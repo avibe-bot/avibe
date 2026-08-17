@@ -119,6 +119,18 @@ const shouldRefreshPolicy = (response: PermissionsResponse): boolean => (
   response.source === 'live' && !response.offline && projectionIsApplying(response)
 );
 
+const policyRefreshSignature = (response: PermissionsResponse): string => JSON.stringify([
+  response.projection.instance.id,
+  response.projection.instance.authorization_revision,
+  response.projection.policy_sync.status,
+  response.projection.projects.map((project) => [
+    project.project_id,
+    project.sync.status,
+    project.sync.desired_access_revision,
+    project.sync.applied_access_revision,
+  ]),
+]);
+
 const mutationErrorCode = (caught: unknown): string => (
   caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable'
 );
@@ -714,8 +726,13 @@ export function PermissionsPage() {
   const [removalConflict, setRemovalConflict] = useState(false);
   const [removalRefreshRequired, setRemovalRefreshRequired] = useState(false);
   const [removalError, setRemovalError] = useState<string>();
+  const [exhaustedPolicySignature, setExhaustedPolicySignature] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const mounted = useRef(true);
+  const currentPolicySignature = state.kind === 'ready' && shouldRefreshPolicy(state.response)
+    ? policyRefreshSignature(state.response)
+    : null;
+  const currentPolicySignatureRef = useRef<string | null>(currentPolicySignature);
 
   const loadPage = useCallback(async (): Promise<void> => {
     const result = await fetchPermissionsPage();
@@ -733,6 +750,16 @@ export function PermissionsPage() {
     return { kind: 'ready', response: result.response };
   }, []);
 
+  const refreshPolicyStatus = useCallback(async (): Promise<void> => {
+    const result = await refreshReady();
+    if (!mounted.current || result.kind === 'failed') return;
+    if (result.kind === 'ready' && shouldRefreshPolicy(result.response)) {
+      setExhaustedPolicySignature(policyRefreshSignature(result.response));
+    } else {
+      setExhaustedPolicySignature(null);
+    }
+  }, [refreshReady]);
+
   useEffect(() => {
     let active = true;
     mounted.current = true;
@@ -745,7 +772,13 @@ export function PermissionsPage() {
     };
   }, []);
 
+  useEffect(() => {
+    currentPolicySignatureRef.current = currentPolicySignature;
+  }, [currentPolicySignature]);
+
   const livePolicyIsApplying = state.kind === 'ready' && shouldRefreshPolicy(state.response);
+  const policyRefreshExhausted = currentPolicySignature !== null
+    && exhaustedPolicySignature === currentPolicySignature;
 
   useEffect(() => {
     if (!livePolicyIsApplying) return undefined;
@@ -762,6 +795,12 @@ export function PermissionsPage() {
       if (!active || result.kind === 'offline') return;
       if (result.kind === 'ready' && !shouldRefreshPolicy(result.response)) return;
       if (attempts < POLICY_REFRESH_MAX_ATTEMPTS) schedule();
+      else if (mounted.current) {
+        const signature = result.kind === 'ready'
+          ? policyRefreshSignature(result.response)
+          : currentPolicySignatureRef.current;
+        if (signature !== null) setExhaustedPolicySignature(signature);
+      }
     };
 
     schedule();
@@ -922,8 +961,25 @@ export function PermissionsPage() {
         />
       ) : !editable ? (
         <Notice tone="neutral" icon={Eye} title={t('permissions.states.readOnlyTitle')} body={t('permissions.states.readOnlyBody')} />
-      ) : applying ? (
-        <Notice tone="warning" icon={Loader2} title={t('permissions.states.applyingTitle')} body={t('permissions.states.applyingBody')} />
+      ) : null}
+
+      {!response.offline && projection.policy_sync.status === 'error' ? (
+        <Notice tone="danger" icon={ShieldX} title={t('permissions.states.syncErrorTitle')} body={t('permissions.states.syncErrorBody')} />
+      ) : !response.offline && projection.policy_sync.status === 'offline' ? (
+        <Notice tone="warning" icon={CloudOff} title={t('permissions.states.syncOfflineTitle')} body={t('permissions.states.syncOfflineBody')} />
+      ) : !response.offline && applying ? (
+        <Notice
+          tone="warning"
+          icon={Loader2}
+          title={t('permissions.states.applyingTitle')}
+          body={t('permissions.states.applyingBody')}
+          action={policyRefreshExhausted ? (
+            <Button size="sm" variant="outline" onClick={() => void refreshPolicyStatus()}>
+              <RefreshCw className="size-3.5" />
+              {t('permissions.actions.refresh')}
+            </Button>
+          ) : undefined}
+        />
       ) : null}
 
       <div className="flex h-10 items-center gap-1 border-b border-border" role="tablist" aria-label={t('permissions.tabs.label')}>
@@ -962,16 +1018,24 @@ export function PermissionsPage() {
             </div>
             <Badge variant="secondary">{t('permissions.roles.owner')}</Badge>
           </div>
-          {projection.access.entries.length === 0 ? (
-            <EmptyState
-              icon={projection.instance.access_mode === 'public' ? Globe2 : Users}
-              title={t(projection.instance.access_mode === 'public'
-                ? 'permissions.access.publicTitle'
-                : 'permissions.access.emptyTitle')}
-              body={t(projection.instance.access_mode === 'public'
+          {projection.instance.access_mode === 'public' ? (
+            <Notice
+              tone="info"
+              icon={Globe2}
+              title={t('permissions.access.publicTitle')}
+              body={t(projection.access.entries.length === 0
                 ? 'permissions.access.publicBody'
-                : 'permissions.access.emptyBody')}
+                : 'permissions.access.publicAssignmentsBody')}
             />
+          ) : null}
+          {projection.access.entries.length === 0 ? (
+            projection.instance.access_mode === 'public' ? null : (
+              <EmptyState
+                icon={Users}
+                title={t('permissions.access.emptyTitle')}
+                body={t('permissions.access.emptyBody')}
+              />
+            )
           ) : (
             <div className="overflow-hidden rounded-lg border border-border bg-card">
               {projection.access.entries.map((entry) => {

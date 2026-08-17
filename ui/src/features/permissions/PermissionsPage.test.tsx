@@ -144,6 +144,23 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByText('permissions.access.emptyBody')).toBeNull();
   });
 
+  it('keeps the public audience visible alongside explicit assignments', async () => {
+    const publicPolicy = response();
+    publicPolicy.projection.instance.access_mode = 'public';
+    publicPolicy.projection.access.entries = [{
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'editor',
+    }];
+    api.getPermissions.mockResolvedValue(publicPolicy);
+
+    renderPage();
+
+    expect(await screen.findByText('permissions.access.publicTitle')).toBeTruthy();
+    expect(screen.getByText('permissions.access.publicAssignmentsBody')).toBeTruthy();
+    expect(screen.getByText('editor@example.com')).toBeTruthy();
+  });
+
   it('lets a Viewer read policy while keeping mutation controls absent', async () => {
     renderPage(false);
 
@@ -232,6 +249,45 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers an explicit refresh after the bounded applying-policy poll', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    api.getPermissions.mockResolvedValue(applying);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(31);
+    const refresh = screen.getByRole('button', { name: 'permissions.actions.refresh' });
+    const inSync = response();
+    api.getPermissions.mockResolvedValueOnce(inSync);
+    await act(async () => {
+      refresh.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(32);
+    expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
+  });
+
+  it.each([
+    ['error', 'permissions.states.syncErrorTitle'],
+    ['offline', 'permissions.states.syncOfflineTitle'],
+  ] as const)('surfaces aggregate %s policy synchronization', async (status, title) => {
+    const policy = response();
+    policy.projection.policy_sync.status = status;
+    api.getPermissions.mockResolvedValue(policy);
+
+    renderPage();
+
+    expect(await screen.findByText(title)).toBeTruthy();
+    expect(screen.getByText(`permissions.states.sync${status === 'error' ? 'Error' : 'Offline'}Body`)).toBeTruthy();
   });
 
   it('does not poll cached offline policy and cleans up a live refresh timer', async () => {

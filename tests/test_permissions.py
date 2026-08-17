@@ -330,7 +330,19 @@ def test_permissions_live_read_survives_cache_write_failure(monkeypatch) -> None
     assert result.projection["instance"]["id"] == "inst-123"
 
 
-def test_permissions_does_not_mask_credential_failures_with_cache(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (401, "invalid_device_secret"),
+        (403, "instance_access_forbidden"),
+        (404, "instance_not_found"),
+    ],
+)
+def test_permissions_does_not_mask_non_retryable_failures_with_cache(
+    monkeypatch,
+    status: int,
+    error: str,
+) -> None:
     monkeypatch.setattr(
         permissions.requests,
         "request",
@@ -340,14 +352,38 @@ def test_permissions_does_not_mask_credential_failures_with_cache(monkeypatch) -
     monkeypatch.setattr(
         permissions.requests,
         "request",
-        lambda *_args, **_kwargs: _Response(401, {"error": "invalid_device_secret"}),
+        lambda *_args, **_kwargs: _Response(status, {"error": error}),
     )
 
     with pytest.raises(permissions.PermissionsBackendError) as caught:
         permissions.get_current_permissions(_config())
 
-    assert caught.value.status == 401
-    assert caught.value.payload == {"error": "invalid_device_secret"}
+    assert caught.value.status == status
+    assert caught.value.payload == {"error": error}
+
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_permissions_uses_exact_instance_cache_for_retryable_backend_reads(
+    monkeypatch,
+    status: int,
+) -> None:
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, _projection()),
+    )
+    permissions.get_current_permissions(_config())
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(status, {"error": "temporarily_unavailable"}),
+    )
+
+    cached = permissions.get_current_permissions(_config())
+
+    assert cached.source == "cache"
+    assert cached.offline is True
+    assert cached.projection["instance"]["id"] == "inst-123"
 
 
 def test_permissions_rejects_backend_projection_for_another_instance(monkeypatch) -> None:

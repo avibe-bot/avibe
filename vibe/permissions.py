@@ -23,6 +23,7 @@ CACHE_SCHEMA_VERSION = 1
 CACHE_FILENAME = "permissions_projection.json"
 DEFAULT_TIMEOUT_SECONDS = 8.0
 _SENSITIVE_KEY_PARTS = ("secret", "token", "credential")
+_CACHE_FALLBACK_HTTP_STATUSES = frozenset({408, 425, 429})
 _ACCESS_MODES = frozenset({"allowlist", "public"})
 _PERMISSION_AUTHORITIES = frozenset({"instance", "cloud"})
 _PERMISSION_CAPABILITIES = frozenset(
@@ -503,7 +504,7 @@ def get_current_permissions(config: V2Config | None = None) -> PermissionsProjec
             return cached
         raise
     except PermissionsBackendError as exc:
-        if exc.status >= 500:
+        if exc.status >= 500 or exc.status in _CACHE_FALLBACK_HTTP_STATUSES:
             cached = _read_cache(instance_id)
             if cached is not None:
                 return cached
