@@ -364,10 +364,19 @@ def test_archive_removal_failures_are_reported(tmp_path: Path, monkeypatch) -> N
     _write_current_pointer(manager, _sha(1))
     _write_archive(manager, _sha(2), b"stale")
 
-    from unittest.mock import patch as _patch
+    real_unlink = os.unlink
 
-    with _patch.object(Path, "unlink", side_effect=OSError("read-only filesystem")):
+    def _unlink_boom(path, *args, **kwargs):
+        raise OSError("read-only filesystem")
+
+    real_remove = Path.unlink
+    monkeypatch.setattr(Path, "unlink", _unlink_boom)
+    monkeypatch.setattr("os.unlink", _unlink_boom)
+    try:
         result = manager.clean()
+    finally:
+        monkeypatch.setattr(Path, "unlink", real_remove)
+        monkeypatch.setattr("os.unlink", real_unlink)
 
     assert result["archives"]["skipped_reason"] == "archive_removal_failed"
     assert result["archives"]["outcome"] == "skipped"
@@ -579,7 +588,7 @@ def test_forced_prepare_fails_structured_when_guard_unavailable(tmp_path: Path, 
     command = manager._install_manifest_runtime()
 
     assert command is None
-    assert manager._install_reason == "runtime_install_already_running"
+    assert manager._install_reason == "runtime_install_guard_unavailable"
 
 
 def test_lock_fallback_enforces_manifest_node_requirement(tmp_path: Path, monkeypatch) -> None:
@@ -706,8 +715,9 @@ def test_symlinked_install_lock_is_refused(tmp_path: Path) -> None:
     victim.write_text("precious", encoding="utf-8")
     (manager.runtime_dir / ".install.lock").symlink_to(victim)
 
-    with manager._install_guard_locked() as acquired:
+    with manager._install_guard_locked() as (acquired, reason):
         assert acquired is False
+        assert reason == "runtime_install_guard_unavailable"
     assert victim.read_text(encoding="utf-8") == "precious"  # link never followed
 
 

@@ -14159,12 +14159,22 @@ def cmd_runtime(args) -> int:
                 # A skipped/failed archive pass is not a completed zero-removal
                 # cleanup; say so instead of printing placeholder counts, with
                 # remediation that matches the actual reason.
-                skip_key = (
-                    "runtime.clean.skippedInspection"
-                    if skipped_reason == "archive_inspection_failed"
-                    else "runtime.clean.skipped"
-                )
-                print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
+                if skipped_reason == "archive_removal_failed":
+                    print(
+                        i18n_t(
+                            "runtime.clean.removalFailed",
+                            language,
+                            failed=int(archives.get("failed_count") or 0),
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    skip_key = (
+                        "runtime.clean.skippedInspection"
+                        if skipped_reason == "archive_inspection_failed"
+                        else "runtime.clean.skipped"
+                    )
+                    print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
             else:
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)

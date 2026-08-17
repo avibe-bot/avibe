@@ -883,7 +883,7 @@ class ShowRuntimeManager:
                         protected.add(digest)
         return protected
 
-    def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int]]:
+    def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int, str]]:
         """Completed content-addressed archives outside the protected set.
 
         Only strict ``<sha256>.tgz`` regular files are candidates. The manifest
@@ -896,7 +896,7 @@ class ShowRuntimeManager:
         yet.
         """
         downloads_dir = self.runtime_dir / "downloads"
-        candidates: list[tuple[Path, int]] = []
+        candidates: list[tuple[Path, int, str]] = []
         try:
             downloads_exists = downloads_dir.stat().st_mode  # error-preserving
             exists = True
@@ -912,24 +912,32 @@ class ShowRuntimeManager:
         if downloads_dir.is_symlink() or not stat.S_ISDIR(downloads_exists):
             raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
-        for path in sorted(downloads_dir.iterdir()):
-            if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(path.name):
-                continue
-            try:
-                stat_result = path.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                # An entry that cannot be inspected must not silently read as
-                # "no candidates"; surface it as an inspection failure.
-                raise _ArchiveInspectionError(f"archive is not stat-able: {path}") from exc
-            if not stat.S_ISREG(stat_result.st_mode):
-                continue
-            if stat_result.st_mtime > mtime_floor:
-                continue
-            if path.stem in protected:
-                continue
-            candidates.append((path, stat_result.st_size))
+        # Bind enumeration and unlinking to the directory we validated: a
+        # concurrent path swap (symlink replacing ``downloads`` between the
+        # stat above and iterdir/unlink below) cannot redirect operations.
+        dir_fd = os.open(downloads_dir, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
+        try:
+            with os.scandir(dir_fd) as entries:
+                names = [entry.name for entry in entries]
+            for name in sorted(names):
+                if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(name):
+                    continue
+                try:
+                    stat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise _ArchiveInspectionError(f"archive is not stat-able: {name}") from exc
+                if not stat.S_ISREG(stat_result.st_mode):
+                    continue
+                if stat_result.st_mtime > mtime_floor:
+                    continue
+                path = downloads_dir / name
+                if name[: -len(".tgz")] in protected:
+                    continue
+                candidates.append((path, stat_result.st_size, name))
+        finally:
+            os.close(dir_fd)
         return candidates
 
     def _clean_downloaded_archives(
@@ -958,14 +966,16 @@ class ShowRuntimeManager:
                 "outcome": "cleaned" if not candidates else "partial",
                 "protected_count": len(protected),
                 "candidate_count": len(candidates),
-                "candidate_bytes": sum(size for _, size in candidates),
+                "candidate_bytes": sum(size for _, size, _name in candidates),
                 "removed_count": 0,
                 "removed_bytes": 0,
                 "failed_count": 0,
             }
-        with self._install_guard_locked(timeout_seconds=1.0) as acquired:
+        with self._install_guard_locked(timeout_seconds=1.0) as (acquired, guard_reason):
             if not acquired:
-                logger.warning("Show Runtime archive cleanup skipped: the install guard is busy or unavailable")
+                logger.warning("Show Runtime archive cleanup skipped: install guard %s", guard_reason)
+                if guard_reason == "runtime_install_guard_unavailable":
+                    return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING)
             try:
                 protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
@@ -973,19 +983,28 @@ class ShowRuntimeManager:
                 removed_count = 0
                 removed_bytes = 0
                 failed_count = 0
-                for path, size in candidates:
-                    try:
-                        path.unlink()
-                    except OSError:
-                        logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
-                        failed_count += 1
-                        continue
-                    removed_count += 1
-                    removed_bytes += size
+                # Unlink by name through the same validated directory (no
+                # path resolution that a concurrent swap could redirect).
+                dir_fd = os.open(
+                    self.runtime_dir / "downloads",
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    for path, size, name in candidates:
+                        try:
+                            os.unlink(name, dir_fd=dir_fd)
+                        except OSError:
+                            logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
+                            failed_count += 1
+                            continue
+                        removed_count += 1
+                        removed_bytes += size
+                finally:
+                    os.close(dir_fd)
                 report = {
                     "protected_count": len(protected),
                     "candidate_count": len(candidates),
-                    "candidate_bytes": sum(size for _, size in candidates),
+                    "candidate_bytes": sum(size for _, size, _name in candidates),
                     "removed_count": removed_count,
                     "removed_bytes": removed_bytes,
                     "failed_count": failed_count,
@@ -1190,34 +1209,52 @@ class ShowRuntimeManager:
     def _install_guard_locked(self, *, timeout_seconds: float = 0.0):
         """Serialize installs and archive cleanup, across processes too.
 
-        Yields ``True`` when the guard is held. The outermost caller in this
+        Yields a ``(acquired, reason)`` pair. ``acquired`` is True when the
+        guard is held; otherwise ``reason`` distinguishes contention
+        (``runtime_install_already_running``) from a guard that cannot exist
+        (``runtime_install_guard_unavailable``: read-only/full directory,
+        symlinked or hard-linked lock file). The outermost caller in this
         process takes the cross-process file lock; nested calls on the same
         thread (post-install cleanup runs inside the install) reuse it, so the
-        non-re-entrant ``flock`` never deadlocks against itself. Yields
-        ``False`` when another install already holds the guard.
+        non-re-entrant ``flock`` never deadlocks against itself.
         """
+        unavailable = (False, "runtime_install_guard_unavailable")
+        busy = (False, "runtime_install_already_running")
         with self._install_guard:
             if self._install_guard_depth > 0:
                 self._install_guard_depth += 1
                 try:
-                    yield True
+                    yield (True, None)
                 finally:
                     self._install_guard_depth -= 1
                 return
             # A symlinked lock path would make the lock truncate/rewrite a
-            # file outside the runtime directory; refuse it outright.
-            if self._install_guard_path.is_symlink():
+            # file outside the runtime directory; a hard link shares its
+            # inode with unrelated content. Refuse both before any open.
+            try:
+                guard_lstat = self._install_guard_path.lstat()
+                if not stat.S_ISREG(guard_lstat.st_mode) or guard_lstat.st_nlink != 1:
+                    logger.warning(
+                        "Show Runtime install guard %s is a symlink or hard link; refusing to lock",
+                        self._install_guard_path,
+                    )
+                    yield unavailable
+                    return
+            except FileNotFoundError:
+                pass
+            except OSError:
                 logger.warning(
-                    "Show Runtime install guard %s is a symlink; refusing to lock",
+                    "Show Runtime install guard %s cannot be inspected; refusing to lock",
                     self._install_guard_path,
+                    exc_info=True,
                 )
-                yield False
+                yield unavailable
                 return
             file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
             try:
                 file_lock.acquire()
             except MigrationLockTimeout:
-                yield False
+                yield busy
                 return
             except OSError:
                 # A lock file that cannot be created/opened (read-only or full
@@ -1228,11 +1265,11 @@ class ShowRuntimeManager:
                     self._install_guard_path,
                     exc_info=True,
                 )
-                yield False
+                yield unavailable
                 return
             self._install_guard_depth = 1
             try:
-                yield True
+                yield (True, None)
             finally:
                 self._install_guard_depth = 0
                 try:
@@ -1241,9 +1278,9 @@ class ShowRuntimeManager:
                     logger.warning("Failed to release Show Runtime install guard", exc_info=True)
 
     def _install_manifest_runtime(self) -> list[str] | None:
-        with self._install_guard_locked() as acquired:
+        with self._install_guard_locked() as (acquired, reason):
             if not acquired:
-                self._install_reason = "runtime_install_already_running"
+                self._install_reason = reason
                 # An untakeable lock (busy or unavailable) must not break a
                 # non-forced prepare that already has a verified install to
                 # reuse. A forced reinstall that cannot run is a failure —
