@@ -205,7 +205,9 @@ scope per instance behind them.
   metadata. Emission is transition-deduplicated by scope, config revision, and capability so
   status polling cannot create one event per instance per minute; the first observing instance
   remains a context tag but is not part of the deduplication key. A successful validation clears
-  that transition so a later outage at the same revision alerts again.
+  that transition so a later outage at the same revision alerts again. The transition claim/clear
+  is an atomic shared-store operation, never process-local state, so concurrent and cold-started
+  Vercel isolates observe the same edge.
 
 ### 6.3 APIs
 
@@ -316,10 +318,11 @@ Every cross-cutting property has exactly one code owner; routes never re-impleme
 
 1. **ModelServiceConfigService** — the only config write path: key⇄address binding, encryption,
    revision, sanitized responses.
-2. **ModelServiceStore** — three atomic contracts only, identical semantics in both adapters:
+2. **ModelServiceStore** — atomic contracts with identical semantics in both adapters:
    `resolveCallSnapshot` (instance+org+plan+config+limits in ONE snapshot — every security decision
    reads one consistent state), `reserveQuota`/`extendQuota`/`settleQuota`, and
-   `readUsageSummarySnapshot`.
+   `readUsageSummarySnapshot`; key-unavailable alert edges use a small additive transition table
+   keyed by scope/config revision/capability and atomic claim/clear operations.
 3. **ModelServiceUpstreamClient** — the only egress owner: destination classification
    (allow-only-global-unicast per the IANA IPv4/IPv6 special-purpose registries; transition/tunnel
    prefixes — NAT64 incl. local-use, 6to4, Teredo — rejected outright), **TLS-only upstreams**
@@ -332,6 +335,8 @@ Every cross-cutting property has exactly one code owner; routes never re-impleme
    certainly-not-sent vs possibly-accepted). Routes never call `fetch`/`WebSocket` or parse usage.
 4. **ModelServiceGateway** — the only call-lifecycle owner, fixed order:
    snapshot → reserve → just-in-time decrypt → client → exactly-once settlement → error mapping.
+   The shared saved-key effectiveness predicate is the only owner of `key_status` judgment;
+   status serialization and call routing consume that result rather than defining another test.
 5. **Voice orchestration** — product composition only (required ASR + optional cleanup); cleanup
    failure of ANY kind (quota or upstream) degrades to the raw transcript in composite flows; the
    dedicated cleanup endpoint alone returns 429 on quota.
@@ -454,15 +459,16 @@ required.
 }
 ```
 
-`mode` ∈ `organization | platform`. While the effective memory pair is available,
-`embedding_identity` is an opaque hash of the embedding slot's (base_url, model) and changes iff
-vector-space identity changes. It is `null` whenever `capabilities.embedding` is false — including
-a missing/disabled slot or a custody failure in either member of the required chat+embedding pair —
-so released clients can parse the degraded payload and pause cloud memory. Before serializing a
-saved scope, the endpoint decrypt-validates every enabled slot and immediately discards the plaintext.
-An enabled slot whose key cannot be decrypted is reported as unavailable and the response adds a
-per-slot reason map, for example `"degraded": { "asr": "model_service_key_unavailable" }`;
-`degraded` is omitted when no slot is degraded.
+`mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
+(base_url, model) and changes iff vector-space identity changes. It is `null` exactly when
+`capabilities.embedding` is false because the embedding slot itself is missing, disabled, or
+undecryptable. A chat-only degradation leaves the healthy embedding capability and identity intact;
+the released client pauses cloud memory through its existing `chat && embedding` pair predicate.
+Before serializing a saved scope, the endpoint consumes the shared saved-key effectiveness predicate
+for every enabled slot and immediately discards any plaintext. An enabled slot whose key cannot be
+decrypted is reported as unavailable and the response adds a per-slot reason map, for example
+`"degraded": { "asr": "model_service_key_unavailable" }`; `degraded` is omitted when no slot is
+degraded.
 
 ### 8.3 Usage row
 
@@ -489,8 +495,10 @@ turns on.
   encrypt/decrypt round trip, or an enabled saved slot cannot be decrypted with the deployed
   `MODEL_SERVICE_KEY_SECRET`. The failure is not overrideable by `force: true`, never maps to
   `model_service_not_configured`, makes no upstream call, and persists no candidate change. For
-  saved-slot failures, status marks the affected capability false with the same reason. Every path
-  emits a scrubbed high-priority Sentry event.
+  saved-slot failures, status marks the affected capability false with the same reason. Each
+  unavailable transition emits one scrubbed high-priority Sentry event per scope/config
+  revision/capability; repeated failures at the same active edge emit none, and a successful
+  validation clears the edge so a later failure can emit again.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
@@ -530,8 +538,9 @@ turns on.
    cloud-token path, realtime WS).
 7. While `capabilities.embedding` remains true, `embedding_identity` changes iff the embedding
    slot's (base_url, model) changes, and every member instance's sidecar treats it exactly like a
-   local embedding change (rebuild ladder). It is `null` whenever the effective chat+embedding
-   pair is unavailable; restoring the same pair restores the same identity.
+   local embedding change (rebuild ladder). It is `null` exactly when the embedding capability is
+   unavailable; chat-only degradation leaves the identity unchanged while the client pair predicate
+   pauses memory.
 8. With enforcement on, an over-cap free-pool call fails before reaching any upstream.
 9. Changing any API key (slot key or mak) with base_url and model unchanged never alters
    `embedding_identity`, never triggers a rebuild or re-embedding, and never loses or duplicates
