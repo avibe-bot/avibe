@@ -64,7 +64,7 @@ import type {
   PermissionsResponse,
   PrincipalKind,
   ProjectBinding,
-  SyncStatus,
+  ProjectSyncStatus,
 } from './types';
 
 type PageState =
@@ -111,7 +111,7 @@ async function fetchPermissionsPage(): Promise<PageLoadResult> {
 const projectionIsApplying = (response: PermissionsResponse): boolean => (
   response.projection.policy_sync.status === 'applying'
   || response.projection.projects.some((project) => (
-    project.sync.status === 'pending' || project.sync.status === 'applying'
+    project.sync.status === 'pending'
   ))
 );
 
@@ -135,6 +135,21 @@ const mutationErrorCode = (caught: unknown): string => (
   caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable'
 );
 
+const revisionMonotonicResponse = (
+  current: PermissionsResponse | null,
+  candidate: PermissionsResponse,
+): PermissionsResponse => {
+  if (
+    current !== null
+    && current.projection.instance.id === candidate.projection.instance.id
+    && current.projection.instance.authorization_revision
+      > candidate.projection.instance.authorization_revision
+  ) {
+    return current;
+  }
+  return candidate;
+};
+
 const principalIcon = (kind: PrincipalKind) => {
   if (kind === 'organization_group') return Users;
   if (kind === 'email_domain') return Globe2;
@@ -153,7 +168,7 @@ const accessEntryKey = (entry: AccessEntry): string => (
   `${entry.kind}:${normalizePrincipal(entry.kind, entry.value)}`
 );
 
-function SyncBadge({ status }: { status: SyncStatus }) {
+function SyncBadge({ status }: { status: ProjectSyncStatus }) {
   const { t } = useTranslation();
   const normalized = status === 'pending' ? 'applying' : status;
   const Icon = normalized === 'in_sync'
@@ -515,6 +530,9 @@ function ProjectAccessDialog({
         principal_value: normalizePrincipal(binding.principal_kind, binding.principal_value),
       }))
     : [];
+  const wireMode: PermissionProject['access']['mode'] = mode === 'inherit'
+    ? 'inherit'
+    : 'restricted';
   const invalid = mode === 'restricted' && (
     wireBindings.length === 0 || wireBindings.some((binding) => !binding.principal_value)
   );
@@ -558,7 +576,7 @@ function ProjectAccessDialog({
     try {
       const result = await updateProjectAccess(
         project,
-        mode,
+        wireMode,
         wireBindings,
         revision,
         expectedInstanceId.current,
@@ -729,26 +747,44 @@ export function PermissionsPage() {
   const [exhaustedPolicySignature, setExhaustedPolicySignature] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const mounted = useRef(true);
+  const readyResponseRef = useRef<PermissionsResponse | null>(null);
   const currentPolicySignature = state.kind === 'ready' && shouldRefreshPolicy(state.response)
     ? policyRefreshSignature(state.response)
     : null;
   const currentPolicySignatureRef = useRef<string | null>(currentPolicySignature);
 
+  const installReadyResponse = useCallback((candidate: PermissionsResponse): PermissionsResponse => {
+    const accepted = revisionMonotonicResponse(readyResponseRef.current, candidate);
+    if (accepted === readyResponseRef.current || !mounted.current) return accepted;
+    readyResponseRef.current = accepted;
+    setState({ kind: 'ready', response: accepted });
+    return accepted;
+  }, []);
+
+  const installPageResult = useCallback((result: PageLoadResult): void => {
+    if (!mounted.current) return;
+    if (result.response) {
+      installReadyResponse(result.response);
+      return;
+    }
+    readyResponseRef.current = null;
+    setState(result.state);
+  }, [installReadyResponse]);
+
   const loadPage = useCallback(async (): Promise<void> => {
     const result = await fetchPermissionsPage();
-    if (mounted.current) setState(result.state);
-  }, []);
+    installPageResult(result);
+  }, [installPageResult]);
 
   const refreshReady = useCallback(async (): Promise<AuthoritativeRefreshResult> => {
     const result = await fetchPermissionsPage();
     if (!result.response) return { kind: 'failed' };
-    if (result.response.source !== 'live' || result.response.offline) {
-      if (mounted.current) setState({ kind: 'ready', response: result.response });
+    const accepted = installReadyResponse(result.response);
+    if (accepted.source !== 'live' || accepted.offline) {
       return { kind: 'offline' };
     }
-    if (mounted.current) setState({ kind: 'ready', response: result.response });
-    return { kind: 'ready', response: result.response };
-  }, []);
+    return { kind: 'ready', response: accepted };
+  }, [installReadyResponse]);
 
   const refreshPolicyStatus = useCallback(async (): Promise<void> => {
     const result = await refreshReady();
@@ -764,13 +800,13 @@ export function PermissionsPage() {
     let active = true;
     mounted.current = true;
     void fetchPermissionsPage().then((result) => {
-      if (active) setState(result.state);
+      if (active) installPageResult(result);
     });
     return () => {
       active = false;
       mounted.current = false;
     };
-  }, []);
+  }, [installPageResult]);
 
   useEffect(() => {
     currentPolicySignatureRef.current = currentPolicySignature;
@@ -844,9 +880,8 @@ export function PermissionsPage() {
   ));
 
   const updateResponse = (updater: (current: PermissionsResponse) => PermissionsResponse) => {
-    setState((current) => current.kind === 'ready'
-      ? { kind: 'ready', response: updater(current.response) }
-      : current);
+    const current = readyResponseRef.current;
+    if (current !== null) installReadyResponse(updater(current));
   };
 
   const closeRemoval = () => {

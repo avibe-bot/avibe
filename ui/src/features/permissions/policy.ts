@@ -40,6 +40,9 @@ export function hasDuplicateProjectBindings(bindings: ProjectBinding[]): boolean
 }
 
 export function projectMode(project: PermissionProject): ProjectAccessMode {
+  if (project.access.mode === 'restricted' && project.access.bindings.length === 0) {
+    return 'owner_only';
+  }
   return project.access.mode;
 }
 

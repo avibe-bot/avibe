@@ -143,7 +143,13 @@ MALFORMED_PROJECTION_CASES = [
     pytest.param(("instance", "local_mutation_allowed"), 1, id="local-mutation-flag"),
     pytest.param(("instance", "authorization_revision"), True, id="authorization-revision"),
     pytest.param(("capabilities",), None, id="capabilities-container"),
-    pytest.param(("capabilities", 0), "unsupported", id="capability-value"),
+    pytest.param(("capabilities", 0), 123, id="capability-type"),
+    pytest.param(("capabilities", 0), "", id="capability-empty"),
+    pytest.param(
+        ("capabilities",),
+        ["instance.permissions.mutate"],
+        id="required-read-capability",
+    ),
     pytest.param(("access",), None, id="access-container"),
     pytest.param(("access", "owner"), None, id="owner-container"),
     pytest.param(("access", "owner", "email"), 123, id="owner-email"),
@@ -177,6 +183,11 @@ MALFORMED_PROJECTION_CASES = [
     pytest.param(("projects", 0, "display_name"), 123, id="project-display-name"),
     pytest.param(("projects", 0, "access"), None, id="project-access-container"),
     pytest.param(("projects", 0, "access", "mode"), "public", id="project-access-mode"),
+    pytest.param(
+        ("projects", 0, "access", "mode"),
+        "owner_only",
+        id="project-access-ui-mode",
+    ),
     pytest.param(("projects", 0, "access", "revision"), True, id="project-access-revision"),
     pytest.param(("projects", 0, "access", "bindings"), None, id="bindings-container"),
     pytest.param(("projects", 0, "access", "bindings", 0), "binding", id="binding-container"),
@@ -197,6 +208,11 @@ MALFORMED_PROJECTION_CASES = [
     ),
     pytest.param(("projects", 0, "sync"), None, id="project-sync-container"),
     pytest.param(("projects", 0, "sync", "status"), "unknown", id="project-sync-status"),
+    pytest.param(
+        ("projects", 0, "sync", "status"),
+        "applying",
+        id="aggregate-only-applying-status",
+    ),
     pytest.param(
         ("projects", 0, "sync", "desired_access_revision"),
         True,
@@ -293,7 +309,42 @@ def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeyp
         permissions.get_current_permissions(_config("inst-other"))
 
 
-def test_permissions_offline_cache_covers_non_json_backend_failure(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "status",
+    [*sorted(permissions._CACHE_FALLBACK_HTTP_STATUSES), 503],  # noqa: SLF001
+)
+@pytest.mark.parametrize("body_shape", ["invalid-json", "json-list"])
+def test_permissions_offline_cache_covers_every_retryable_response_body_shape(
+    monkeypatch,
+    status: int,
+    body_shape: str,
+) -> None:
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, _projection()),
+    )
+    permissions.get_current_permissions(_config())
+    failure = (
+        _InvalidJsonResponse(status, None)
+        if body_shape == "invalid-json"
+        else _Response(status, [])
+    )
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: failure,
+    )
+
+    cached = permissions.get_current_permissions(_config())
+
+    assert cached.source == "cache"
+    assert cached.offline is True
+
+
+def test_permissions_does_not_mask_non_json_authoritative_failure_with_cache(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         permissions.requests,
         "request",
@@ -303,13 +354,11 @@ def test_permissions_offline_cache_covers_non_json_backend_failure(monkeypatch) 
     monkeypatch.setattr(
         permissions.requests,
         "request",
-        lambda *_args, **_kwargs: _InvalidJsonResponse(503, None),
+        lambda *_args, **_kwargs: _InvalidJsonResponse(403, None),
     )
 
-    cached = permissions.get_current_permissions(_config())
-
-    assert cached.source == "cache"
-    assert cached.offline is True
+    with pytest.raises(permissions.PermissionsInvalidResponseError):
+        permissions.get_current_permissions(_config())
 
 
 def test_permissions_live_read_survives_cache_write_failure(monkeypatch) -> None:
@@ -456,6 +505,27 @@ def test_permissions_rejects_each_malformed_nested_projection_before_caching(
         permissions.get_current_permissions(_config())
 
     assert not permissions._cache_path().exists()  # noqa: SLF001
+
+
+def test_permissions_preserves_additive_backend_capabilities_live_and_offline(
+    monkeypatch,
+) -> None:
+    projection = _complete_projection()
+    projection["capabilities"].append("instance.permissions.audit")
+    backend_available = True
+
+    def request(*_args, **_kwargs):
+        if not backend_available:
+            raise requests.ConnectionError()
+        return _Response(200, projection)
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    live = permissions.get_current_permissions(_config())
+    backend_available = False
+    cached = permissions.get_current_permissions(_config())
+
+    assert live.projection["capabilities"] == projection["capabilities"]
+    assert cached.projection["capabilities"] == projection["capabilities"]
 
 
 def test_permissions_ignores_a_malformed_offline_cache(monkeypatch) -> None:
@@ -642,7 +712,7 @@ def test_project_access_mutation_refreshes_offline_cache(monkeypatch) -> None:
         "project_id": "project-1",
         "organization_id": "org-1",
         "display_name": "Launch Plan",
-        "access": {"mode": "restricted", "revision": 1, "bindings": []},
+        "access": {"mode": "inherit", "revision": 1, "bindings": []},
         "sync": {
             "status": "in_sync",
             "desired_access_revision": 1,
@@ -653,7 +723,7 @@ def test_project_access_mutation_refreshes_offline_cache(monkeypatch) -> None:
     live["projects"] = [project]
     updated_project = {
         **project,
-        "access": {"mode": "owner_only", "revision": 2, "bindings": []},
+        "access": {"mode": "restricted", "revision": 2, "bindings": []},
     }
     backend_available = True
 
@@ -678,7 +748,7 @@ def test_project_access_mutation_refreshes_offline_cache(monkeypatch) -> None:
     permissions.update_project_access(
         "project-1",
         {
-            "mode": "owner_only",
+            "mode": "restricted",
             "bindings": [],
             "if_match_revision": 1,
             "if_match_instance_id": "inst-123",

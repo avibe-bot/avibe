@@ -26,16 +26,12 @@ _SENSITIVE_KEY_PARTS = ("secret", "token", "credential")
 _CACHE_FALLBACK_HTTP_STATUSES = frozenset({408, 425, 429})
 _ACCESS_MODES = frozenset({"allowlist", "public"})
 _PERMISSION_AUTHORITIES = frozenset({"instance", "cloud"})
-_PERMISSION_CAPABILITIES = frozenset(
-    {"instance.permissions.read", "instance.permissions.mutate"}
-)
+_REQUIRED_PERMISSION_CAPABILITY = "instance.permissions.read"
 _PRINCIPAL_KINDS = frozenset({"email", "email_domain", "organization_group"})
 _ACCESS_ROLES = frozenset({"viewer", "editor"})
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
-_PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted", "owner_only"})
-_PROJECT_SYNC_STATUSES = frozenset(
-    {"in_sync", "pending", "applying", "offline", "error", "deleted"}
-)
+_PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted"})
+_PROJECT_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
 _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "error"})
 _SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
 logger = logging.getLogger(__name__)
@@ -143,6 +139,10 @@ def _require_nonnegative_integer(value: Any) -> None:
         _invalid_response()
 
 
+def _is_backend_unavailable_status(status: int) -> bool:
+    return status >= 500 or status in _CACHE_FALLBACK_HTTP_STATUSES
+
+
 def _validate_access_entries(value: Any) -> list[Any]:
     entries = _require_list(value)
     for item in entries:
@@ -239,9 +239,10 @@ def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
 
     capabilities = _require_list(projection["capabilities"])
     for capability in capabilities:
-        _require_enum(capability, _PERMISSION_CAPABILITIES)
+        if not isinstance(capability, str) or not capability:
+            _invalid_response()
     if (
-        "instance.permissions.read" not in capabilities
+        _REQUIRED_PERMISSION_CAPABILITY not in capabilities
         or len(capabilities) != len(set(capabilities))
     ):
         _invalid_response()
@@ -480,10 +481,12 @@ def _backend_request(
     try:
         parsed = response.json()
     except ValueError as exc:
-        if response.status_code >= 500:
+        if _is_backend_unavailable_status(response.status_code):
             raise PermissionsUnavailableError("permissions_backend_unavailable") from exc
         raise PermissionsInvalidResponseError("permissions_backend_invalid_response") from exc
     if not isinstance(parsed, dict):
+        if _is_backend_unavailable_status(response.status_code):
+            raise PermissionsUnavailableError("permissions_backend_unavailable")
         raise PermissionsInvalidResponseError("permissions_backend_invalid_response")
     if not response.ok:
         raise PermissionsBackendError(response.status_code, parsed)
@@ -504,7 +507,7 @@ def get_current_permissions(config: V2Config | None = None) -> PermissionsProjec
             return cached
         raise
     except PermissionsBackendError as exc:
-        if exc.status >= 500 or exc.status in _CACHE_FALLBACK_HTTP_STATUSES:
+        if _is_backend_unavailable_status(exc.status):
             cached = _read_cache(instance_id)
             if cached is not None:
                 return cached

@@ -1,6 +1,6 @@
 export type AccessRole = 'viewer' | 'editor';
 export type PrincipalKind = 'email' | 'email_domain' | 'organization_group';
-export type SyncStatus = 'none' | 'in_sync' | 'applying' | 'pending' | 'offline' | 'error' | 'deleted';
+export type ProjectSyncStatus = 'in_sync' | 'pending' | 'offline' | 'error' | 'deleted';
 export type ResourceAccessLevel = 'public' | 'scope' | 'private';
 
 export type AccessEntry = {
@@ -33,12 +33,12 @@ export type PermissionProject = {
   organization_id: string | null;
   display_name: string;
   access: {
-    mode: 'inherit' | 'restricted' | 'owner_only';
+    mode: 'inherit' | 'restricted';
     revision: number;
     bindings: ProjectBinding[];
   };
   sync: {
-    status: SyncStatus;
+    status: ProjectSyncStatus;
     desired_access_revision: number;
     applied_access_revision: number;
     last_synced_at: string | null;
@@ -63,7 +63,7 @@ export type PermissionsProjection = {
     local_mutation_allowed: boolean;
     authorization_revision: number;
   };
-  capabilities: Array<'instance.permissions.read' | 'instance.permissions.mutate'>;
+  capabilities: string[];
   access: {
     owner: { email: string | null; role: 'owner' };
     entries: AccessEntry[];

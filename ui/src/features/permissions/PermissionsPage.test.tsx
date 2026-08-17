@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -184,6 +184,18 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: 'permissions.actions.manage' })).toBeNull();
   });
 
+  it('ignores additive capabilities while honoring the known mutation capability', async () => {
+    const extended = response();
+    extended.projection.capabilities.push('instance.permissions.audit');
+    api.getPermissions.mockResolvedValue(extended);
+
+    renderPage();
+
+    expect(await screen.findByRole('button', {
+      name: 'permissions.actions.addAccess',
+    })).toBeTruthy();
+  });
+
   it('renders an API denial instead of an empty policy', async () => {
     api.getPermissions.mockRejectedValue(new PermissionsApiError(403, { error: 'instance_access_forbidden' }));
 
@@ -224,6 +236,76 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a mutation epoch when an older in-flight policy refresh arrives later', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    applying.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    const stale = response();
+    stale.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    let resolvePoll: (value: PermissionsResponse) => void = () => undefined;
+    const poll = new Promise<PermissionsResponse>((resolve) => {
+      resolvePoll = resolve;
+    });
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockReturnValueOnce(poll);
+    api.replaceAuthorizedUsers
+      .mockResolvedValueOnce({
+        ok: true,
+        authorization_revision: 5,
+        entries: [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        authorization_revision: 6,
+        entries: [],
+      });
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.replaceAuthorizedUsers).toHaveBeenCalledWith(
+      [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+      4,
+      'inst-123',
+    );
+    expect(screen.getByText('permissions.roles.editor')).toBeTruthy();
+
+    await act(async () => {
+      resolvePoll(stale);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('permissions.states.applyingTitle')).toBeTruthy();
+    expect(screen.getByText('permissions.roles.editor')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.removeAccess' }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', {
+      name: 'permissions.actions.removeAccess',
+    }));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.replaceAuthorizedUsers.mock.calls[1]).toEqual([
+      [],
+      5,
+      'inst-123',
+    ]);
   });
 
   it('installs an offline fallback before stopping an applying-policy refresh', async () => {
@@ -582,13 +664,13 @@ describe('PermissionsPage conflict handling', () => {
     expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
   });
 
-  it('sends owner-only as the exact Backend access mode', async () => {
+  it('encodes Owner only as restricted with an empty binding set', async () => {
     api.updateProjectAccess.mockResolvedValue({
       ok: true,
       authorization_revision: 5,
       project: {
         ...response().projection.projects[0]!,
-        access: { mode: 'owner_only', revision: 2, bindings: [] },
+        access: { mode: 'restricted', revision: 2, bindings: [] },
       },
     });
     const user = userEvent.setup();
@@ -603,11 +685,12 @@ describe('PermissionsPage conflict handling', () => {
     await waitFor(() => expect(api.updateProjectAccess).toHaveBeenCalledOnce());
     expect(api.updateProjectAccess).toHaveBeenCalledWith(
       expect.objectContaining({ project_id: 'project-1' }),
-      'owner_only',
+      'restricted',
       [],
       1,
       'inst-123',
     );
+    expect(await screen.findByText('permissions.projects.modes.owner_only')).toBeTruthy();
   });
 
   it('re-runs Project narrowing preflight against the refreshed baseline', async () => {
