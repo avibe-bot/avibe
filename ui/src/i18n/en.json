@@ -2738,7 +2738,7 @@
     "errorRetryLimit": "Error Retry Limit",
     "errorRetryLimitHint": "Auto-retry with 'continue' when LLM stream errors occur (0 = no retry)",
     "opencodeActiveTurnTimeout": "OpenCode Turn Limit",
-    "opencodeActiveTurnTimeoutHint": "Abort and fail an accepted OpenCode turn that produces no result within this many minutes",
+    "opencodeActiveTurnTimeoutHint": "Abort and fail an accepted OpenCode turn that produces no result within this many minutes. 0 disables the limit; errors still settle the turn as failed",
     "showDuration": "Show Duration",
     "showDurationHint": "Display task elapsed time in result messages",
     "includeTimeInfo": "Include Current Time",

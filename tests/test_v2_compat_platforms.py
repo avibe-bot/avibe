@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 import sys
 from pathlib import Path
 
@@ -126,6 +128,63 @@ def test_to_app_config_uses_shared_agent_defaults() -> None:
         compat.opencode.active_turn_timeout_seconds
         == DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     )
+    assert DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS == 0
+
+
+def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
+    monkeypatch, tmp_path
+) -> None:
+    """The shipped 5400-second cap is the old default's echo, not a choice.
+
+    Seeding every persisted shape proves the property in one pass: a legacy
+    payload (marker absent) with the default echo loads as disabled, while the
+    same value carrying the provenance marker — the shape every post-change
+    save writes — is an explicit choice that survives. An explicit custom value
+    and an absent key keep their meaning.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.services.settings import default_config
+    from vibe import api
+
+    base = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    # A genuine pre-change payload carries the echo value and no provenance
+    # marker; a post-change save always carries the marker.
+    cases = [
+        (
+            {
+                "active_turn_timeout_seconds": 90 * 60,
+                "legacy_turn_timeout_neutralized": True,
+            },
+            None,
+            90 * 60,
+        ),
+        ({"active_turn_timeout_seconds": 7200}, None, 7200),
+        ({"active_turn_timeout_seconds": 0}, None, 0),
+        ({"active_turn_timeout_seconds": 90 * 60}, "legacy", 0),
+        ({"active_turn_timeout_seconds": 7200}, "legacy", 7200),
+    ]
+    for index, (override, legacy_shape, expected) in enumerate(cases):
+        payload = copy.deepcopy(base)
+        payload["agents"]["opencode"].update(override)
+        if legacy_shape:
+            payload["agents"]["opencode"].pop("legacy_turn_timeout_neutralized", None)
+        config_path = tmp_path / f"config-{index}.json"
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        loaded = V2Config.load(config_path=config_path)
+
+        assert loaded.agents.opencode.active_turn_timeout_seconds == expected
+        assert loaded.agents.opencode.legacy_turn_timeout_neutralized is True
+
+    payload = copy.deepcopy(base)
+    payload["agents"]["opencode"].pop("active_turn_timeout_seconds", None)
+    config_path = tmp_path / "config-missing.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.agents.opencode.active_turn_timeout_seconds == 0
 
 
 def test_to_app_config_exposes_opencode_provider_and_reasoning_fields() -> None:
