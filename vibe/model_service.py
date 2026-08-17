@@ -173,6 +173,32 @@ def _runtime_state_signature(memory: MemoryConfig) -> tuple[object, ...]:
     )
 
 
+def _cancel_organization_transition(memory: MemoryConfig) -> bool:
+    """Cancel only the rebuild fence owned by a pending org transition."""
+
+    if not memory.cloud.transition_notice_pending:
+        return False
+    memory.cloud.transition_notice_pending = False
+    if memory.recovery_intent == "rebuild":
+        memory.recovery_intent = None
+    return True
+
+
+def _adopt_cloud_embedding_identity(
+    candidate: MemoryConfig,
+    previous: MemoryConfig,
+    identity: str,
+) -> bool:
+    """Record one cloud target while checking the prior runtime baseline."""
+
+    baseline = previous.cloud.applied_embedding_identity
+    first_activation = baseline is None
+    if previous.cloud_runtime_selected() and baseline is not None and baseline != identity:
+        candidate.recovery_intent = "rebuild"
+    candidate.cloud.applied_embedding_identity = identity
+    return first_activation
+
+
 def _resolved_memory(
     current: MemoryConfig,
     *,
@@ -185,10 +211,9 @@ def _resolved_memory(
     previous = deepcopy(current)
     first_resolution = candidate.cloud.source_instance_id != instance_id
     if first_resolution:
+        _cancel_organization_transition(candidate)
         candidate.cloud.model_access_key = None
         candidate.cloud.organization_attached = False
-        candidate.cloud.transition_notice_pending = False
-        candidate.cloud.applied_embedding_identity = None
     if candidate.mode is None:
         candidate.mode = _memory_mode_after_initialization(candidate)
 
@@ -204,17 +229,14 @@ def _resolved_memory(
 
     if status.scope == "organization":
         if status.memory_available():
+            assert status.embedding_identity is not None
             if candidate.cloud.organization_attached:
-                first_managed_activation = (
-                    candidate.cloud.applied_embedding_identity is None
-                )
-                if (
-                    candidate.cloud.applied_embedding_identity is not None
-                    and candidate.cloud.applied_embedding_identity != status.embedding_identity
-                ):
-                    candidate.recovery_intent = "rebuild"
                 if candidate.cloud.model_access_key:
-                    candidate.cloud.applied_embedding_identity = status.embedding_identity
+                    first_managed_activation = _adopt_cloud_embedding_identity(
+                        candidate,
+                        previous,
+                        status.embedding_identity,
+                    )
                     if first_managed_activation:
                         candidate.enabled = True
             elif candidate.cloud.transition_notice_pending:
@@ -223,52 +245,36 @@ def _resolved_memory(
                 candidate.cloud.transition_notice_pending = True
                 candidate.recovery_intent = "rebuild"
             else:
-                if (
-                    previous.cloud.scope == "platform"
-                    and previous.cloud.applied_embedding_identity is not None
-                    and previous.cloud.applied_embedding_identity != status.embedding_identity
-                ):
-                    candidate.recovery_intent = "rebuild"
                 candidate.cloud.organization_attached = True
                 if candidate.cloud.model_access_key:
-                    candidate.cloud.applied_embedding_identity = status.embedding_identity
+                    _adopt_cloud_embedding_identity(
+                        candidate,
+                        previous,
+                        status.embedding_identity,
+                    )
                     candidate.enabled = True
-        elif candidate.cloud.organization_attached:
-            # Keep the last applied identity while paused so re-enable can
-            # distinguish an unchanged provider from one that needs rebuild.
-            candidate.cloud.transition_notice_pending = False
-        elif not (
-            candidate.mode == "custom" and previous.custom_processing_complete()
-        ):
-            # Scope binding remains managed even with no Memory pair. Only a
-            # complete configuration that was actively custom is grandfathered;
-            # every other installation pauses instead of falling back.
-            candidate.cloud.organization_attached = True
-            candidate.cloud.applied_embedding_identity = (
-                previous.cloud.applied_embedding_identity
-            )
+        else:
+            _cancel_organization_transition(candidate)
+            if not candidate.cloud.organization_attached and not (
+                candidate.mode == "custom" and previous.custom_processing_complete()
+            ):
+                # Scope binding remains managed even with no Memory pair. Only a
+                # complete configuration that was actively custom is grandfathered;
+                # every other installation pauses instead of falling back. Attached
+                # runtimes keep their identity baseline for a checked resume.
+                candidate.cloud.organization_attached = True
+                candidate.cloud.applied_embedding_identity = previous.cloud.applied_embedding_identity
     else:
         was_organization_cloud = previous.cloud.scope == "organization" and previous.cloud.organization_attached
-        canceled_organization_transition = previous.cloud.transition_notice_pending
+        _cancel_organization_transition(candidate)
         candidate.cloud.organization_attached = False
-        candidate.cloud.transition_notice_pending = False
-        if canceled_organization_transition and candidate.recovery_intent == "rebuild":
-            candidate.recovery_intent = None
-        if (
-            candidate.mode == "platform"
-            and status.memory_available()
-            and candidate.cloud.model_access_key
-        ):
-            first_platform_activation = (
-                candidate.cloud.applied_embedding_identity is None
+        if candidate.mode == "platform" and status.memory_available() and candidate.cloud.model_access_key:
+            assert status.embedding_identity is not None
+            first_platform_activation = _adopt_cloud_embedding_identity(
+                candidate,
+                previous,
+                status.embedding_identity,
             )
-            if (
-                (was_organization_cloud or previous.cloud.scope == "platform")
-                and previous.cloud.applied_embedding_identity is not None
-                and previous.cloud.applied_embedding_identity != status.embedding_identity
-            ):
-                candidate.recovery_intent = "rebuild"
-            candidate.cloud.applied_embedding_identity = status.embedding_identity
             if first_platform_activation:
                 candidate.enabled = True
         elif was_organization_cloud:
@@ -299,16 +305,13 @@ def _unpaired_memory(current: MemoryConfig) -> MemoryConfig:
         return current
 
     candidate = deepcopy(current)
-    canceled_organization_transition = cloud.transition_notice_pending
     candidate.cloud.capabilities = MemoryCloudCapabilities()
     candidate.cloud.embedding_identity = None
     candidate.cloud.revision = None
     candidate.cloud.quota_enforced = False
     candidate.cloud.model_access_key = None
     candidate.cloud.proxy_base_url = None
-    candidate.cloud.transition_notice_pending = False
-    if canceled_organization_transition and candidate.recovery_intent == "rebuild":
-        candidate.recovery_intent = None
+    _cancel_organization_transition(candidate)
     candidate.cloud.runtime_apply_pending = (
         current.cloud.runtime_apply_pending
         or _runtime_state_signature(candidate) != _runtime_state_signature(current)

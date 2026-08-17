@@ -192,6 +192,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
     endpoints = ("llm", "embedding", "rerank", "multimodal")
+    adopt_cloud_identity = False
     for endpoint in endpoints:
         if endpoint in target["processing"]:
             target["processing"][endpoint].pop("has_api_key", None)
@@ -212,6 +213,8 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
         ):
             raise ValueError("memory_cloud_unavailable")
         target["mode"] = mode
+        if mode == "platform":
+            adopt_cloud_identity = True
     if "acknowledge_transition" in patch_payload:
         if (
             patch_payload["acknowledge_transition"] is not True
@@ -222,6 +225,8 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
             raise ValueError("invalid_memory_patch")
         target["cloud"]["organization_attached"] = True
         target["cloud"]["transition_notice_pending"] = False
+        adopt_cloud_identity = True
+    if adopt_cloud_identity:
         target["cloud"]["applied_embedding_identity"] = (
             current.memory.cloud.embedding_identity
         )

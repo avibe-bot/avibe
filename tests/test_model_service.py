@@ -354,11 +354,50 @@ def test_enterprise_attachment_pauses_custom_until_acknowledged() -> None:
     )
 
 
-def test_canceling_enterprise_attachment_resumes_the_preserved_custom_runtime() -> None:
+@pytest.mark.parametrize(
+    "event",
+    ["scope_release", "capability_removal", "unpair"],
+)
+def test_canceling_enterprise_attachment_resumes_the_preserved_custom_runtime(
+    event: str,
+) -> None:
     pending = _resolved(
         _manual_memory(),
         _status(scope="organization"),
     )
+
+    if event == "scope_release":
+        canceled = _resolved(
+            pending,
+            _status(scope="platform", revision=2),
+        )
+    elif event == "capability_removal":
+        canceled = _resolved(
+            pending,
+            _status(
+                scope="organization",
+                chat=False,
+                embedding=False,
+                identity=None,
+                revision=2,
+            ),
+        )
+    else:
+        canceled = model_service._unpaired_memory(pending)  # noqa: SLF001
+
+    assert canceled.cloud.transition_notice_pending is False
+    assert canceled.cloud.organization_attached is False
+    assert canceled.recovery_intent is None
+    assert canceled.runtime_source() == "custom"
+    assert canceled.cloud.runtime_apply_pending is True
+
+
+def test_canceling_enterprise_attachment_preserves_an_unrelated_recovery_fence() -> None:
+    pending = _resolved(
+        _manual_memory(),
+        _status(scope="organization"),
+    )
+    pending.recovery_intent = "factory_reset"
 
     canceled = _resolved(
         pending,
@@ -366,10 +405,7 @@ def test_canceling_enterprise_attachment_resumes_the_preserved_custom_runtime() 
     )
 
     assert canceled.cloud.transition_notice_pending is False
-    assert canceled.cloud.organization_attached is False
-    assert canceled.recovery_intent is None
-    assert canceled.runtime_source() == "custom"
-    assert canceled.cloud.runtime_apply_pending is True
+    assert canceled.recovery_intent == "factory_reset"
 
 
 def test_enterprise_transition_acknowledgement_cannot_edit_custom_endpoints() -> None:
@@ -578,6 +614,78 @@ def test_platform_to_organization_upstream_change_is_an_identity_change() -> Non
         None,
     )
     assert organization.recovery_intent == "rebuild"
+
+
+@pytest.mark.parametrize("old_scope", ["platform", "organization"])
+@pytest.mark.parametrize("new_scope", ["platform", "organization"])
+@pytest.mark.parametrize(
+    ("new_identity", "expected_recovery"),
+    [("emb-old", None), ("emb-new", "rebuild")],
+)
+def test_pairing_a_different_instance_preserves_the_cloud_identity_baseline(
+    old_scope: str,
+    new_scope: str,
+    new_identity: str,
+    expected_recovery: str | None,
+) -> None:
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope=old_scope,
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-old",
+            applied_embedding_identity="emb-old",
+            model_access_key="mak_old",
+            proxy_base_url="https://old.example.test/v1/model",
+            source_instance_id="instance-old",
+            organization_attached=old_scope == "organization",
+        ),
+    )
+
+    repaired = _resolved(
+        current,
+        _status(scope=new_scope, identity=new_identity, revision=2),
+        minted=_mint("mak_new"),
+    )
+
+    assert repaired.cloud.applied_embedding_identity == new_identity
+    assert repaired.recovery_intent == expected_recovery
+    assert repaired.runtime_source() == "cloud"
+
+
+def test_platform_mode_acknowledgement_records_the_confirmed_cloud_identity() -> None:
+    memory = _manual_memory()
+    memory.mode = "custom"
+    memory.cloud = MemoryCloudConfig(
+        scope="platform",
+        capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+        embedding_identity="emb-cloud",
+        applied_embedding_identity="emb-previous-cloud",
+        model_access_key="mak_first",
+        proxy_base_url="https://backend.example.test/v1/model",
+        source_instance_id="instance-1",
+    )
+    current = _paired_config(memory)
+
+    target, confirm_rebuild = ui_memory_routes._memory_settings_patch(  # noqa: SLF001
+        current,
+        {"mode": "platform", "confirm_rebuild": True},
+    )
+    candidate = ui_memory_routes._memory_candidate_config(  # noqa: SLF001
+        current,
+        target,
+    )
+
+    assert confirm_rebuild is True
+    assert candidate.memory.cloud.applied_embedding_identity == "emb-cloud"
+    assert (
+        ui_memory_routes._memory_embedding_configuration_changed(  # noqa: SLF001
+            current,
+            candidate,
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize("dedicated_multimodal", [False, True])
