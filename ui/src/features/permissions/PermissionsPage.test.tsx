@@ -333,6 +333,105 @@ describe('PermissionsPage state model', () => {
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ['access editor', 'permissions.actions.save'],
+    ['Project editor', 'permissions.actions.save'],
+    ['access removal', 'permissions.actions.removeAccess'],
+  ] as const)('disables an already-open %s after switching offline', async (flow, actionLabel) => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    applying.projection.access.entries = [{
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'editor',
+    }];
+    const cached = response({ source: 'cache', offline: true, cached_at: 123 });
+    cached.projection.policy_sync.status = 'applying';
+    cached.projection.projects[0]!.sync.status = 'pending';
+    cached.projection.access.entries = applying.projection.access.entries;
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockResolvedValueOnce(cached);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+
+    if (flow === 'access editor') {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+    } else if (flow === 'Project editor') {
+      fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.removeAccess' }));
+    }
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('button', { name: actionLabel }).hasAttribute('disabled')).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+    const disabledAction = within(dialog).getByRole('button', { name: actionLabel });
+    expect(disabledAction.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(disabledAction);
+    await act(async () => { await Promise.resolve(); });
+    expect(api.replaceAuthorizedUsers).not.toHaveBeenCalled();
+    expect(api.updateProjectAccess).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['access', 'permissions.access.narrowTitle'],
+    ['Project', 'permissions.projects.narrowTitle'],
+  ] as const)('disables an open %s narrowing confirmation after switching offline', async (flow, title) => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    applying.projection.access.entries = [{
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'editor',
+    }];
+    const cached = response({ source: 'cache', offline: true, cached_at: 123 });
+    cached.projection.policy_sync.status = 'applying';
+    cached.projection.projects[0]!.sync.status = 'pending';
+    cached.projection.access.entries = applying.projection.access.entries;
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockResolvedValueOnce(cached);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+
+    if (flow === 'access') {
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+      fireEvent.click(screen.getByRole('radio', { name: 'permissions.roles.viewer' }));
+    } else {
+      fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+      fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+      fireEvent.click(screen.getByRole('radio', { name: 'permissions.projects.modes.owner_only' }));
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    const narrowingDialog = screen.getByText(title).closest('[role="dialog"]');
+    expect(narrowingDialog).toBeTruthy();
+    expect(within(narrowingDialog as HTMLElement).getByRole('button', {
+      name: 'permissions.actions.save',
+    }).hasAttribute('disabled')).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+    const disabledConfirm = within(narrowingDialog as HTMLElement).getByRole('button', {
+      name: 'permissions.actions.save',
+    });
+    expect(disabledConfirm.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(disabledConfirm);
+    await act(async () => { await Promise.resolve(); });
+    expect(api.replaceAuthorizedUsers).not.toHaveBeenCalled();
+    expect(api.updateProjectAccess).not.toHaveBeenCalled();
+  });
+
   it('keeps a newer mutation epoch while adopting an older cache outage', async () => {
     vi.useFakeTimers();
     const applying = response();

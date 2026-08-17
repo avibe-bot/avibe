@@ -265,6 +265,7 @@ function AccessEntryDialog({
   open,
   editingKey,
   response,
+  editable,
   onOpenChange,
   onRefresh,
   onSaved,
@@ -272,6 +273,7 @@ function AccessEntryDialog({
   open: boolean;
   editingKey: string | null;
   response: PermissionsResponse;
+  editable: boolean;
   onOpenChange: (open: boolean) => void;
   onRefresh: AuthoritativeRefresh;
   onSaved: (result: Awaited<ReturnType<typeof replaceAuthorizedUsers>>) => void;
@@ -362,7 +364,7 @@ function AccessEntryDialog({
   };
 
   const commit = async () => {
-    if (!validateDraft()) return;
+    if (!editable || !validateDraft()) return;
     setSaving(true);
     setError(undefined);
     try {
@@ -386,6 +388,7 @@ function AccessEntryDialog({
   };
 
   const save = async () => {
+    if (!editable) return;
     if (refreshRequired) {
       setSaving(true);
       try {
@@ -472,7 +475,7 @@ function AccessEntryDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || !candidate.value} onClick={() => void save()}>
+          <Button variant="brand" disabled={!editable || saving || !candidate.value} onClick={() => void save()}>
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
             {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
           </Button>
@@ -485,6 +488,7 @@ function AccessEntryDialog({
         title={t('permissions.access.narrowTitle')}
         description={t('permissions.access.narrowBody')}
         confirmLabel={t('permissions.actions.save')}
+        confirmDisabled={!editable}
         onConfirm={commit}
       />
     </>
@@ -495,6 +499,7 @@ function ProjectAccessDialog({
   project,
   instanceId,
   groups,
+  editable,
   onOpenChange,
   onRefresh,
   onSaved,
@@ -502,6 +507,7 @@ function ProjectAccessDialog({
   project: PermissionProject | null;
   instanceId: string;
   groups: DirectoryGroup[];
+  editable: boolean;
   onOpenChange: (open: boolean) => void;
   onRefresh: AuthoritativeRefresh;
   onSaved: (result: Awaited<ReturnType<typeof updateProjectAccess>>) => void;
@@ -578,7 +584,7 @@ function ProjectAccessDialog({
   };
 
   const commit = async () => {
-    if (!project || invalid) return;
+    if (!editable || !project || invalid) return;
     if (hasDuplicateProjectBindings(wireBindings)) {
       setError('duplicate_project_access_principal');
       return;
@@ -608,7 +614,7 @@ function ProjectAccessDialog({
   };
 
   const save = async () => {
-    if (!project || invalid) return;
+    if (!editable || !project || invalid) return;
     if (refreshRequired) {
       setSaving(true);
       try {
@@ -725,7 +731,7 @@ function ProjectAccessDialog({
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-            <Button variant="brand" disabled={saving || invalid} onClick={() => void save()}>
+            <Button variant="brand" disabled={!editable || saving || invalid} onClick={() => void save()}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : null}
               {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
             </Button>
@@ -738,6 +744,7 @@ function ProjectAccessDialog({
         title={t('permissions.projects.narrowTitle')}
         description={t('permissions.projects.narrowBody')}
         confirmLabel={t('permissions.actions.save')}
+        confirmDisabled={!editable}
         onConfirm={commit}
       />
     </>
@@ -925,7 +932,7 @@ export function PermissionsPage() {
   };
 
   const removeAccess = async () => {
-    if (removingAccess === null || removalInstanceId === null) return;
+    if (!editable || removingAccess === null || removalInstanceId === null) return;
     if (removalRefreshRequired) {
       await refreshRemovalConflict();
       return;
@@ -1133,6 +1140,7 @@ export function PermissionsPage() {
         open={editingAccess !== undefined}
         editingKey={editingAccess ?? null}
         response={response}
+        editable={editable}
         onOpenChange={(open) => { if (!open) setEditingAccess(undefined); }}
         onRefresh={refreshReady}
         onSaved={(result) => updateResponse((current) => ({
@@ -1148,6 +1156,7 @@ export function PermissionsPage() {
         project={editingProject}
         instanceId={projection.instance.id}
         groups={groups}
+        editable={editable}
         onOpenChange={(open) => { if (!open) setEditingProject(null); }}
         onRefresh={refreshReady}
         onSaved={(result) => updateResponse((current) => ({
@@ -1166,6 +1175,7 @@ export function PermissionsPage() {
         description={t('permissions.access.removeBody')}
         destructive
         confirmLabel={t('permissions.actions.removeAccess')}
+        confirmDisabled={!editable}
         onConfirm={removeAccess}
       >
         {removalConflict ? (
