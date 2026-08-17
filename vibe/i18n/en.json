@@ -903,6 +903,7 @@
       "removedItems": "Removed {count} Show Runtime cache item(s).",
       "removedArchives": "Removed {count} downloaded Show Runtime archive(s) ({size}).",
       "removedGit": "Removed {count} Git Runtime cache item(s).",
+      "partiallyRemoved": " {failed} archive(s) could not be removed; check permissions and the Avibe log.",
       "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes.",
       "gitSkipped": "Git Runtime cache preview skipped ({reason}); stale entries may remain."
     },
@@ -911,7 +912,8 @@
       "archiveCacheReclaimableAction": "Run `vibe runtime clean --dry-run` to preview, then `vibe runtime clean` to reclaim.",
       "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives",
       "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
-      "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor."
+      "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
+      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed."
     }
   }
 }

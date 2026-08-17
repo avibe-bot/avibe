@@ -62,6 +62,15 @@ _ARCHIVE_MTIME_GUARD_SECONDS = 15 * 60
 # ``skipped_reason`` generically instead of matching literal strings.
 _SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING = "runtime_install_already_running"
 _SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED = "archive_inspection_failed"
+_SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED = "archive_removal_failed"
+# Every archive-cache report carries exactly one outcome from this set; the
+# enumeration test in tests/test_show_runtime_archive_cleanup.py pins CLI and
+# Doctor rendering to it, so a new outcome fails the test until wired.
+_ARCHIVE_CLEANUP_OUTCOMES = frozenset({"cleaned", "partial", "skipped"})
+
+
+class _ArchiveMetadataError(Exception):
+    """A retained install's metadata could not be read; destructive cleanup must abort."""
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -787,7 +796,10 @@ class ShowRuntimeManager:
         actually remove.
         """
         stale_plan = self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=True)
-        return self._clean_downloaded_archives(dry_run=True, skip_metadata_under=set(stale_plan))
+        return self._clean_downloaded_archives(
+            dry_run=True,
+            skip_metadata_under={Path(path) for path in stale_plan},
+        )
 
     def _protected_archive_sha256s(self, skip_metadata_under: set[Path] | None = None) -> set[str]:
         """SHA-256 digests of archives the current and retained installs still need.
@@ -798,6 +810,10 @@ class ShowRuntimeManager:
         current install plus the retained rollback install(s). Metadata under
         ``skip_metadata_under`` is ignored, so dry runs can simulate the state
         after removing those install dirs.
+
+        Raises ``_ArchiveMetadataError`` when a retained install's metadata is
+        unreadable or malformed: silently treating that archive as unprotected
+        could delete the artifact a rollback reinstall needs.
         """
         skip_resolved = {path.resolve() for path in (skip_metadata_under or ())}
 
@@ -813,8 +829,10 @@ class ShowRuntimeManager:
             digest = pointer.get("archive_sha256")
             if isinstance(digest, str) and digest:
                 protected.add(digest)
-        except Exception:
+        except FileNotFoundError:
             pass
+        except Exception as exc:
+            raise _ArchiveMetadataError("current.json is unreadable") from exc
         versions_dir = self.runtime_dir / "versions"
         if versions_dir.is_dir():
             for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
@@ -823,8 +841,8 @@ class ShowRuntimeManager:
                         continue
                     try:
                         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
+                    except Exception as exc:
+                        raise _ArchiveMetadataError(f"install metadata is unreadable: {metadata_path}") from exc
                     digest = metadata.get("archive_sha256")
                     if isinstance(digest, str) and digest:
                         protected.add(digest)
@@ -882,10 +900,14 @@ class ShowRuntimeManager:
             try:
                 protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
                 candidates = self._archive_cleanup_candidates(protected)
+            except _ArchiveMetadataError:
+                logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
             except Exception:
                 logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
             return {
+                "outcome": "cleaned" if not candidates else "partial",
                 "protected_count": len(protected),
                 "candidate_count": len(candidates),
                 "candidate_bytes": sum(size for _, size in candidates),
@@ -894,27 +916,37 @@ class ShowRuntimeManager:
             }
         with self._install_guard_locked(timeout_seconds=1.0) as acquired:
             if not acquired:
-                logger.warning("Show Runtime archive cleanup skipped: an install is already running")
+                logger.warning("Show Runtime archive cleanup skipped: the install guard is busy or unavailable")
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING)
             try:
                 protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
                 candidates = self._archive_cleanup_candidates(protected)
                 removed_count = 0
                 removed_bytes = 0
+                failed_count = 0
                 for path, size in candidates:
                     try:
                         path.unlink()
                     except OSError:
+                        logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
+                        failed_count += 1
                         continue
                     removed_count += 1
                     removed_bytes += size
-                return {
+                report = {
                     "protected_count": len(protected),
                     "candidate_count": len(candidates),
                     "candidate_bytes": sum(size for _, size in candidates),
                     "removed_count": removed_count,
                     "removed_bytes": removed_bytes,
+                    "failed_count": failed_count,
                 }
+                if failed_count:
+                    report["outcome"] = "skipped" if removed_count == 0 else "partial"
+                    report["skipped_reason"] = _SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED
+                else:
+                    report["outcome"] = "cleaned"
+                return report
             except Exception:
                 logger.warning("Show Runtime archive cleanup failed", exc_info=True)
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
@@ -922,6 +954,7 @@ class ShowRuntimeManager:
     @staticmethod
     def _skipped_archive_report(reason: str) -> dict[str, Any]:
         return {
+            "outcome": "skipped",
             "protected_count": 0,
             "candidate_count": 0,
             "candidate_bytes": 0,
@@ -1128,6 +1161,17 @@ class ShowRuntimeManager:
             except MigrationLockTimeout:
                 yield False
                 return
+            except OSError:
+                # A lock file that cannot be created/opened (read-only or full
+                # runtime directory) is a structured "cannot serialize" outcome,
+                # never an exception through prepare/clean.
+                logger.warning(
+                    "Show Runtime install guard %s is unavailable; treating as busy",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield False
+                return
             self._install_guard_depth = 1
             try:
                 yield True
@@ -1142,8 +1186,29 @@ class ShowRuntimeManager:
         with self._install_guard_locked() as acquired:
             if not acquired:
                 self._install_reason = "runtime_install_already_running"
-                return None
+                # An untakeable lock (busy or unavailable) must not break a
+                # prepare that already has a verified install to reuse.
+                return self._reuse_verified_manifest_command()
             return self._install_manifest_runtime_locked()
+
+    def _reuse_verified_manifest_command(self) -> list[str] | None:
+        """Best-effort read-only fallback: reuse a verified installed runtime."""
+        try:
+            node = _resolve_node_command()
+            manifest = self._load_runtime_manifest()
+            if not node or not manifest:
+                return None
+            archive = self._manifest_archive_for_platform(manifest)
+            if not archive:
+                return None
+            install_dir = self._manifest_install_dir(manifest, archive)
+            command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
+            if not command:
+                legacy_install_dir = self._legacy_manifest_install_dir(manifest, archive)
+                command = self._verified_manifest_runtime_command(legacy_install_dir, manifest, archive, node)
+            return self._reuse_existing_archive_runtime(command)
+        except Exception:
+            return None
 
     def _install_manifest_runtime_locked(self) -> list[str] | None:
         node = _resolve_node_command()

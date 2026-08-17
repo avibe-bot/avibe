@@ -305,6 +305,151 @@ def test_cleanup_reports_inspection_failure_distinct_from_lock_contention(tmp_pa
     assert result["skipped_reason"] == "archive_inspection_failed"
 
 
+def test_archive_cleanup_outcomes_are_fully_rendered_everywhere() -> None:
+    """Enumeration pin: every report outcome/reason must render distinctly.
+
+    A new outcome or skip reason that the CLI/Doctor forgot to wire fails this
+    test instead of silently rendering placeholder counts.
+    """
+    from core import show_runtime as module
+    from vibe import cli as vibe_cli
+
+    reasons = {
+        module._SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING,
+        module._SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED,
+        module._SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED,
+    }
+    # Every skip reason produces a non-empty localized skip line.
+    language = "en"
+    rendered = set()
+    for reason in reasons:
+        message = vibe_cli.i18n_t("runtime.clean.skipped", language, reason=reason)
+        assert message and message != "runtime.clean.skipped"
+        assert reason in message
+        rendered.add(message)
+    assert len(rendered) == len(reasons)
+    # Inspection failures carry different remediation from lock contention.
+    wait_action = vibe_cli.i18n_t("runtime.doctor.archiveCacheSkippedAction", language)
+    inspect_action = vibe_cli.i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", language)
+    assert wait_action and inspect_action and wait_action != inspect_action
+    # Partial removals report the failed count.
+    partial = vibe_cli.i18n_t("runtime.clean.partiallyRemoved", language, failed=3)
+    assert "3" in partial and partial != "runtime.clean.partiallyRemoved"
+    # The outcome vocabulary stays closed.
+    assert module._ARCHIVE_CLEANUP_OUTCOMES == frozenset({"cleaned", "partial", "skipped"})
+
+
+def test_unreadable_retained_install_metadata_aborts_cleanup(tmp_path: Path) -> None:
+    """A rollback install with malformed metadata must protect its archive."""
+    manager = _make_manager(tmp_path)
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    (manager.runtime_dir / "versions" / "v1" / "test").mkdir(parents=True, exist_ok=True)
+    # Corrupt the retained rollback install's metadata after writing it.
+    rollback_dir = manager.runtime_dir / "versions" / "v1"
+    for metadata in rollback_dir.rglob(".vibe-show-runtime.json"):
+        metadata.write_text("{ not json", encoding="utf-8")
+    _write_archive(manager, _sha(1), b"current")
+    rollback_archive = _write_archive(manager, _sha(8), b"rollback")
+
+    result = manager.clean()
+
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert rollback_archive.exists()
+
+
+def test_archive_removal_failures_are_reported(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+
+    from unittest.mock import patch as _patch
+
+    with _patch.object(Path, "unlink", side_effect=OSError("read-only filesystem")):
+        result = manager.clean()
+
+    assert result["archives"]["skipped_reason"] == "archive_removal_failed"
+    assert result["archives"]["outcome"] == "skipped"
+    assert result["archives"]["candidate_count"] == 1
+
+
+def test_archive_cache_status_handles_stale_install_plan_paths(tmp_path: Path) -> None:
+    """Doctor status must convert the stale-plan strings back to Paths."""
+    manager = _make_manager(tmp_path)
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    _write_install_metadata(manager, version="v0", sha256=_sha(9), mtime=-999999)
+    _write_archive(manager, _sha(1), b"current")
+    stale_archive = _write_archive(manager, _sha(9), b"stale")
+
+    report = manager.archive_cache_status()
+
+    assert report.get("skipped_reason") != "archive_inspection_failed"
+    assert report["candidate_count"] == 1
+    assert stale_archive.exists()
+
+
+def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path, monkeypatch) -> None:
+    """A read-only runtime dir must not turn a verified install into a failure."""
+    from core import show_runtime as module
+
+    monkeypatch.setattr(module, "_runtime_platform_tag", lambda: "test")
+    monkeypatch.setattr(module, "_resolve_node_command", lambda: ["node"])
+    manifest_payload = {
+        "schema_version": 1,
+        "runtime_version": "v2",
+        "archives": {
+            "test": {
+                "name": "vibe-show-runtime-node-test.tgz",
+                "url": f"file://{tmp_path}/v2.tgz",
+                "sha256": _sha(1),
+            }
+        },
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        offline=True,
+        runtime_source="manifest-cache",
+        manifest_path=manifest_path,
+    )
+    manifest = manager._load_runtime_manifest()
+    assert manifest is not None
+    archive = manifest.archives["test"]
+    install_dir = manager._manifest_install_dir(manifest, archive)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    (install_dir / ".vibe-show-runtime.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "manifest_sha256": manifest.digest,
+                "runtime_version": manifest.runtime_version,
+                "platform": "test",
+                "archive_name": archive.name,
+                "archive_sha256": archive.sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cli_path = install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    cli_path.parent.mkdir(parents=True, exist_ok=True)
+    cli_path.write_text("runtime", encoding="utf-8")
+
+    from storage.lock import MigrationFileLock
+
+    def _unwritable_lock(self, *args, **kwargs):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", _unwritable_lock)
+
+    command = manager._install_manifest_runtime()
+
+    assert command is not None and command[-1].endswith("cli.js")
+
+
 def test_dry_run_reports_inspection_failure_instead_of_raising(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))

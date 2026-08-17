@@ -10764,17 +10764,25 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         archive_cache = manager.archive_cache_status()
     except Exception:  # noqa: BLE001
         archive_cache = None
+    doctor_language = _configured_cli_language()
     archive_skipped_reason = str((archive_cache or {}).get("skipped_reason") or "")
-    if archive_cache and archive_skipped_reason:
+    if archive_cache and archive_skipped_reason == "archive_inspection_failed":
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("runtime.doctor.archiveCacheSkipped", _configured_cli_language(), reason=archive_skipped_reason),
-            i18n_t("runtime.doctor.archiveCacheSkippedAction", _configured_cli_language()),
+            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+        )
+    elif archive_cache and archive_skipped_reason:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedAction", doctor_language),
             code="show_runtime.archive_cache_skipped",
         )
     elif archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
-        doctor_language = _configured_cli_language()
         _add_doctor_item(
             items,
             "warn",
@@ -14127,8 +14135,8 @@ def cmd_runtime(args) -> int:
             archives = payload.get("archives") or {}
             skipped_reason = str(archives.get("skipped_reason") or "")
             if skipped_reason:
-                # A skipped cleanup is not a completed zero-removal cleanup;
-                # say so instead of printing placeholder counts.
+                # A skipped/failed cleanup is not a completed zero-removal
+                # cleanup; say so instead of printing placeholder counts.
                 print(i18n_t("runtime.clean.skipped", language, reason=skipped_reason), file=sys.stderr)
             else:
                 prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
@@ -14144,6 +14152,15 @@ def cmd_runtime(args) -> int:
                         size=_format_byte_size(archive_bytes),
                     )
                 )
+                if int(archives.get("failed_count") or 0):
+                    print(
+                        i18n_t(
+                            "runtime.clean.partiallyRemoved",
+                            language,
+                            failed=int(archives["failed_count"]),
+                        ),
+                        file=sys.stderr,
+                    )
                 if git.get("ok") is False and git.get("reason"):
                     print(i18n_t("runtime.clean.gitSkipped", language, reason=git["reason"]), file=sys.stderr)
                 else:

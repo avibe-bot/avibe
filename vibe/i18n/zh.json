@@ -903,6 +903,7 @@
       "removedItems": "\u5df2\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
       "removedArchives": "\u5df2\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
       "removedGit": "\u5df2\u6e05\u7406 {count} \u9879 Git Runtime \u7f13\u5b58\u3002",
+      "partiallyRemoved": " \u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8bf7\u68c0\u67e5\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
       "skipped": "\u5f52\u6863\u6e05\u7406\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u5728\u6b63\u5728\u8fd0\u884c\u7684\u5b89\u88c5\u6216\u6e05\u7406\u7ed3\u675f\u540e\u91cd\u8bd5\u3002",
       "gitSkipped": "Git Runtime \u7f13\u5b58\u9884\u89c8\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u6761\u76ee\u3002"
     },
@@ -911,7 +912,8 @@
       "archiveCacheReclaimableAction": "\u5148\u8fd0\u884c `vibe runtime clean --dry-run` \u9884\u89c8\uff0c\u518d\u8fd0\u884c `vibe runtime clean` \u56de\u6536\u7a7a\u95f4\u3002",
       "archiveCacheClean": "Show Runtime \u5f52\u6863\u7f13\u5b58\u6ca1\u6709\u53ef\u56de\u6536\u5f52\u6863",
       "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
-      "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。"
+      "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
+      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002"
     }
   }
 }
