@@ -13281,25 +13281,25 @@ def _show_public_editor_context():
     return instance_owner_context()
 
 
-def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
+async def _show_public_request_author() -> dict[str, str] | None:
+    context = await asyncio.to_thread(_show_public_editor_context)
+    if context is None:
+        return None
+    if context.is_remote:
+        return {"kind": "user", "email": context.email} if context.email else None
+    return {"kind": "local"}
+
+
+def _show_request_author() -> dict[str, str] | None:
     from vibe.authorization import context_from_session_payload
 
-    if public:
-        context = _show_public_editor_context()
-        if context is None:
+    context = getattr(g, "authorization_context", None)
+    if context is not None:
+        if not context.has_role("editor"):
             return None
         if context.is_remote:
             return {"kind": "user", "email": context.email} if context.email else None
         return {"kind": "local"}
-
-    if not public:
-        context = getattr(g, "authorization_context", None)
-        if context is not None:
-            if not context.has_role("editor"):
-                return None
-            if context.is_remote:
-                return {"kind": "user", "email": context.email} if context.email else None
-            return {"kind": "local"}
 
     config = _load_remote_access_config()
     if config is not None:
@@ -13315,12 +13315,6 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
                 return {"kind": "user", "email": email}
             return None
 
-        cloud = config.remote_access.vibe_cloud
-        if public and cloud.enabled:
-            return None
-
-    if public and not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
-        return None
     return {"kind": "local"}
 
 
@@ -15067,6 +15061,13 @@ async def complete_show_identity_login():
         access = store.get_access(page.session_id)
         if access is None:
             return _show_identity_error_response("not_found", 404)
+        try:
+            show_identity.consume_verified_show_identity(identity)
+        except show_identity.ShowIdentityError as exc:
+            return _show_identity_error_response(
+                exc.reason,
+                _show_identity_error_status(exc.reason),
+            )
         if access.access_mode == "public":
             return redirect(state.return_target, code=303)
         if (
@@ -15076,13 +15077,6 @@ async def complete_show_identity_login():
         ):
             return _show_identity_error_response("show_access_forbidden", 403)
 
-        try:
-            show_identity.consume_verified_show_identity(identity)
-        except show_identity.ShowIdentityError as exc:
-            return _show_identity_error_response(
-                exc.reason,
-                _show_identity_error_status(exc.reason),
-            )
         # This browser-session lease intentionally has no live revision check:
         # membership changes affect new admissions, not a page already opened.
         lease = show_identity.make_show_guest_lease(
@@ -15117,6 +15111,9 @@ def redirect_public_show_page_to_canonical_path(share_id):
     try:
         page = store.get_by_share_id(share_id)
         if page is None and lease is not None:
+            # A lease preserves an already-admitted browser across audience and
+            # share-link changes. New visitors cannot resolve the retired link;
+            # explicit offline is the only immediate availability withdrawal.
             page = store.get(lease.page_id)
         if page is None:
             return _show_page_not_found_response()
@@ -15158,7 +15155,7 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if not limited_guest and page.visibility == "limited":
             if _is_show_page_spa_route_request(asset_path, request._request):
-                editor_context = _show_public_editor_context()
+                editor_context = await asyncio.to_thread(_show_public_editor_context)
                 if editor_context is not None:
                     try:
                         store.require_access(
@@ -15207,7 +15204,7 @@ async def serve_public_show_page(share_id, asset_path):
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
-            author = None if limited_guest else _show_request_author(public=True)
+            author = None if limited_guest else await _show_public_request_author()
             can_annotate = _show_annotation_capability(
                 author=author,
                 page=page,
@@ -15246,7 +15243,7 @@ async def serve_public_show_page(share_id, asset_path):
                 )
             if request.method != "POST":
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
-            author = _show_request_author(public=True)
+            author = await _show_public_request_author()
             if author is None:
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
             can_annotate = _show_annotation_capability(
@@ -15282,15 +15279,16 @@ async def serve_public_show_page(share_id, asset_path):
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
             try:
                 starlette_request = request._request
+                show_authenticated = False
+                if not limited_guest:
+                    show_authenticated = await _show_public_request_author() is not None
                 response = await _show_page_runtime_response(
                     page.session_id,
                     asset_path,
                     starlette_request,
                     external_prefix=f"/p/{quote(share_id, safe='')}",
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
-                    show_authenticated=(
-                        False if limited_guest else _show_request_author(public=True) is not None
-                    ),
+                    show_authenticated=show_authenticated,
                     show_config_session_id=share_id,
                     include_annotation_bootstrap=not limited_guest,
                 )

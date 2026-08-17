@@ -505,6 +505,23 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
         remote_session_cookie(config, "owner@example.com", "owner-1"),
         domain="alex.avibe.bot",
     )
+    original_resolve_session = ui_server._resolved_remote_session_payload
+    editor_resolution_was_offloaded: list[bool] = []
+
+    def resolve_session_off_loop(config):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            editor_resolution_was_offloaded.append(True)
+        else:
+            editor_resolution_was_offloaded.append(False)
+        return original_resolve_session(config)
+
+    monkeypatch.setattr(
+        ui_server,
+        "_resolved_remote_session_payload",
+        resolve_session_off_loop,
+    )
     editor_shared = editor_client.get(
         f"/p/{share_id}/reports/daily?tab=1",
         base_url="https://alex.avibe.bot",
@@ -514,6 +531,8 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     )
     assert editor_shared.status_code == 302
     assert editor_shared.headers["Location"] == "/show/ses123/reports/daily?tab=1"
+    assert editor_resolution_was_offloaded
+    assert all(editor_resolution_was_offloaded)
 
     asset = app.test_client().get(
         f"/p/{share_id}/app.js",
@@ -685,6 +704,69 @@ def test_limited_show_callback_rejects_offline_page_and_rate_limits_verification
     assert limited.headers["Cache-Control"] == "no-store"
 
 
+def test_show_identity_callback_consumes_assertion_when_page_became_public(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+    login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(login.headers["Location"]).query
+    )["state"][0]
+    store = ShowPageStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        result = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="public",
+            target_share_id=share_id,
+            target_emails=[],
+        )
+        assert result.status == "applied"
+    finally:
+        store.close()
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        lambda *_args, **_kwargs: show_identity.VerifiedShowIdentity(
+            subject="viewer-1",
+            normalized_email="viewer@example.com",
+            assertion_id="became-public-assertion",
+            expires_at=int(ui_server.time.time()) + 300,
+        ),
+    )
+    form = {"state": state, "assertion": "signed-assertion"}
+
+    accepted = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data=form,
+        follow_redirects=False,
+    )
+    assert accepted.status_code == 303
+    replay = app.test_client().post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data=form,
+    )
+    assert replay.status_code == 400
+    assert replay.get_json()["error"] == "replayed_assertion"
+
+
 def test_show_identity_callback_body_stops_at_the_streaming_limit():
     class StreamingRequest:
         consumed_chunks = 0
@@ -742,6 +824,57 @@ def test_public_show_ignores_an_existing_limited_guest_lease(monkeypatch, tmp_pa
     assert response.status_code == 200
     assert response.headers.get("Cache-Control") != "private, no-store"
     assert "Cookie" not in response.headers.get("Vary", "")
+
+
+def test_limited_guest_lease_survives_rotation_only_for_that_browser(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    old_share_id = _create_show_page("ses123", "limited")
+    lease = show_identity.make_show_guest_lease(
+        config,
+        page_id="ses123",
+        share_id=old_share_id,
+        normalized_email="viewer@example.com",
+    )
+    admitted = app.test_client()
+    admitted.set_cookie(
+        show_identity.show_guest_cookie_name(old_share_id),
+        lease,
+        domain="alex.avibe.bot",
+        path=show_identity.show_guest_cookie_path(old_share_id),
+    )
+    store = ShowPageStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        result = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="limited",
+            target_share_id="rotated-share",
+            target_emails=["viewer@example.com"],
+        )
+        assert result.status == "applied"
+    finally:
+        store.close()
+
+    continuing = admitted.get(
+        f"/p/{old_share_id}/app.js",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert continuing.status_code == 200
+    fresh_old_link = app.test_client().get(
+        f"/p/{old_share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+    )
+    assert fresh_old_link.status_code == 404
 
 
 def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
