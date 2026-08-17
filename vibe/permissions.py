@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
-from typing import Any, Mapping, NoReturn
+from typing import Any, Callable, Mapping, NoReturn
 from urllib.parse import quote
 
 import requests
@@ -313,6 +313,26 @@ def _runtime_credentials(config: V2Config) -> tuple[str, str, str]:
     return credentials
 
 
+def _request_config(
+    config: V2Config | None,
+) -> tuple[V2Config, Callable[[], V2Config]]:
+    if config is not None:
+        return config, lambda: config
+    return V2Config.load(), V2Config.load
+
+
+def _guard_current_pairing(
+    credentials: tuple[str, str, str],
+    load_current_config: Callable[[], V2Config],
+) -> None:
+    try:
+        current_credentials = _runtime_credentials(load_current_config())
+    except (FileNotFoundError, PermissionsNotPairedError) as exc:
+        raise PermissionsPairingChangedError("permissions_pairing_changed") from exc
+    if current_credentials != credentials:
+        raise PermissionsPairingChangedError("permissions_pairing_changed")
+
+
 def _mutation_payload(payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     expected_instance_id = payload.get("if_match_instance_id")
     if not isinstance(expected_instance_id, str) or not expected_instance_id:
@@ -444,6 +464,7 @@ def _acknowledge_authorization_revision(config: V2Config, revision: int) -> None
 
 def _backend_request(
     config: V2Config,
+    load_current_config: Callable[[], V2Config],
     method: str,
     suffix: str,
     payload: Mapping[str, Any] | None = None,
@@ -451,7 +472,8 @@ def _backend_request(
     expected_instance_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[dict[str, Any], str]:
-    backend_url, instance_id, instance_secret = _runtime_credentials(config)
+    credentials = _runtime_credentials(config)
+    backend_url, instance_id, instance_secret = credentials
     if expected_instance_id is not None and expected_instance_id != instance_id:
         raise PermissionsPairingChangedError("permissions_pairing_changed")
     endpoint = (
@@ -476,6 +498,7 @@ def _backend_request(
         )
     except requests.RequestException as exc:
         raise PermissionsUnavailableError("permissions_backend_unavailable") from exc
+    _guard_current_pairing(credentials, load_current_config)
     if 300 <= response.status_code < 400:
         raise PermissionsInvalidResponseError("permissions_backend_redirect_blocked")
     try:
@@ -494,10 +517,10 @@ def _backend_request(
 
 
 def get_current_permissions(config: V2Config | None = None) -> PermissionsProjectionResult:
-    config = config or V2Config.load()
+    config, load_current_config = _request_config(config)
     _, instance_id, _ = _runtime_credentials(config)
     try:
-        payload, _ = _backend_request(config, "GET", "")
+        payload, _ = _backend_request(config, load_current_config, "GET", "")
         projection = _validated_projection(payload, instance_id)
         _cache_projection(instance_id, projection)
         return PermissionsProjectionResult(projection=projection, source="live")
@@ -518,10 +541,11 @@ def replace_authorized_users(
     payload: Mapping[str, Any],
     config: V2Config | None = None,
 ) -> dict[str, Any]:
-    config = config or V2Config.load()
+    config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
     payload_result, instance_id = _backend_request(
         config,
+        load_current_config,
         "PUT",
         "authorized-users",
         backend_payload,
@@ -544,10 +568,11 @@ def update_project_access(
 ) -> dict[str, Any]:
     if not isinstance(project_id, str) or not project_id or "/" in project_id:
         raise PermissionsInvalidResponseError("invalid_project_id")
-    config = config or V2Config.load()
+    config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
     payload_result, instance_id = _backend_request(
         config,
+        load_current_config,
         "PUT",
         f"projects/{quote(project_id, safe='')}/access",
         backend_payload,

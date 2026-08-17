@@ -487,6 +487,97 @@ def test_permissions_mutations_reject_a_changed_pairing_before_backend_contact(
     assert backend_calls == []
 
 
+@pytest.mark.parametrize(
+    ("credential_field", "replacement"),
+    (
+        ("backend_url", "https://other-backend.example"),
+        ("instance_id", "inst-new"),
+        ("instance_secret", "replacement-secret"),
+    ),
+)
+@pytest.mark.parametrize("operation", ("get", "authorized_users", "project_access"))
+def test_permissions_rejects_inflight_results_after_the_pairing_tuple_changes(
+    monkeypatch,
+    credential_field: str,
+    replacement: str,
+    operation: str,
+) -> None:
+    config = _config()
+    cached_projection = _complete_projection()
+    permissions._cache_projection("inst-123", cached_projection)  # noqa: SLF001
+    backend_projection = _complete_projection()
+    backend_projection["instance"]["authorization_revision"] = 4
+    backend_projection["access"]["entries"] = [
+        {"kind": "email", "value": "new@example.com", "role": "editor"}
+    ]
+    project = backend_projection["projects"][0]
+    parsed = []
+    acknowledged = []
+
+    class TrackingResponse(_Response):
+        def json(self):
+            parsed.append(True)
+            return super().json()
+
+    def request(_method, _url, **_kwargs):
+        setattr(config.remote_access.vibe_cloud, credential_field, replacement)
+        if operation == "get":
+            payload = backend_projection
+        elif operation == "authorized_users":
+            payload = {
+                "ok": True,
+                "entries": backend_projection["access"]["entries"],
+                "authorization_revision": 4,
+            }
+        else:
+            payload = {
+                "ok": True,
+                "project": project,
+                "authorization_revision": 4,
+            }
+        return TrackingResponse(200, payload)
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+    monkeypatch.setattr(
+        permissions,
+        "_acknowledge_authorization_revision",
+        lambda *_args: acknowledged.append(True),
+    )
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        if operation == "get":
+            permissions.get_current_permissions(config)
+        elif operation == "authorized_users":
+            permissions.replace_authorized_users(
+                {
+                    "entries": [],
+                    "if_match_revision": 3,
+                    "if_match_instance_id": "inst-123",
+                },
+                config,
+            )
+        else:
+            permissions.update_project_access(
+                "project-1",
+                {
+                    "mode": "restricted",
+                    "bindings": project["access"]["bindings"],
+                    "if_match_revision": 2,
+                    "if_match_instance_id": "inst-123",
+                },
+                config,
+            )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection == cached_projection
+    assert parsed == []
+    assert acknowledged == []
+
+
 @pytest.mark.parametrize(("path", "replacement"), MALFORMED_PROJECTION_CASES)
 def test_permissions_rejects_each_malformed_nested_projection_before_caching(
     monkeypatch,
@@ -850,6 +941,24 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
         http_authorization_policy("PUT", "/api/permissions/projects/project-1/access").minimum_role
         == "owner"
     )
+
+
+def test_permissions_projection_get_is_private_and_not_cached(monkeypatch) -> None:
+    client = app.test_client()
+    monkeypatch.setattr(
+        permissions,
+        "get_current_permissions",
+        lambda: permissions.PermissionsProjectionResult(
+            projection=_projection(),
+            source="live",
+        ),
+    )
+
+    response = client.get("/api/permissions")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert response.get_json()["projection"]["instance"]["id"] == "inst-123"
 
 
 def test_permissions_same_origin_routes_reject_non_contract_entry_fields(monkeypatch) -> None:

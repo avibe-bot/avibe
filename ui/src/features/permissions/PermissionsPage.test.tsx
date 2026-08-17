@@ -333,6 +333,52 @@ describe('PermissionsPage state model', () => {
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps a newer mutation epoch while adopting an older cache outage', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    applying.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    const staleCache = response({ source: 'cache', offline: true, cached_at: 123 });
+    staleCache.projection.policy_sync.status = 'applying';
+    staleCache.projection.projects[0]!.sync.status = 'pending';
+    staleCache.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockResolvedValueOnce(staleCache);
+    api.replaceAuthorizedUsers.mockResolvedValueOnce({
+      ok: true,
+      authorization_revision: 5,
+      entries: [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+    });
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByText('permissions.roles.editor')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+    expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
+    expect(screen.getByText('permissions.roles.editor')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'permissions.actions.editAccess' })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+  });
+
   it('offers an explicit refresh after the bounded applying-policy poll', async () => {
     vi.useFakeTimers();
     const applying = response();

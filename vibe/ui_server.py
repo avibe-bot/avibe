@@ -2684,7 +2684,9 @@ async def current_instance_permissions_get(starlette_request: FastAPIRequest):
             return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         try:
             result = await asyncio.to_thread(permissions.get_current_permissions)
-            return jsonify(permissions.response_payload(result))
+            response = jsonify(permissions.response_payload(result))
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
         except Exception as error:
             return _permissions_error_response(error)
 

@@ -145,7 +145,19 @@ const revisionMonotonicResponse = (
     && current.projection.instance.authorization_revision
       > candidate.projection.instance.authorization_revision
   ) {
-    return current;
+    if (
+      current.source === candidate.source
+      && current.offline === candidate.offline
+      && current.cached_at === candidate.cached_at
+    ) {
+      return current;
+    }
+    return {
+      ...current,
+      source: candidate.source,
+      offline: candidate.offline,
+      cached_at: candidate.cached_at,
+    };
   }
   return candidate;
 };
