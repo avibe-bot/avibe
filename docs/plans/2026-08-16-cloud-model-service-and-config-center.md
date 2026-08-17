@@ -210,10 +210,11 @@ scope per instance behind them.
   realtime uses its existing fixed `unattributed-legacy` context. Neither value identifies a
   customer instance. Both adapters atomically upsert `available`/`unavailable` state in a shared
   transition table; only a successfully persisted transition to `unavailable` grants permission
-  to emit the outage event. A successful managed decrypt attempts the `available` transition on
-  every call. If that recovery write fails, the usable call still proceeds, the write is retried
-  on the next successful decrypt, and the persistence failure itself is reported directly to
-  Sentry without relying on the unavailable transition table. Concurrent and cold-started Vercel
+  to emit the outage event. A successful managed decrypt of committed saved ciphertext attempts
+  the `available` transition on every call; candidate save round trips never read or write alert
+  state. If that recovery write fails, the usable call still proceeds, the write is retried on the
+  next successful decrypt, and the persistence failure itself is reported directly to Sentry
+  without relying on the unavailable transition table. Concurrent and cold-started Vercel
   isolates therefore observe the same edges without making alert infrastructure part of service
   availability.
 
@@ -502,8 +503,10 @@ turns on.
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
 - `model_service_api_key_required` (400) — an enabled save candidate has no submitted, retained,
-  or materialized API key. This client-input validation runs before managed custody validation and
-  never emits a custody alert.
+  or materialized API key, or any candidate (enabled or disabled) changes `base_url` or
+  `realtime_url` while trying to retain ciphertext bound to the prior address. Address changes
+  never carry prior ciphertext forward. This client-input validation runs before managed custody
+  validation and never emits a custody alert.
 - `model_service_key_unavailable` (503) — an enabled save candidate cannot complete its managed
   encrypt/decrypt round trip after an actual key has been selected, or an enabled saved slot has
   neither decryptable custody nor an eligible same-scope platform env recovery under the shared
@@ -514,9 +517,10 @@ turns on.
   For unrecovered saved-slot failures, status marks the affected capability false with the same
   reason. Every saved-key decryption-failure transition, including one masked by approved platform
   recovery, emits one scrubbed high-priority Sentry event per scope/config revision/capability;
-  repeated failures at the same active edge emit none, and a successful managed-key validation
-  rearms a later failure through the persisted `available` state. Failure to persist that recovery
-  state never changes the successful call or truthful status result.
+  repeated failures at the same active edge emit none, and successful decryption of the committed
+  saved ciphertext rearms a later failure through the persisted `available` state. Candidate
+  round trips never rearm that state. Failure to persist the committed recovery state never changes
+  the successful call or truthful status result.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
