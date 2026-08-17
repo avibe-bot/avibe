@@ -200,14 +200,19 @@ scope per instance behind them.
   skips the upstream probe. Status uses decrypt-validate-and-discard and never retains or returns
   plaintext. This status-only read-path exception supersedes the earlier proxy-only wording.
   All read APIs return `has_api_key: true/false`, never the value. Keys and ciphertext never enter
-  API responses, logs, Sentry, or usage events. Missing or invalid key-secret material is reported
-  as a high-priority Sentry event tagged by scope, capability, and instance, using only scrubbed
-  metadata. Emission is transition-deduplicated by scope, config revision, and capability so
-  status polling cannot create one event per instance per minute; the first observing instance
-  remains a context tag but is not part of the deduplication key. A successful validation clears
-  that transition so a later outage at the same revision alerts again. The transition claim/clear
-  is an atomic shared-store operation, never process-local state, so concurrent and cold-started
-  Vercel isolates observe the same edge.
+  API responses, logs, Sentry, or usage events. Missing or invalid key-secret material for a
+  committed saved slot is reported as a high-priority Sentry event tagged by scope, capability,
+  instance, and config revision, using only scrubbed metadata. Emission is transition-deduplicated
+  by scope, config revision, and capability so status polling cannot create one event per instance
+  per minute; the first observing instance remains a context tag but is not part of the
+  deduplication key. Both adapters atomically upsert `available`/`unavailable` state in a shared
+  transition table; only a successfully persisted transition to `unavailable` grants permission
+  to emit the outage event. A successful managed decrypt attempts the `available` transition on
+  every call. If that recovery write fails, the usable call still proceeds, the write is retried
+  on the next successful decrypt, and the persistence failure itself is reported directly to
+  Sentry without relying on the unavailable transition table. Concurrent and cold-started Vercel
+  isolates therefore observe the same edges without making alert infrastructure part of service
+  availability.
 
 ### 6.3 APIs
 
@@ -322,7 +327,7 @@ Every cross-cutting property has exactly one code owner; routes never re-impleme
    `resolveCallSnapshot` (instance+org+plan+config+limits in ONE snapshot — every security decision
    reads one consistent state), `reserveQuota`/`extendQuota`/`settleQuota`, and
    `readUsageSummarySnapshot`; key-unavailable alert edges use a small additive transition table
-   keyed by scope/config revision/capability and atomic claim/clear operations.
+   keyed by scope/config revision/capability and atomic `available`/`unavailable` upserts.
 3. **ModelServiceUpstreamClient** — the only egress owner: destination classification
    (allow-only-global-unicast per the IANA IPv4/IPv6 special-purpose registries; transition/tunnel
    prefixes — NAT64 incl. local-use, 6to4, Teredo — rejected outright), **TLS-only upstreams**
@@ -500,12 +505,15 @@ turns on.
   encrypt/decrypt round trip after an actual key has been selected, or an enabled saved slot has
   neither decryptable custody nor an eligible same-scope platform env recovery under the shared
   effectiveness predicate. The failure is not overrideable by `force: true`, never maps to
-  `model_service_not_configured`, makes no upstream call, and persists no candidate change. For
-  unrecovered saved-slot failures, status marks the affected capability false with the same reason.
-  Every saved-key decryption-failure transition, including one masked by approved platform recovery,
-  emits one scrubbed high-priority Sentry event per scope/config revision/capability; repeated
-  failures at the same active edge emit none, and a successful managed-key validation clears the
-  edge so a later failure can emit again.
+  `model_service_not_configured`, makes no upstream call, and persists no candidate change. A
+  rejected pre-save custody check writes a scrubbed structured log only: it creates no transition
+  row and emits no ops alert because the request response and admin UI are its presentation surface.
+  For unrecovered saved-slot failures, status marks the affected capability false with the same
+  reason. Every saved-key decryption-failure transition, including one masked by approved platform
+  recovery, emits one scrubbed high-priority Sentry event per scope/config revision/capability;
+  repeated failures at the same active edge emit none, and a successful managed-key validation
+  rearms a later failure through the persisted `available` state. Failure to persist that recovery
+  state never changes the successful call or truthful status result.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
