@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avibe.bot/contracts/show-access/v1",
+  "title": "Avibe local ShowAccess contract v1",
+  "$ref": "#/$defs/ShowAccess",
+  "x-contract": {
+    "contract_id": "avibe.show-access.v1",
+    "version": 1,
+    "authority": "local_avibe_only",
+    "owner": "avibe.local_show_access_stable_writer",
+    "storage_boundary": {
+      "aggregate": ["access_mode", "share_id", "revision", "normalized_emails"],
+      "transaction": "one_local_transaction",
+      "share_id_uniqueness": "global_atomic_check",
+      "exact_email_persistence": "local_avibe_only"
+    },
+    "interfaces": [
+      {
+        "id": "show_access_apply_http",
+        "producer": "avibe.ui.SharingSettings",
+        "consumer": "avibe.local_http.ShowAccessApply",
+        "delivery": "authenticated_local_http_json",
+        "request": "#/$defs/ApplyRequest",
+        "result": "#/$defs/ApplyResult",
+        "authorization": "owner_or_existing_sharing_control_authority"
+      },
+      {
+        "id": "show_access_apply_ipc",
+        "producer": "avibe.ui_process.ShowAccessApplyClient",
+        "consumer": "avibe.controller.ShowAccessStableWriter",
+        "delivery": "authenticated_internal_socket_json",
+        "request": "#/$defs/ApplyRequest",
+        "result": "#/$defs/ApplyResult",
+        "serialization_owner": "avibe.controller.ShowAccessStableWriter"
+      },
+      {
+        "id": "show_access_read",
+        "producer": "avibe.controller.ShowAccessStore",
+        "consumer": "avibe.local_http.SharedNavigationAdmission",
+        "delivery": "local_transactional_snapshot",
+        "result": "#/$defs/ShowAccess"
+      },
+      {
+        "id": "show_access_settings_read",
+        "producer": "avibe.local_http.ShowAccessSettingsRead",
+        "consumer": "avibe.ui.SharingSettings",
+        "delivery": "authenticated_local_http_json_with_cache_control_private_no_store",
+        "result": "#/$defs/ShowAccess",
+        "authorization": "owner_or_existing_sharing_control_authority"
+      }
+    ],
+    "page_identity": {
+      "required_equality": "authorized_route_page_id == request.page_id == result.show_access.page_id",
+      "route_or_request_mismatch": "reject_before_controller_ipc_or_store_read",
+      "controller_result_mismatch": "internal_protocol_failure_without_response_data"
+    },
+    "apply": {
+      "cas_field": "expected_revision",
+      "canonical_change_fields": ["target_access_mode", "target_share_id", "target_emails"],
+      "canonical_change": "advance_revision_exactly_once",
+      "canonical_no_change": "return_no_change_without_revision_advance",
+      "stale_expected_revision": "conflict_without_write",
+      "share_id_collision": "share_id_taken_without_write",
+      "lost_response": "reread_current_show_access_then_submit_again_with_current_revision_if_needed",
+      "durable_mutation_receipts": false
+    },
+    "mode_invariants": {
+      "private": "shared_route_disabled; an existing stable share_id may remain inactive; emails_empty",
+      "limited": "share_id_required; one_or_more_normalized_emails; new_navigation_requires_verified_identity_and_current_local_membership",
+      "public": "share_id_required; emails_empty; new_navigation_allows_anonymous",
+      "stable_binding": "limited_and_public_preserve_share_id_unless_apply_explicitly_replaces_it"
+    },
+    "normalization": {
+      "steps": ["trim_ascii_surrounding_whitespace", "ascii_lowercase", "reject_invalid_email", "deduplicate", "sort_lexicographically"],
+      "persistence": "canonical_array_only"
+    },
+    "forbidden_concepts": ["availability", "grant_revision", "grant_commitment", "hosted_grant", "prepare_commit", "cleanup", "migration", "mutation_receipt"]
+  },
+  "x-examples": [
+    {
+      "name": "private_with_inactive_binding",
+      "schema_ref": "#/$defs/ShowAccess",
+      "value": {"page_id": "page:alpha", "access_mode": "private", "share_id": "stable_alpha", "revision": 4, "normalized_emails": []}
+    },
+    {
+      "name": "limited",
+      "schema_ref": "#/$defs/ShowAccess",
+      "value": {"page_id": "page:alpha", "access_mode": "limited", "share_id": "stable_alpha", "revision": 5, "normalized_emails": ["alice@example.com", "bob@example.com"]}
+    },
+    {
+      "name": "public",
+      "schema_ref": "#/$defs/ShowAccess",
+      "value": {"page_id": "page:alpha", "access_mode": "public", "share_id": "stable_alpha", "revision": 6, "normalized_emails": []}
+    },
+    {
+      "name": "apply_limited",
+      "schema_ref": "#/$defs/ApplyRequest",
+      "value": {"page_id": "page:alpha", "expected_revision": 4, "target_access_mode": "limited", "target_share_id": "stable_alpha", "target_emails": ["alice@example.com"]}
+    },
+    {
+      "name": "apply_result",
+      "schema_ref": "#/$defs/ApplyResult",
+      "value": {"status": "applied", "show_access": {"page_id": "page:alpha", "access_mode": "limited", "share_id": "stable_alpha", "revision": 5, "normalized_emails": ["alice@example.com"]}}
+    },
+    {
+      "name": "stale_apply",
+      "schema_ref": "#/$defs/ApplyResult",
+      "value": {"status": "conflict", "show_access": {"page_id": "page:alpha", "access_mode": "public", "share_id": "stable_alpha", "revision": 6, "normalized_emails": []}}
+    }
+  ],
+  "$defs": {
+    "PageId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "ShareId": {"type": "string", "minLength": 3, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,62}[A-Za-z0-9]$"},
+    "NormalizedEmail": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$"},
+    "ShowAccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_id", "access_mode", "share_id", "revision", "normalized_emails"],
+      "properties": {
+        "page_id": {"$ref": "#/$defs/PageId"},
+        "access_mode": {"enum": ["private", "limited", "public"]},
+        "share_id": {"anyOf": [{"$ref": "#/$defs/ShareId"}, {"type": "null"}]},
+        "revision": {"type": "integer", "minimum": 0},
+        "normalized_emails": {"type": "array", "items": {"$ref": "#/$defs/NormalizedEmail"}, "uniqueItems": true}
+      },
+      "allOf": [
+        {"if": {"properties": {"access_mode": {"const": "private"}}, "required": ["access_mode"]}, "then": {"properties": {"normalized_emails": {"maxItems": 0}}}},
+        {"if": {"properties": {"access_mode": {"const": "limited"}}, "required": ["access_mode"]}, "then": {"properties": {"share_id": {"$ref": "#/$defs/ShareId"}, "normalized_emails": {"minItems": 1}}}},
+        {"if": {"properties": {"access_mode": {"const": "public"}}, "required": ["access_mode"]}, "then": {"properties": {"share_id": {"$ref": "#/$defs/ShareId"}, "normalized_emails": {"maxItems": 0}}}}
+      ]
+    },
+    "ApplyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page_id", "expected_revision", "target_access_mode", "target_share_id", "target_emails"],
+      "properties": {
+        "page_id": {"$ref": "#/$defs/PageId"},
+        "expected_revision": {"type": "integer", "minimum": 0},
+        "target_access_mode": {"enum": ["private", "limited", "public"]},
+        "target_share_id": {"anyOf": [{"$ref": "#/$defs/ShareId"}, {"type": "null"}]},
+        "target_emails": {"type": "array", "items": {"$ref": "#/$defs/NormalizedEmail"}, "uniqueItems": true}
+      },
+      "allOf": [
+        {"if": {"properties": {"target_access_mode": {"const": "private"}}, "required": ["target_access_mode"]}, "then": {"properties": {"target_emails": {"maxItems": 0}}}},
+        {"if": {"properties": {"target_access_mode": {"const": "limited"}}, "required": ["target_access_mode"]}, "then": {"properties": {"target_share_id": {"$ref": "#/$defs/ShareId"}, "target_emails": {"minItems": 1}}}},
+        {"if": {"properties": {"target_access_mode": {"const": "public"}}, "required": ["target_access_mode"]}, "then": {"properties": {"target_share_id": {"$ref": "#/$defs/ShareId"}, "target_emails": {"maxItems": 0}}}}
+      ]
+    },
+    "ApplyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "show_access"],
+      "properties": {
+        "status": {"enum": ["applied", "no_change", "conflict", "share_id_taken", "invalid"]},
+        "show_access": {"$ref": "#/$defs/ShowAccess"}
+      }
+    }
+  }
+}

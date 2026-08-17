@@ -155,7 +155,6 @@ capabilities:
     observations: tests/scenarios/auth_setup/observations.yaml
     scenario_tests:
       - tests/scenarios/auth_setup/test_auth_setup_scenarios.py
-      - tests/scenarios/auth_setup/test_show_identity_scenario.py
       - tests/test_claude_agent_sessions.py
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py

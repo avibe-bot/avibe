@@ -1,135 +1,71 @@
-# Show Access Contract v2
+# Show Access Boundary Contracts
 
-This directory freezes the machine-readable cross-repository contract for local
-Show Page audience state, identity-only limited login, orthogonal resource
-capabilities, direct retirement of the unused hosted email model, and Runtime
-context isolation.
+Version 1 freezes three cross-repository boundaries for the first Unified Show
+Access release. Each JSON file is a self-contained Draft 2020-12 JSON Schema
+with machine-readable ownership, interface, policy, and example metadata.
 
-The authority is Issue #1498 and `../public-show-live-update.md`. The design bytes
-are pinned by Git blob SHA in `mirror-registry.json` and
-`scenario-bindings.json`. The exact PR head that receives review pins the complete
-contract set; the blob pin avoids an impossible self-referential commit SHA.
+| Contract | Authority | Producer -> consumer |
+| --- | --- | --- |
+| [`show-access.json`](show-access.json) | Local Avibe only | Sharing UI -> local HTTP -> controller stable writer -> local store |
+| [`identity-auth.json`](identity-auth.json) | Paired Backend identity proof only | Local login -> Backend authorize -> fixed local `form_post` callback |
+| [`runtime-containment.json`](runtime-containment.json) | Avibe admission, Runtime isolation | Avibe trusted proxy -> Runtime protocol 1 private/shared contexts |
 
-## Ownership
+## Product Boundary
 
-Local Avibe is the only authority and persistence location for `access_mode`, the
-stable share binding, `audience_revision`, and normalized exact-email membership.
-The controller process owns one transactional writer under a stable cross-process
-lease. That transaction also records a durable receipt keyed by page and mutation,
-so replay remains deterministic after later Apply operations. Receipts live for the
-page lifetime, are never evicted by time or count, and cascade-delete with the page.
-The receipt digest covers the full normalized Apply body using recursive RFC 8785
-canonical JSON, UTF-8, SHA-256, and lowercase hex; known-answer vectors freeze the
-bytes across language and version changes.
-The UI process
-authorizes and forwards; it never coordinates or writes.
+`ShowAccess` contains the complete local audience state: `access_mode`, stable
+`share_id`, monotonic `revision`, and the normalized exact-email set. One local
+stable writer replaces these fields atomically. The Backend never receives or
+evaluates the email set.
 
-Avibe Backend authenticates identity only. Its compact RS256 JWT/JWS assertion is instance-bound
-and contains a verified email, but no page membership, page authorization, Instance
-role, or `show_page_email` access source. Local Avibe re-resolves the share and
-checks current local membership on every limited request.
-The executable identity owner derives one server-owned callback origin as exact
-scheme, normalized host, and effective port, then creates one host-only, callback-scoped,
-`SameSite=None`, `Secure`, `HttpOnly` cookie per signed nonce. The cookie value is
-an independent 32-byte secret, state is verified before cookie selection, and atomic
-nonce/`jti` retention supports concurrent flows. The reference harness performs a
-real HTTP form POST plus strict compact JWT/JWKS verification. Signed state and paired-issuer
-JWKS caches have closed clocks and fail-closed refresh behavior. Callback success
-atomically advances a token-hash-backed, exact-origin-bound identity-only session
-lineage and invalidates every prior generation. Its `SameSite=None` cookie supports
-the cross-site callback without becoming page authorization. A nonce-scoped server
-flow record captures the exact browser-current valid token hash, lineage, and generation,
-including null; stale cookies are cleared at start. A callback rotates only when the
-current cookie still equals that snapshot, so a superseded concurrent flow creates no
-lineage or second session. The flow cookie remains valid through the same signed-state
-plus verifier-skew boundary. The session has a
-non-renewable 24-hour maximum; every later limited request still checks current local
-membership. The HTTP harness executes the cookie policy model; real-browser delivery
-remains residual conformance evidence.
+The three modes are closed:
 
-There is no migration or compatibility phase. The unused hosted storage, endpoints,
-clients, and Instance authorization source are direct deletion targets.
+- `private`: `/p` is disabled. A prior share binding may remain stored but is inactive.
+- `limited`: a new `/p` navigation needs verified identity and current local membership.
+- `public`: a new `/p` navigation allows anonymous access.
 
-## Contract Table
+Limited and public preserve the same share binding unless the owner explicitly
+replaces it. `Apply` uses `expected_revision`; it has no hosted operation and no
+durable mutation receipt. After a lost response, the client reads current state.
 
-| Artifact | Frozen surface |
-| --- | --- |
-| `show-access.schema.json` | Local aggregate, exact membership, stable binding, revision, mutation receipt |
-| `apply-invocation.json` | Owner-or-sharing-control invocation boundary and early denial |
-| `apply-mutation.schema.json` | Local Apply request, terminal result, and rejected result |
-| `apply-transition-algebra.json` | Exhaustive CAS, idempotency, binding, membership, and revision algebra |
-| `fixtures/apply-mutations.json` | Canonical transitions, crash/idempotency trace, next-request revocation |
-| `owner-settings.schema.json` | Page-correlated local settings IPC and actual private/no-store HTTP metadata |
-| `identity-auth.json` | Compact RS256/JWKS, bounded state/cache, concurrent callback, and identity-session state machines |
-| `local-legacy-mapping.json` | Wide legacy string boundary with deterministic valid mapping and malformed fail-closed |
-| `capability-matrix.json` | Closed `/p` and `/show` decision requiring keyed support for every shared admission |
-| `shared-browser-containment.json` | Trusted shell, opaque Runtime capture, worker broker, every-request validation, sibling isolation |
-| `retirement.json` | Direct removal inventory with migration and compatibility forbidden |
-| `runtime-context.json` | Protocol, trusted envelope, isolated graphs, demand-only shared work, confinement and budgets |
-| `mirror-registry.json` | Exact future producer, consumer, signature, delivery and serialization owner |
-| `scenario-bindings.json` | Executable scalar claims for every SHOW-LIVE expected-evidence clause |
+The Backend returns only a short-lived RS256 identity assertion. That assertion
+does not contain page, share, membership, role, or resource-access claims. The
+local identity session proves identity only. Page admission remains a fresh local
+decision at each new top-level navigation or manual refresh.
 
-## Invariants
+After admission, the opaque document capability remains valid for that loaded
+document and its subresources until the tab, document, or Runtime namespace ends.
+Audience changes affect the next navigation or refresh. They do not poll, push a
+refresh, revoke loaded subresources, or close the loaded guest page.
 
-- Private disables but retains a stable binding; limited/public reuse it; explicit
-  rotation or custom binding replaces it.
-- Apply never changes availability and never calls Backend. Apply and durable
-  availability transitions share one page writer; an effective transition advances
-  the same `audience_revision` exactly once and a no-op advances zero.
-- Canonical mode, binding, or email-set change advances `audience_revision` once;
-  canonical no-op does not.
-- Same mutation and payload replays its stored terminal result even after later
-  Apply operations; different payload reuse and stale revision reject before write.
-- Receipts remain for the page lifetime with no time/count eviction and are removed
-  only by the page cascade.
-- Legacy local offline maps to offline/private; private/public map active in their
-  matching mode. A valid stable binding remains and null stays null. Unknown visibility
-  or malformed/non-v2 binding degrades to offline/private/null with one fixed warning;
-  startup continues and no hosted data is imported.
-- Listed-only identity can read current limited `/p` and nothing privileged.
-- Resource viewer/editor authority is independent. Trusted top-level `/p`
-  navigation redirects to canonical `/show`; only editor authority enables HMR and
-  annotations there.
-- A served `/p` always selects keyed shared Runtime and never exposes HMR, annotations,
-  private context, Session internals, Workbench, APIs, or Agents. Unsupported or
-  transient-unknown keyed context never touches the legacy singleton graph and returns
-  one sanitized unavailable result after any bounded retry.
-- Arbitrary shared code runs in an opaque-origin sandbox and cannot obtain or reuse
-  another share's bootstrap, handle, capability, cookie, DOM, CORS response, opener,
-  or protected bytes. Service Worker registration is unsupported and no
-  Service-Worker-Allowed header is emitted. Canonical dedicated module workers use the
-  containment Owner's opaque-origin broker; dynamic/unrecognized constructors fail closed.
-- Public anonymous and current-member limited admission both mint opaque capability-
-  path authority. Protected document/module/resource/API requests are credentialless;
-  JSON mutation preflight has an exact closed method/header policy.
-- Every protected surface and method revalidates active local ShowAccess, shared mode,
-  exact binding, revision, capability lifetime, and limited membership before Runtime
-  atomically pins a live namespace/document handle. Offline-to-active never revives an
-  old capability; a request pinned before change may finish only within the hard
-  request deadline, and later requests reload.
-- Every shared response, including streams, has a hard deadline at the earlier of
-  60 seconds after admission or namespace absolute expiry. The deadline terminates the
-  work and atomically releases its pin and weighted charge; no request can keep a
-  namespace or process slot alive past absolute expiry.
-- Membership removal affects the next request without Backend. Loaded guest tabs are
-  not actively closed.
-- Ordinary editor file edits never create, rebase, or background-build a shared
-  Runtime graph. Shared prewarm is explicit and admitted.
-- Canonical HMR accepts only one exact Origin resolved by the existing WebSocket trust
-  classifier across hosted/custom, loopback, setup, enumerated wildcard interface,
-  Docker-loopback, and trusted-proxy sources. Origin and resource-editor authority
-  both pass before upstream open. One coalesced persistent monitor polls every durable
-  editor/resource/remote-auth/revision/offline source and gives each a five-second
-  total closure bound even without notifications.
+`/p` always uses shared Runtime context and never exposes HMR, annotations,
+Avibe cookies or storage, local APIs, session IDs, or source paths. Shared code
+runs in a sandboxed opaque-origin iframe. Worker, SharedWorker, and Service Worker
+are unsupported in version 1. Protected shared resources use an opaque document
+capability and credentialless CORS; they never accept ambient identity or cookies.
+Private editor edits never create, build, or rebase a shared graph.
 
-## Validation
+`/show` uses private Runtime context. Resource-editor authority is checked when
+an HMR/annotation connection is admitted. Permission changes do not require an
+active polling or forced-close protocol; later connections authorize again.
 
-`tests/test_show_access_contracts.py` parses every JSON document, validates all
-schema examples, exhausts Apply, capability, protected-request, identity-flow, and
-HMR-origin state spaces, rejects
-retired vocabulary/files, checks Runtime constants and release provenance, and
-evaluates every scenario leaf claim. Each scalar claim is also evaluated with a
-mutated expectation to prove the check is sensitive to the claimed value.
+## Evidence Boundary
 
-This PR is contract evidence only. UI, storage, Backend, Runtime, browser, and local
-Incus conformance remain work for their named implementation lanes.
+The focused tests validate all three schemas and examples, exact interface fields,
+closed vocabularies, local-only membership, identity-only claims, Runtime protocol
+constants, keyed-context fail-closed behavior, admission lifetime, worker denial,
+and cache boundaries.
+
+This repository does not yet prove production Avibe, Backend, Runtime, browser,
+or Incus conformance. Those consumers must implement the same contract version
+and supply integration, browser, security, and release evidence in their delivery
+lanes. Runtime capability advertisement additionally requires the reviewed,
+smoke-tested, and bundled Runtime SHAs to match.
+
+## Deliberate Omissions
+
+There is no production data to preserve. Version 1 therefore defines no hosted
+email grant, legacy migration, compatibility bridge, prepare/commit operation,
+cleanup/reconciliation workflow, mutation receipt, worker broker, permission
+revocation monitor, or namespace pin/reclaim state machine. Obsolete hosted table,
+endpoint, proxy, and `show_page_email` authorization code is retired directly by
+future implementation lanes.

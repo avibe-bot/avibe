@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avibe.bot/contracts/show-runtime-containment/v1",
+  "title": "Show Runtime private and shared containment contract v1",
+  "$ref": "#/$defs/RuntimeEnvelope",
+  "x-contract": {
+    "contract_id": "avibe.show-runtime-containment.v1",
+    "version": 1,
+    "protocol": {
+      "version": 1,
+      "version_header": "X-Avibe-Show-Protocol",
+      "context_header": "X-Avibe-Show-Context",
+      "contexts": ["private", "shared"],
+      "keyed_context_feature": "show-context-key-v1",
+      "browser_supplied_internal_headers": "strip_all_then_add_exactly_one_server_owned_envelope"
+    },
+    "interfaces": [
+      {
+        "id": "runtime_context_envelope",
+        "producer": "avibe.local_http.ShowRuntimeProxy",
+        "consumer": "vibe-show-runtime.Protocol1Admission",
+        "delivery": "trusted_loopback_http_headers",
+        "request": "#/$defs/RuntimeEnvelope"
+      },
+      {
+        "id": "shared_document_admission",
+        "producer": "avibe.local_http.SharedNavigationAdmission",
+        "consumer": "vibe-show-runtime.SharedDocumentCapture",
+        "delivery": "trusted_internal_request",
+        "request": "#/$defs/SharedAdmission",
+        "result": "#/$defs/SharedDocumentCapability"
+      },
+      {
+        "id": "private_editor_connection",
+        "producer": "avibe.local_http.ShowEditorAdmission",
+        "consumer": "vibe-show-runtime.PrivateHmrAdmission",
+        "delivery": "trusted_loopback_websocket_upgrade",
+        "authorization": "resource_editor_at_connection_admission"
+      }
+    ],
+    "shared_admission": {
+      "entry_events": ["new_top_level_navigation", "manual_refresh"],
+      "public": "public_show_access_allows_anonymous",
+      "limited": "limited_show_access_requires_verified_identity_and_current_local_membership",
+      "private": "deny",
+      "keyed_context_supported": "required_before_any_shared_runtime_work",
+      "keyed_context_unsupported": "shared_runtime_unavailable_without_legacy_graph_access",
+      "keyed_context_transient_unknown": "bounded_probe_then_shared_runtime_unavailable_without_upstream"
+    },
+    "top_level_route_decision": {
+      "resource_viewer_or_editor": "redirect_to_canonical_show_without_shared_runtime_admission",
+      "listed_only_identity": "serve_shared_p_without_editor_capability",
+      "public_anonymous": "serve_shared_p_without_editor_capability"
+    },
+    "context_isolation": {
+      "private_graph_key": ["session_id", "private"],
+      "shared_graph_key": ["session_id", "page_id", "share_id", "admitted_revision", "shared"],
+      "lifecycle": "private_and_shared_graphs_are_independent",
+      "shared_build_trigger": "successful_new_navigation_or_manual_refresh_admission_only",
+      "ordinary_private_editor_edit": "keeps_private_graph_identity_and_never_creates_builds_or_rebases_shared_graph",
+      "shared_hmr": false
+    },
+    "admitted_document_lifetime": {
+      "capability_scope": ["instance_id", "page_id", "share_id", "admitted_revision", "namespace_id", "document_id"],
+      "valid_until": "tab_document_or_namespace_naturally_ends",
+      "subresource_authority": "document_scoped_capability_only",
+      "capability_entropy_bits": 256,
+      "capability_derivation": "csprng_non_derived",
+      "subresource_validation": "opaque_capability_namespace_document_and_expiry_only_without_show_access_lookup",
+      "permission_recheck_per_subresource": false,
+      "permission_polling": false,
+      "permission_change_push_refresh": false,
+      "permission_change_revokes_loaded_document": false,
+      "membership_mode_binding_or_revision_change": "affects_next_navigation_or_manual_refresh_only",
+      "runtime_restart_or_resource_pressure": "fixed_reload_required"
+    },
+    "browser_boundary": {
+      "trusted_shell_url": "/p/<share_id>/",
+      "user_document_container": "sandboxed_opaque_origin_iframe",
+      "iframe_sandbox_tokens_exact": ["allow-scripts"],
+      "allow_same_origin": false,
+      "csp_required_directives": {"worker-src": "'none'", "object-src": "'none'", "base-uri": "'none'"},
+      "unsupported_worker_kinds": ["Worker", "SharedWorker", "ServiceWorker"],
+      "worker_attempt_outcome": "shared_worker_unsupported",
+      "service_worker_allowed_header_emitted": false,
+      "shared_code_forbidden_data": ["avibe_cookies", "avibe_storage", "local_apis", "hmr", "annotations", "session_id", "workspace_path", "source_path"]
+    },
+    "shared_response_transport": {
+      "protected_surfaces": ["document", "module", "style", "raw_asset", "fallback", "page_api"],
+      "authorization": "opaque_document_capability",
+      "access_control_allow_origin": "*",
+      "access_control_allow_credentials": false,
+      "set_cookie_allowed": false,
+      "referrer_policy": "no-referrer",
+      "ambient_identity_or_cookie_authority": false
+    },
+    "private_editor": {
+      "surface": "/show/<session_id>/",
+      "context": "private",
+      "hmr_and_annotations": "resource_editor_only_at_connection_admission",
+      "permission_revocation_polling": false,
+      "permission_change_forced_close": false,
+      "new_connections_reauthorize": true,
+      "operational_shutdown_or_runtime_restart": "separate_lifecycle"
+    },
+    "cache_policy": {
+      "limited_all_surfaces": "private, no-store",
+      "public_shell_document_fallback_api_errors": "private, no-store",
+      "public_versioned_asset_exception": "public, max-age=31536000, immutable",
+      "public_versioned_asset_constraint": "contains_only_public_bytes_and_no_identity_or_page_private_data"
+    },
+    "fixed_limits": {
+      "shared_request_seconds": 60,
+      "shared_namespace_idle_seconds": 1800,
+      "shared_namespace_absolute_seconds": 7200,
+      "maximum_shared_snapshot_bytes": 67108864,
+      "limit_outcome": "reload_required_without_paths_or_diagnostics"
+    },
+    "release_gate": {
+      "reviewed_runtime_sha": "ee3b0b490ad8b4afafb59cf37e2d57a20325208a",
+      "required_equality": "reviewed_runtime_sha == smoke_tested_runtime_sha == bundled_runtime_sha",
+      "feature_advertisement_before_equality": false,
+      "dynamic_runtime_main_resolution_after_advertisement": false
+    }
+  },
+  "x-examples": [
+    {"name": "private_envelope", "schema_ref": "#/$defs/RuntimeEnvelope", "value": {"protocol": 1, "context": "private"}},
+    {"name": "shared_envelope", "schema_ref": "#/$defs/RuntimeEnvelope", "value": {"protocol": 1, "context": "shared"}},
+    {"name": "shared_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 5, "audience": "limited", "identity_subject": "user-1"}},
+    {"name": "public_anonymous_admission", "schema_ref": "#/$defs/SharedAdmission", "value": {"instance_id": "instance-1", "page_id": "page:alpha", "share_id": "stable_alpha", "admitted_revision": 6, "audience": "public", "identity_subject": null}},
+    {"name": "document_capability", "schema_ref": "#/$defs/SharedDocumentCapability", "value": {"namespace_id": "ns_R4nd0mValue_01", "document_id": "doc_R4nd0mValue_01", "capability": "cap_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-", "expires_at": 1786942800}}
+  ],
+  "$defs": {
+    "RuntimeEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "context"],
+      "properties": {"protocol": {"const": 1}, "context": {"enum": ["private", "shared"]}}
+    },
+    "SharedAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "page_id", "share_id", "admitted_revision", "audience", "identity_subject"],
+      "properties": {
+        "instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "page_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "share_id": {"type": "string", "minLength": 3, "maxLength": 64},
+        "admitted_revision": {"type": "integer", "minimum": 0},
+        "audience": {"enum": ["limited", "public"]},
+        "identity_subject": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 512}, {"type": "null"}]}
+      }
+    },
+    "SharedDocumentCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace_id", "document_id", "capability", "expires_at"],
+      "properties": {
+        "namespace_id": {"type": "string", "minLength": 16, "maxLength": 256},
+        "document_id": {"type": "string", "minLength": 16, "maxLength": 256},
+        "capability": {"type": "string", "minLength": 43, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$"},
+        "expires_at": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
