@@ -623,6 +623,127 @@ def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
     assert "Set-Cookie" not in rotated.headers
 
 
+def test_limited_show_callback_rejects_offline_page_and_rate_limits_verification(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+
+    login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(login.headers["Location"]).query
+    )["state"][0]
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        lambda *_args, **_kwargs: show_identity.VerifiedShowIdentity(
+            subject="viewer-1",
+            normalized_email="viewer@example.com",
+            assertion_id="offline-assertion",
+            expires_at=int(ui_server.time.time()) + 300,
+        ),
+    )
+    store = ShowPageStore()
+    try:
+        store.update_visibility("ses123", "offline")
+    finally:
+        store.close()
+
+    offline = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": state, "assertion": "signed-assertion"},
+    )
+    assert offline.status_code == 403
+    assert offline.get_json()["error"] == "show_access_forbidden"
+    assert "Set-Cookie" not in offline.headers
+
+    monkeypatch.setattr(ui_server, "_auth_rate_limited", lambda: True)
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        lambda *_args, **_kwargs: pytest.fail("rate-limited callback verified JWT"),
+    )
+    limited = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": state, "assertion": "signed-assertion"},
+    )
+    assert limited.status_code == 429
+    assert limited.headers["Cache-Control"] == "no-store"
+
+
+def test_show_identity_callback_body_stops_at_the_streaming_limit():
+    class StreamingRequest:
+        consumed_chunks = 0
+
+        async def stream(self):
+            for chunk in (b"a" * (show_identity.MAX_CALLBACK_BODY_BYTES - 1), b"bb", b"unread"):
+                self.consumed_chunks += 1
+                yield chunk
+
+    streaming_request = StreamingRequest()
+
+    with pytest.raises(show_identity.ShowIdentityError, match="invalid_callback"):
+        asyncio.run(ui_server._read_show_identity_callback_body(streaming_request))
+    assert streaming_request.consumed_chunks == 2
+
+
+def test_public_show_ignores_an_existing_limited_guest_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    lease = show_identity.make_show_guest_lease(
+        config,
+        page_id="ses123",
+        share_id=share_id,
+        normalized_email="viewer@example.com",
+    )
+    client = app.test_client()
+    client.set_cookie(
+        show_identity.show_guest_cookie_name(share_id),
+        lease,
+        domain="alex.avibe.bot",
+        path=show_identity.show_guest_cookie_path(share_id),
+    )
+    store = ShowPageStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        result = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="public",
+            target_share_id=share_id,
+            target_emails=[],
+        )
+        assert result.status == "applied"
+    finally:
+        store.close()
+
+    response = client.get(
+        f"/p/{share_id}/app.js",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert response.status_code == 200
+    assert response.headers.get("Cache-Control") != "private, no-store"
+    assert "Cookie" not in response.headers.get("Vary", "")
+
+
 def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
     monkeypatch,
     tmp_path,

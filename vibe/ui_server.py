@@ -14942,6 +14942,19 @@ def _show_identity_error_status(error: str, *, default: int = 400) -> int:
     return default
 
 
+async def _read_show_identity_callback_body(
+    starlette_request: FastAPIRequest,
+) -> bytes:
+    from vibe.show_identity import MAX_CALLBACK_BODY_BYTES, ShowIdentityError
+
+    body = bytearray()
+    async for chunk in starlette_request.stream():
+        if len(body) + len(chunk) > MAX_CALLBACK_BODY_BYTES:
+            raise ShowIdentityError("invalid_callback")
+        body.extend(chunk)
+    return bytes(body)
+
+
 async def _show_identity_callback_fields() -> dict[str, str]:
     from vibe.show_identity import MAX_CALLBACK_BODY_BYTES, ShowIdentityError
 
@@ -14951,13 +14964,12 @@ async def _show_identity_callback_fields() -> dict[str, str]:
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > MAX_CALLBACK_BODY_BYTES:
+            parsed_content_length = int(content_length)
+            if parsed_content_length < 0 or parsed_content_length > MAX_CALLBACK_BODY_BYTES:
                 raise ShowIdentityError("invalid_callback")
         except ValueError as exc:
             raise ShowIdentityError("invalid_callback") from exc
-    body = await request._request.body()
-    if len(body) > MAX_CALLBACK_BODY_BYTES:
-        raise ShowIdentityError("invalid_callback")
+    body = await _read_show_identity_callback_body(request._request)
     try:
         pairs = parse_qsl(
             body.decode("utf-8"),
@@ -15011,6 +15023,8 @@ async def complete_show_identity_login():
     from core.show_pages import ShowPageStore
     from vibe import show_identity
 
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
     config = _load_remote_access_config()
     if config is None:
         return _show_identity_error_response("identity_unavailable", 503)
@@ -15048,6 +15062,8 @@ async def complete_show_identity_login():
         page = store.get_by_share_id(state.share_id)
         if page is None:
             return _show_identity_error_response("not_found", 404)
+        if page.visibility == "offline":
+            return _show_identity_error_response("show_access_forbidden", 403)
         access = store.get_access(page.session_id)
         if access is None:
             return _show_identity_error_response("not_found", 404)
@@ -15133,7 +15149,11 @@ async def serve_public_show_page(share_id, asset_path):
             page = store.get(lease.page_id)
         if page is None:
             return _show_page_not_found_response()
-        limited_guest = lease is not None and lease.page_id == page.session_id
+        limited_guest = (
+            lease is not None
+            and lease.page_id == page.session_id
+            and page.visibility != "public"
+        )
         if page.visibility == "offline":
             return _show_page_offline_response()
         if not limited_guest and page.visibility == "limited":
