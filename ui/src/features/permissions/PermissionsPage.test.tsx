@@ -358,6 +358,65 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
   });
 
+  it('restarts the bounded policy poll for a new applying mutation epoch', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    applying.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    api.getPermissions.mockResolvedValue(applying);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(api.getPermissions).toHaveBeenCalledTimes(31);
+    expect(screen.getByRole('button', { name: 'permissions.actions.refresh' })).toBeTruthy();
+
+    const nextApplying = response();
+    nextApplying.projection.instance.authorization_revision = 5;
+    nextApplying.projection.policy_sync.status = 'applying';
+    nextApplying.projection.projects[0]!.sync.status = 'pending';
+    nextApplying.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'editor',
+    }];
+    api.getPermissions.mockResolvedValue(nextApplying);
+    api.replaceAuthorizedUsers.mockResolvedValueOnce({
+      ok: true,
+      authorization_revision: 5,
+      entries: nextApplying.projection.access.entries,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(api.replaceAuthorizedUsers).toHaveBeenCalledWith(
+      [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+      4,
+      'inst-123',
+    );
+    expect(screen.queryByRole('button', { name: 'permissions.actions.refresh' })).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(32);
+    expect(screen.queryByRole('button', { name: 'permissions.actions.refresh' })).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(58_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(61);
+    expect(screen.getByRole('button', { name: 'permissions.actions.refresh' })).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(61);
+  });
+
   it.each([
     ['error', 'permissions.states.syncErrorTitle'],
     ['offline', 'permissions.states.syncOfflineTitle'],

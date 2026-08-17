@@ -751,7 +751,6 @@ export function PermissionsPage() {
   const currentPolicySignature = state.kind === 'ready' && shouldRefreshPolicy(state.response)
     ? policyRefreshSignature(state.response)
     : null;
-  const currentPolicySignatureRef = useRef<string | null>(currentPolicySignature);
 
   const installReadyResponse = useCallback((candidate: PermissionsResponse): PermissionsResponse => {
     const accepted = revisionMonotonicResponse(readyResponseRef.current, candidate);
@@ -808,16 +807,11 @@ export function PermissionsPage() {
     };
   }, [installPageResult]);
 
-  useEffect(() => {
-    currentPolicySignatureRef.current = currentPolicySignature;
-  }, [currentPolicySignature]);
-
-  const livePolicyIsApplying = state.kind === 'ready' && shouldRefreshPolicy(state.response);
   const policyRefreshExhausted = currentPolicySignature !== null
     && exhaustedPolicySignature === currentPolicySignature;
 
   useEffect(() => {
-    if (!livePolicyIsApplying) return undefined;
+    if (currentPolicySignature === null) return undefined;
     let active = true;
     let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -834,7 +828,7 @@ export function PermissionsPage() {
       else if (mounted.current) {
         const signature = result.kind === 'ready'
           ? policyRefreshSignature(result.response)
-          : currentPolicySignatureRef.current;
+          : currentPolicySignature;
         if (signature !== null) setExhaustedPolicySignature(signature);
       }
     };
@@ -844,7 +838,7 @@ export function PermissionsPage() {
       active = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [livePolicyIsApplying, refreshReady]);
+  }, [currentPolicySignature, refreshReady]);
 
   if (state.kind === 'loading') {
     return (
