@@ -79,6 +79,19 @@ def _memory_log_list_query(request: FastAPIRequest) -> tuple[str | None, int]:
     return cursor, limit
 
 
+def _memory_log_unlinked_query(request: FastAPIRequest) -> int:
+    items = list(request.query_params.multi_items())
+    if any(key != "limit" for key, _value in items) or len(items) > 1:
+        raise ValueError("invalid unlinked memory log query")
+    raw_limit = items[0][1] if items else "20"
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid unlinked memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 20:
+        raise ValueError("invalid unlinked memory log limit")
+    return limit
+
+
 def _memory_log_entry_query(request: FastAPIRequest) -> str:
     items = list(request.query_params.multi_items())
     if len(items) != 1 or items[0][0] != "memcell_id":
@@ -1099,6 +1112,30 @@ def register_memory_routes(app) -> None:
             return await _memory_internal_response(
                 lambda: internal_client.memory_log(
                     cursor=cursor,
+                    limit=limit,
+                    user_key=user_key,
+                )
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.get("/api/memory/log/unlinked", include_in_schema=False)
+    async def memory_log_unlinked_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                limit = _memory_log_unlinked_query(starlette_request)
+            except ValueError:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_log_unlinked(
                     limit=limit,
                     user_key=user_key,
                 )

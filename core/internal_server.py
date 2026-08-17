@@ -92,6 +92,19 @@ def _memory_log_list_query(request: Request) -> tuple[str | None, int]:
     return cursor, limit
 
 
+def _memory_log_unlinked_query(request: Request) -> int:
+    items = list(request.query_params.multi_items())
+    if any(key != "limit" for key, _value in items) or len(items) > 1:
+        raise ValueError("invalid unlinked memory log query")
+    raw_limit = items[0][1] if items else "20"
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid unlinked memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 20:
+        raise ValueError("invalid unlinked memory log limit")
+    return limit
+
+
 def _memory_log_entry_query(request: Request) -> str:
     items = list(request.query_params.multi_items())
     if len(items) != 1 or items[0][0] != "memcell_id":
@@ -1404,6 +1417,53 @@ def create_app(
             )
         except Exception:
             logger.warning("internal memory log failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+
+    @app.get("/internal/memory/log/unlinked")
+    async def _memory_log_unlinked(request: Request) -> Any:
+        try:
+            limit = _memory_log_unlinked_query(request)
+            access = _memory_log_access(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if access is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        try:
+            if access is memory_admin_log_access:
+                return await runtime.admin_log_unlinked_calls_payload(limit)
+            principal_id, project_id = access
+            return await runtime.log_unlinked_calls_payload(
+                principal_id,
+                project_id,
+                limit,
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal unlinked memory log failed")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_processing_failed"},

@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { useState } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -10,6 +10,7 @@ import type {
   MemoryLogDetailResult,
   MemoryLogEntry,
   MemoryLogListResult,
+  MemoryUnlinkedCallListResult,
 } from '../../../context/ApiContext';
 import {
   MemoryLogListContent,
@@ -24,6 +25,7 @@ import {
 
 const api = vi.hoisted(() => ({
   getMemoryLog: vi.fn(),
+  getMemoryLogUnlinked: vi.fn(),
   getMemoryLogEntry: vi.fn(),
 }));
 const translate = vi.hoisted(() => (key: string, values?: { count?: number }) =>
@@ -42,6 +44,22 @@ vi.mock('react-i18next', () => ({
 vi.mock('../../ui/preview-json', () => ({
   default: ({ value }: { value: object }) => <pre data-testid="json-tree">{JSON.stringify(value)}</pre>,
 }));
+
+const unlinkedResult = (
+  calls: Extract<MemoryUnlinkedCallListResult, { status: 'ok' }>['calls'] = [],
+  recorder: { state: string; reason: string | null } = { state: 'active', reason: null },
+): MemoryUnlinkedCallListResult => ({
+  status: 'ok',
+  calls,
+  truncated: false,
+  sections,
+  recorder,
+  retention: { max_age_ms: 14 * 24 * 60 * 60 * 1000, max_rows: 5_000 },
+});
+
+beforeEach(() => {
+  api.getMemoryLogUnlinked.mockResolvedValue(unlinkedResult());
+});
 
 afterEach(() => {
   cleanup();
@@ -132,6 +150,43 @@ const renderPanel = (props?: Partial<React.ComponentProps<typeof MemoryLogPanel>
   );
 
 describe('MemoryLogPanel', () => {
+  it('shows retained provider calls that have no Memory entry under their exact scope', async () => {
+    api.getMemoryLog.mockResolvedValue(listResult([]));
+    api.getMemoryLogUnlinked.mockResolvedValue(unlinkedResult([
+      {
+        ...detailResult().calls[0],
+        id: 'call-unlinked',
+        principal_id: 'u-22222222222222222222222222222222',
+        project_id: 'billing',
+      },
+    ]));
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    expect(await screen.findByText('memory.log.unlinkedTitle')).toBeTruthy();
+    expect(screen.getByText('u-22222222222222222222222222222222')).toBeTruthy();
+    expect(screen.getByText('billing')).toBeTruthy();
+    const callToggle = screen.getByRole('button', { expanded: false });
+    await user.click(callToggle);
+    expect(await screen.findByText(/hello/)).toBeTruthy();
+    expect(screen.getByText(/world/)).toBeTruthy();
+  });
+
+  it('marks an empty unlinked-call list as incomplete when recording is unavailable', async () => {
+    api.getMemoryLog.mockResolvedValue(listResult([]));
+    api.getMemoryLogUnlinked.mockResolvedValue(unlinkedResult(
+      [],
+      { state: 'disabled', reason: null },
+    ));
+
+    renderPanel();
+
+    expect(await screen.findByText('memory.log.unlinkedRecorderIncomplete')).toBeTruthy();
+    expect(screen.getByText('memory.log.unlinkedRetention')).toBeTruthy();
+    expect(screen.getByText('memory.log.unlinkedEmpty')).toBeTruthy();
+  });
+
   it.each([
     ['dead_letter', 'deadLetter'],
     ['crashed', 'crashed'],
@@ -271,6 +326,7 @@ describe('MemoryLogPanel', () => {
     expect(await screen.findByText('Refreshed')).toBeTruthy();
     await waitFor(() => expect(screen.queryByText('Initial')).toBeNull());
     expect(api.getMemoryLog).toHaveBeenCalledTimes(2);
+    expect(api.getMemoryLogUnlinked).toHaveBeenCalledTimes(2);
   });
 
   it('reloads the selected detail when the merged view refresh token changes', async () => {

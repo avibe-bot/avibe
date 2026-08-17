@@ -5925,6 +5925,52 @@ async def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes
     await memory_runtime_factory.close(runtime)
 
 
+def test_runtime_forwards_unlinked_calls_with_recorder_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    principal_id = "u-11111111111111111111111111111111"
+    calls: list[tuple[object, ...]] = []
+
+    class Reader:
+        def list_unlinked_calls(self, scope, limit):
+            calls.append(("scoped", scope, limit))
+            return {"status": "ok", "calls": [], "truncated": False, "sections": {}}
+
+        def list_admin_unlinked_calls(self, limit):
+            calls.append(("admin", limit))
+            return {"status": "ok", "calls": [], "truncated": False, "sections": {}}
+
+    runtime = MemoryRuntime(
+        MemoryConfig(),
+        store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+        effective_home=tmp_path,
+        insight_reader=Reader(),
+    )
+    runtime._recorder_health = {
+        "state": "degraded",
+        "reason": "writer_failures",
+    }
+
+    scoped = asyncio.run(runtime.log_unlinked_calls_payload(principal_id, PROJECT, 7))
+    admin = asyncio.run(runtime.admin_log_unlinked_calls_payload(9))
+
+    for payload in (scoped, admin):
+        assert payload["recorder"] == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        assert payload["retention"] == {
+            "max_age_ms": 14 * 24 * 60 * 60 * 1000,
+            "max_rows": 5_000,
+        }
+    assert calls == [
+        ("scoped", (principal_id, PROJECT), 7),
+        ("admin", 9),
+    ]
+
+
 def test_runtime_forwards_scoped_insight_detail(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

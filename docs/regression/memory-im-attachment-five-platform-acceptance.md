@@ -147,13 +147,15 @@ selected input text and attachment kind/name
 (`core/memory/everos_insight/reader.py::_memcell_preview`), not
 attachment-derived model output, and therefore are not positive evidence.
 
-For a rejected SVG, use only the post-baseline processing entries visible in the
-UI. A caption-bearing rejected turn must preserve its caption without showing the
-SVG filename as an attachment in the entry preview. The hermetic
-`MEMORY-IM-ATTACH-010` scenario separately proves that a fully rejected
-caption-bearing attachment does not enter the multimodal provider path; the
-manual run does not try to reconstruct that engineering fact from an
-unobservable UI absence.
+For a rejected SVG, use only the post-baseline Processing Record evidence visible
+in the UI. A caption-bearing rejected turn must preserve its caption without
+showing the SVG filename as an attachment in the entry preview. Also inspect
+**Calls without Memory entries** for the tagged principal/project: a retained
+multimodal call attributable to that rejected turn is a product-visible failure.
+The hermetic `MEMORY-IM-ATTACH-010` scenario remains the positive proof that a
+fully rejected caption-bearing attachment does not enter the multimodal provider
+path. An empty retained-call list is not proof by itself because the view is
+bounded by the displayed recorder health and retention policy.
 
 | Platform | Scenario | Send | Pass condition in Memory > Processing Record |
 | --- | --- | --- | --- |
@@ -177,9 +179,11 @@ not **Recording normally**, its Model calls are unavailable/expired, or the
 Request/Response evidence cannot be opened. Any row is `INCONCLUSIVE` when the
 Processing Record section needed by its pass condition is unavailable. Rejected
 rows do not use absence of Model calls as evidence; only the visible
-post-baseline entry conditions in the table decide them. A terminal outcome that
-is present but violates its row is `FAIL`; the 30-minute stop threshold applies
-only when required evidence never becomes observable.
+post-baseline entry conditions in the table and any positively attributed call
+without a Memory entry decide them. A retained multimodal call for the rejected
+turn is `FAIL`; an empty retained-call list is not `PASS` evidence. A terminal
+outcome that is present but violates its row is `FAIL`; the 30-minute stop
+threshold applies only when required evidence never becomes observable.
 
 Before recording `PASS`, state the visible counterfactual: broken accepted-image
 processing yields an available terminal call whose response lacks the complete
@@ -287,9 +291,11 @@ Decision:
   validating Agent attachment behavior. This run covers Memory capture only.
 - Provisioning Telegram or any other platform credentials. A separately
   provisioned five-platform target is a precondition, not an acceptance step.
-- Proving the absence of pre-memcell provider calls through the product UI. The
-  `MEMORY-IM-ATTACH-010` automated scenario owns the rejection-to-provider
-  boundary; issue #1483 tracks product visibility for calls without memcells.
+- Proving absolute absence of pre-memcell provider calls. Processing Record can
+  now expose retained calls without Memory entries and can positively falsify
+  the boundary, but its explicit recorder health and retention bounds mean an
+  empty view is not proof that no call occurred. The `MEMORY-IM-ATTACH-010`
+  automated scenario remains the authoritative rejection-to-provider proof.
 - Manually testing captionless, fully filtered Lark or WeChat file-only turns.
   `CaptureAdmission.decide()` returns `CaptureSkipped(memory_invalid_input)` when
   both text and selected attachments are empty (`core/memory/admission.py`),
@@ -307,9 +313,6 @@ Decision:
 - [#1480](https://github.com/avibe-bot/avibe/issues/1480) investigates why an
   explicit `vibe watch add --timeout 0` can read back as the default `21600`
   despite the repository reader preserving zero.
-- [#1483](https://github.com/avibe-bot/avibe/issues/1483) tracks the missing
-  Processing Record surface for provider calls and terminal turns that have no
-  memcell.
 
 ## Result record
 

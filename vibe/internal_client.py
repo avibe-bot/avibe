@@ -969,6 +969,24 @@ async def memory_log(
     )
 
 
+async def memory_log_unlinked(
+    *,
+    limit: int,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/log/unlinked"
+    return await _memory_request(
+        "GET",
+        path,
+        params={"limit": limit},
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_log_entry(
     memcell_id: str,
     *,

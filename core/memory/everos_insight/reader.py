@@ -199,6 +199,249 @@ class MemoryInsightReader:
             for row in rows
         )
 
+    def list_unlinked_calls(
+        self,
+        scope: MemoryReadScope,
+        limit: int,
+    ) -> dict[str, Any]:
+        principal_id, project_id = _validated_scope(scope)
+        return self._list_unlinked_calls(
+            query_filter=_ScopedMemcellFilter(
+                principal_id=principal_id,
+                project_id=project_id,
+            ),
+            limit=limit,
+        )
+
+    def list_admin_unlinked_calls(self, limit: int) -> dict[str, Any]:
+        return self._list_unlinked_calls(
+            query_filter=_ADMIN_MEMCELL_FILTER,
+            limit=limit,
+        )
+
+    def _list_unlinked_calls(
+        self,
+        *,
+        query_filter: _MemcellFilter,
+        limit: int,
+    ) -> dict[str, Any]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+
+        everos_section = self._memcell_status()
+        capture_section = self._capture_status()
+        _, calls_section = self._read_call_counts(
+            [],
+            capture_available=False,
+            runs_available=False,
+        )
+        sections = _observed_sections(
+            {
+                "everos": everos_section,
+                "capture": capture_section,
+                "calls": calls_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
+        if any(
+            section["status"] != "available"
+            for section in (everos_section, capture_section, calls_section)
+        ):
+            return {
+                "status": "ok",
+                "calls": [],
+                "truncated": False,
+                "sections": sections,
+            }
+
+        rows, query_section = self._read_unlinked_call_rows(
+            query_filter=query_filter,
+            limit=limit + 1,
+        )
+        if rows is None:
+            sections["calls"] = {
+                **query_section,
+                "observed_at": None,
+            }
+            return {
+                "status": "ok",
+                "calls": [],
+                "truncated": False,
+                "sections": sections,
+            }
+
+        projected: list[dict[str, Any]] = []
+        for row in rows:
+            row_scope = _unlinked_call_scope(row)
+            if row_scope is None:
+                continue
+            if (
+                isinstance(query_filter, _ScopedMemcellFilter)
+                and row_scope != (query_filter.principal_id, query_filter.project_id)
+            ):
+                continue
+            principal_id, project_id = row_scope
+            projected.append(
+                {
+                    **_call_projection(
+                        row,
+                        base_urls=self._provider_base_urls,
+                        exact_values=self._exact_redaction_values,
+                    ),
+                    "principal_id": principal_id,
+                    "project_id": project_id,
+                }
+            )
+        return {
+            "status": "ok",
+            "calls": projected[:limit],
+            "truncated": len(projected) > limit,
+            "sections": sections,
+        }
+
+    def _read_unlinked_call_rows(
+        self,
+        *,
+        query_filter: _MemcellFilter,
+        limit: int,
+    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
+        if isinstance(query_filter, _ScopedMemcellFilter):
+            scope_sql = (
+                "request_scope.principal_id = :principal_id "
+                "AND request_scope.project_id = :project_id"
+            )
+            scope_args: dict[str, object] = {
+                "principal_id": query_filter.principal_id,
+                "project_id": query_filter.project_id,
+            }
+        elif isinstance(query_filter, _AdminMemcellFilter):
+            scope_sql = "1"
+            scope_args = {}
+        else:
+            raise TypeError("unsupported unlinked-call query filter")
+
+        try:
+            with _read_only(self._paths.call_log_db_path) as conn:
+                _attach_read_only(conn, self._paths.capture_db_path, "capture")
+                _attach_read_only(conn, self._paths.system_db_path, "everos_system")
+                _validate_provider_call_source(conn)
+                rows = list(
+                    conn.execute(
+                        f"""
+                        WITH candidate_calls AS MATERIALIZED (
+                            SELECT call.id, call.request_id
+                            FROM provider_call AS call
+                                INDEXED BY provider_call_request_id_idx
+                            WHERE typeof(call.request_id) = 'text'
+                              AND call.request_id != ''
+                              AND call.memcell_id IS NULL
+                              AND call.parent_type IS NOT 'memcell'
+                        ),
+                        candidate_requests AS MATERIALIZED (
+                            SELECT DISTINCT request_id
+                            FROM candidate_calls
+                        ),
+                        request_origins AS MATERIALIZED (
+                            SELECT queue.add_request_id AS request_id,
+                                   queue.principal_id AS principal_id,
+                                   queue.project_ref AS project_id,
+                                   queue.session_id AS session_id,
+                                   queue.provider_timestamp_ms AS provider_timestamp_ms
+                            FROM capture.memory_capture_queue AS queue
+                            JOIN candidate_requests AS candidate
+                              ON candidate.request_id = queue.add_request_id
+                            WHERE typeof(queue.add_request_id) = 'text'
+                              AND queue.add_request_id != ''
+                              AND typeof(queue.principal_id) = 'text'
+                              AND typeof(queue.project_ref) = 'text'
+
+                            UNION
+
+                            SELECT settlement.request_id AS request_id,
+                                   queue.principal_id AS principal_id,
+                                   queue.project_ref AS project_id,
+                                   queue.session_id AS session_id,
+                                   queue.provider_timestamp_ms AS provider_timestamp_ms
+                            FROM capture.memory_flush_settlements AS settlement
+                            JOIN candidate_requests AS candidate
+                              ON candidate.request_id = settlement.request_id
+                            JOIN capture.memory_capture_queue AS queue
+                              ON queue.provider_session_ref = settlement.provider_session_ref
+                             AND queue.epoch = settlement.epoch
+                             AND queue.generation = settlement.generation
+                            WHERE settlement.operation_kind = 'flush'
+                              AND typeof(settlement.request_id) = 'text'
+                              AND settlement.request_id != ''
+                              AND typeof(queue.principal_id) = 'text'
+                              AND typeof(queue.project_ref) = 'text'
+                        ),
+                        request_scopes AS MATERIALIZED (
+                            SELECT request_id,
+                                   MIN(principal_id) AS principal_id,
+                                   MIN(project_id) AS project_id
+                            FROM request_origins
+                            GROUP BY request_id
+                            HAVING MIN(principal_id) = MAX(principal_id)
+                               AND MIN(project_id) = MAX(project_id)
+                        ),
+                        linked_requests AS MATERIALIZED (
+                            SELECT DISTINCT origin.request_id
+                            FROM request_origins AS origin
+                            JOIN everos_system.memcell AS memcell
+                              ON memcell.app_id = :app_id
+                             AND memcell.project_id = origin.project_id
+                             AND length(CAST(memcell.sender_ids_json AS BLOB))
+                                   <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
+                             AND length(CAST(memcell.message_ids_json AS BLOB))
+                                   <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
+                             AND CASE WHEN json_valid(memcell.sender_ids_json) THEN
+                                   json_type(memcell.sender_ids_json) = 'array'
+                                   AND json_array_length(memcell.sender_ids_json) = 1
+                                   AND json_type(memcell.sender_ids_json, '$[0]') = 'text'
+                                   AND json_extract(memcell.sender_ids_json, '$[0]') = origin.principal_id
+                                 ELSE 0 END
+                             AND CASE WHEN json_valid(memcell.message_ids_json) THEN
+                                   EXISTS (
+                                       SELECT 1
+                                       FROM json_each(memcell.message_ids_json) AS message_id
+                                       WHERE message_id.type = 'text'
+                                         AND message_id.value =
+                                             'm_' || origin.session_id || '_'
+                                             || CAST(origin.provider_timestamp_ms AS TEXT) || '_000'
+                                   )
+                                 ELSE 0 END
+                        )
+                        SELECT call.id, call.started_at_ms, call.duration_ms,
+                               call.kind, call.stage, call.model, call.status,
+                               call.error, call.finish_reason, call.prompt_tokens,
+                               call.completion_tokens, call.request_json,
+                               call.response_json, call.request_bytes,
+                               call.response_bytes, call.dropped_before,
+                               request_scope.principal_id, request_scope.project_id
+                        FROM request_scopes AS request_scope
+                        JOIN candidate_calls AS candidate_call
+                          ON candidate_call.request_id = request_scope.request_id
+                        JOIN provider_call AS call
+                          ON call.id = candidate_call.id
+                        WHERE NOT EXISTS (
+                              SELECT 1 FROM linked_requests AS linked
+                              WHERE linked.request_id = request_scope.request_id
+                          )
+                          AND {scope_sql}
+                        ORDER BY call.started_at_ms DESC, call.id DESC
+                        LIMIT :limit
+                        """,
+                        {
+                            "app_id": _APP_ID,
+                            "limit": limit,
+                            **scope_args,
+                        },
+                    )
+                )
+            return rows, {"status": "available"}
+        except _Unavailable as unavailable:
+            return None, {"status": "unavailable", "reason": unavailable.reason}
+
     def list_entries(
         self,
         scope: MemoryReadScope,
@@ -1418,6 +1661,19 @@ def _memcell_scope(row: sqlite3.Row) -> MemoryReadScope | None:
     ):
         return None
     return senders[0], project_id
+
+
+def _unlinked_call_scope(row: sqlite3.Row) -> MemoryReadScope | None:
+    principal_id = row["principal_id"]
+    project_id = row["project_id"]
+    if (
+        not isinstance(principal_id, str)
+        or _PRINCIPAL_RE.fullmatch(principal_id) is None
+        or not isinstance(project_id, str)
+        or not is_persisted_memory_project_id(project_id)
+    ):
+        return None
+    return principal_id, project_id
 
 
 def _timestamp_ms(value: object) -> int:

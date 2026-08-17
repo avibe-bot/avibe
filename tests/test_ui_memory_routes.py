@@ -1479,6 +1479,13 @@ def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch
             "body": {"status": "ok", "entries": [], "next_cursor": None},
         }
 
+    async def memory_log_unlinked(*, limit: int, user_key: str):
+        calls.append(("unlinked", limit, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "calls": [], "truncated": False},
+        }
+
     async def memory_log_entry(memcell_id: str, *, user_key: str):
         calls.append(("detail", memcell_id, user_key))
         return {
@@ -1487,6 +1494,7 @@ def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch
         }
 
     monkeypatch.setattr(internal_client, "memory_log", memory_log)
+    monkeypatch.setattr(internal_client, "memory_log_unlinked", memory_log_unlinked)
     monkeypatch.setattr(internal_client, "memory_log_entry", memory_log_entry)
     client = app.test_client()
     request_options = {
@@ -1496,19 +1504,24 @@ def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch
     }
 
     listed = client.get("/api/memory/log?cursor=opaque_cursor&limit=17", **request_options)
+    unlinked = client.get("/api/memory/log/unlinked?limit=20", **request_options)
     detail = client.get("/api/memory/log/entry?memcell_id=mc_1", **request_options)
     duplicate = client.get("/api/memory/log?limit=1&limit=2", **request_options)
+    invalid_unlinked = client.get("/api/memory/log/unlinked?limit=21", **request_options)
     invalid_id = client.get("/api/memory/log/entry?memcell_id=../secret", **request_options)
 
     assert listed.status_code == 200
+    assert unlinked.status_code == 200
     assert detail.status_code == 200
     assert listed.headers["cache-control"] == "no-store"
+    assert unlinked.headers["cache-control"] == "no-store"
     assert detail.headers["cache-control"] == "no-store"
     assert calls == [
         ("list", "opaque_cursor", 17, "avibe:local"),
+        ("unlinked", 20, "avibe:local"),
         ("detail", "mc_1", "avibe:local"),
     ]
-    for response in (duplicate, invalid_id):
+    for response in (duplicate, invalid_unlinked, invalid_id):
         assert response.status_code == 400
         assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
 
