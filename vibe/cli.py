@@ -14135,20 +14135,17 @@ def cmd_runtime(args) -> int:
             archives = payload.get("archives") or {}
             skipped_reason = str(archives.get("skipped_reason") or "")
             outcome = str(archives.get("outcome") or "")
-            if outcome == "partial":
+            is_partial_run = outcome == "partial" and not dry_run
+            if is_partial_run:
                 # Some archives were removed, others were not: report both
                 # totals plus the failure count, never a bare skip line.
-                prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
-                removed = payload.get("removed") or []
-                print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
-                archive_count = int(archives.get("removed_count") or 0)
-                archive_bytes = int(archives.get("removed_bytes") or 0)
+                print(i18n_t("runtime.clean.removedItems", language, count=len(payload.get("removed") or [])))
                 print(
                     i18n_t(
-                        f"{prefix_key}Archives",
+                        "runtime.clean.removedArchives",
                         language,
-                        count=archive_count,
-                        size=_format_byte_size(archive_bytes),
+                        count=int(archives.get("removed_count") or 0),
+                        size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
                     )
                 )
                 print(

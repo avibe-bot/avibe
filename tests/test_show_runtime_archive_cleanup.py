@@ -482,7 +482,41 @@ def test_partial_removal_reports_removed_and_failed_counts(monkeypatch, capsys) 
     captured = capsys.readouterr()
     assert "2" in captured.out  # successful removal total still reported
     assert "1" in captured.err  # failed count reported as a warning
-    assert "skipped" not in captured.out.lower() or "2" in captured.out
+
+
+def test_dry_run_with_candidates_previews_without_partial_warning(monkeypatch, capsys) -> None:
+    from vibe import cli as vibe_cli
+
+    parser = vibe_cli.build_parser()
+    args = parser.parse_args(["runtime", "clean", "--dry-run"])
+
+    class FakeRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            assert dry_run is True
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {
+                    "outcome": "partial",
+                    "candidate_count": 3,
+                    "candidate_bytes": 3072,
+                    "removed_count": 0,
+                    "removed_bytes": 0,
+                    "failed_count": 0,
+                },
+            }
+
+    monkeypatch.setattr(vibe_cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(
+        vibe_cli,
+        "_clean_git_runtime",
+        lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []},
+    )
+
+    assert vibe_cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "3" in captured.out and "3.0 KiB" in captured.out  # candidate preview rendered
+    assert captured.err == ""  # no bogus partial-removal warning in a preview
 
 
 def test_archive_cache_status_reports_stale_plan_failure(tmp_path: Path, monkeypatch) -> None:

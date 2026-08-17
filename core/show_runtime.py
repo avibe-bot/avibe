@@ -923,6 +923,7 @@ class ShowRuntimeManager:
                 "candidate_bytes": sum(size for _, size in candidates),
                 "removed_count": 0,
                 "removed_bytes": 0,
+                "failed_count": 0,
             }
         with self._install_guard_locked(timeout_seconds=1.0) as acquired:
             if not acquired:
