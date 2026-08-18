@@ -117,8 +117,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   // Stale-closure-safe mirrors so the SSE (re)connect reconcile reads the current
   // expanded set + loaded window without re-subscribing the stream on every change.
+  // ``projectsRef`` is deliberately NOT assigned on render like the two below:
+  // the reads consult it BEFORE issuing a request (see ``canIssueRead``), so it has
+  // to be true when a write returns rather than one render later. ``commitProjects``
+  // owns it together with the state; nothing else writes either half.
   const projectsRef = useRef<WorkbenchProject[] | null>(null);
-  projectsRef.current = projects;
   const sessionsRef = useRef<Record<string, ProjectSessionsState>>({});
   sessionsRef.current = sessions;
   const expandedRef = useRef<Set<string>>(new Set());
@@ -146,6 +149,58 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
 
+  // The list and its mirror move together. The mirror used to be written on render,
+  // so after a write that added a project it stayed one render behind — which is why
+  // the reads below could only check "does the tree still hold this project?" AFTER
+  // their request and discard the response, and why asking beforehand would have
+  // dropped the window a just-created project needs. A read cannot decline a request
+  // on an answer it can only trust afterwards.
+  const commitProjects = useCallback(
+    (
+      next:
+        | WorkbenchProject[]
+        | null
+        | ((prev: WorkbenchProject[] | null) => WorkbenchProject[] | null),
+    ) => {
+      const resolved = typeof next === 'function' ? next(projectsRef.current) : next;
+      projectsRef.current = resolved;
+      setProjects(resolved);
+    },
+    [],
+  );
+
+  // ── One question, asked immediately before every read request ────────────────
+  // Every read this provider owns commits into a cache, and two things can make
+  // that commit impossible or pointless before the response even arrives. There may
+  // be no reader: a REVALIDATION is by definition a read the next activation would
+  // redo, so with nothing rendering the tree it is dropped (a POPULATING read
+  // produces what nothing else will and is exempt by declaration — see
+  // ``fetchSessions``). Or there may be no address: an authorization change, an
+  // archive, or a document that never loaded the tree leaves the project's window
+  // with nowhere to land, which every read already detects by discarding its own
+  // response.
+  //
+  // Both used to be answered somewhere other than the moment of asking — the first
+  // at the call sites that triggered a read, the second after the request had
+  // already been paid for — and each new trigger or each extra page then had to
+  // remember. So it is ONE predicate, evaluated per REQUEST rather than per read: a
+  // paging read asks it before every page, and a read that loops to retry asks it
+  // again before the retry.
+  const projectIsInTree = useCallback(
+    (projectId: string) => projectsRef.current?.some((project) => project.id === projectId) ?? false,
+    [],
+  );
+
+  const canIssueRead = useCallback(
+    (kind: 'revalidation' | 'population', projectId?: string) => {
+      if (kind === 'revalidation' && !isActive()) return false;
+      // A tree-wide read is its own address: the bootstrap is what CREATES the list
+      // a per-project read is checked against.
+      return projectId === undefined || projectIsInTree(projectId);
+    },
+    [isActive, projectIsInTree],
+  );
+
   const flushBootstrapReadIntent = useCallback(() => {
     if (bootstrapReadInFlightRef.current) return;
     const pendingFetch = fetchProjectsPendingRef.current;
@@ -161,7 +216,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // renders no project, and after an authorization change it would repopulate
       // the tree ``discardAuthorizedTree`` just dropped, since invalidating the
       // read in flight is itself what queues the retry.
-      if (isActive()) {
+      if (canIssueRead('revalidation')) {
         fetchProjectsRunnerRef.current(pendingFetch);
         return;
       }
@@ -173,7 +228,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       projectTreePendingRef.current = false;
       projectTreeRunnerRef.current();
     }
-  }, [isActive]);
+  }, [canIssueRead]);
 
   const queueFetchProjectsIntent = useCallback((options?: { cache?: boolean }) => {
     const pending = fetchProjectsPendingRef.current;
@@ -210,8 +265,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   const applyProjectsSnapshot = useCallback((nextProjects: WorkbenchProject[]) => {
     const accessibleIds = new Set(nextProjects.map((project) => project.id));
-    projectsRef.current = nextProjects;
-    setProjects(nextProjects);
+    commitProjects(nextProjects);
     setSessions((prev) =>
       Object.fromEntries(
         Object.entries(prev).filter(([projectId]) => accessibleIds.has(projectId)),
@@ -222,7 +276,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     for (const projectId of [...pendingReconcileRef.current.keys()]) {
       if (!accessibleIds.has(projectId)) pendingReconcileRef.current.delete(projectId);
     }
-  }, []);
+  }, [commitProjects]);
 
   // A reconnect and an authorization change are not the same kind of signal. A
   // reconnect says "you may have missed events", so deferring it while nothing
@@ -247,7 +301,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       ...[...cachedProjectIds].map((projectId) => `project:${projectId}`),
       ...[...sessionProjectRef.current.keys()].map((sessionId) => `project-session:${sessionId}`),
     ]);
-    projectsRef.current = null;
+    commitProjects(null);
     sessionsRef.current = {};
     expandedRef.current = new Set();
     sessionProjectRef.current.clear();
@@ -256,12 +310,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     // Pre-mount state includes "never loaded": the next activation must take the
     // authoritative first-page bootstrap, not a reconcile onto a dropped window.
     treeInitialFetched.current = false;
-    setProjects(null);
     setProjectsError(null);
     setSessions({});
     setExpanded(new Set());
     setCreating(new Set());
-  }, []);
+  }, [commitProjects]);
 
   const queueReconcile = useCallback((projectId: string, minCount = 0) => {
     const pending = pendingReconcileRef.current.get(projectId) ?? 0;
@@ -367,12 +420,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // reconnect, a queued retry — left every other trigger of a request-backed
       // revalidation to remember it, and there are more triggers than guards:
       // session activity, a pin re-order, a status or turn-end row refresh, a
-      // trailing reconcile from a failed bootstrap. Stated here it becomes a
-      // property of the read instead: a revalidation is by definition a read the
-      // next activation would redo, so with nothing rendering the tree it is
-      // dropped and a long-lived admin tab stops paging in a window it never shows.
-      // The two POPULATING reads are deliberately exempt — see ``fetchSessions``.
-      if (!isActive()) return;
+      // trailing reconcile from a failed bootstrap. Stated at the read it becomes a
+      // property of the read instead, and a long-lived admin tab stops paging in a
+      // window it never shows. This read asks it per REQUEST (``canIssueRead``,
+      // below) rather than on the way in, because it is a LOOP: an entry gate that
+      // has already passed keeps rebuilding a multi-page window across the
+      // navigation that removed its last reader.
       if (inFlightRef.current.has(projectId)) {
         queueReconcile(projectId, opts?.minCount ?? 0);
         return;
@@ -390,6 +443,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           let before: string | undefined;
           let nextBeforeId: string | null = null;
           do {
+            // Both loops pass through here: the next page of this window, and the
+            // fresh read the outer retry starts after a mutation refused this one.
+            if (!canIssueRead('revalidation', projectId)) return;
             const res = await api.listSessions({
               projectId,
               status: 'active',
@@ -397,7 +453,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
               beforeId: before,
               cache: false,
             });
-            if (!projectsRef.current?.some((project) => project.id === projectId)) return;
+            if (!projectIsInTree(projectId)) return;
             if (!readOwnershipRef.current.isCurrent(read, `project:${projectId}`)) {
               stale = true;
               break;
@@ -429,12 +485,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         minCount = Math.max(targetCount, pendingMinCount ?? 0);
       }
     },
-    [acceptProjectRows, api, isActive, queueReconcile, takePendingReconcile],
+    [acceptProjectRows, api, canIssueRead, projectIsInTree, queueReconcile, takePendingReconcile],
   );
 
   const reconcileProjectTree = useCallback(async function reconcileProjectTree() {
     // Revalidation: dropped while nothing reads the tree (see ``reconcileSessions``).
-    if (!isActive()) return;
+    // Also a loop — one bootstrap per window-size group — so the question is asked
+    // before each of them rather than once on the way in.
     if (bootstrapReadInFlightRef.current) {
       queueProjectTreeIntent();
       return;
@@ -466,12 +523,16 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     try {
       const groups = Array.from(bootstrapGroups.entries());
       if (groups.length === 0) {
+        if (!canIssueRead('revalidation')) return;
         const result = await api.getWorkbenchProjectsBootstrap({ cache: false });
         if (readOwnershipRef.current.isCurrent(read, 'projects')) applyProjectsSnapshot(result.projects);
       } else {
         let nextProjects: WorkbenchProject[] | null = null;
         const pages: Record<string, { sessions: WorkbenchSession[]; next_before_id: string | null }> = {};
         for (const [limit, projectIds] of groups) {
+          // A window-size group per request: leaving the workbench between two of
+          // them stops the rest, rather than finishing a rebuild nobody reads.
+          if (!canIssueRead('revalidation')) return;
           const result = await api.getWorkbenchProjectsBootstrap({
             projectIds,
             status: 'active',
@@ -529,7 +590,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       bootstrapReadInFlightRef.current = false;
       flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, isActive, queueProjectTreeIntent, queueReconcile, reconcileSessions]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot, canIssueRead, flushBootstrapReadIntent, queueProjectTreeIntent, queueReconcile, reconcileSessions]);
 
   fetchProjectsRunnerRef.current = (options) => void fetchProjects(options);
   projectTreeRunnerRef.current = () => void reconcileProjectTree();
@@ -558,8 +619,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
     // Revalidation: dropped while nothing reads the tree (see ``reconcileSessions``).
     // The binding this refreshes gates an action on a row nobody is rendering, and
-    // the reconcile on the next activation re-reads the row anyway.
-    if (!isActive()) return;
+    // the reconcile on the next activation re-reads the row anyway. Asked inside the
+    // loop, because another event landing mid-flight makes this read go round again.
     if (cachedRowRefreshInFlightRef.current.has(sessionId)) {
       pendingCachedRowRefreshRef.current.add(sessionId);
       return;
@@ -572,6 +633,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           state.sessions?.some((session) => session.id === sessionId && !session.native_session_id),
         )?.[0];
         if (!projectId) return;
+        if (!canIssueRead('revalidation', projectId)) return;
         const resource = `project-session:${sessionId}`;
         const read = readOwnershipRef.current.beginRead(resource);
         let stale = false;
@@ -596,7 +658,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         queueMicrotask(() => void refreshCachedSessionRow(sessionId));
       }
     }
-  }, [api, isActive]);
+  }, [api, canIssueRead]);
 
   // Load the first page (append=false) or the next page (append=true) of a
   // project's sessions, with dedupe + per-project serialisation.
@@ -609,10 +671,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // user opened rendering empty until they collapsed it, which is a worse trade than
   // the one request. Same for ``fetchProjects``: the authoritative first load, whose
   // only droppable path is the queued retry ``flushBootstrapReadIntent`` already gates.
+  //
+  // Exempt from the DEMAND half only. A populating read still has to have somewhere
+  // to land, and this one already knows the answer — the membership check below
+  // discards every response that arrives for a project the tree does not hold. A
+  // cold /chat/:id visit that forks a session reaches this with a tree it never
+  // loaded, so that request was paid for and thrown away; asking first is the same
+  // question, one round-trip earlier.
   const fetchSessions = useCallback(
     async function fetchSessions(projectId: string, opts?: { append?: boolean }) {
       const append = opts?.append ?? false;
       if (append && !sessionsRef.current[projectId]?.cursor) return; // nothing more to load
+      if (!canIssueRead('population', projectId)) return;
       if (inFlightRef.current.has(projectId)) return; // serialise per project
       inFlightRef.current.add(projectId);
       setSessions((prev) => {
@@ -627,7 +697,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       let retryAfterInvalidation = false;
       try {
         const res = await api.listSessions({ projectId, status: 'active', limit: SESSIONS_PAGE_SIZE, beforeId });
-        if (!projectsRef.current?.some((project) => project.id === projectId)) return;
+        if (!projectIsInTree(projectId)) return;
         const currentRead = readOwnershipRef.current.isCurrent(read, `project:${projectId}`);
         retryAfterInvalidation = !currentRead && readOwnershipRef.current.isLatestRead(read);
         if (currentRead) acceptProjectRows(read, projectId, res.sessions);
@@ -674,6 +744,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         if (retryAfterInvalidation) {
           if (pendingMinCount !== null) queueReconcile(projectId, pendingMinCount);
           queueMicrotask(() => {
+            // The retry a refused response queues is a REVALIDATION wearing this
+            // read's name: with no reader left there is no window to keep filled,
+            // because activation re-reads unconditionally. Same asymmetry, and the
+            // same place it is spent, as ``flushBootstrapReadIntent``.
+            if (!canIssueRead('revalidation', projectId)) return;
             if (!inFlightRef.current.has(projectId)) void fetchSessions(projectId, opts);
           });
         } else if (pendingMinCount !== null) {
@@ -681,7 +756,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         }
       }
     },
-    [acceptProjectRows, api, queueReconcile, reconcileSessions, takePendingReconcile],
+    [acceptProjectRows, api, canIssueRead, projectIsInTree, queueReconcile, reconcileSessions, takePendingReconcile],
   );
 
   // Keep the tree live: patch a row's status dot / title from SSE, and refetch
@@ -862,12 +937,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       try {
         const updated = await api.updateProject(projectId, { display_name: name });
         acceptProjectsMutation();
-        setProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
+        commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
       } catch (err) {
         console.error('[workbench] rename project failed', err);
       }
     },
-    [acceptProjectsMutation, api],
+    [acceptProjectsMutation, api, commitProjects],
   );
 
   const forkSession = useCallback(
@@ -925,9 +1000,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         reasoning_effort: route.reasoning_effort,
       });
       acceptProjectsMutation();
-      setProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
+      commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
     },
-    [acceptProjectsMutation, api],
+    [acceptProjectsMutation, api, commitProjects],
   );
 
   const archiveProject = useCallback(
@@ -936,7 +1011,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         await api.archiveProject(projectId);
         acceptProjectsMutation();
         acceptSessionMutation(projectId);
-        setProjects((prev) => (prev ? prev.filter((p) => p.id !== projectId) : prev));
+        commitProjects((prev) => (prev ? prev.filter((p) => p.id !== projectId) : prev));
         setExpanded((prev) => {
           if (!prev.has(projectId)) return prev;
           const next = new Set(prev);
@@ -947,7 +1022,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         console.error('[workbench] archive project failed', err);
       }
     },
-    [acceptProjectsMutation, acceptSessionMutation, api],
+    [acceptProjectsMutation, acceptSessionMutation, api, commitProjects],
   );
 
   const renameSession = useCallback(
@@ -1012,7 +1087,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       acceptProjectsMutation();
       // create_project is find-or-create by path: opening a tracked folder returns
       // the existing project, refreshed. Drop any stale copy, hoist to top, expand.
-      setProjects((prev) => (prev ? [project, ...prev.filter((p) => p.id !== project.id)] : [project]));
+      commitProjects((prev) => (prev ? [project, ...prev.filter((p) => p.id !== project.id)] : [project]));
       setExpanded((prev) => {
         const next = new Set(prev);
         next.add(project.id);
@@ -1023,7 +1098,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const state = sessionsRef.current[project.id];
       if (!state || state.sessions === null || state.error) void fetchSessions(project.id);
     },
-    [acceptProjectsMutation, fetchSessions],
+    [acceptProjectsMutation, commitProjects, fetchSessions],
   );
 
   const sessionsOf = useCallback((projectId: string) => sessions[projectId] ?? EMPTY_SESSIONS, [sessions]);

@@ -88,6 +88,7 @@ type FakeApi = {
   getSession?: () => Promise<unknown>;
   updateSession?: () => Promise<unknown>;
   createSession?: () => Promise<unknown>;
+  forkSession?: (sessionId: string) => Promise<unknown>;
   listInbox?: (args: ListInboxArgs) => Promise<unknown>;
   markSessionRead?: () => Promise<unknown>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
@@ -1243,5 +1244,360 @@ describe('Demand-driven shell bootstrap', () => {
         expect(state?.totalUnread).toBe(5);
       });
     }
+  });
+
+  // Round 5 moved the demand decision into the reads; this states WHEN each read
+  // asks it. Two things can make a response impossible or pointless to commit —
+  // no reader left, and nowhere to put it — and both used to be answered somewhere
+  // other than the moment of asking: the first once on the way into a read that
+  // then issues many requests, the second only after a request had been paid for.
+  // A read is not one request. `reconcileSessions` pages a window, the tree rebuild
+  // issues one bootstrap per window size, and both go round again on a refused
+  // response. So the property is per REQUEST: every request is preceded by the same
+  // predicate, and a read that cannot commit anything issues nothing at all.
+  describe('every request is preceded by the question, not every read', () => {
+    it('stops paging a window between pages when its last reader leaves', async () => {
+      const sessionB = { ...session, id: 'ses_b' };
+      const bootstrap = vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { proj_a: { sessions: [session, sessionB], next_before_id: null } },
+      });
+      const firstPage = deferred<{ sessions: Array<typeof session>; next_before_id: string | null }>();
+      const listSessions = vi
+        .fn()
+        .mockReturnValueOnce(firstPage.promise)
+        .mockResolvedValue({ sessions: [sessionB], next_before_id: null });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const captureTree = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(2);
+
+      // Activity on a two-row window starts a reconcile that needs two pages.
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'user_message',
+        });
+      });
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // Workbench → /admin between page one and page two.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        firstPage.resolve({ sessions: [session], next_before_id: 'cursor_2' });
+      });
+      await settle();
+
+      // An entry gate passed before the navigation would have finished rebuilding a
+      // window nobody renders, one page at a time.
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // And the abandoned half costs nothing: the window is still what it was, and
+      // the returning consumer re-reads it.
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(2);
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops rebuilding the tree between window-size groups', async () => {
+      // The rebuild batches projects by how much of each window has to come back,
+      // so it is one request per distinct size — a loop like any other.
+      const projectWide = { ...project, id: 'proj_wide', scope_id: 'scope_wide', display_name: 'Wide' };
+      const wideWindow = Array.from({ length: 10 }, (_, index) => ({
+        ...session,
+        id: `ses_wide_${index}`,
+        project_id: projectWide.id,
+        scope_id: projectWide.scope_id,
+      }));
+      const treePayload = {
+        projects: [project, projectWide],
+        sessions: {
+          [project.id]: { sessions: [session], next_before_id: null },
+          [projectWide.id]: { sessions: wideWindow, next_before_id: null },
+        },
+      };
+      const firstGroup = deferred<typeof treePayload>();
+      const bootstrap = vi
+        .fn()
+        .mockResolvedValueOnce(treePayload)
+        .mockReturnValueOnce(firstGroup.promise)
+        .mockResolvedValue(treePayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions: vi.fn().mockResolvedValue({ sessions: [], next_before_id: null }),
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        handlers?.onConnected?.({ sub_id: 1 });
+      });
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      expect(bootstrap.mock.calls[1][0]).toMatchObject({ projectIds: [project.id] });
+
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        firstGroup.resolve(treePayload);
+      });
+      await settle();
+
+      // The ten-row group is never asked for.
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops a row refresh that a mid-flight event sent round again', async () => {
+      // This read loops in place: an event landing while it is in flight refuses the
+      // response and makes it read the row again. The second read is a request of
+      // its own and asks the question of its own.
+      const unbound = { ...session, native_session_id: null };
+      const bootstrap = vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { proj_a: { sessions: [unbound], next_before_id: null } },
+      });
+      const firstRead = deferred<typeof unbound>();
+      const getSession = vi.fn().mockReturnValueOnce(firstRead.promise).mockResolvedValue(unbound);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        getSession,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        handlers?.onTurnEnd?.({ session_id: session.id });
+      });
+      expect(getSession).toHaveBeenCalledTimes(1);
+
+      // A second turn-end refuses the read in flight and queues another pass.
+      await act(async () => {
+        handlers?.onTurnEnd?.({ session_id: session.id });
+      });
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        firstRead.resolve(unbound);
+      });
+      await settle();
+
+      expect(getSession).toHaveBeenCalledTimes(1);
+    });
+
+    // The other half of the question. A populating read is exempt from demand, but
+    // it still has to have somewhere to land — and it already knew the answer, since
+    // it discarded every response that came back for a project the tree does not
+    // hold. Asking first is the same question one round-trip earlier.
+    it('issues no window read for a fork on a document that never loaded the tree', async () => {
+      const forked = { ...session, id: 'ses_forked' };
+      const forkSession = vi.fn().mockResolvedValue(forked);
+      const listSessions = vi.fn().mockResolvedValue({ sessions: [forked], next_before_id: null });
+      const bootstrap = vi.fn().mockResolvedValue(bootstrapPayload);
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        forkSession,
+        connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      };
+      let actions: WorkbenchProjectsActions | null = null;
+      const captureActions = (next: WorkbenchProjectsActions) => {
+        actions = next;
+      };
+
+      // /chat/:id renders one session, never the tree — but it does fork.
+      render(
+        <WorkbenchProjectsProvider>
+          <ActionsProbe onState={captureActions} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        await actions?.forkSession(project.id, session.id);
+      });
+      await settle();
+
+      // The write is untouched; only the read that had nowhere to commit is gone.
+      expect(forkSession).toHaveBeenCalledTimes(1);
+      expect(listSessions).not.toHaveBeenCalled();
+      expect(bootstrap).not.toHaveBeenCalled();
+    });
+
+    // The boundary that makes asking first safe. A write can CREATE the address in
+    // the same tick it asks for the window, so membership has to be true when the
+    // write returns rather than one render later — the list and its mirror are
+    // committed together for exactly this.
+    it('loads the window of a project the write it followed just added', async () => {
+      const newProject = { ...project, id: 'proj_new', scope_id: 'scope_new', display_name: 'New' };
+      const newSession = { ...session, id: 'ses_new', project_id: newProject.id, scope_id: newProject.scope_id };
+      const bootstrap = vi.fn().mockResolvedValue({ projects: [project], sessions: {} });
+      const listSessions = vi.fn().mockResolvedValue({ sessions: [newSession], next_before_id: null });
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const captureTree = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toEqual([project]);
+
+      // Opening a tracked folder hoists the project and asks for its sessions in the
+      // same statement.
+      await act(async () => {
+        tree?.upsertProjectToTop(newProject);
+      });
+      await settle();
+
+      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(listSessions.mock.calls[0][0]).toMatchObject({ projectId: newProject.id });
+      expect(tree?.sessionsOf(newProject.id).sessions).toEqual([newSession]);
+    });
+
+    // The window read's own copy of the one demand decision a read cannot make for
+    // itself: a populating read whose response a mutation refused re-queues ITSELF,
+    // and that retry is a revalidation wearing the populating read's name. Same rule
+    // as ``flushBootstrapReadIntent``, one level down.
+    it('drops the window retry a mutation refused, once its reader is gone', async () => {
+      const bootstrap = vi.fn().mockResolvedValue({ projects: [project], sessions: {} });
+      const firstLoad = deferred<{ sessions: Array<typeof session>; next_before_id: string | null }>();
+      const listSessions = vi
+        .fn()
+        .mockReturnValueOnce(firstLoad.promise)
+        .mockResolvedValue({ sessions: [session], next_before_id: null });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const captureTree = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      // Expanding a group populates its window — exempt from demand, and in flight.
+      await act(async () => {
+        tree?.toggleExpanded(project.id);
+      });
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // Activity invalidates that read, so its response can no longer be committed.
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'updated',
+          title: 'Fresh title',
+        });
+      });
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        firstLoad.resolve({ sessions: [session], next_before_id: null });
+      });
+      await settle();
+
+      // With a reader still there this retries (see WorkbenchSessionReadOrdering);
+      // with none, the window it would keep filled has nobody to fill it for.
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+    });
   });
 });
