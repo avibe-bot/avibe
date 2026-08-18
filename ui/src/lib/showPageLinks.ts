@@ -10,11 +10,12 @@ export type ShowPageLinkInfo = {
   share_id: string | null;
 };
 
-// Same-origin path a Show Page is served at locally. Null when there is no live
-// route, including Limited until signed-in guest admission is implemented.
+// Same-origin path a Show Page is served at locally. Limited and Public share
+// one stable /p route; the server decides whether to start identity admission
+// or serve the page anonymously.
 export function localPath(page: ShowPageLinkInfo): string | null {
   if (page.visibility === 'private') return `/show/${encodeURIComponent(page.session_id)}/`;
-  if (page.visibility === 'public' && page.share_id) {
+  if ((page.visibility === 'limited' || page.visibility === 'public') && page.share_id) {
     return `/p/${encodeURIComponent(page.share_id)}/`;
   }
   return null;
@@ -30,9 +31,6 @@ export function editorPath(page: ShowPageLinkInfo): string | null {
 }
 
 export function liveHref(page: ShowPageLinkInfo): string | null {
-  // Limited is configurable in this lane, but its signed-in guest admission is
-  // not active yet. Ignore even a stale server-projected URL until that exists.
-  if (page.visibility === 'limited') return null;
   return page.active_url || localPath(page);
 }
 

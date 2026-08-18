@@ -18,14 +18,14 @@ describe('Show Page link routes', () => {
     expect(editorPath(page('unexpected'))).toBeNull();
   });
 
-  it('does not expose Limited as a live link before signed-in guest admission exists', () => {
+  it('keeps Limited share links on the signed-in guest route', () => {
     const limited = {
       ...page('limited'),
       active_url: 'https://show.example.test/p/shared-link/',
     };
-    expect(localPath(limited)).toBeNull();
-    expect(liveHref(limited)).toBeNull();
-    expect(copyHref(limited)).toBeNull();
+    expect(localPath(limited)).toBe('/p/shared-link/');
+    expect(liveHref(limited)).toBe('https://show.example.test/p/shared-link/');
+    expect(copyHref(limited)).toBe('https://show.example.test/p/shared-link/');
   });
 
   it('keeps public share links on the guest-facing route', () => {

@@ -38,12 +38,24 @@ const showAccess = (overrides: Partial<ShowAccess> = {}): ShowAccess => ({
   ...overrides,
 });
 
-const settings = (sessionId = 'ses-1') => (
+const settings = (sessionId = 'ses-1', showCustomLink = true) => (
   <I18nextProvider i18n={i18n}>
-    <ShowPageSharingSettings active canManage sessionId={sessionId} />
+    <ShowPageSharingSettings
+      active
+      canManage
+      sessionId={sessionId}
+      showCustomLink={showCustomLink}
+    />
   </I18nextProvider>
 );
-const renderSettings = (sessionId = 'ses-1') => render(settings(sessionId));
+const renderSettings = (sessionId = 'ses-1', showCustomLink = true) => (
+  render(settings(sessionId, showCustomLink))
+);
+
+const chooseMode = async (name: 'Private' | 'Limited' | 'Fully public') => {
+  fireEvent.click(await screen.findByRole('button', { name: /Access:/ }));
+  fireEvent.click(screen.getByRole('option', { name: new RegExp(name) }));
+};
 
 afterEach(() => {
   cleanup();
@@ -51,25 +63,23 @@ afterEach(() => {
 });
 
 describe('ShowPageSharingSettings', () => {
-  it('offers the three closed modes and shows Limited-only fields', async () => {
+  it('uses semantic icons instead of radio controls for the three access modes', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     renderSettings();
 
-    expect(await screen.findByRole('radio', { name: 'Private' })).toBeTruthy();
-    expect(screen.getByRole('radio', { name: 'Limited' })).toBeTruthy();
-    expect(screen.getByRole('radio', { name: 'Fully public' })).toBeTruthy();
-    expect(screen.queryByRole('textbox', { name: 'Limited access emails' })).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.queryAllByRole('radio')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Access: Private' }));
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Limited' }));
-
-    expect(screen.getByRole('textbox', { name: 'Limited access emails' })).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
-      'stable-link',
-    );
-    expect(screen.getByText('Add at least one email address.')).toBeTruthy();
+    expect(screen.getByRole('option', { name: /Private/ })).toBeTruthy();
+    expect(screen.getByRole('option', { name: /Limited/ })).toBeTruthy();
+    expect(screen.getByRole('option', { name: /Fully public/ })).toBeTruthy();
+    expect(document.querySelector('[data-access-icon="private"]')).toBeTruthy();
+    expect(document.querySelector('[data-access-icon="limited"]')).toBeTruthy();
+    expect(document.querySelector('[data-access-icon="public"]')).toBeTruthy();
   });
 
-  it('submits mode, stable link, and normalized emails in one Apply', async () => {
+  it('saves a Limited audience as soon as an email is added', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
@@ -80,18 +90,15 @@ describe('ShowPageSharingSettings', () => {
       }),
     });
     renderSettings();
-    await screen.findByRole('radio', { name: 'Private' });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Limited' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Limited access emails' }), {
+    await chooseMode('Limited');
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+    fireEvent.change(screen.getByRole('textbox', { name: 'People with access' }), {
       target: { value: ' Guest@Example.COM ' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
 
-    await waitFor(() => {
-      expect(api.applyShowAccess).toHaveBeenCalledTimes(1);
-    });
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
     expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
       expected_revision: 0,
       target_access_mode: 'limited',
@@ -100,24 +107,20 @@ describe('ShowPageSharingSettings', () => {
     });
   });
 
-  it('does not let a hidden Limited email draft block another mode', async () => {
+  it('saves a direct mode change without an Apply button', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({ access_mode: 'public', revision: 1 }),
     });
     renderSettings();
-    await screen.findByRole('radio', { name: 'Private' });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Limited' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Limited access emails' }), {
+    await chooseMode('Limited');
+    fireEvent.change(screen.getByRole('textbox', { name: 'People with access' }), {
       target: { value: 'unfinished@example.com' },
     });
-    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
+    await chooseMode('Fully public');
 
-    const apply = screen.getByRole('button', { name: 'Apply' });
-    expect((apply as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(apply);
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
     expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
       expected_revision: 0,
@@ -125,6 +128,7 @@ describe('ShowPageSharingSettings', () => {
       target_share_id: 'stable-link',
       target_emails: [],
     });
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
   });
 
   it('disables new Limited email input at the audience limit', async () => {
@@ -136,12 +140,26 @@ describe('ShowPageSharingSettings', () => {
     });
     renderSettings();
 
-    const input = await screen.findByRole('textbox', { name: 'Limited access emails' });
+    const input = await screen.findByRole('textbox', { name: 'People with access' });
     expect((input as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText('Up to 64 email addresses.')).toBeTruthy();
+    expect(screen.getByText('Enter an email and press Enter to add · up to 64')).toBeTruthy();
   });
 
-  it('reloads the latest snapshot after a CAS conflict', async () => {
+  it('does not allow removing the last email while Limited is selected', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    renderSettings();
+
+    const remove = await screen.findByRole('button', { name: 'Remove guest@example.com' });
+    expect((remove as HTMLButtonElement).disabled).toBe(true);
+    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last email');
+  });
+
+  it('reloads the latest snapshot after an automatic CAS conflict', async () => {
     api.getShowAccessSettings
       .mockResolvedValueOnce({ show_access: showAccess() })
       .mockResolvedValueOnce({
@@ -152,37 +170,42 @@ describe('ShowPageSharingSettings', () => {
       show_access: showAccess({ access_mode: 'limited', revision: 2 }),
     });
     renderSettings();
-    await screen.findByRole('radio', { name: 'Private' });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await chooseMode('Fully public');
 
-    await waitFor(() => {
-      expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2);
-    });
-    expect(screen.getByRole('radio', { name: 'Fully public' }).getAttribute('aria-checked')).toBe('true');
+    await waitFor(() => expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('button', { name: 'Access: Fully public' })).toBeTruthy();
     expect(screen.getByText(/changed elsewhere/)).toBeTruthy();
   });
 
-  it('keeps the slug draft visible after a collision', async () => {
-    api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+  it('keeps the custom-link draft visible after an automatic collision response', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({ access_mode: 'public' }),
+    });
     api.applyShowAccess.mockResolvedValue({
       status: 'share_id_taken',
-      show_access: showAccess(),
+      show_access: showAccess({ access_mode: 'public' }),
     });
     renderSettings();
-    await screen.findByRole('radio', { name: 'Private' });
+    const input = await screen.findByRole('textbox', { name: 'Custom link' });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Custom link' }), {
-      target: { value: 'taken-link' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    fireEvent.change(input, { target: { value: 'taken-link' } });
+    fireEvent.blur(input);
 
     expect(await screen.findByText('That custom link is already taken. Pick another.')).toBeTruthy();
     expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
       'taken-link',
     );
+  });
+
+  it('can hide custom-link editing when embedded in the share popover', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({ access_mode: 'public' }),
+    });
+    renderSettings('ses-1', false);
+
+    expect(await screen.findByRole('button', { name: 'Access: Fully public' })).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
   });
 
   it('rejects a mismatched result identity without adopting its email list', async () => {
@@ -197,16 +220,14 @@ describe('ShowPageSharingSettings', () => {
       }),
     });
     renderSettings();
-    await screen.findByRole('radio', { name: 'Private' });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await chooseMode('Fully public');
 
     expect(await screen.findByText('Link access could not be loaded.')).toBeTruthy();
     expect(screen.queryByText('secret@example.com')).toBeNull();
   });
 
-  it('discards an in-flight Apply result after the component moves to another session', async () => {
+  it('discards an in-flight autosave result after moving to another session', async () => {
     api.getShowAccessSettings.mockImplementation((sessionId: string) => Promise.resolve({
       show_access: showAccess({
         page_id: sessionId,
@@ -218,15 +239,13 @@ describe('ShowPageSharingSettings', () => {
       resolveApply = resolve;
     }));
     const view = renderSettings();
-    await screen.findByRole('radio', { name: 'Private' });
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Fully public' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await chooseMode('Fully public');
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
 
     view.rerender(settings('ses-2'));
     await waitFor(() => {
-      expect(screen.getByRole('radio', { name: 'Private' }).getAttribute('aria-checked')).toBe('true');
+      expect(screen.getByRole('button', { name: 'Access: Private' })).toBeTruthy();
     });
     await act(async () => {
       resolveApply({
@@ -240,10 +259,7 @@ describe('ShowPageSharingSettings', () => {
       await Promise.resolve();
     });
 
-    await waitFor(() => {
-      expect(screen.getByRole('radio', { name: 'Private' }).getAttribute('aria-checked')).toBe('true');
-    });
-    expect(screen.queryByRole('textbox', { name: 'Limited access emails' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Access: Private' })).toBeTruthy();
     expect(screen.queryByText('first-secret@example.com')).toBeNull();
     expect(screen.queryByText('Link access could not be loaded.')).toBeNull();
   });
