@@ -272,12 +272,13 @@ class SyncOwnership:
         parent_identity = self.host.inspect_identity(int(record["parent_pid"]))
         if parent_identity is not None:
             expected_uid = record.get("parent_uid")
-            if parent_identity.create_time is None or (
+            parent_stamp = getattr(parent_identity, "stamp", getattr(parent_identity, "create_time", None))
+            if parent_stamp is None or (
                 expected_uid is not None and parent_identity.uid is None
             ):
                 raise SyncOwnershipError("sync parent identity is unavailable")
             if (
-                parent_identity.create_time == float(record["parent_create_time"])
+                parent_stamp == float(record["parent_create_time"])
                 and parent_identity.uid == expected_uid
                 and record.get("cleanup_failed") is not True
             ):
@@ -494,10 +495,10 @@ class EverOSSyncProcess:
             identity = self._ownership.host.inspect_identity(process.pid)
             if identity is None or group is None:
                 raise SyncOwnershipError("sync child identity could not be observed")
-            _validate_child_identity(identity, {**pending, "pid": process.pid, "create_time": identity.create_time}, provider_root=self.provider_root)
-            if identity.create_time is None:
+            _validate_child_identity(identity, {**pending, "pid": process.pid, "create_time": identity.stamp}, provider_root=self.provider_root)
+            if identity.stamp is None:
                 raise SyncOwnershipError("sync child creation time is unavailable")
-            finalized = {**pending, "state": "finalized", "pid": process.pid, "create_time": identity.create_time, "process_group": group}
+            finalized = {**pending, "state": "finalized", "pid": process.pid, "create_time": identity.stamp, "process_group": group}
             self._ownership.finalize(finalized, nonce=nonce)
             process.send_signal(signal.SIGCONT)
             if spawn_interrupted:
@@ -510,7 +511,7 @@ class EverOSSyncProcess:
                     result = SyncProcessResult.TIMED_OUT
                 except asyncio.CancelledError:
                     result = SyncProcessResult.INTERRUPTED
-            identities[process.pid] = float(identity.create_time)
+            identities[process.pid] = float(identity.stamp)
             await self._terminate_owned_sync_tree(
                 process,
                 process_group=group,
@@ -708,9 +709,9 @@ def _validate_child_identity(
 ) -> None:
     expected_create = record.get("create_time")
     if expected_create is not None:
-        if identity.create_time is None:
+        if identity.stamp is None:
             raise SyncOwnershipError("sync child creation time is unavailable")
-        if identity.create_time != float(expected_create):
+        if identity.stamp != float(expected_create):
             raise _SyncIdentityMismatch("sync child creation time does not match")
     uid = record.get("parent_uid")
     if uid is not None:

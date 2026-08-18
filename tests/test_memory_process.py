@@ -855,7 +855,7 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """A CLOCK_REALTIME step must not block SIGTERM on the handle we own."""
+    """A CLOCK_REALTIME step must not block SIGTERM for a stable child stamp."""
 
     child = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -954,7 +954,13 @@ async def test_sidecar_cleanup_never_signals_spawned_pid_after_identity_changes(
             def send_signal(self, signum: int) -> None:
                 signals.append(("psutil", signum))
 
+        def _reused_stamp(_proc: object) -> float:
+            # Linux identity is starttime ticks, not create_time(). Shift the
+            # stamp itself so this still models a recycled pid on CI.
+            return captured_at + 1.0
+
         monkeypatch.setattr(memory_process.psutil, "Process", _ReusedProcess)
+        monkeypatch.setattr(memory_process, "_process_creation_stamp", _reused_stamp)
         try:
             host.signal(identities, signal.SIGTERM)
             host.signal(
@@ -1006,6 +1012,65 @@ def test_sidecar_cleanup_reverifies_asyncio_pid_before_signaling(monkeypatch) ->
     )
 
     assert signals == []
+
+
+async def test_sidecar_wait_never_discovers_from_a_reused_asyncio_pid(monkeypatch) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    snapshot_calls: list[tuple[int, int | None]] = []
+
+    class _ReapedChild:
+        pid = _ORPHAN_PID
+        returncode = None
+
+        async def wait(self) -> int:
+            return 0
+
+    def snapshot(pid: int, process_group: int | None) -> dict[int, float]:
+        snapshot_calls.append((pid, process_group))
+        return {
+            _ORPHAN_PID: _ORPHAN_CREATE_TIME + 1,
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 2,
+        }
+
+    monkeypatch.setattr(memory_process, "_snapshot_owned_processes", snapshot)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: {})
+
+    assert await memory_process._wait_for_owned_exit(
+        _ReapedChild(),
+        process_group=_ORPHAN_PID,
+        identities=identities,
+        timeout_seconds=0.1,
+    )
+    assert snapshot_calls == []
+    assert identities == {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+
+
+def test_owned_tree_refresh_reverifies_the_root_after_snapshot() -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+
+    class _ReusingHost(_FakeProcessHost):
+        def snapshot_tree(self, pid: int, process_group: int | None) -> dict[int, float]:
+            snapshot = super().snapshot_tree(pid, process_group)
+            self.live_processes[pid] = _ORPHAN_CREATE_TIME + 1
+            return snapshot
+
+    host = _ReusingHost(
+        live_processes=dict(identities),
+        trees={
+            (_ORPHAN_PID, _ORPHAN_PID): {
+                _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+                _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 2,
+            }
+        },
+    )
+
+    assert not memory_process._refresh_owned_process_tree(
+        host,
+        identities,
+        _ORPHAN_PID,
+        _ORPHAN_PID,
+    )
+    assert identities == {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
 
 
 def test_sidecar_cleanup_does_not_group_signal_an_unconfirmed_member(monkeypatch) -> None:
@@ -1193,9 +1258,9 @@ def _orphan_record(process: EverOSProcess, **overrides) -> dict:
 
 
 def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
-    creation_stamp = overrides.pop("create_time", _ORPHAN_CREATE_TIME)
+    creation_stamp = overrides.pop("stamp", overrides.pop("create_time", _ORPHAN_CREATE_TIME))
     fields = {
-        "create_time": creation_stamp,
+        "stamp": creation_stamp,
         "cmdline": (
             sys.executable,
             "-m",
@@ -1309,7 +1374,7 @@ def test_inspect_identity_keeps_wall_clock_beside_linux_starttime_ticks(
     identity = memory_process._inspect_process_identity(_ORPHAN_PID)
 
     assert identity == _ProcessIdentity(
-        create_time=99.0,
+        stamp=99.0,
         cmdline=None,
         uid=4_242,
         wall_create_time=_ORPHAN_CREATE_TIME,
@@ -1334,9 +1399,58 @@ def test_linux_creation_stamp_reads_starttime_ticks_not_wall_clock(
 
 def test_parse_proc_stat_starttime_handles_spaces_in_comm() -> None:
     # Field 2 (comm) can contain spaces and parentheses. Field 22 is starttime.
-    after_comm = ["S"] + ["0"] * 18 + ["987654", "1"]
-    stat_text = "42 (python 3.11) " + " ".join(after_comm)
-    assert memory_process._parse_proc_stat_starttime(stat_text) == 987654.0
+    after_comm = [b"S"] + [b"0"] * 18 + [b"987654", b"1"]
+    stat_data = b"42 (python 3.11) " + b" ".join(after_comm)
+    assert memory_process._parse_proc_stat_starttime(stat_data) == 987654.0
+
+
+def test_linux_starttime_reader_accepts_non_utf8_comm(monkeypatch: pytest.MonkeyPatch) -> None:
+    after_comm = [b"S"] + [b"0"] * 18 + [b"987654", b"1"]
+    stat_data = b"42 (worker-\xff) " + b" ".join(after_comm)
+
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: stat_data)
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        ),
+    )
+
+    assert memory_process._read_linux_starttime_ticks(_ORPHAN_PID) == 987654.0
+
+
+@pytest.mark.parametrize("stamp", [float("nan"), float("inf"), float("-inf"), 10**1000])
+def test_identity_stamps_must_be_finite(stamp: float | int) -> None:
+    assert not memory_process._is_identity_stamp(stamp)
+
+
+def test_legacy_record_rejects_a_nan_creation_stamp(tmp_path: Path) -> None:
+    process = _orphan_process(tmp_path)
+    assert _classify_recorded_sidecar(
+        _orphan_record(process, create_time=float("nan")),
+        _orphan_identity(
+            process,
+            wall_create_time=_ORPHAN_CREATE_TIME + 48.0,
+            environment={"EVEROS_ROOT": str(process.provider_root)},
+        ),
+        socket_path=process.socket_path,
+        provider_root=process.provider_root,
+    ) is _RecordedSidecar.NOT_OURS
+
+
+def test_legacy_record_treats_a_nan_live_creation_stamp_as_unverifiable(tmp_path: Path) -> None:
+    process = _orphan_process(tmp_path)
+    assert _classify_recorded_sidecar(
+        _orphan_record(process),
+        _orphan_identity(
+            process,
+            wall_create_time=float("nan"),
+            environment={"EVEROS_ROOT": str(process.provider_root)},
+        ),
+        socket_path=process.socket_path,
+        provider_root=process.provider_root,
+    ) is _RecordedSidecar.UNVERIFIABLE
 
 
 def test_creation_stamp_falls_back_to_create_time_off_linux(
@@ -1445,6 +1559,76 @@ def test_sidecar_record_writes_starttime_ticks_on_linux(
 
     assert recorded["create_time"] == _ORPHAN_CREATE_TIME
     assert recorded["starttime_ticks"] == 4242.0
+
+
+def test_sidecar_record_omits_wall_create_time_when_undisclosed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_process, "_uses_linux_starttime_stamp", lambda: True)
+    monkeypatch.setattr(memory_process, "_process_wall_create_time", lambda _pid: None)
+    process = _orphan_process(tmp_path)
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    process._ownership.record_launch(_ORPHAN_PID, 4242.0, _ORPHAN_PID)
+    recorded = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+
+    assert recorded["create_time"] is None
+    assert recorded["starttime_ticks"] == 4242.0
+
+
+def test_legacy_linux_ticks_identity_reaps_when_live_wall_drift_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ticks = 424_242.0
+    drifted_wall = _ORPHAN_CREATE_TIME + 48.0
+    helper = {_ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 1}
+    monkeypatch.setattr(memory_process, "_process_wall_create_time", lambda _pid: drifted_wall)
+    host = _FakeProcessHost(
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (dict(helper), [])},
+        live_processes={_ORPHAN_PID: ticks, **helper},
+        trees={(_ORPHAN_PID, _ORPHAN_PID): {_ORPHAN_PID: ticks, **helper}},
+    )
+    process = _orphan_process(tmp_path, host=host)
+    host.identities[_ORPHAN_PID] = _orphan_identity(
+        process,
+        stamp=ticks,
+        wall_create_time=None,
+        environment={"EVEROS_ROOT": str(process.provider_root)},
+    )
+    record_path = _write_orphan_record(process, _orphan_record(process))
+
+    asyncio.run(process._ownership.reap())
+
+    signaled = {pid for call in host.signal_calls for pid in call[0]}
+    assert _ORPHAN_PID in signaled
+    assert _ORPHAN_GROUP_HELPER_PID in signaled
+    assert not record_path.exists()
+
+
+def test_legacy_linux_ticks_identity_rejects_live_wall_drift_beyond_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        memory_process,
+        "_process_wall_create_time",
+        lambda _pid: _ORPHAN_CREATE_TIME + 301.0,
+    )
+    process = _orphan_process(tmp_path)
+    assert _classify_recorded_sidecar(
+        _orphan_record(process),
+        _orphan_identity(
+            process,
+            stamp=424_242.0,
+            wall_create_time=None,
+            environment={"EVEROS_ROOT": str(process.provider_root)},
+        ),
+        socket_path=process.socket_path,
+        provider_root=process.provider_root,
+    ) is _RecordedSidecar.NOT_OURS
 
 
 def test_new_sidecar_role_record_reaps_with_exact_role_environment(tmp_path: Path) -> None:
@@ -1569,7 +1753,7 @@ def test_process_identity_reports_undisclosed_fields_instead_of_gone(
     identity = memory_process._inspect_process_identity(_ORPHAN_PID)
 
     assert identity == _ProcessIdentity(
-        create_time=_ORPHAN_CREATE_TIME,
+        stamp=_ORPHAN_CREATE_TIME,
         cmdline=None,
         uid=4_242,
         wall_create_time=_ORPHAN_CREATE_TIME,
@@ -1600,7 +1784,7 @@ def test_process_identity_reports_undisclosed_fields_instead_of_gone(
     monkeypatch.setattr(memory_process.psutil, "Process", _NoUidsPlatform)
 
     assert memory_process._inspect_process_identity(_ORPHAN_PID) == _ProcessIdentity(
-        create_time=_ORPHAN_CREATE_TIME,
+        stamp=_ORPHAN_CREATE_TIME,
         cmdline=None,
         uid=None,
         wall_create_time=_ORPHAN_CREATE_TIME,
@@ -1771,7 +1955,7 @@ def test_sidecar_launch_fails_closed_on_a_live_pid_it_cannot_describe(
         socket_path=short_socket_path,
     )
     host.identities[_ORPHAN_PID] = _ProcessIdentity(
-        create_time=_ORPHAN_CREATE_TIME,
+        stamp=_ORPHAN_CREATE_TIME,
         cmdline=None,
         uid=os.getuid() if hasattr(os, "getuid") else None,
     )
@@ -1811,7 +1995,7 @@ def test_sidecar_launch_proceeds_past_a_recycled_pid_owned_by_another_user(
         socket_path=short_socket_path,
     )
     host.identities[_ORPHAN_PID] = _ProcessIdentity(
-        create_time=_ORPHAN_CREATE_TIME,
+        stamp=_ORPHAN_CREATE_TIME,
         cmdline=None,
         uid=foreign_uid,
     )
@@ -1840,6 +2024,8 @@ def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) ->
     )
     if memory_process._uses_linux_starttime_stamp():
         expected["starttime_ticks"] = _ORPHAN_CREATE_TIME
+        # Fake pid has no wall-clock create_time; do not store ticks there.
+        expected["create_time"] = None
     assert recorded == expected
     assert stat.S_IMODE(process._ownership.record_path.lstat().st_mode) == 0o600
 
@@ -2983,7 +3169,7 @@ def test_sidecar_and_rebuild_use_one_physical_identity_for_a_symlinked_home(
         "python": sys.executable,
     }
     legacy_spelling_identity = _ProcessIdentity(
-        create_time=_ORPHAN_CREATE_TIME,
+        stamp=_ORPHAN_CREATE_TIME,
         cmdline=(
             sys.executable,
             "-m",
@@ -4421,9 +4607,9 @@ def _rebuild_record(process: EverOSRebuildProcess, **overrides) -> dict:
 
 
 def _rebuild_identity(process: EverOSRebuildProcess, **overrides) -> _ProcessIdentity:
-    creation_stamp = overrides.pop("create_time", _ORPHAN_CREATE_TIME)
+    creation_stamp = overrides.pop("stamp", overrides.pop("create_time", _ORPHAN_CREATE_TIME))
     fields = {
-        "create_time": creation_stamp,
+        "stamp": creation_stamp,
         "cmdline": (
             sys.executable,
             "-m",
@@ -4845,7 +5031,7 @@ async def test_rebuild_boot_without_artifact_python_discovers_and_reaps_child(
         process_groups={_ORPHAN_PID: _ORPHAN_PID},
         identities={
             _ORPHAN_PID: _ProcessIdentity(
-                create_time=_ORPHAN_CREATE_TIME,
+                stamp=_ORPHAN_CREATE_TIME,
                 cmdline=(
                     sys.executable,
                     "-m",
@@ -4910,7 +5096,7 @@ async def test_rebuild_boot_discovers_an_orphan_from_the_previous_artifact(
         process_groups={_ORPHAN_PID: _ORPHAN_PID},
         identities={
             _ORPHAN_PID: _ProcessIdentity(
-                create_time=_ORPHAN_CREATE_TIME,
+                stamp=_ORPHAN_CREATE_TIME,
                 cmdline=(
                     str(old_python),
                     "-m",
@@ -5019,7 +5205,7 @@ async def test_rebuild_boot_discovers_exact_survivor_after_reaping_valid_record(
             _ORPHAN_PID: _rebuild_identity(process),
             _ORPHAN_DESCENDANT_PID: _rebuild_identity(
                 process,
-                create_time=_ORPHAN_CREATE_TIME + 1,
+                stamp=_ORPHAN_CREATE_TIME + 1,
             ),
         }
     )
@@ -5274,7 +5460,7 @@ async def test_sidecar_start_refuses_live_cross_home_peer_on_shared_root(
         root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
         identities={
             _ORPHAN_PID: _ProcessIdentity(
-                create_time=_ORPHAN_CREATE_TIME,
+                stamp=_ORPHAN_CREATE_TIME,
                 cmdline=(
                     sys.executable,
                     "-m",
