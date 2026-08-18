@@ -63,8 +63,16 @@ export interface WorkbenchProjectsActions {
    *  tasks/watches/runs) then drops the row from the tree. Throws on failure.
    *  `null` project = standalone session (nothing to drop from the tree). */
   archiveSession: (projectId: string | null, sessionId: string) => Promise<void>;
-  /** After NewProjectDialog: dedup-by-id, hoist to top, expand, fetch sessions if not loaded. */
-  upsertProjectToTop: (project: WorkbenchProject) => void;
+  /** Create a project AND place it in the shared tree (dedup-by-id, hoist to top,
+   *  expand, fetch sessions), then return it so the caller can navigate/select.
+   *
+   *  The commit lives here rather than at the call site because a write is the
+   *  other way a row reaches the cache: the request is stamped before it leaves
+   *  and the response is refused if an authorization change landed meanwhile, so
+   *  a create begun under the old gate cannot re-seed a tree that was dropped.
+   *  `null` means exactly that — the project exists on the server, this document
+   *  may no longer be allowed to show it, and the next activation will decide. */
+  createProject: (payload: { folder_path: string; display_name?: string }) => Promise<WorkbenchProject | null>;
 }
 
 export interface WorkbenchProjectsTree extends WorkbenchProjectsActions {

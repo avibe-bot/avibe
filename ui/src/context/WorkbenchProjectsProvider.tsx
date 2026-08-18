@@ -298,6 +298,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     readOwnershipRef.current.acceptMutation([
       'projects',
       'projects-bootstrap',
+      // A read is not the only producer of a cached row: a create commits one
+      // too, and it is in flight across exactly the same window. This resource
+      // is bumped ONLY here, so an unrelated rename or archive cannot refuse a
+      // create that authorization never touched.
+      'projects-authorization',
       ...[...cachedProjectIds].map((projectId) => `project:${projectId}`),
       ...[...sessionProjectRef.current.keys()].map((sessionId) => `project-session:${sessionId}`),
     ]);
@@ -1171,6 +1176,29 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [acceptProjectsMutation, commitProjects, fetchSessions],
   );
 
+  // ── A write is the OTHER producer of a cached row ───────────────────────────
+  // ``discardAuthorizedTree`` fences the reads in flight, because a read is how
+  // rows normally arrive. But a create carries a row too, over the same await,
+  // and it was issued under the gate that just changed — so leaving the commit
+  // at the call site put the one path that can SEED a dropped tree outside the
+  // fence: the response lands, `prev` is null, and `[project]` re-creates the
+  // cache from an authorization the document no longer has.
+  //
+  // Owning the request here is what makes the stamp unforgeable by a caller: the
+  // epoch is taken before the request leaves and spent before the commit, and no
+  // call site can hold a row without one. `null` is not a failure — the project
+  // was created — it means this document must not paint it.
+  const createProject = useCallback(
+    async (payload: { folder_path: string; display_name?: string }): Promise<WorkbenchProject | null> => {
+      const write = readOwnershipRef.current.beginRead('projects-authorization');
+      const project = await api.createProject(payload);
+      if (!readOwnershipRef.current.isMutationCurrent(write, 'projects-authorization')) return null;
+      upsertProjectToTop(project);
+      return project;
+    },
+    [api, upsertProjectToTop],
+  );
+
   const sessionsOf = useCallback((projectId: string) => sessions[projectId] ?? EMPTY_SESSIONS, [sessions]);
   const isExpanded = useCallback((projectId: string) => expanded.has(projectId), [expanded]);
   const creatingSession = useCallback((projectId: string) => creating.has(projectId), [creating]);
@@ -1198,7 +1226,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       renameSession,
       setSessionPinned,
       archiveSession,
-      upsertProjectToTop,
+      createProject,
     }),
     [
       projects,
@@ -1220,7 +1248,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       renameSession,
       setSessionPinned,
       archiveSession,
-      upsertProjectToTop,
+      createProject,
     ],
   );
 

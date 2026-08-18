@@ -135,7 +135,6 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     projects: rawProjects,
     projectsError,
     createSessionForProject,
-    upsertProjectToTop,
   } = useWorkbenchProjectsTree({ active });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -317,13 +316,11 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     [sending, loaded, target, routeForCreate, agents, createSessionForProject, createFailedText],
   );
 
-  const upsertSelectProject = useCallback(
-    (project: WorkbenchProject) => {
-      upsertProjectToTop(project); // updates the shared tree (sidebar + Projects page) too
-      setSelectedId(project.id);
-    },
-    [upsertProjectToTop],
-  );
+  // The dialog already committed the row through the provider (fenced against a
+  // concurrent authorization change); this only points the sheet at it.
+  const upsertSelectProject = useCallback((project: WorkbenchProject) => {
+    setSelectedId(project.id);
+  }, []);
 
   // Surface a project-load failure (provider-level) when we have no list, plus any
   // create error raised here.

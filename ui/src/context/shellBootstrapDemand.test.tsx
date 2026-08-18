@@ -1499,6 +1499,7 @@ describe('Demand-driven shell bootstrap', () => {
         getWorkbenchProjectsBootstrap: bootstrap,
         listSessions,
         connectWorkbenchEvents: vi.fn(() => vi.fn()),
+        createProject: vi.fn().mockResolvedValue(newProject),
       };
       let tree: WorkbenchProjectsTree | null = null;
       const captureTree = (next: WorkbenchProjectsTree) => {
@@ -1517,7 +1518,7 @@ describe('Demand-driven shell bootstrap', () => {
       // Opening a tracked folder hoists the project and asks for its sessions in the
       // same statement.
       await act(async () => {
-        tree?.upsertProjectToTop(newProject);
+        await tree?.createProject({ folder_path: newProject.folder_path });
       });
       await settle();
 
@@ -2262,6 +2263,336 @@ describe('Demand-driven shell bootstrap', () => {
       expect(targetedReads()).toBe(1);
       expect(wholeCountsReads()).toBeGreaterThan(countsBefore);
       expect(state?.unreadBySession).toEqual({ [session.id]: 7 });
+    });
+  });
+
+  // A guard that declines on a CORRELATE of the thing it needs is right until the
+  // two come apart. "A feed consumer exists" correlates with "the feed read will
+  // carry the map", and "this is a read" correlates with "this is how a row reaches
+  // the cache" — both hold in the common case and both have an edge where they do
+  // not, and on that edge the guard silently drops what it was protecting.
+  describe('a guard names the invariant, not something that usually travels with it', () => {
+    it('reads the map a live feed consumer left owing, without reading it twice', async () => {
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 3 });
+
+      // The counts moved and the event did not say how, so the map this document
+      // holds no longer describes the account. Nothing is in flight to replace it:
+      // the feed read that would normally carry one already finished.
+      listInbox.mockResolvedValue({ ...inboxPayload, unread_by_session: { [session.id]: 9 } });
+      await act(async () => {
+        handlers?.onInboxUnreadChanged?.({});
+      });
+      await settle();
+
+      // Having a feed consumer is not having a payment scheduled. The debt is paid
+      // by ASKING for the read that carries the map...
+      expect(listInbox).toHaveBeenCalledTimes(2);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 9 });
+
+      // ...and by asking once: the read this queued is the payment, so the counts
+      // effect that also observes the debt must not add a second request.
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(2);
+    });
+
+    it('pays a debt raised over the very read that debt just fenced', async () => {
+      const feedRead = deferred<typeof inboxPayload>();
+      const listInbox = vi.fn((args: ListInboxArgs) =>
+        args.limit > 1 && listInbox.mock.calls.length === 1
+          ? feedRead.promise
+          : Promise.resolve({ ...inboxPayload, unread_by_session: { ses_b: 5 } }),
+      );
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+
+      // Raising the debt fences the reads that started before it — including this
+      // one. It is in flight AND it is guaranteed not to pay.
+      await act(async () => {
+        handlers?.onInboxUnreadChanged?.({});
+      });
+      await act(async () => {
+        feedRead.resolve(inboxPayload);
+      });
+      await settle();
+
+      // Its rows are still current and commit; its map is refused, exactly as the
+      // fence intends. Something else therefore has to carry one.
+      expect(listInbox).toHaveBeenCalledTimes(2);
+      expect(state?.unreadBySession).toEqual({ ses_b: 5 });
+    });
+
+    it('re-owes the map when the gate drops the read that was going to carry it', async () => {
+      const feedRead = deferred<typeof inboxPayload>();
+      const listInbox = vi.fn((args: ListInboxArgs) =>
+        args.limit > 1
+          ? feedRead.promise
+          : Promise.resolve({ sessions: [], next_cursor: null, unread_by_session: { ses_b: 5 } }),
+      );
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const feedReads = () => listInbox.mock.calls.filter(([args]) => args.limit > 1).length;
+      const countsReads = () => listInbox.mock.calls.filter(([args]) => args.limit === 1).length;
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(feedReads()).toBe(1);
+
+      // The debt is raised while a feed consumer is mounted, so the payment it
+      // schedules is a feed read — which cannot start until the one in flight ends.
+      await act(async () => {
+        handlers?.onInboxUnreadChanged?.({});
+      });
+
+      // The user leaves for a feedless route first. The demand edge is observed
+      // while that payment is still only queued, so the settle it triggers sees a
+      // payment scheduled and correctly stands aside...
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(countsReads()).toBe(0);
+
+      await act(async () => {
+        feedRead.resolve(inboxPayload);
+      });
+      await settle();
+
+      // ...which makes the gate's drop the moment that payment stops existing, and
+      // therefore the moment the debt has to be owed again. No 30-row read for a
+      // feedless document, and no badge left describing counts that already moved.
+      expect(feedReads()).toBe(1);
+      expect(countsReads()).toBe(1);
+      expect(state?.unreadBySession).toEqual({ ses_b: 5 });
+    });
+
+    it('re-tests a debt its only payer failed to pay, at the next demand edge', async () => {
+      const reconcileRead = deferred<typeof inboxPayload>();
+      const listInbox = vi.fn((args: ListInboxArgs) => {
+        if (args.limit === 1) {
+          return Promise.resolve({ sessions: [], next_cursor: null, unread_by_session: { ses_b: 5 } });
+        }
+        return listInbox.mock.calls.filter(([a]) => a.limit > 1).length === 1
+          ? Promise.resolve(inboxPayload)
+          : reconcileRead.promise;
+      });
+      const feedReads = () => listInbox.mock.calls.filter(([args]) => args.limit > 1).length;
+      const countsReads = () => listInbox.mock.calls.filter(([args]) => args.limit === 1).length;
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(feedReads()).toBe(1);
+
+      // The debt is raised with a feed consumer mounted, so the payment it
+      // schedules is a feed read — and that read is the only payer there is.
+      await act(async () => {
+        handlers?.onInboxUnreadChanged?.({});
+      });
+      await settle();
+      expect(feedReads()).toBe(2);
+
+      // It fails. Re-asking here would re-enter on the debt itself, which is the
+      // one thing that cannot decide when to retry: it is still owed precisely
+      // because the last attempt failed, so the loop would never end.
+      await act(async () => {
+        reconcileRead.reject(new Error('offline'));
+      });
+      await settle();
+      expect(countsReads()).toBe(0);
+
+      // A demand edge is a real event rather than a level, and it changes which
+      // read can pay: leaving the feed makes the counts-only read the one that
+      // can, so the badge recovers there instead of on a timer.
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(feedReads()).toBe(2);
+      expect(countsReads()).toBe(1);
+      expect(state?.unreadBySession).toEqual({ ses_b: 5 });
+    });
+
+    it('collapses a burst of debts into one re-read rather than one read each', async () => {
+      const firstRead = deferred<typeof inboxPayload>();
+      const listInbox = vi.fn(() =>
+        listInbox.mock.calls.length === 1
+          ? firstRead.promise
+          : Promise.resolve({ sessions: [], next_cursor: null, unread_by_session: { ses_b: 5 } }),
+      );
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+
+      // Three events land while that read is in flight. Each one voids the map the
+      // read is carrying, so each one genuinely re-owes it — what they must not do
+      // is each buy their own request for the same answer.
+      for (let i = 0; i < 3; i += 1) {
+        await act(async () => {
+          handlers?.onInboxUnreadChanged?.({});
+        });
+      }
+      expect(listInbox).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        firstRead.resolve(inboxPayload);
+      });
+      await settle();
+
+      // The read in flight is what makes the debt a flag instead of a fan-out: it
+      // absorbs the burst, and the one re-read it owes afterwards answers all three.
+      expect(listInbox).toHaveBeenCalledTimes(2);
+      expect(state?.unreadBySession).toEqual({ ses_b: 5 });
+    });
+
+    it('refuses a project a create wrote after the change that dropped the tree', async () => {
+      const created = deferred<typeof project>();
+      // The re-read the change triggers stays in flight, so the tree observed below
+      // is the one the drop left behind rather than a fresh authorized load.
+      const reload = deferred<typeof bootstrapPayload>();
+      const bootstrap = vi
+        .fn()
+        .mockResolvedValueOnce(bootstrapPayload)
+        .mockReturnValue(reload.promise);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        createProject: vi.fn(() => created.promise),
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const capture = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toHaveLength(1);
+
+      // The user creates a project, and access changes while that write is in
+      // flight. The tree is dropped — including the row the create was going to
+      // land next to.
+      let placed: unknown;
+      let writing: Promise<void> | undefined;
+      await act(async () => {
+        writing = tree!.createProject({ folder_path: '/tmp/new' }).then((result) => {
+          placed = result;
+        });
+      });
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+      expect(tree?.projects).toBeNull();
+
+      await act(async () => {
+        created.resolve({ ...project, id: 'proj_new' });
+        await writing;
+      });
+      await settle();
+
+      // A write is the other way a row reaches this cache, and it is the only one
+      // that can SEED it: committing here would rebuild the tree from an
+      // authorization this document no longer holds, out of a single row. The
+      // project exists on the server; the next activation is what decides whether
+      // this document may see it.
+      expect(tree?.projects).toBeNull();
+      expect(placed).toBeNull();
     });
   });
 });

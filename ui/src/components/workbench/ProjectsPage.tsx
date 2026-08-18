@@ -393,7 +393,6 @@ export const ProjectsPage: React.FC = () => {
     toggleExpanded,
     loadMore,
     reloadSessions,
-    upsertProjectToTop,
   } = useWorkbenchProjectsTree();
   const [showNewProject, setShowNewProject] = useState(false);
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
@@ -517,10 +516,7 @@ export const ProjectsPage: React.FC = () => {
       {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setShowNewProject(false);
-            upsertProjectToTop(project);
-          }}
+          onCreated={() => setShowNewProject(false)}
         />
       )}
     </div>

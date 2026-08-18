@@ -123,6 +123,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const unreadReadInFlightRef = useRef(false);
   const unreadReadPendingRef = useRef(false);
   const unreadReadRunnerRef = useRef<() => void>(() => {});
+  // Every read currently in flight that would commit a WHOLE account map: the two
+  // broad feed reads and the counts-only read. Membership alone proves nothing —
+  // what makes one a payer is that it is still current for ``inbox-unread``, which
+  // is exactly what raising the debt takes away. Kept as stamps rather than a
+  // counter for that reason.
+  const wholeUnreadReadsInFlightRef = useRef<Set<WorkbenchSessionReadStamp>>(new Set());
+  // ``flushFeedReadIntent`` is the one place a scheduled payer can disappear, and it
+  // is defined above the settle it then has to re-run. Same runner-ref shape as the
+  // reads below.
+  const settleWholeUnreadRef = useRef<() => void>(() => {});
   // "No whole-account map currently describes this account." The unread map is the
   // one thing here with no demand gate at all — every route badges it — so this is
   // the debt that keeps it live independently of which read was supposed to pay it:
@@ -160,9 +170,15 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     // exempt from badging that — the debt is ``wholeUnreadOwedRef``, and the demand
     // edge that caused this drop is what makes the counts effect pay it.
     if (!isFeedActive()) {
+      const droppedWholeMapRead = refreshPendingRef.current || reconcilePendingRef.current;
       refreshPendingRef.current = false;
       reconcilePendingRef.current = false;
       loadMorePendingRef.current = false;
+      // A queued refresh/reconcile was ALSO the scheduled payment for the unread
+      // debt, and dropping it here is the moment that payment stops existing.
+      // Re-settling is what turns the drop into the counts-only read the debt is
+      // still owed, instead of a silently unpaid one.
+      if (droppedWholeMapRead) settleWholeUnreadRef.current();
       return;
     }
     if (refreshPendingRef.current) {
@@ -229,11 +245,27 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const settleWholeUnread = useCallback(() => {
     queueMicrotask(() => {
       if (!wholeUnreadOwedRef.current) return;
-      if (isFeedActive()) return;
-      if (unreadReadInFlightRef.current) return;
+      // Being in flight is not being a payer. The call that raises the debt fences
+      // the reads that started before it, so those will refuse their own unread map
+      // — declining on their mere presence is how a debt ends up with nobody left
+      // to pay it. Only a read still current for the map can settle this one.
+      for (const read of wholeUnreadReadsInFlightRef.current) {
+        if (readOwnershipRef.current.isMutationCurrent(read, 'inbox-unread')) return;
+      }
+      // A queued read is a payment already scheduled: it has not been issued yet, so
+      // it will be stamped after this debt and will commit its map.
+      if (refreshPendingRef.current || reconcilePendingRef.current || unreadReadPendingRef.current) return;
+      // With a feed consumer the whole map rides on the feed read this queues, so the
+      // badge is paid without a second request. If demand disappears before it
+      // flushes, the gate drops it and re-enters here with no consumer — the branch
+      // below. Without one, the counts-only read is the only thing that can pay.
+      if (isFeedActive()) {
+        queueReconcileIntent();
+        return;
+      }
       unreadReadRunnerRef.current();
     });
-  }, [isFeedActive]);
+  }, [isFeedActive, queueReconcileIntent]);
 
   // The mirror of ``applyUnreadMap``: one home for "no whole map describes this
   // account any more". Recording the debt alone is not enough, because a whole-map
@@ -324,6 +356,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     refreshPendingRef.current = false;
     reconcilePendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-refresh']);
+    wholeUnreadReadsInFlightRef.current.add(read);
     const loadingGeneration = ++refreshLoadingGenerationRef.current;
     const retryAfterInvalidation = () => {
       const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
@@ -363,6 +396,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       if (!retryAfterInvalidation()) console.error('[inbox] refresh failed', err);
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
+      wholeUnreadReadsInFlightRef.current.delete(read);
       broadReadInFlightRef.current = false;
       flushFeedReadIntent();
     }
@@ -458,6 +492,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     broadReadInFlightRef.current = true;
     reconcilePendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-reconcile']);
+    wholeUnreadReadsInFlightRef.current.add(read);
     const retryAfterInvalidation = () => {
       const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
       const supersededByCursorRead =
@@ -524,6 +559,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } catch (err) {
       if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
     } finally {
+      wholeUnreadReadsInFlightRef.current.delete(read);
       broadReadInFlightRef.current = false;
       flushFeedReadIntent();
     }
@@ -557,6 +593,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       do {
         unreadReadPendingRef.current = false;
         const read = readOwnershipRef.current.beginRead(['inbox-unread']);
+        wholeUnreadReadsInFlightRef.current.add(read);
         try {
           const result = await api.listInbox({
             platform: 'avibe',
@@ -572,6 +609,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         } catch (err) {
           if (staleReadNeedsReread(read)) unreadReadPendingRef.current = true;
           else console.error('[inbox] refreshUnread failed', err);
+        } finally {
+          wholeUnreadReadsInFlightRef.current.delete(read);
         }
       } while (unreadReadPendingRef.current);
     } finally {
@@ -692,6 +731,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     },
     [api, applySessionUnread, isFeedActive, oweWholeUnread],
   );
+  settleWholeUnreadRef.current = settleWholeUnread;
   unreadReadRunnerRef.current = () => void refreshUnread();
   refreshRunnerRef.current = () => void refresh();
   reconcileRunnerRef.current = () => void reconcile();
@@ -732,17 +772,19 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // The badges are shell-wide, so the unread map is loaded on every route — but on
   // a route with no feed consumer, only the map. The decision itself belongs to
   // ``settleWholeUnread``, which every producer of the debt also calls; this effect
-  // only adds the one demand EDGE no producer of the debt can observe: when the last
-  // feed consumer detaches, the gate in ``flushFeedReadIntent`` drops whatever feed
-  // read was queued — and a dropped refresh/reconcile was also going to deliver the
-  // whole-account map. Nothing else would notice, because the refcount function has
+  // adds the two moments no producer of the debt can observe. Mount is one: it is
+  // the first time the map is owed. A change in DEMAND is the other, and it is not
+  // the same event as the debt being owed — it changes WHICH read can pay, so a
+  // debt whose payer failed is re-tested by the route the user moved to rather than
+  // by a retry. Nothing else would notice it, because the refcount function has
   // stable identity by design. ``isFeedActive()`` is then read synchronously inside
   // the settle rather than from ``feedActive`` here, because consumers activate in
   // their own effects, which React runs before this one.
   //
-  // The debt itself is deliberately NOT a dependency. It is paid by whoever raises
-  // it, so re-running on it would be a second owner of the same payment — and this
-  // effect runs on mount, which is the first time it is owed.
+  // The debt itself is deliberately NOT a dependency, and that is the round-8 rule
+  // rather than an optimization: re-running on the level would re-enter on the very
+  // thing a failed pass leaves behind, so it would never terminate. A demand edge is
+  // an event, so it re-enters a bounded number of times — once per navigation.
   useEffect(() => {
     settleWholeUnread();
   }, [feedActive, settleWholeUnread]);
