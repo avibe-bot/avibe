@@ -1016,7 +1016,7 @@
         "section": "Route chain for this model",
         "removeHop": "Remove hop",
         "addHop": "Add a hop",
-        "add": { "source": "Source", "model": "Model", "confirm": "Add", "none": "No source/model pair is available to add" },
+        "add": { "confirm": "Add", "none": "No source/model pair is available to add" },
         "sourceMissing": "Source missing",
         "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Remove it before saving.",
         "reorder": {
