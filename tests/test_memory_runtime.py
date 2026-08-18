@@ -2840,6 +2840,78 @@ async def test_missing_artifact_defers_config_until_repair_retires_restart_autho
     await memory_runtime_factory.close(runtime)
 
 
+async def test_repair_rechecks_vectors_after_retiring_restart_authority(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed old-model write must block durable embedding adoption."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    restarting = FakeEverOSProcess(
+        _running=False,
+        _down=False,
+        _desired_running=True,
+        _restart_pending=True,
+    )
+    runtime._process = restarting
+    vector_state = {"exists": False}
+    monkeypatch.setattr(
+        runtime,
+        "_provider_data_exists_strict",
+        lambda: vector_state["exists"],
+    )
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert runtime._config == active
+
+    # The retained supervisor can resume and write with the old embedding before
+    # exhausting its restart budget. Repair must inspect that newer state only
+    # after it has retired the supervisor and fenced claims.
+    vector_state["exists"] = True
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_clear_failed",
+        "download_error": None,
+    }
+    assert restarting.stopped is True
+    assert runtime._process is None
+    assert runtime._config == active
+    assert runtime._restart_config == active
+    assert artifact.ensure_calls == []
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_missing_artifact_retains_active_config_until_rejected_child_is_gone(
     tmp_path: Path,
     memory_runtime_factory,

@@ -1097,16 +1097,10 @@ class MemoryRuntime:
             claims_paused = True
             embedding_guard_rejected = False
             try:
-                if await asyncio.to_thread(self._provider_data_exists_strict):
+                if not await self._embedding_change_is_admissible(self._config, config):
                     embedding_guard_rejected = True
                     self._runtime_error = "memory_clear_failed"
                     return {"ok": False, "error": self._runtime_error}
-            except Exception:
-                # An indeterminate root/queue state cannot safely accept an
-                # embedding change because it could mix vector spaces.
-                embedding_guard_rejected = True
-                self._runtime_error = "memory_clear_failed"
-                return {"ok": False, "error": self._runtime_error}
             finally:
                 if embedding_guard_rejected and resume_claims_on_failure:
                     self.module.resume_claims()
@@ -2456,6 +2450,19 @@ class MemoryRuntime:
                     self._process = None
                     self._process_records_calls = False
                     self._ensure_call_log_retention()
+                    if (
+                        activation_config.recovery_intent is None
+                        and not await self._embedding_change_is_admissible(
+                            self._config,
+                            activation_config,
+                        )
+                    ):
+                        self._runtime_error = "memory_clear_failed"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
                     # The prior supervisor's launch authority is now retired.
                     # Artifact activation must use the durable desired settings,
                     # not the active snapshot that was kept while it could retry.
@@ -3760,6 +3767,22 @@ class MemoryRuntime:
         root_has_data = self._provider_root_owner.has_data()
         stats = self._store.queue_stats()
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
+
+    async def _embedding_change_is_admissible(
+        self,
+        current: MemoryConfig,
+        candidate: MemoryConfig,
+    ) -> bool:
+        """Require a freshly proven-empty vector surface for an embedding change."""
+
+        if not _embedding_configuration_changed(current, candidate):
+            return True
+        try:
+            return not await asyncio.to_thread(self._provider_data_exists_strict)
+        except Exception:
+            # An indeterminate root/queue state cannot safely accept an
+            # embedding change because it could mix vector spaces.
+            return False
 
     def _settle_rebuild_intent(self, candidate: MemoryConfig) -> MemoryConfig | None:
         """Clear a rebuild intent when the durable vector-space identity still matches.
