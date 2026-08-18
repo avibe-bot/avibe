@@ -130,15 +130,28 @@ class InboundAttachmentMaterializer:
         self._home = Path(os.path.abspath(os.path.expanduser(os.fspath(home))))
         # The anchor is trusted and resolved once; every component below it is
         # Avibe-owned and stays under a per-component no-follow walk.
+        anchor = paths.physical_home(self._home)
         if attachments_root is None:
-            anchor = paths.physical_home(self._home)
-            self._owned_parts = ("attachments", "im")
+            owned_parts: tuple[str, ...] = ("attachments", "im")
         else:
             declared_root = Path(os.path.abspath(os.path.expanduser(os.fspath(attachments_root))))
-            anchor = paths.physical_home(declared_root.parent)
-            self._owned_parts = (declared_root.name, "im")
+            relative_parts = _owned_parts_below(anchor, self._home, declared_root)
+            if relative_parts is None:
+                # A declared root outside the home is its own anchor, on the same
+                # rule as the home: the path reaching it is operator config, and
+                # Avibe only owns what it creates underneath.
+                anchor = paths.physical_home(declared_root)
+                owned_parts = ("im",)
+            else:
+                # Every component between the home and a declared root inside it
+                # is Avibe-owned space, so all of them stay in the no-follow walk
+                # instead of being resolved: a symlink planted at an intermediate
+                # component such as ``<home>/custom`` must not redirect leases out
+                # of the tree.
+                owned_parts = (*relative_parts, "im")
         self._anchor = anchor
-        self._root = anchor.joinpath(*self._owned_parts)
+        self._owned_parts = owned_parts
+        self._root = anchor.joinpath(*owned_parts)
 
     async def materialize(
         self,
@@ -577,14 +590,34 @@ def _remove_lease_directory(state: _LeaseState) -> None:
         os.close(state.root_fd)
 
 
+def _owned_parts_below(
+    anchor: Path,
+    home: Path,
+    declared_root: Path,
+) -> tuple[str, ...] | None:
+    """Components from the home down to ``declared_root``, or ``None`` if outside.
+
+    A declared root under the home is accepted in either spelling: as written
+    against the logical home, or already resolved against the physical one. The
+    returned components are relative to the anchor either way, so the caller can
+    keep every one of them inside the ``O_NOFOLLOW`` walk.
+    """
+
+    for base in (home, anchor):
+        if declared_root.is_relative_to(base):
+            return declared_root.relative_to(base).parts
+    return None
+
+
 def _open_or_create_private_directory(anchor: Path, owned_parts: tuple[str, ...]) -> int:
     """Create a private root while refusing symlinks in every owned component.
 
-    ``anchor`` is the already-resolved Avibe home: the operator owns the path
-    that reaches it, so it is opened in one step and its own symlinked parents
-    stay legal. ``owned_parts`` are the components Avibe creates underneath,
-    and each one is opened with ``O_NOFOLLOW`` so a planted symlink cannot
-    redirect a lease outside Avibe-owned storage.
+    ``anchor`` is the already-resolved trust anchor -- the Avibe home, or a
+    declared root the operator put outside it: the operator owns the path that
+    reaches it, so it is opened in one step and its own symlinked parents stay
+    legal. ``owned_parts`` are every component Avibe creates underneath, and
+    each one is opened with ``O_NOFOLLOW`` so a planted symlink cannot redirect
+    a lease outside Avibe-owned storage.
     """
 
     if not anchor.is_absolute():

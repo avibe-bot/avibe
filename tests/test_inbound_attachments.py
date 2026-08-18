@@ -315,6 +315,68 @@ async def test_materializer_traverses_a_symlinked_parent_for_a_declared_root(
 
 
 @pytest.mark.asyncio
+async def test_materializer_rejects_symlinked_parent_inside_a_nested_declared_root(
+    tmp_path: Path,
+) -> None:
+    """Intermediate components of a nested declared root stay no-follow.
+
+    A declared root such as ``<home>/custom/downloads`` reaches it through
+    ``custom``, which is Avibe-owned space below the trusted home. Resolving the
+    declared root's parents would follow a symlink planted there before the
+    protected walk starts, redirecting leases outside the declared tree.
+    """
+
+    home = tmp_path / "avibe-home"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home.mkdir()
+    (home / "custom").symlink_to(outside, target_is_directory=True)
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    with pytest.raises(OSError):
+        await InboundAttachmentMaterializer(
+            effective_home=home,
+            attachments_root=home / "custom" / "downloads",
+        ).materialize(context, _StubClient({"notes.txt": b"notes"}))
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_materializer_keeps_a_nested_declared_root_under_the_home(
+    tmp_path: Path,
+) -> None:
+    """A nested declared root still materializes below the resolved home."""
+
+    physical = tmp_path / "volume" / "user"
+    physical.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "volume", target_is_directory=True)
+    home = tmp_path / "home" / "user" / ".avibe"
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    batch = await InboundAttachmentMaterializer(
+        effective_home=home,
+        attachments_root=home / "custom" / "downloads",
+    ).materialize(context, _StubClient({"notes.txt": b"notes"}))
+
+    assert batch.errors == ()
+    path = Path(batch.attachments[0].local_path or "")
+    assert path.read_bytes() == b"notes"
+    assert path.is_relative_to(physical / ".avibe" / "custom" / "downloads" / "im")
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
 async def test_materializer_keeps_download_writes_on_anchored_descriptor(
     tmp_path: Path,
 ) -> None:
