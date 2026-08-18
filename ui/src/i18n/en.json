@@ -3575,7 +3575,6 @@
       "limitedEmailRequired": "Add at least one email address.",
       "limitedEmailHint": "Enter an email and press Enter to add · up to {{count}}",
       "keepOneLimitedEmail": "Switch to Private to remove the last email",
-      "shareIdAutoSaveHint": "Press Enter or leave the field to save",
       "sharingErrors": {
         "conflict": "Link access changed elsewhere. The latest version has been loaded.",
         "invalid": "Review the mode, link, and email list.",
