@@ -18,6 +18,11 @@
       "dispatchFailed": "Show 事件已记录，但未能投递对应的 Agent turn。",
       "idConflict": "此 Show 事件 ID 已绑定到不同的事件内容。",
       "unsupportedEventType": "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
+    },
+    "pageUnavailable": {
+      "title": "Show Page 暂时不可用",
+      "heading": "此页面暂时不可用",
+      "message": "页面不存在，或已不再提供访问。"
     }
   },
   "harness": {
