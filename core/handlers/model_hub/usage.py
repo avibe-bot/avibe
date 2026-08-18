@@ -346,12 +346,42 @@ class BoundedUsageLedger:
                     existing["last_metered_at"],
                     increment["last_metered_at"],
                 )
-            retained = self._retained(list(rows.values()), local_usage_day(at))
+            retained = self._retained(list(rows.values()), at)
             self._write(retained)
 
-    def _retained(self, rows: list[dict], today: date) -> list[dict]:
+    def _retained(self, rows: list[dict], now: datetime) -> list[dict]:
+        """Keep the rows this ledger's own clock can place, bounded at both edges.
+
+        `window` already refuses to report a row dated after today, so a future row
+        contributes to nothing a reader can see — while still holding one of the
+        `max_rows` slots and outranking every real row in `_recency`, which evicts
+        the least recently metered. A clock that jumps forward while many pairs are
+        metered and is then corrected would therefore fill the ledger with rows that
+        report nothing and evict every new one, and metering would stop until those
+        dates arrive. Retention keeping what reads refuse is the defect; one window
+        with both edges, measured by this module rather than declared by the file,
+        is what closes it.
+
+        A row inside the window may still claim an instant that has not happened.
+        That is not evidence of a misplaced row, only of an unmeasurable recency, so
+        it is bounded rather than dropped: the file supplies the instant, this module
+        supplies its spelling and its ceiling.
+        """
+
+        measured = now if now.tzinfo is not None else now.astimezone()
+        today = local_usage_day(measured)
         oldest = (today - timedelta(days=self.retention_days - 1)).isoformat()
-        return [row for row in rows if row["day"] >= oldest]
+        newest = today.isoformat()
+        ceiling = measured.astimezone(timezone.utc).isoformat()
+        placed = []
+        for row in rows:
+            if not oldest <= row["day"] <= newest:
+                continue
+            metered = _instant(row["last_metered_at"])
+            if metered is not None and metered > measured:
+                row = {**row, "last_metered_at": ceiling}
+            placed.append(row)
+        return placed
 
     def window(self, *, days: int, now: datetime) -> list[dict]:
         """Return the rows inside the trailing local-day window, oldest first."""

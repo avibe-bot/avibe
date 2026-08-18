@@ -13,7 +13,18 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union, get_args
+from typing import (
+    Callable,
+    ClassVar,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    TypeVar,
+    Union,
+    get_args,
+)
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
@@ -2533,6 +2544,46 @@ class AgentsConfig:
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
+_SettledItem = TypeVar("_SettledItem")
+
+
+def _collapse_settled_duplicates(
+    parsed: list[_SettledItem],
+    identity: Callable[[_SettledItem], object],
+    as_written: list,
+    message: str,
+) -> list[_SettledItem]:
+    """Keep a collection of model identifiers unique after spelling is settled.
+
+    `normalized_model_id` is a many-to-one map applied inside the leaf validator,
+    while the uniqueness check belongs to the parent holding the collection. So
+    every such parent is checking pre-images while the object it builds carries
+    post-images, and the difference is not cosmetic: the loaded config keeps both
+    entries, `to_payload` writes one spelling for both, and the next load of what
+    this one wrote raises. Loading a file must produce something loadable, and
+    that round trip is what this restores.
+
+    Duplicates **as written** stay a malformed payload and raise. Duplicates that
+    appear only once spelling is settled are a legacy file naming one model in two
+    spellings, so the later entry collapses into the earlier: it was already
+    unreachable — an inventory lookup and an exact hop comparison both find the
+    first — and raising would fail exactly the load the persisted-shape rule
+    requires to succeed.
+    """
+
+    if len(set(as_written)) != len(as_written):
+        raise ValueError(message)
+    collapsed: list[_SettledItem] = []
+    seen: set[object] = set()
+    for item in parsed:
+        settled = identity(item)
+        if settled in seen:
+            continue
+        seen.add(settled)
+        collapsed.append(item)
+    return collapsed
+
+
 @dataclass
 class ModelHubModelConfig:
     id: str
@@ -2808,8 +2859,12 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
         if any(not isinstance(model_id, str) for model_id in model_ids):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if len(set(model_ids)) != len(model_ids):
-            raise ValueError("Config 'model_hub.sources.models' contains duplicate ids")
+        models = _collapse_settled_duplicates(
+            [ModelHubModelConfig.from_payload(model) for model in models_payload],
+            lambda model: model.id,
+            model_ids,
+            "Config 'model_hub.sources.models' contains duplicate ids",
+        )
         usage_payload = payload.get("usage")
         base_url = payload.get("base_url")
         credential_ref = payload.get("credential_ref")
@@ -2850,7 +2905,7 @@ class ModelHubSourceConfig:
             supply_channel=supply_channel,
             billing=billing,
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
-            models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            models=models,
             created_at=(
                 _validate_optional_datetime(
                     created_at,
@@ -2937,24 +2992,16 @@ class ModelHubRouteConfig:
         hops = payload.get("hops")
         if not isinstance(hops, list):
             raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
-        parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
-        # Duplicates as written stay a malformed payload. Duplicates that appear
-        # only once spelling is settled are a legacy file naming one upstream model
-        # in two spellings — the second hop could never have been reached past the
-        # first, so dropping it preserves the chain, where raising would fail the
-        # config load the persisted-shape rule requires to succeed.
-        as_written = [(hop["source_id"], hop["model_id"]) for hop in hops]
-        if len(set(as_written)) != len(as_written):
-            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
-        deduplicated: list[ModelHubRouteHopConfig] = []
-        seen: set[tuple[str, str]] = set()
-        for hop in parsed:
-            pair = (hop.source_id, hop.model_id)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            deduplicated.append(hop)
-        return cls(hops=tuple(deduplicated))
+        return cls(
+            hops=tuple(
+                _collapse_settled_duplicates(
+                    [ModelHubRouteHopConfig.from_payload(hop) for hop in hops],
+                    lambda hop: (hop.source_id, hop.model_id),
+                    [(hop["source_id"], hop["model_id"]) for hop in hops],
+                    "Config 'model_hub.agents.routes.hops' must contain unique pairs",
+                )
+            )
+        )
 
     def to_payload(self) -> dict:
         return {"hops": [hop.to_payload() for hop in self.hops]}

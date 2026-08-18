@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import re
@@ -1719,6 +1720,79 @@ def test_config_reload_spells_route_hops_like_the_inventory_they_name(monkeypatc
     hub = loaded.model_hub
     hops = hub.agents["claude"].routes[menu_model].hops
     assert {hop.model_id for hop in hops} == {model.id for model in hub.sources[0].models}
+
+
+def test_loading_a_persisted_config_yields_one_this_product_can_load_again(monkeypatch, tmp_path):
+    # The terminal property behind two rounds of findings, stated once instead of
+    # per collection: whatever `load` returns for a file a released build wrote,
+    # serializing it has to produce a file `load` accepts. Normalization is what
+    # threatened it — a many-to-one map applied in the leaf validator while the
+    # uniqueness check sits in the parent, so both spellings survive the load,
+    # `to_payload` writes one spelling twice, and the *next* load raises. That
+    # second load is the assertion, and it does not care which collections exist.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    padded = " claude-opus-4-6 "
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "native_cli"
+    source["models"] = [
+        {
+            "id": spelling,
+            "display_name": None,
+            "origin": "discovered",
+            "reasoning_efforts": [],
+            "discovered_at": "2026-07-23T03:00:00Z",
+        }
+        for spelling in (padded.strip(), padded)
+    ]
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    current["model_hub"]["sources"] = [source]
+    menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
+    route["hops"] = [
+        {"source_id": source["id"], "model_id": spelling} for spelling in (padded.strip(), padded)
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+    assert loaded.load_warnings == ()
+
+    rewritten = tmp_path / "rewritten.json"
+    rewritten.write_text(
+        json.dumps(
+            api.config_to_payload(loaded, include_secrets=True, include_internal=True),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    reloaded = V2Config.load(config_path=rewritten)
+
+    assert reloaded.load_warnings == ()
+    assert reloaded.model_hub.to_payload() == loaded.model_hub.to_payload()
+
+
+def test_every_normalized_identifier_collection_collapses_through_one_owner():
+    # Naming the class rather than its third member. Each collection whose leaf
+    # validator settles a spelling needs its parent to collapse on the settled
+    # value, and the two that exist cost one review round each because nothing
+    # tied the two halves together. Counting them does: a normalization added
+    # without its collapse fails here instead of arriving as a finding.
+    source = Path("config/v2_config.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    normalizing = set()
+    collapsing = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                continue
+            if call.func.id == "normalized_model_id":
+                normalizing.add(node.name)
+            elif call.func.id == "_collapse_settled_duplicates":
+                collapsing.add(node.name)
+    assert normalizing == {"ModelHubModelConfig", "ModelHubRouteHopConfig"}
+    assert collapsing == {"ModelHubSourceConfig", "ModelHubRouteConfig"}
+    assert len(collapsing) == len(normalizing)
 
 
 def test_config_reload_recovers_dangling_legacy_custom_source_order(monkeypatch, tmp_path):

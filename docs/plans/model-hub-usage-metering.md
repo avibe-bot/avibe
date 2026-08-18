@@ -348,6 +348,51 @@ since this one — a file that ships but is invisible to anyone reading the inde
 `test_contracts_readme_indexes_every_file_beside_it` now compares the table with the
 directory, so the next file added is caught here instead of by whoever needed it.
 
+### Round 6 (head `44bd53b48`)
+
+Two P2 findings, and the first of them tripped the circuit breaker: "deduplicate model
+IDs after normalization" in `ModelHubSourceConfig.from_payload` is the *same class* as
+round 5's hop finding on the previous head. Stopping before a third site patch and
+diagnosing the inventory instead, per the ruling recorded above.
+
+- **Class G — normalized identity versus the collections that hold it**
+  (`config/v2_config.py`). Round 4 made `normalized_model_id` a many-to-one map applied
+  inside a leaf validator, while every uniqueness check lives in the parent that holds
+  the collection. So each parent compares pre-images while the object it builds carries
+  post-images. The consequence is not cosmetic: the loaded config keeps both entries,
+  `to_payload` writes one spelling for both, and the next load of what this one wrote
+  raises — a released build could write a file this product refuses. The class has
+  exactly two members, confirmed by reading every application of the normalizer:
+  `ModelHubModelConfig`/`ModelHubSourceConfig` and
+  `ModelHubRouteHopConfig`/`ModelHubRouteConfig`. Route dict keys, `menu.checked`, and
+  `sources.order` are a different identifier space and are not normalized. Both members
+  now go through one owner, `_collapse_settled_duplicates`, which keeps round 5's
+  ruling: duplicates *as written* raise, duplicates that appear only once spelling is
+  settled collapse into the first — the later one was already unreachable.
+- **Recency is only meaningful against a clock this module measures**
+  (`core/handlers/model_hub/usage.py`). `_retained` named a window and implemented a
+  half-line: a lower edge only. `window` already refuses to report a row dated after
+  today, so a future-dated row contributes to nothing a reader can see — while holding
+  one of the `max_rows` slots and outranking every real row in `_recency`, which evicts
+  the least recently metered. A host clock that jumps forward while many pairs are
+  metered and is then corrected therefore stops metering entirely until those dates
+  arrive. Retention keeping what reads refuse was the defect; `_retained` now applies
+  the same window at both edges, and bounds a within-window row whose `last_metered_at`
+  has not happened yet to the measured instant. Same terminal rule as round 4's: the
+  file supplies the instant, this module supplies its spelling *and* its ceiling.
+
+Three invariant tests, each proven to fail without its fix.
+`test_loading_a_persisted_config_yields_one_this_product_can_load_again` states the
+property behind two rounds of findings once instead of per collection: whatever `load`
+returns for a file a released build wrote, serializing it produces a file `load`
+accepts. `test_every_normalized_identifier_collection_collapses_through_one_owner`
+names the class rather than its members — an AST walk asserting the exact set of
+classes that normalize and the exact set that collapse, so a third site fails a test
+instead of costing a review round.
+`test_a_new_call_is_metered_whatever_recency_the_ledger_already_claims` seeds every
+shape a persisted row can use to outrank the present (future day, future instant, both)
+rather than listing the ones that are handled.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

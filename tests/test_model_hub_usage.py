@@ -564,6 +564,52 @@ def test_the_row_cap_evicts_the_least_recently_metered_row(tmp_path: Path) -> No
     assert rows["model-a"]["requests"] == 2
 
 
+def test_a_new_call_is_metered_whatever_recency_the_ledger_already_claims(
+    tmp_path: Path,
+) -> None:
+    """Review 4964314764: a clock that ran ahead must not stop metering.
+
+    Every shape a persisted row can use to outrank the present fills a ledger that
+    is already at its cap: a day after today, an instant that has not happened, and
+    both together. `_recency` evicts the least recently metered, so each of them
+    ranks above the call being recorded right now, and none of them reports
+    anything — `window` refuses a day it cannot place. Stating the property rather
+    than the three shapes means a fourth spelling of "later than now" is covered
+    without editing this test.
+    """
+
+    ledger = _ledger(tmp_path, max_rows=3)
+    ahead = NOW + timedelta(days=400)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(day).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": f"model-{index}",
+                    "requests": 1,
+                    "token_reports": 0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "last_metered_at": instant.isoformat(),
+                }
+                for index, (day, instant) in enumerate(
+                    ((ahead, ahead), (NOW, ahead), (ahead, NOW))
+                )
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    ledger.record(source_id="src_a", model_id="model-new", usage=None, at=NOW)
+
+    rows = {row["model_id"]: row for row in ledger.window(days=30, now=NOW)}
+    assert rows["model-new"]["requests"] == 1
+    assert all(datetime.fromisoformat(row["last_metered_at"]) <= NOW for row in rows.values())
+
+
 @pytest.mark.parametrize(
     "content",
     [
