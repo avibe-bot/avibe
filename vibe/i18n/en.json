@@ -895,12 +895,14 @@
     }
   },
   "data": {
+    "helpCommand": "Inspect Avibe data, and run explicit trace-retention maintenance",
+    "helpDescription": "Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
     "retention": {
       "invalidDays": "--days must be at least {minimum}; refusing to run instead of silently clamping the window.",
       "helpCommand": "Show or run bounded retention for internal agent trace events",
       "helpDescription": "Status and manual control for the agent_events trace retention policy: tool_call trace rows older than the retention window are deleted; messages, non-trace events, and newer traces are never touched.",
       "helpRun": "Run one retention pass now (bypasses the daily cadence gate, still respects the lease).",
-      "helpDays": "Retention window override in days (default: the configured value, currently 30).",
+      "helpDays": "Retention window override in days (default: the configured value, currently {current}).",
       "helpCompact": "Also physically compact the database (VACUUM) when safe; implies --run. Off by default: VACUUM holds the database's sole writer lock and can stall the running service's writes; run it during a maintenance window or with the service stopped.",
       "configRecovered": "The Avibe config could not be read (recovery defaults active); the retention policy is unknown. Re-run with an explicit --days window to delete anything.",
       "compactionReasonCheckpointBusy": "the database is busy with concurrent readers/writers",

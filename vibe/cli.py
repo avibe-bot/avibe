@@ -359,6 +359,20 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
+def _configured_trace_retention_days(language: str) -> int:
+    """The persisted retention window for help text; default on any failure."""
+    from storage import agent_events_retention as _retention
+
+    try:
+        value = getattr(V2Config.load().runtime, "agent_events_trace_retention_days", None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+    except Exception:
+        pass
+    del language
+    return _retention.DEFAULT_RETENTION_DAYS
+
+
 def _configured_cli_language() -> str:
     """Read an optional configured language without creating or migrating state."""
 
@@ -15413,14 +15427,11 @@ def build_parser():
     _add_pagination_args(show_list_parser, help_command="vibe show list --help")
     show_list_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
+    _data_help_lang = _configured_cli_language()
     data_parser = subparsers.add_parser(
         "data",
-        help="Inspect Avibe data, and run explicit trace-retention maintenance",
-        description=(
-            "Inspect local Avibe SQLite state with guarded read-only SQL, or run "
-            "explicit maintenance: `query` is read-only, while `retention --run` "
-            "deletes old internal trace events and may compact the database."
-        ),
+        help=i18n_t("data.helpCommand", _data_help_lang),
+        description=i18n_t("data.helpDescription", _data_help_lang),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
@@ -15455,7 +15466,11 @@ def build_parser():
         "--days",
         type=int,
         default=None,
-        help=i18n_t("data.retention.helpDays", _retention_help_lang),
+        help=i18n_t(
+            "data.retention.helpDays",
+            _retention_help_lang,
+            current=_configured_trace_retention_days(_retention_help_lang),
+        ),
     )
     data_retention_parser.add_argument(
         "--compact",
