@@ -10,9 +10,18 @@ export interface ConsumerActivation {
    *
    *  Consumers activate from their own effects, and React runs child effects
    *  before the provider's, so this is already accurate in the provider's mount
-   *  effect while ``active`` is still false. A provider that has to CHOOSE
-   *  between two requests must read it here; one that only has to skip a request
-   *  can use ``active`` and let the second render trigger it. */
+   *  effect while ``active`` is still false. Which one to reach for follows from
+   *  what the code has to decide:
+   *
+   *  * skip a request → ``active`` is enough; the second render triggers it.
+   *  * CHOOSE between two requests → ``isActive()``, because the choice is made
+   *    in the first commit and ``active`` is still false there.
+   *  * react to the demand EDGE (demand appearing, and especially demand going
+   *    away) → BOTH: ``active`` in the dependency list, since a stable function
+   *    identity never re-runs an effect, and ``isActive()`` in the body to keep
+   *    that first commit correct. An effect that only closes over ``isActive``
+   *    silently answers "was there demand when I mounted", which reads as
+   *    correct for as long as nobody navigates. */
   isActive: () => boolean;
   /** Effect body: call from a consumer's ``useEffect`` and return the result as
    *  its cleanup. Balanced activate/release pairs in one commit batch to a net

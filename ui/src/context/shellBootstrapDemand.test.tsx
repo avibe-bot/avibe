@@ -707,4 +707,165 @@ describe('Demand-driven shell bootstrap', () => {
       expect(state?.totalUnread).toBe(7);
     });
   });
+
+  // The one thing in this provider that NO route is exempt from: every document
+  // badges the unread total on its favicon and app icon. So the demand gate may
+  // decide whether the 30-row feed is read, but never whether the whole-account
+  // map is — and the feed read is the one that usually carries it. These state that
+  // as a debt rather than as a list of reads: whichever read was supposed to
+  // deliver the map may fail, be invalidated, or be dropped by the gate, and the
+  // badge still ends up with one.
+  describe('the unread map no route gates', () => {
+    it('reads the counts a dropped feed read was carrying', async () => {
+      const feedRead = deferred<typeof inboxPayload>();
+      const countsOnly = {
+        sessions: [inboxRow],
+        next_cursor: 'cursor_1',
+        unread_by_session: { [session.id]: 3, ses_b: 5 },
+      };
+      const listInbox = vi.fn((args: ListInboxArgs) =>
+        args.limit > 1 ? feedRead.promise : Promise.resolve(countsOnly),
+      );
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const feedReads = () => listInbox.mock.calls.filter(([args]) => args.limit > 1).length;
+      const countsReads = () => listInbox.mock.calls.filter(([args]) => args.limit === 1).length;
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(feedReads()).toBe(1);
+      expect(countsReads()).toBe(0);
+
+      // A live event invalidates that first page while it is still in flight, and
+      // carries only its own session's count — so no whole-account map has arrived.
+      await act(async () => {
+        handlers?.onInboxSessionUpdated?.(inboxRow);
+      });
+      // The user reaches a feedless route before it settles, so the replacement it
+      // queues is dropped: correct for the rows, and the map is now owed to nobody.
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      await act(async () => {
+        feedRead.resolve(inboxPayload);
+      });
+      await settle();
+
+      // No 30-row read is re-issued for a document that renders no feed...
+      expect(feedReads()).toBe(1);
+      // ...and the badge does not wait for a later focus, reconnect or permission
+      // change to learn every other session's count.
+      expect(countsReads()).toBe(1);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 3, ses_b: 5 });
+      expect(state?.totalUnread).toBe(8);
+    });
+
+    it('leaves the counts alone when a healthy feed consumer detaches', async () => {
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      apiRef.current = { listInbox, connectWorkbenchEvents: vi.fn(() => vi.fn()) };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+
+      // Workbench → admin. The feed read already delivered a whole map, so the
+      // demand edge owes nothing: re-reading here would put back exactly the
+      // per-navigation traffic this provider exists to avoid.
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+
+      expect(listInbox).toHaveBeenCalledTimes(1);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 3 });
+    });
+
+    it('reads the counts an authorization change left owing', async () => {
+      const stale = deferred<typeof inboxPayload>();
+      const postChange = { sessions: [], next_cursor: null, unread_by_session: { ses_b: 5 } };
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const feedReads = () => listInbox.mock.calls.filter(([args]) => args.limit > 1).length;
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      // A whole map HAS arrived, so "have we ever loaded one" is already satisfied
+      // here — and is the wrong question, because the map it describes is about to
+      // stop describing this account.
+      expect(state?.unreadBySession).toEqual({ [session.id]: 3 });
+
+      listInbox.mockImplementation((args: ListInboxArgs) =>
+        args.limit > 1 ? stale.promise : Promise.resolve(postChange),
+      );
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+      expect(feedReads()).toBe(2);
+      // That refresh is invalidated mid-flight, and its replacement is dropped when
+      // the user leaves the feed behind — so the read that owed the new scope's map
+      // never delivers one.
+      await act(async () => {
+        handlers?.onInboxSessionUpdated?.(inboxRow);
+      });
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      await act(async () => {
+        stale.resolve(inboxPayload);
+      });
+      await settle();
+
+      expect(feedReads()).toBe(2);
+      expect(state?.unreadBySession).toEqual({ ses_b: 5 });
+      expect(state?.totalUnread).toBe(5);
+    });
+  });
 });

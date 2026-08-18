@@ -73,6 +73,15 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // session.updated/archived merges adjust a prior map, so they are not themselves
   // a first authoritative load and deliberately do not flip this.)
   const [unreadLoaded, setUnreadLoaded] = useState(false);
+  // "No whole-account map currently describes this account." The unread map is the
+  // one thing here with no demand gate at all — every route badges it — so this is
+  // the debt that keeps it live independently of which read was supposed to pay it:
+  // true until one arrives, true again when an authorization change voids the scope
+  // it described. Every read that can deliver a whole map is allowed to fail, be
+  // invalidated, or be dropped by the demand gate; what must not happen is the debt
+  // being forgotten with it. Distinct from ``unreadLoaded``, which is one-way and
+  // answers a different question (may this document touch the OS badge at all).
+  const [wholeUnreadOwed, setWholeUnreadOwed] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -138,6 +147,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     // ``discardAuthorizedFeed``: invalidating the read in flight is itself what
     // queues a replacement refresh, which would repopulate the rows that branch
     // just dropped, off-route and in parallel with the counts-only read.
+    //
+    // That argument covers the FEED half of the dropped read. The whole-account
+    // unread map it was also carrying is a different matter, because no route is
+    // exempt from badging that — the debt is ``wholeUnreadOwed``, and the demand
+    // edge that caused this drop is what makes the counts effect pay it.
     if (!isFeedActive()) {
       refreshPendingRef.current = false;
       reconcilePendingRef.current = false;
@@ -195,10 +209,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // ``unreadLoaded`` together so the two can never drift apart. Every whole-account
   // write (refresh / reconcile / unread.changed) goes through here; targeted
   // reads and mark-read responses merge one session without claiming completeness.
-  // stable identity, so it never churns the memoized context value.
+  // stable identity, so it never churns the memoized context value. Paying the
+  // ``wholeUnreadOwed`` debt belongs here for the same reason: this is the only
+  // place a whole map is adopted, so no producer has to remember to clear it.
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
     setUnreadBySession(map);
     setUnreadLoaded(true);
+    setWholeUnreadOwed(false);
   }, []);
 
   const applyWholeUnreadRead = useCallback((
@@ -641,16 +658,29 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     }
   }, [feedActive, reconcile, refresh]);
 
-  // The badges are shell-wide, so the unread map is loaded on every route — but
-  // on a route with no feed consumer, only the map. Read the refcount rather
-  // than ``feedActive`` here: consumers activate in their own effects, which run
-  // before this one, so this is already true on a workbench load and the counts
-  // read is skipped in favour of the feed read that supersedes it. Going the
-  // other way (workbench → admin) re-runs nothing: the map is already current.
+  // The badges are shell-wide, so the unread map is loaded on every route — but on
+  // a route with no feed consumer, only the map. This is the one place that read is
+  // issued for demand (the resume listeners below issue it for revalidation), and
+  // all three of its conditions are load-bearing:
+  //
+  //  * ``isFeedActive()`` read synchronously, because consumers activate in their
+  //    own effects and React runs those before this one: the refcount is already up
+  //    on a workbench document's first commit, so the counts read is skipped in
+  //    favour of the feed read that supersedes it.
+  //  * ``feedActive`` as a dependency, because the demand EDGE matters too. When the
+  //    last feed consumer detaches, the gate in ``flushFeedReadIntent`` drops
+  //    whatever feed read was queued — and a dropped refresh/reconcile was also
+  //    going to deliver the whole-account map. Nothing else would notice, because
+  //    the refcount function has stable identity by design.
+  //  * ``wholeUnreadOwed``, because that edge must not cost a request when it is not
+  //    owed: leaving a healthy workbench document re-runs this effect with a map
+  //    that is already whole, and re-reading it there would put back exactly the
+  //    per-navigation traffic this provider exists to avoid.
   useEffect(() => {
     if (isFeedActive()) return;
+    if (!wholeUnreadOwed) return;
     void refreshUnread();
-  }, [isFeedActive, refreshUnread]);
+  }, [feedActive, isFeedActive, refreshUnread, wholeUnreadOwed]);
 
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
@@ -658,12 +688,18 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // A permission change invalidates whatever is loaded; re-read exactly
         // what this route reads — and, when no route reads the feed, still drop
         // the rows nobody is watching rather than keeping them for later.
+        //
+        // No committed whole map describes the new scope, so owe one rather than
+        // naming the read that pays it: with a feed consumer the refresh below
+        // carries it, without one the counts effect runs on this very state
+        // change, and if the refresh is later dropped or fails the debt is still
+        // outstanding when the last consumer leaves.
+        setWholeUnreadOwed(true);
         if (isFeedActive()) {
           void refresh();
           return;
         }
         discardAuthorizedFeed();
-        void refreshUnread();
       },
       onInboxSessionUpdated: (row) => {
         targetedSnapshotsRef.current.delete(row.session_id);
@@ -681,7 +717,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         acceptUnreadMutation();
         if (data?.unread_by_session) {
           applyUnreadMap(data.unread_by_session);
+          return;
         }
+        // The counts changed and the event did not say how. The mutation above
+        // already invalidated every read in flight, so nothing is left to adopt a
+        // map: owe one.
+        setWholeUnreadOwed(true);
       },
       onSessionActivity: (data) => {
         // Contract A6: react to visibility/scope changes carried on the event.
@@ -725,7 +766,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     isFeedActive,
     reconcileSession,
     refresh,
-    refreshUnread,
   ]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
