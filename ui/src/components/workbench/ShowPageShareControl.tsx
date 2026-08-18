@@ -309,6 +309,7 @@ export const ShowPageShareControl: React.FC<{
               active={open}
               canManageInstance={canManageInstance}
               sessionId={sessionId}
+              ownerWindowId={ownerWindowId}
             />
           </div>
         ) : null}

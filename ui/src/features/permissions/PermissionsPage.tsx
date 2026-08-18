@@ -177,6 +177,45 @@ const revisionMonotonicResponse = (
   return candidate;
 };
 
+const mergeProjectMutationAcknowledgement = (
+  current: PermissionsResponse,
+  result: Awaited<ReturnType<typeof updateProjectAccess>>,
+): PermissionsResponse => {
+  const currentRevision = current.projection.instance.authorization_revision;
+  const acknowledgedProject = result.project;
+  const currentProject = current.projection.projects.find(
+    (project) => project.project_id === acknowledgedProject.project_id,
+  );
+  let project = acknowledgedProject;
+  if (currentProject) {
+    if (currentProject.access.revision > acknowledgedProject.access.revision) {
+      project = currentProject;
+    } else if (
+      currentProject.access.revision === acknowledgedProject.access.revision
+      && currentRevision > result.authorization_revision
+    ) {
+      // A later acknowledgement may already have observed this policy's sync
+      // progress. Keep that progress while applying the committed policy.
+      project = { ...acknowledgedProject, sync: currentProject.sync };
+    }
+  }
+  const projects = current.projection.projects.map((candidate) => (
+    candidate.project_id === project.project_id ? project : candidate
+  ));
+  if (!currentProject) projects.push(project);
+  return {
+    ...current,
+    projection: {
+      ...current.projection,
+      instance: {
+        ...current.projection.instance,
+        authorization_revision: Math.max(currentRevision, result.authorization_revision),
+      },
+      projects,
+    },
+  };
+};
+
 const principalIcon = (kind: PrincipalKind) => {
   if (kind === 'organization_group') return Users;
   if (kind === 'email_domain') return Globe2;
@@ -1286,14 +1325,11 @@ export function PermissionsPage() {
         editable={editable}
         onOpenChange={(open) => { if (!open) setEditingProject(null); }}
         onRefresh={refreshReady}
-        onSaved={(instanceId, result) => installMutationAcknowledgement(instanceId, result.instance_id, (current) => ({
-          ...current,
-          projection: {
-            ...current.projection,
-            instance: { ...current.projection.instance, authorization_revision: result.authorization_revision },
-            projects: current.projection.projects.map((project) => project.project_id === result.project.project_id ? result.project : project),
-          },
-        }))}
+        onSaved={(instanceId, result) => installMutationAcknowledgement(
+          instanceId,
+          result.instance_id,
+          (current) => mergeProjectMutationAcknowledgement(current, result),
+        )}
       />
       <ConfirmDialog
         open={removingAccess !== null}

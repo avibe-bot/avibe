@@ -180,13 +180,14 @@ const resource = ({
 
 const renderControl = (
   access: ShowPageAccess = showPageAccess(),
-  options: { sessionId?: string; canManageInstance?: boolean } = {},
+  options: { sessionId?: string; canManageInstance?: boolean; ownerWindowId?: string } = {},
 ) => render(
   <ShowPageWorkspaceAccessControl
     access={access}
     active
     canManageInstance={options.canManageInstance ?? true}
     sessionId={options.sessionId ?? 'ses-1'}
+    ownerWindowId={options.ownerWindowId}
   />,
 );
 
@@ -267,6 +268,20 @@ describe('ShowPageWorkspaceAccessControl', () => {
       4,
       'inst-1',
     );
+  });
+
+  it('associates the narrowing confirmation with its owning app window', async () => {
+    api.getResourceAccess.mockResolvedValue({
+      resource: resource({ level: 'public' }),
+    });
+    const user = userEvent.setup();
+    renderControl(showPageAccess(), { ownerWindowId: 'window-42' });
+
+    await user.click(await screen.findByRole('radio', { name: 'Private' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    const dialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    expect(dialog?.getAttribute('data-window-owner-id')).toBe('window-42');
   });
 
   it('saves Organization and selected-group policies and reloads the canonical group selection', async () => {

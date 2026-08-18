@@ -846,6 +846,52 @@ def test_permissions_cache_mutation_rebase_reads_complete_equal_revision_project
     assert cached.projection["access"]["entries"] == updated_entries
 
 
+def test_permissions_cache_mutation_rebase_preserves_newer_project_sync_state() -> None:
+    newer = _complete_projection()
+    newer_project = newer["projects"][0]
+    newer_project["access"] = {
+        **newer_project["access"],
+        "mode": "restricted",
+        "revision": 4,
+        "bindings": [
+            {
+                "principal_kind": "email",
+                "principal_value": "new@example.com",
+                "access_role": "editor",
+            }
+        ],
+    }
+    newer_project["sync"] = {
+        **newer_project["sync"],
+        "status": "in_sync",
+        "desired_access_revision": 4,
+        "applied_access_revision": 4,
+    }
+    mutation_project = deepcopy(newer_project)
+    mutation_project["sync"] = {
+        **mutation_project["sync"],
+        "status": "pending",
+        "applied_access_revision": 3,
+    }
+
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        newer,
+        request_order=20,
+    )
+    permissions._cache_mutation_result(  # noqa: SLF001
+        "inst-123",
+        newer["instance"]["authorization_revision"],
+        project=mutation_project,
+        request_order=19,
+    )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection["projects"][0]["access"] == mutation_project["access"]
+    assert cached.projection["projects"][0]["sync"] == newer_project["sync"]
+
+
 @pytest.mark.parametrize(
     "status",
     [*sorted(permissions._CACHE_FALLBACK_HTTP_STATUSES), 503],  # noqa: SLF001

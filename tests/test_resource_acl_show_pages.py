@@ -1069,6 +1069,11 @@ def test_reconciliation_rejects_a_pairing_switch_before_policy_write(monkeypatch
             "_assert_show_page_pairing_current",
             switch_after_validation,
         )
+        monkeypatch.setattr(
+            permissions,
+            "resolve_current_instance_ownership",
+            lambda: _ownership("organization", organization_id="org-1"),
+        )
 
         reconciliation = store.reconcile_resource_policy("ses-pairing-race")
         assert reconciliation["status"] == "pending"

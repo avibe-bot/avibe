@@ -725,6 +725,32 @@ def _merge_equal_revision_projection(
     return merged
 
 
+def _merge_mutation_rebase_projection(
+    cached: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply mutation policy fields while retaining newer cached sync state."""
+
+    merged = _prefer_mapping(candidate, cached)
+    cached_projects = {
+        project["project_id"]: project for project in cached["projects"]
+    }
+    projects: list[dict[str, Any]] = []
+    for project in candidate["projects"]:
+        cached_project = cached_projects.get(project["project_id"])
+        if cached_project is None:
+            projects.append(dict(project))
+            continue
+        merged_project = _merge_project_projection(project, cached_project)
+        merged_project["sync"] = _prefer_mapping(
+            cached_project["sync"],
+            project["sync"],
+        )
+        projects.append(merged_project)
+    merged["projects"] = projects
+    return merged
+
+
 def _cache_read_merge_write(
     instance_id: str,
     merge: Callable[[dict[str, Any] | None], Any],
@@ -767,6 +793,16 @@ def _cache_read_merge_write(
                                 if request_order and cached.cache_order
                                 else request_order > 0
                             ),
+                        )
+                        validated = _validated_projection(validated, instance_id)
+                    elif (
+                        cached_revision == candidate_revision
+                        and mutation_rebase
+                        and cached.cache_order > request_order
+                    ):
+                        validated = _merge_mutation_rebase_projection(
+                            cached.projection,
+                            validated,
                         )
                         validated = _validated_projection(validated, instance_id)
                 if pairing_guard is not None:

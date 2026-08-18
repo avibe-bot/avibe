@@ -620,6 +620,68 @@ describe('PermissionsPage state model', () => {
     }
   });
 
+  it('installs a superseded Project acknowledgement without regressing the newer revision', async () => {
+    vi.useFakeTimers();
+    const initial = response();
+    initial.projection.policy_sync.status = 'applying';
+    initial.projection.projects[0]!.sync.status = 'pending';
+    const newer = response();
+    newer.projection.instance.authorization_revision = 6;
+    newer.projection.access.entries = [{
+      kind: 'email',
+      value: 'newer@example.com',
+      role: 'viewer',
+    }];
+    const acknowledgement = deferred<ProjectAccessWriteResponse>();
+    api.getPermissions
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(newer);
+    api.updateProjectAccess.mockReturnValueOnce(acknowledgement.promise);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    fireEvent.change(screen.getByLabelText('permissions.fields.role'), {
+      target: { value: 'editor' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    await act(async () => {
+      acknowledgement.resolve({
+        ok: true,
+        instance_id: 'inst-123',
+        authorization_revision: 5,
+        project: {
+          ...initial.projection.projects[0]!,
+          display_name: 'Updated Project',
+          access: {
+            ...initial.projection.projects[0]!.access,
+            revision: 2,
+            bindings: [{
+              principal_kind: 'email',
+              principal_value: 'viewer@example.com',
+              access_role: 'editor',
+            }],
+          },
+          sync: {
+            ...initial.projection.projects[0]!.sync,
+            status: 'pending',
+          },
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.access' }));
+    expect(screen.getByText('newer@example.com')).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    expect(screen.getByText('Updated Project')).toBeTruthy();
+  });
+
   it.each([
     ['a different instance', 'inst-other', 5],
     ['an older revision', 'inst-123', 3],

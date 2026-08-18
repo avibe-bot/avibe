@@ -476,6 +476,7 @@ def _remember_show_page_instance_ownership_locked(
         or configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
         or instance_id != configured[0]
         or mode not in {"personal", "organization"}
+        or configured[1] != mode
         or (mode == "organization") != bool(organization_id)
     ):
         return current_show_page_instance_ownership(connection=connection)

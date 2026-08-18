@@ -51,11 +51,13 @@ export function ShowPageWorkspaceAccessControl({
   active,
   canManageInstance,
   sessionId,
+  ownerWindowId,
 }: {
   access: ShowPageAccess | null;
   active: boolean;
   canManageInstance: boolean;
   sessionId: string;
+  ownerWindowId?: string;
 }) {
   const { t } = useTranslation();
   const [gate, setGate] = useState<Gate>('idle');
@@ -433,6 +435,7 @@ export function ShowPageWorkspaceAccessControl({
         confirmLabel={t('chat.showPage.applyWorkspaceAccess')}
         confirmDisabled={!editable}
         onConfirm={commit}
+        windowOwnerId={ownerWindowId}
       />
     </section>
   );
