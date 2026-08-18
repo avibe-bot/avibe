@@ -62,7 +62,7 @@ const ManualModelMenu: React.FC<{
       onOpenChange={setOpen}
       sheetTitle={model.id}
       className="w-40"
-      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="grid size-8 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
     >
       <button type="button" role="menuitem" className="flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold text-destructive-ink hover:bg-destructive/[0.08]" onClick={() => { setOpen(false); onRemove(); }}>{t('settings.models.sourceDetail.row.remove')}</button>
     </ResponsiveMenu>
@@ -89,7 +89,7 @@ const SourceManageMenu: React.FC<{
       onOpenChange={setOpen}
       sheetTitle={source.display_name}
       className="w-44"
-      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="grid size-8 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
     >
       {manageActions().map((kind) => (
         <button
@@ -764,7 +764,7 @@ export const SourceDetailPanel: React.FC<{
             — the design omits it entirely, but a subscription source has no
             host to fall back on and would be unidentifiable without it. */}
         <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
-          <div className={cn('model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-2', state.textClass)}>
+          <div className={cn('model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-[7px]', state.textClass)}>
             <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
             {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
@@ -775,7 +775,7 @@ export const SourceDetailPanel: React.FC<{
           {repairDestination === 'reauth_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {repairDestination === 'replace_key_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
           {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
-          {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+          {source.kind === 'api_key' && <Button size="sm" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
@@ -831,7 +831,7 @@ export const SourceDetailPanel: React.FC<{
           </button>
         )}
       </section>
-      <p className="model-hub-source-footnote flex gap-2 leading-relaxed">
+      <p className="model-hub-source-footnote flex gap-2">
         <Info className="model-hub-ink-59 mt-px size-[13px] shrink-0" aria-hidden="true" />
         <span>{t('settings.models.sourceDetail.footnote')}</span>
       </p>

@@ -43,12 +43,12 @@ export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => v
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-[12.5px] font-bold text-foreground" title={source.display_name}>{source.display_name}</span>
-          <span className={cn('shrink-0 rounded-full border px-2 py-[3px] text-[10.5px] font-semibold', ACCENT_PILL[accent])}>
+          <span className="truncate text-[12.5px] font-bold leading-[18px] text-foreground" title={source.display_name}>{source.display_name}</span>
+          <span className={cn('model-hub-pill border', ACCENT_PILL[accent])}>
             {t(`settings.models.upstream.kind.${kindKey}`)}
           </span>
         </span>
-        {detail && <span className="model-hub-upstream-detail mt-1 block truncate font-mono text-[10.5px]" title={detail}>{detail}</span>}
+        {detail && <span className="model-hub-upstream-detail mt-1 block truncate font-mono text-[10.5px] leading-[14px]" title={detail}>{detail}</span>}
         {state.key && <span className={cn('mt-1 flex items-center gap-[5px] text-[10.5px] font-semibold', state.textClass)}>
           <span className={cn('size-[5px] rounded-full', state.dotClass)} />
           {t(state.key, state.values)}
