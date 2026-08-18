@@ -17,6 +17,7 @@ from typing import Any, Iterator
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
+from config.v2_config import config_file_lock
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies, state_meta
 from vibe.authorization import (
@@ -31,7 +32,20 @@ ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 RESOURCE_ORGANIZATIONS_META_KEY = "resource_access_organizations"
+SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY = "show_page_instance_ownership"
 HARNESS_ACCESS_FORBIDDEN_CODE = "harness_access_forbidden"
+SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE = "configuration_unavailable"
+
+_SHOW_PAGE_OWNERSHIP_MODES = frozenset(
+    {
+        "unmanaged",
+        "personal",
+        "organization",
+        "organization_pending",
+        SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+    }
+)
+_CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE = object()
 
 
 class ResourceAccessError(ValueError):
@@ -75,6 +89,22 @@ def _required_identifier(value: Any, *, code: str) -> str:
     if cleaned is None:
         raise ResourceAccessError(code)
     return cleaned
+
+
+def _assert_show_page_pairing_current(ownership: Mapping[str, Any]) -> None:
+    """Reject a reconciliation snapshot that no longer names the current pairing."""
+
+    configured = _configured_show_page_instance()
+    instance_id = _clean_optional_string(ownership.get("instance_id"))
+    if (
+        configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        or configured is None
+        or instance_id is None
+        or configured[0] != instance_id
+        or ownership.get("mode") not in {"personal", "organization"}
+        or configured[1] != ownership.get("mode")
+    ):
+        raise ResourceAccessError("show_page_pairing_changed")
 
 
 def _validate_resource_kind(resource_kind: Any) -> str:
@@ -307,8 +337,414 @@ def _connection(connection: Connection | None) -> Iterator[Connection]:
         yield connection
         return
     engine = get_cached_sqlite_engine()
-    with engine.connect() as active_connection:
+    with engine.begin() as active_connection:
         yield active_connection
+
+
+def _configured_show_page_instance() -> tuple[str, str] | None | object:
+    try:
+        from config.v2_config import V2Config
+
+        cloud = V2Config.load().remote_access.vibe_cloud
+        credentials = cloud.runtime_credentials()
+        if credentials is None:
+            return None
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        instance_id = _clean_optional_string(credentials[1])
+        if instance_id is None or cloud.instance_kind not in {"personal", "organization"}:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    except (
+        AttributeError,
+        FileNotFoundError,
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    return instance_id, cloud.instance_kind
+
+
+def _configuration_unavailable_ownership() -> dict[str, Any]:
+    return {
+        "mode": SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+        "instance_id": None,
+        "organization_id": None,
+        "source": "config",
+    }
+
+
+def _stored_show_page_instance_ownership(connection: Connection) -> dict[str, Any] | None:
+    raw_value = connection.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY
+        )
+    ).scalar_one_or_none()
+    try:
+        payload = json.loads(raw_value) if raw_value else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        return None
+    instance_id = _clean_optional_string(payload.get("instance_id"))
+    mode = payload.get("mode")
+    organization_id = _clean_optional_string(payload.get("organization_id"))
+    if instance_id is None or mode not in {"personal", "organization"}:
+        return None
+    if mode == "organization" and organization_id is None:
+        return None
+    if mode == "personal" and organization_id is not None:
+        return None
+    return {
+        "mode": mode,
+        "instance_id": instance_id,
+        "organization_id": organization_id,
+        "source": "stored",
+    }
+
+
+def current_show_page_instance_ownership(
+    *,
+    connection: Connection | None = None,
+) -> dict[str, Any]:
+    """Return the persisted ownership fence for the exact current pairing."""
+
+    configured = _configured_show_page_instance()
+    if configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE:
+        return _configuration_unavailable_ownership()
+    if configured is None:
+        return {
+            "mode": "unmanaged",
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
+    instance_id, instance_kind = configured
+    with _connection(connection) as conn:
+        stored = _stored_show_page_instance_ownership(conn)
+    exact_stored = stored if stored and stored["instance_id"] == instance_id else None
+    if instance_kind == "personal":
+        return {
+            "mode": "personal",
+            "instance_id": instance_id,
+            "organization_id": None,
+            "source": "config",
+        }
+    if instance_kind == "organization":
+        if exact_stored and exact_stored["mode"] == "organization":
+            return exact_stored
+        return {
+            "mode": "organization_pending",
+            "instance_id": instance_id,
+            "organization_id": None,
+            "source": "config",
+        }
+    if exact_stored is not None:
+        return exact_stored
+    return {
+        "mode": "unmanaged",
+        "instance_id": instance_id,
+        "organization_id": None,
+        "source": "config",
+    }
+
+
+def remember_show_page_instance_ownership(
+    connection: Connection,
+    ownership: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist an authoritative binding only while its exact pairing is current."""
+
+    with config_file_lock():
+        return _remember_show_page_instance_ownership_locked(connection, ownership)
+
+
+def _remember_show_page_instance_ownership_locked(
+    connection: Connection,
+    ownership: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Implement ownership persistence while the pairing lock is held."""
+
+    configured = _configured_show_page_instance()
+    instance_id = _clean_optional_string(ownership.get("instance_id"))
+    mode = ownership.get("mode")
+    organization_id = _clean_optional_string(ownership.get("organization_id"))
+    if (
+        configured is None
+        or configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        or instance_id != configured[0]
+        or mode not in {"personal", "organization"}
+        or configured[1] != mode
+        or (mode == "organization") != bool(organization_id)
+    ):
+        return current_show_page_instance_ownership(connection=connection)
+    payload = {
+        "schema_version": 1,
+        "instance_id": instance_id,
+        "mode": mode,
+        "organization_id": organization_id,
+    }
+    connection.execute(
+        state_meta.delete().where(state_meta.c.key == SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY)
+    )
+    connection.execute(
+        state_meta.insert().values(
+            key=SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY,
+            value_json=json.dumps(payload, separators=(",", ":")),
+            updated_at=_utc_now_iso(),
+        )
+    )
+    return {**payload, "source": str(ownership.get("source") or "live")}
+
+
+def reconcile_show_page_resource_policy(
+    connection: Connection,
+    *,
+    resource_id: str,
+    ownership: Mapping[str, Any],
+    owner_user_id: str | None,
+    owner_email: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile one Show Page policy under the persisted pairing lock."""
+
+    with config_file_lock():
+        return _reconcile_show_page_resource_policy_locked(
+            connection,
+            resource_id=resource_id,
+            ownership=ownership,
+            owner_user_id=owner_user_id,
+            owner_email=owner_email,
+        )
+
+
+def _reconcile_show_page_resource_policy_locked(
+    connection: Connection,
+    *,
+    resource_id: str,
+    ownership: Mapping[str, Any],
+    owner_user_id: str | None,
+    owner_email: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile one Show Page policy without changing either access axis."""
+
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    mode = ownership.get("mode")
+    if mode not in _SHOW_PAGE_OWNERSHIP_MODES:
+        raise ResourceAccessError("invalid_show_page_ownership")
+    if mode in {"personal", "organization"}:
+        _assert_show_page_pairing_current(ownership)
+        fence = _remember_show_page_instance_ownership_locked(connection, ownership)
+    else:
+        fence = current_show_page_instance_ownership(connection=connection)
+    mode = fence["mode"]
+    policy = _policy_row(connection, "show_page", identifier)
+    policy_organization = _clean_optional_string(
+        policy.get("organization_id") if policy else None
+    )
+
+    if mode == "unmanaged":
+        status = "unmanaged"
+    elif mode == "organization_pending":
+        status = "pending"
+    elif mode == SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE:
+        status = SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
+    elif mode == "personal":
+        if policy is None:
+            _assert_show_page_pairing_current(fence)
+            policy = ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id=identifier,
+                organization_id=None,
+                owner_user_id=owner_user_id,
+                owner_email=owner_email,
+                access_level="private",
+                created_by_user_id=owner_user_id,
+                updated_by_user_id=owner_user_id,
+            )
+            status = "created"
+        else:
+            status = "unchanged" if policy_organization is None else "conflict"
+    else:
+        organization_id = _required_identifier(
+            fence.get("organization_id"), code="invalid_organization_id"
+        )
+        if policy is None:
+            _assert_show_page_pairing_current(fence)
+            policy = ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id=identifier,
+                organization_id=organization_id,
+                owner_user_id=owner_user_id,
+                owner_email=owner_email,
+                access_level="private",
+                created_by_user_id=owner_user_id,
+                updated_by_user_id=owner_user_id,
+            )
+            status = "created"
+        elif policy_organization is None:
+            _assert_show_page_pairing_current(fence)
+            connection.execute(
+                resource_access_policies.update()
+                .where(resource_access_policies.c.resource_kind == "show_page")
+                .where(resource_access_policies.c.resource_id == identifier)
+                .values(organization_id=organization_id)
+            )
+            connection.execute(
+                resource_access_groups.update()
+                .where(resource_access_groups.c.resource_kind == "show_page")
+                .where(resource_access_groups.c.resource_id == identifier)
+                .values(organization_id=organization_id)
+            )
+            remember_resource_organization(connection, organization_id)
+            policy = _policy_row(connection, "show_page", identifier)
+            status = "adopted"
+        else:
+            status = (
+                "unchanged" if policy_organization == organization_id else "conflict"
+            )
+    serialized = _serialize_policy(connection, policy) if policy else None
+    return {"status": status, "ownership": fence, "policy": serialized}
+
+
+def _show_page_policy_matches_instance_ownership(
+    ownership: Mapping[str, Any],
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    mode = ownership.get("mode")
+    if mode == "unmanaged":
+        return True
+    if mode in {
+        "organization_pending",
+        SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+    }:
+        return False
+    policy_organization = _clean_optional_string(
+        policy.get("organization_id") if policy else None
+    )
+    if mode == "personal":
+        return policy_organization is None
+    return bool(
+        mode == "organization"
+        and policy_organization
+        and policy_organization == _clean_optional_string(ownership.get("organization_id"))
+    )
+
+
+def _resolve_authoritative_show_page_ownership(
+    ownership: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve a pending organization fence using the paired Permissions projection."""
+
+    if ownership.get("mode") != "organization_pending":
+        return dict(ownership)
+    try:
+        from vibe import permissions
+
+        resolved = permissions.resolve_current_instance_ownership()
+    except (
+        AttributeError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return dict(ownership)
+    if resolved.get("mode") == "organization":
+        return dict(resolved)
+    return dict(ownership)
+
+
+def _show_page_authorization_ownership(
+    connection: Connection | None,
+    ownership: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the pairing fence before the authorization transaction reads state."""
+
+    if ownership is not None:
+        return _resolve_authoritative_show_page_ownership(dict(ownership))
+
+    # With no caller-owned connection, finish the small persisted-fence read
+    # before resolving the potentially slow authoritative organization lookup.
+    if connection is None:
+        return _resolve_authoritative_show_page_ownership(
+            current_show_page_instance_ownership()
+        )
+
+    configured = _configured_show_page_instance()
+    if configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE:
+        return _configuration_unavailable_ownership()
+    if configured is None:
+        return {
+            "mode": "unmanaged",
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
+    instance_id, instance_kind = configured
+    if instance_kind == "personal":
+        return {
+            "mode": "personal",
+            "instance_id": instance_id,
+            "organization_id": None,
+            "source": "config",
+        }
+
+    # A supplied Connection may contain an uncommitted legacy policy. Resolve
+    # the organization fence before its first SELECT so reconciliation can
+    # safely write through that same transaction.
+    provisional = {
+        "mode": "organization_pending",
+        "instance_id": instance_id,
+        "organization_id": None,
+        "source": "config",
+    }
+    resolved = _resolve_authoritative_show_page_ownership(provisional)
+    if resolved.get("mode") == "organization":
+        return resolved
+    return current_show_page_instance_ownership(connection=connection)
+
+
+def _show_page_authorization_snapshot(
+    connection: Connection,
+    resource_id: str,
+    *,
+    ownership: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, list[str]]:
+    """Load one policy after adopting a legacy null-organization shape when safe."""
+
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    current_ownership = dict(
+        ownership
+        if ownership is not None
+        else _show_page_authorization_ownership(connection)
+    )
+    policy = _policy_row(connection, "show_page", identifier)
+    policy_organization = _clean_optional_string(
+        policy.get("organization_id") if policy else None
+    )
+    if (
+        policy is not None
+        and policy_organization is None
+        and current_ownership.get("mode") in {"organization", "organization_pending"}
+    ):
+        try:
+            reconciliation = reconcile_show_page_resource_policy(
+                connection,
+                resource_id=identifier,
+                ownership=current_ownership,
+                owner_user_id=_clean_optional_string(policy.get("owner_user_id")),
+                owner_email=_clean_optional_string(policy.get("owner_email"), limit=320),
+            )
+        except ResourceAccessError:
+            return _configuration_unavailable_ownership(), policy, []
+        current_ownership = dict(reconciliation["ownership"])
+        policy = reconciliation["policy"]
+    groups = _policy_groups(connection, "show_page", identifier) if policy else []
+    return current_ownership, policy, groups
 
 
 def _stored_resource_organizations(connection: Connection) -> set[str]:
@@ -559,6 +995,8 @@ def _policy_allows(
     resource_id: str,
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
+    *,
+    show_page_ownership: Mapping[str, Any] | None = None,
 ) -> bool:
     if context.is_instance_owner:
         return True
@@ -569,8 +1007,28 @@ def _policy_allows(
     if resource_kind in {"skill", "vault_secret"}:
         if context.is_remote and context.is_active_organization_member and context.has_role("editor"):
             return True
+    # A signed Show Page email session carries an exact resource entitlement.
+    # It remains valid even when the local instance pairing cannot be reloaded;
+    # the broader instance/organization policy fence below must not revoke that
+    # independent Limited-link flow.
     if resource_kind == "show_page" and context.can_use_show_page(resource_id):
         return True
+    if (
+        resource_kind == "show_page"
+        and show_page_ownership is not None
+        and show_page_ownership.get("mode")
+        == SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
+    ):
+        return False
+    if (
+        resource_kind == "show_page"
+        and show_page_ownership is not None
+        and not _show_page_policy_matches_instance_ownership(
+            show_page_ownership,
+            policy,
+        )
+    ):
+        return False
     if context.instance_access_source == "show_page_email":
         return False
     if not context.can_use_resource(resource_kind):
@@ -697,10 +1155,30 @@ def can_use_resource(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    show_page_ownership = (
+        _show_page_authorization_ownership(connection)
+        if kind == "show_page"
+        else None
+    )
     with _connection(connection) as conn:
-        policy = _policy_row(conn, kind, identifier)
-        groups = _policy_groups(conn, kind, identifier) if policy else []
-        return _policy_allows(context, kind, identifier, policy, groups)
+        if kind == "show_page":
+            ownership, policy, groups = _show_page_authorization_snapshot(
+                conn,
+                identifier,
+                ownership=show_page_ownership,
+            )
+        else:
+            policy = _policy_row(conn, kind, identifier)
+            groups = _policy_groups(conn, kind, identifier) if policy else []
+            ownership = None
+        return _policy_allows(
+            context,
+            kind,
+            identifier,
+            policy,
+            groups,
+            show_page_ownership=ownership,
+        )
 
 
 def can_manage_resource_acl(
@@ -713,8 +1191,30 @@ def can_manage_resource_acl(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    show_page_ownership = (
+        _show_page_authorization_ownership(connection)
+        if kind == "show_page"
+        else None
+    )
     with _connection(connection) as conn:
-        policy = _policy_row(conn, kind, identifier)
+        if kind == "show_page":
+            ownership, policy, _groups = _show_page_authorization_snapshot(
+                conn,
+                identifier,
+                ownership=show_page_ownership,
+            )
+        else:
+            ownership = None
+            policy = _policy_row(conn, kind, identifier)
+        if (
+            kind == "show_page"
+            and not context.is_instance_owner
+            and not _show_page_policy_matches_instance_ownership(
+                ownership or {},
+                policy,
+            )
+        ):
+            return False
     return _policy_allows_management(context, policy)
 
 
@@ -728,8 +1228,21 @@ def can_manage_show_page_access(
 
     context = _as_context(user_context)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    show_page_ownership = _show_page_authorization_ownership(connection)
     with _connection(connection) as conn:
-        policy = _policy_row(conn, "show_page", identifier)
+        ownership, policy, _groups = _show_page_authorization_snapshot(
+            conn,
+            identifier,
+            ownership=show_page_ownership,
+        )
+        if (
+            not context.is_instance_owner
+            and not _show_page_policy_matches_instance_ownership(
+                ownership,
+                policy,
+            )
+        ):
+            return False
     return _policy_allows_show_page_access_management(context, policy)
 
 
@@ -745,8 +1258,30 @@ def can_control_resource_sharing(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    show_page_ownership = (
+        _show_page_authorization_ownership(connection)
+        if kind == "show_page"
+        else None
+    )
     with _connection(connection) as conn:
-        policy = _policy_row(conn, kind, identifier)
+        if kind == "show_page":
+            ownership, policy, _groups = _show_page_authorization_snapshot(
+                conn,
+                identifier,
+                ownership=show_page_ownership,
+            )
+        else:
+            ownership = None
+            policy = _policy_row(conn, kind, identifier)
+        if (
+            kind == "show_page"
+            and not context.is_instance_owner
+            and not _show_page_policy_matches_instance_ownership(
+                ownership or {},
+                policy,
+            )
+        ):
+            return False
     return _policy_allows_owner_control(context, policy)
 
 
@@ -785,6 +1320,11 @@ def filter_accessible_resources(
     identifiers = [identifier for _, identifier in candidates if identifier is not None]
     if not identifiers:
         return []
+    ownership = (
+        _show_page_authorization_ownership(connection)
+        if kind == "show_page"
+        else None
+    )
     with _connection(connection) as conn:
         policy_rows = conn.execute(
             select(resource_access_policies)
@@ -796,6 +1336,24 @@ def filter_accessible_resources(
             identifier: _policy_groups(conn, kind, identifier)
             for identifier in policies
         }
+        if kind == "show_page":
+            if ownership and ownership.get("mode") == "organization":
+                for identifier, policy in list(policies.items()):
+                    if _clean_optional_string(policy.get("organization_id")) is not None:
+                        continue
+                    try:
+                        reconciliation = reconcile_show_page_resource_policy(
+                            conn,
+                            resource_id=identifier,
+                            ownership=ownership,
+                            owner_user_id=_clean_optional_string(policy.get("owner_user_id")),
+                            owner_email=_clean_optional_string(policy.get("owner_email"), limit=320),
+                        )
+                    except ResourceAccessError:
+                        ownership = _configuration_unavailable_ownership()
+                        break
+                    policies[identifier] = reconciliation["policy"] or policy
+                    groups[identifier] = _policy_groups(conn, kind, identifier)
     return [
         row
         for row, identifier in candidates
@@ -806,6 +1364,7 @@ def filter_accessible_resources(
             identifier,
             policies.get(identifier),
             groups.get(identifier, []),
+            show_page_ownership=ownership,
         )
     ]
 

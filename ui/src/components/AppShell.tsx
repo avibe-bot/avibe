@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -260,7 +260,6 @@ export const AppShell: React.FC = () => {
   const { totalUnread } = useWorkbenchInbox();
   const {
     capabilities,
-    instanceKind,
     remote,
   } = useInstanceAuthorization();
   const api = useApi();
@@ -391,7 +390,6 @@ export const AppShell: React.FC = () => {
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
-  const showOrganizationNavigation = instanceKind === 'organization';
   const canUseShowPageApp =
     location.pathname.startsWith('/apps/show/') && capabilities.can_use_show_pages;
   const localSystemPath = isOwnerOnlyPath(location.pathname);
@@ -423,14 +421,6 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(showOrganizationNavigation
-      ? [{
-          to: '/admin/organization/overview',
-          label: t('nav.organization'),
-          icon: Building2,
-          match: (p: string) => p.startsWith('/admin/organization'),
-        }]
-      : []),
     // Permanent escape hatch to the App Library (a workbench app) for principals
     // covered by the current Apps policy. It stays reachable even when undocked.
     ...(canUseApps
@@ -473,6 +463,12 @@ export const AppShell: React.FC = () => {
       ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain, match: isMemorySettingsPath }]
       : []),
     {
+      to: '/admin/permissions',
+      label: t('nav.permissions'),
+      icon: ShieldCheck,
+      match: (p: string) => p.startsWith('/admin/permissions'),
+    },
+    {
       // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
       // backends, models, and Memory have their own sidebar destinations, so
       // exclude those routes from the active match.
@@ -492,15 +488,12 @@ export const AppShell: React.FC = () => {
 
   // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
   // bar with Workbench, Control Panel, and More (which opens the full nested nav
-  // sheet). The Organization tab follows the same capability visibility as
-  // every other shell entry point. See ``adminMenuOpen``.
+  // sheet). See ``adminMenuOpen``.
   const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(showOrganizationNavigation
-      ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
-      : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
+    { to: '/admin/permissions', label: t('nav.permissions'), icon: ShieldCheck },
     {
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
@@ -742,9 +735,7 @@ export const AppShell: React.FC = () => {
           'w-full',
           chromeless
             ? 'h-full'
-            : location.pathname.startsWith('/admin/organization')
-              ? 'mx-auto'
-              : 'mx-auto px-4 py-5 md:px-10 md:py-8',
+            : 'mx-auto px-4 py-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not

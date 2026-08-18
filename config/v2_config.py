@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
 _memory_config_tx_state = threading.local()
+_config_file_lock_state = threading.local()
 
 
 def _acquire_memory_config_file_lock(descriptor: int) -> None:
@@ -1502,12 +1503,59 @@ def _config_file_lock(path: Path):
     return MigrationFileLock(path.with_name(f".{path.name}.lock"))
 
 
+@contextmanager
+def _config_file_transaction_lock(path: Path) -> Iterator[None]:
+    """Hold one config migration lock, re-entering it within this thread."""
+
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    locks = getattr(_config_file_lock_state, "locks", None)
+    if locks is None:
+        locks = {}
+        _config_file_lock_state.locks = locks
+    active = locks.get(key)
+    if active is not None:
+        lock, depth = active
+        locks[key] = (lock, depth + 1)
+        try:
+            yield
+        finally:
+            locks[key] = (lock, depth)
+        return
+
+    lock = _config_file_lock(path)
+    with lock:
+        locks[key] = (lock, 1)
+        try:
+            yield
+        finally:
+            del locks[key]
+
+
+@contextmanager
+def config_file_lock(config_path: Optional[Path] = None) -> Iterator[None]:
+    """Serialize work that must observe one exact persisted config snapshot.
+
+    This is the same cross-process transaction used by ``V2Config.save`` and
+    ``config_write_transaction``. It also takes the migration lock used by
+    ``V2Config.load`` while persisting migrations, so ordinary saves cannot
+    replace a file between migration verification and replacement. Keeping one
+    lock path for ordinary config writes and guarded state transitions prevents
+    a pairing update from racing a reader that is about to persist
+    instance-owned state.
+    """
+
+    path = config_path or paths.get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _memory_config_transaction(path):
+        with _config_file_transaction_lock(path):
+            yield
+
+
 def _write_config_payload(path: Path, payload: dict) -> None:
     content = json.dumps(payload, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with CONFIG_LOCK:
-        with _config_file_lock(path):
-            _atomic_write_text(path, content)
+    with config_file_lock(path):
+        _atomic_write_text(path, content)
 
 
 def _write_config_payload_if_unchanged(
@@ -1556,7 +1604,7 @@ def _persist_migrated_config_payload(
 
     try:
         with CONFIG_LOCK:
-            with _config_file_lock(path):
+            with _config_file_transaction_lock(path):
                 try:
                     current_raw = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as exc:

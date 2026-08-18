@@ -1,9 +1,11 @@
-import type { ResourceAccessLevel, SyncStatus } from '@/features/organization/api/types';
+import type { ResourceAccessLevel } from '@/features/permissions/types';
 export type ShowPageAccess = {
   ok: true;
-  mode: 'personal' | 'organization';
+  mode: 'unmanaged' | 'personal' | 'organization' | 'organization_pending' | 'configuration_unavailable';
+  ownership_status: 'unmanaged' | 'created' | 'adopted' | 'unchanged' | 'pending' | 'conflict' | 'configuration_unavailable';
   instance_id: string | null;
   organization_id: string | null;
+  policy_organization_id: string | null;
   access_level: ResourceAccessLevel;
   group_ids: string[];
   policy_revision: number | null;
@@ -86,7 +88,14 @@ function isShowPageAccess(value: unknown): value is ShowPageAccess {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<ShowPageAccess>;
   return candidate.ok === true
-    && (candidate.mode === 'personal' || candidate.mode === 'organization')
+    && (
+      candidate.mode === 'unmanaged'
+      || candidate.mode === 'personal'
+      || candidate.mode === 'organization'
+      || candidate.mode === 'organization_pending'
+      || candidate.mode === 'configuration_unavailable'
+    )
+    && typeof candidate.ownership_status === 'string'
     && typeof candidate.can_use === 'boolean'
     && typeof candidate.can_manage === 'boolean'
     && typeof candidate.can_publish_public === 'boolean';
@@ -123,50 +132,4 @@ export function showPageHeaderAccess(
     canOpen: canManageInstance || access?.can_use === true,
     canManage: canManageInstance || access?.can_manage === true,
   };
-}
-
-export type ShowPageAccessPatch = {
-  access_level: ResourceAccessLevel;
-  group_ids: string[];
-  if_match_revision: number;
-};
-
-export const showPageAudienceLevels = (
-  mode: ShowPageAccess['mode'],
-): ResourceAccessLevel[] => (
-  mode === 'organization' ? ['private', 'public', 'scope'] : ['private']
-);
-
-export const showPageAudienceLabelKey = (level: ResourceAccessLevel): string => (
-  `chat.showPage.workspaceLevels.${level}`
-);
-
-export function buildShowPageAccessPatch(
-  level: ResourceAccessLevel,
-  groupIds: string[],
-  revision: number,
-): ShowPageAccessPatch | null {
-  const normalizedGroupIds = level === 'scope'
-    ? [...new Set(groupIds.map((id) => id.trim()).filter(Boolean))]
-    : [];
-  if (level === 'scope' && normalizedGroupIds.length === 0) return null;
-  return {
-    access_level: level,
-    group_ids: normalizedGroupIds,
-    if_match_revision: revision,
-  };
-}
-
-export function showPageSyncPresentation(status: SyncStatus): {
-  key: string;
-  tone: 'muted' | 'pending' | 'error';
-} | null {
-  if (status === 'in_sync' || status === 'none' || status === 'deleted') return null;
-  if (status === 'error') {
-    return { key: 'chat.showPage.workspaceSync.error', tone: 'error' };
-  }
-  if (status === 'offline') {
-    return { key: 'chat.showPage.workspaceSync.offline', tone: 'pending' };
-  }
-  return { key: 'chat.showPage.workspaceSync.pending', tone: 'pending' };
 }

@@ -3,10 +3,24 @@ import { createInstance } from 'i18next';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
+import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { ShowPageShareControl } from './ShowPageShareControl';
+
+const permissionsApi = vi.hoisted(() => ({
+  getPermissions: vi.fn(),
+  getResourceAccess: vi.fn(),
+  updateResourceAccess: vi.fn(),
+}));
+
+vi.mock('@/features/permissions/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/permissions/api')>()),
+  getPermissions: permissionsApi.getPermissions,
+  getResourceAccess: permissionsApi.getResourceAccess,
+  updateResourceAccess: permissionsApi.updateResourceAccess,
+}));
 
 const api = {
   ensureShowPage: vi.fn(),
@@ -51,6 +65,12 @@ vi.mock('../useShowPages', () => ({
   }),
 }));
 
+beforeEach(() => {
+  permissionsApi.getPermissions.mockReset();
+  permissionsApi.getResourceAccess.mockReset();
+  permissionsApi.updateResourceAccess.mockReset();
+});
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -70,6 +90,23 @@ const renderControl = (compact: boolean) =>
       <ShowPageShareControl sessionId="ses-1" compact={compact} />
     </I18nextProvider>,
   );
+
+const showPageAccess = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess => ({
+  ok: true,
+  mode: 'unmanaged',
+  ownership_status: 'unmanaged',
+  instance_id: null,
+  organization_id: null,
+  policy_organization_id: null,
+  access_level: 'private',
+  group_ids: [],
+  policy_revision: null,
+  last_applied_control_plane_revision: null,
+  can_use: true,
+  can_manage: false,
+  can_publish_public: false,
+  ...overrides,
+});
 
 describe('ShowPageShareControl trigger presentation', () => {
   it('renders the header-sized trigger by default', () => {
@@ -100,13 +137,11 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     // The app-window call site: no initialAccess, no instance authority. The
     // payload read is gated on access, so it must start only once access
     // resolves — the first open still shows the link.
-    api.getShowPageAccess.mockResolvedValue({
-      ok: true,
-      mode: 'local',
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,
       can_manage: false,
       can_publish_public: false,
-    });
+    }));
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
@@ -132,14 +167,68 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     });
   });
 
+  it('keeps Link access usable while Workspace access is still loading', async () => {
+    const organizationAccess = showPageAccess({
+      mode: 'organization',
+      ownership_status: 'unchanged',
+      instance_id: 'inst-1',
+      organization_id: 'org-1',
+      policy_organization_id: 'org-1',
+      can_manage: true,
+      can_publish_public: true,
+    });
+    const pending = new Promise(() => undefined);
+    permissionsApi.getPermissions.mockReturnValue(pending);
+    permissionsApi.getResourceAccess.mockReturnValue(pending);
+    api.getShowPageAccess.mockResolvedValue(organizationAccess);
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: null,
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: {
+        page_id: 'ses-1',
+        access_mode: 'private',
+        share_id: null,
+        revision: 3,
+        normalized_emails: [],
+      },
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={organizationAccess}
+          canManageInstance
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.getByText('Loading Workspace access…')).toBeTruthy();
+    expect(api.getShowAccessSettings).toHaveBeenCalledWith('ses-1');
+    expect(permissionsApi.getPermissions).toHaveBeenCalledOnce();
+    expect(permissionsApi.getResourceAccess).toHaveBeenCalledWith({
+      resource_kind: 'show_page',
+      resource_id: 'ses-1',
+    });
+    const popover = document.querySelector('.overflow-y-auto');
+    expect(popover?.classList.contains('max-h-[var(--radix-popover-content-available-height)]')).toBe(true);
+  });
+
   it('never loads the payload when access resolves without page use', async () => {
-    api.getShowPageAccess.mockResolvedValue({
-      ok: true,
-      mode: 'local',
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: false,
       can_manage: true,
       can_publish_public: false,
-    });
+    }));
 
     render(
       <I18nextProvider i18n={i18n}>
@@ -164,13 +253,11 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     // A caller holding access (the chat header passes initialAccess) reads the
     // payload and access in parallel — the post-access hook must NOT fire a
     // second ensure request.
-    api.getShowPageAccess.mockResolvedValue({
-      ok: true,
-      mode: 'local',
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,
       can_manage: true,
       can_publish_public: true,
-    });
+    }));
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
@@ -185,13 +272,11 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       <I18nextProvider i18n={i18n}>
         <ShowPageShareControl
           sessionId="ses-1"
-          initialAccess={{
-            ok: true,
-            mode: 'local',
+          initialAccess={showPageAccess({
             can_use: true,
             can_manage: true,
             can_publish_public: true,
-          } as never}
+          })}
         />
       </I18nextProvider>,
     );
@@ -206,13 +291,11 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
   });
 
   it('presents the Limited guest-admission link', async () => {
-    api.getShowPageAccess.mockResolvedValue({
-      ok: true,
-      mode: 'local',
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,
       can_manage: false,
       can_publish_public: false,
-    });
+    }));
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'limited',
@@ -239,13 +322,11 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
   });
 
   it('keeps the Limited share action disabled without Cloud identity', async () => {
-    api.getShowPageAccess.mockResolvedValue({
-      ok: true,
-      mode: 'local',
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,
       can_manage: false,
       can_publish_public: false,
-    });
+    }));
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'limited',
@@ -272,14 +353,99 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     expect(screen.queryByDisplayValue(/\/p\/stable-link\/$/)).toBeNull();
   });
 
-  it('keeps explicit custom-link saving while online and Workspace controls stay out', async () => {
-    api.getShowPageAccess.mockResolvedValue({
-      ok: true,
-      mode: 'local',
+  it('keeps the online toggle and custom link out while showing Workspace access', async () => {
+    const organizationAccess = showPageAccess({
+      mode: 'organization',
+      ownership_status: 'unchanged',
+      instance_id: 'inst-1',
+      organization_id: 'org-1',
+      policy_organization_id: 'org-1',
       can_use: true,
       can_manage: true,
       can_publish_public: true,
     });
+    const pending = new Promise(() => undefined);
+    permissionsApi.getPermissions.mockReturnValue(pending);
+    permissionsApi.getResourceAccess.mockReturnValue(pending);
+    api.getShowPageAccess.mockResolvedValue(organizationAccess);
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: 'stable-link',
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: {
+        page_id: 'ses-1',
+        access_mode: 'private',
+        share_id: 'stable-link',
+        revision: 0,
+        normalized_emails: [],
+      },
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={organizationAccess}
+          canManageInstance
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.getByText('Workspace access')).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
+    expect(screen.queryByText('Page online')).toBeNull();
+    expect(api.setShowPageAvailability).not.toHaveBeenCalled();
+  });
+
+  it('shows a Personal ownership conflict through the Workspace control', async () => {
+    const conflict = showPageAccess({
+      mode: 'personal',
+      ownership_status: 'conflict',
+      instance_id: 'inst-1',
+      organization_id: null,
+      policy_organization_id: 'org-other',
+      can_use: true,
+      can_manage: true,
+      can_publish_public: false,
+    });
+    api.getShowPageAccess.mockResolvedValue(conflict);
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: null,
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" initialAccess={conflict} canManageInstance />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByText('This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.')).toBeTruthy();
+    expect(screen.queryByText('This Show Page belongs to a Personal Avibe.')).toBeNull();
+    expect(permissionsApi.getPermissions).not.toHaveBeenCalled();
+    expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
+  });
+
+  it('keeps explicit custom-link saving while online and Workspace controls stay out', async () => {
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
+      can_use: true,
+      can_manage: true,
+      can_publish_public: true,
+    }));
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'public',
@@ -336,7 +502,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       });
     });
     expect(screen.queryByText('Workspace access')).toBeNull();
-    expect(screen.queryByText('Page online')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
     expect(api.setShowPageAvailability).not.toHaveBeenCalled();
   });
@@ -347,13 +512,11 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     let release: (() => void) | null = null;
     api.getShowPageAccess.mockImplementation(
       () => new Promise((resolve) => {
-        release = () => resolve({
-          ok: true,
-          mode: 'local',
+        release = () => resolve(showPageAccess({
           can_use: false,
           can_manage: true,
           can_publish_public: false,
-        });
+        }));
       }),
     );
 

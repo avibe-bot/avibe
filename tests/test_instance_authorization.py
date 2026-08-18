@@ -81,6 +81,8 @@ def test_show_page_email_context_is_exactly_page_scoped() -> None:
             "vibe_show_page_id": "session-one",
         }
     )
+    assert not context.can_read_instance
+    assert context.capability_projection()["can_read_instance"] is False
     assert context.can_use_show_page("session-one")
     assert not context.can_use_show_page("session-two")
     assert not context.can_chat
