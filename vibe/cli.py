@@ -6711,13 +6711,16 @@ def cmd_data_retention(args):
             else:
                 retention_days = days_value
             enabled_value = getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)
-            if isinstance(enabled_value, bool):
+            if isinstance(enabled_value, bool) and not config_recovered:
                 enabled = enabled_value
             else:
-                # A malformed opt-out must surface as disabled/recovery in the
-                # status view, mirroring the controller's fail-closed behavior.
+                # A malformed opt-out — or any earlier recovery/malformed
+                # window that made the controller refuse the policy — must
+                # keep the status view disabled; a valid-looking recovered
+                # default must not overwrite that.
                 enabled = False
-                config_recovered = True
+                if not isinstance(enabled_value, bool):
+                    config_recovered = True
         except Exception:
             # Unreadable/missing config: the controller disables the
             # automatic pass, so the status must not claim it is enabled.
@@ -6726,7 +6729,8 @@ def cmd_data_retention(args):
         if days_override is not None:
             retention_days = int(days_override)
             config_recovered = False
-        if config_recovered and getattr(args, "run", False):
+        should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
+        if config_recovered and should_run:
             print(
                 i18n_t("data.retention.configRecovered", language),
                 file=sys.stderr,
@@ -6734,7 +6738,7 @@ def cmd_data_retention(args):
             return 1
 
         exit_code = 0
-        if getattr(args, "run", False):
+        if should_run:
             payload = agent_events_retention.run_once(
                 engine,
                 retention_days=retention_days,
@@ -15452,9 +15456,10 @@ def build_parser():
         "--compact",
         action="store_true",
         help=(
-            "Also physically compact the database (VACUUM) when safe. Off by default: "
-            "VACUUM holds the database's sole writer lock and can stall the running "
-            "service's writes; run it during a maintenance window or with the service stopped."
+            "Also physically compact the database (VACUUM) when safe; implies --run. "
+            "Off by default: VACUUM holds the database's sole writer lock and can stall "
+            "the running service's writes; run it during a maintenance window or with "
+            "the service stopped."
         ),
     )
     _add_json_noop(data_retention_parser)

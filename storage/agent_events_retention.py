@@ -509,21 +509,63 @@ def run_once(
             result_marker = get_last_run(conn)
         compaction: dict[str, Any] = {"status": "not_attempted"}
         if compact:
+            lease_replaced = {"flag": False}
+
             def _lease_heartbeat() -> bool:
                 # Renewal is skipped while VACUUM holds the writer lock (the
                 # heartbeat treats that OperationalError as retry-later); do
                 # one renewal here so the TTL is fresh when VACUUM begins.
+                # A False return means the token-conditional UPDATE matched
+                # nothing — the lease was replaced. Record it in the flag so
+                # every caller (heartbeat, pre/post renewals) sees the same
+                # definitive-loss signal without an exception the heartbeat
+                # could mistake for a lock conflict.
                 with engine.begin() as conn:
-                    if not renew_lease(conn, token):
-                        raise OperationalError("lease replaced before compaction", None, None)
-                return True
+                    renewed = renew_lease(conn, token)
+                if not renewed:
+                    lease_replaced["flag"] = True
+                return renewed
 
             # Refresh the lease, then compact; a final renewal after VACUUM
             # closes the TTL window for the post-vacuum reporting path.
             _lease_heartbeat()
+            if lease_replaced["flag"]:
+                return {
+                    "status": "ok_with_contested_compaction",
+                    "deleted_rows": result["deleted_rows"],
+                    "batches": result["batches"],
+                    "cutoff": result["cutoff"],
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "last_run": result_marker,
+                    "compaction": {"status": "deferred", "reason": "lease_lost_during_compaction"},
+                }
             compaction = maybe_compact(engine, db_path=db_path, lease_heartbeat=_lease_heartbeat)
+            if lease_replaced["flag"]:
+                # A replacement committed during compaction (heartbeat saw a
+                # definitive token mismatch): report contested, not clean.
+                if str(compaction.get("reason")) != "lease_lost_during_compaction":
+                    compaction = {**compaction, "status": "deferred", "reason": "lease_lost_during_compaction"}
+                return {
+                    "status": "ok_with_contested_compaction",
+                    "deleted_rows": result["deleted_rows"],
+                    "batches": result["batches"],
+                    "cutoff": result["cutoff"],
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "last_run": result_marker,
+                    "compaction": compaction,
+                }
             with engine.begin() as conn:
-                renew_lease(conn, token)
+                renewed_after = renew_lease(conn, token)
+            if not renewed_after:
+                return {
+                    "status": "ok_with_contested_compaction",
+                    "deleted_rows": result["deleted_rows"],
+                    "batches": result["batches"],
+                    "cutoff": result["cutoff"],
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "last_run": result_marker,
+                    "compaction": {"status": "deferred", "reason": "lease_lost_during_compaction"},
+                }
             if str(compaction.get("reason")) == "lease_lost_during_compaction":
                 # Deletion already completed and its marker is written; only
                 # the compaction was contested. Report that distinctly so the

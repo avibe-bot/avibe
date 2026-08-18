@@ -2042,8 +2042,11 @@ class RuntimeConfig:
     # Bounded retention for internal agent trace events (``agent_events`` rows
     # with ``event_type='tool_call'`` and ``visibility='trace'``). These are
     # debug/diagnostic material, never chat messages; without a bound an active
-    # installation grows ``vibe.sqlite`` without limit. ``enabled=False`` is an
-    # explicit opt-out; days below 1 clamp to 1 at the retention service.
+    # installation grows ``vibe.sqlite`` without limit. Default-on: the first
+    # controller startup after upgrading runs a pass that permanently deletes
+    # tool_call traces older than the window — set ``enabled=False`` BEFORE
+    # upgrading to preserve old diagnostics. User docs (en+zh): the
+    # ``vibe data retention`` section of the CLI reference (avibe-docs).
     agent_events_trace_retention_enabled: bool = True
     agent_events_trace_retention_days: int = 30
 
