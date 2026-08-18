@@ -3149,13 +3149,7 @@ def _classify_recorded_child(
         socket_path=socket_path,
         provider_root=provider_root,
     )
-    live_recorded_stamp = (
-        identity.create_time
-        if has_starttime_ticks
-        else identity.wall_create_time
-        if identity.wall_create_time is not None
-        else identity.create_time
-    )
+    live_recorded_stamp = identity.create_time if has_starttime_ticks else identity.wall_create_time
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
     if identity.uid is not None and own_uid is not None and identity.uid != own_uid:

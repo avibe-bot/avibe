@@ -1283,6 +1283,11 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
         (_orphan_record(process), _orphan_identity(process, create_time=None, cmdline=None, uid=None)),
         # The creation time alone is withheld, so pid reuse cannot be ruled out.
         (_orphan_record(process), _orphan_identity(process, create_time=None)),
+        # Linux starttime ticks cannot be compared with a legacy epoch value.
+        (
+            _orphan_record(process),
+            _orphan_identity(process, create_time=424_242.0, wall_create_time=None),
+        ),
     ]
     for record, identity in unverifiable:
         assert verdict(record, identity) is _RecordedSidecar.UNVERIFIABLE, (record, identity)
@@ -1325,23 +1330,6 @@ def test_linux_creation_stamp_reads_starttime_ticks_not_wall_clock(
             return _ORPHAN_CREATE_TIME + 48.0
 
     assert memory_process._process_creation_stamp(_Proc()) == ticks
-
-
-def test_linux_process_identity_keeps_wall_time_for_legacy_records(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ticks = 424_242.0
-    guarded = _guarded_process_class(create_time=_ORPHAN_CREATE_TIME, uid=4_242)
-    monkeypatch.setattr(memory_process.psutil, "Process", guarded)
-    monkeypatch.setattr(memory_process, "_uses_linux_starttime_stamp", lambda: True)
-    monkeypatch.setattr(memory_process, "_read_linux_starttime_ticks", lambda _pid: ticks)
-
-    assert memory_process._inspect_process_identity(_ORPHAN_PID) == _ProcessIdentity(
-        create_time=ticks,
-        cmdline=None,
-        uid=4_242,
-        wall_create_time=_ORPHAN_CREATE_TIME,
-    )
 
 
 def test_parse_proc_stat_starttime_handles_spaces_in_comm() -> None:
