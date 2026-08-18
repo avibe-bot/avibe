@@ -15,6 +15,12 @@ generation they were authored in, and sentences such as "Minimum v5 set" or
 `adapter-interface.py`'s dated header describe what that generation said. Only
 `contract_version` — the value a consumer reads and the closure below guards — moves.
 
+Which of the two a sentence means is not left to the reader. A claim about the current
+value spells `contract_version`, which is the token the closure guard matches, so a bare
+`vN` is a generation name by construction. Prose that restated the number in its own
+words is exactly how `api.md` came to advertise one value in its envelopes and another
+in its own declarations.
+
 The contracts and their consumers must coexist on one tested PR head before Model Hub
 can be enabled. CI evaluates that head, not individual commits. A green intermediate
 commit is not evidence that the complete final protocol has landed.
@@ -90,7 +96,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-The terminal value 6 must coexist in all registered version locations on the same tested head:
+`contract_version` 6 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -112,9 +118,10 @@ The terminal value 6 must coexist in all registered version locations on the sam
 - `ui/src/components/settings/models/*.test.*`
 
 `tests/test_model_hub_config.py::test_every_versioned_object_ends_at_the_terminal_version_the_code_writes`
-enforces the closure over whatever schemas this directory holds rather than over this
-list, so a versioned object added later is covered without an edit here. This list stays
-as the reader's map of where the value is published.
+enforces the closure over whatever files this directory holds rather than over this list
+— versioned objects by their shape, and every `contract_version` a document writes as
+text — so an object or declaration added later is covered without an edit here. This
+list stays as the reader's map of where the value is published.
 
 One object diverges, and only in what it accepts. Every versioned object except
 `TurnProvenance` is an envelope built and consumed inside one request, so it is pinned

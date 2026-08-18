@@ -741,6 +741,26 @@ def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
     assert persisted <= checked
     assert "api-response.schema.json" in checked
 
+    # The schemas above are structured, so their versions are read from the shape.
+    # Every other file beside them publishes the same number as text, and nothing
+    # compared those: `api.md` carried the terminal value in eighteen envelopes
+    # while three of its own declarations still named the previous one, which is
+    # two review rounds spent on one stale sentence at a time. Matching the token
+    # a consumer reads, rather than a list of sentences, is what makes the next
+    # declaration fail here instead of in review — and it is why a claim about the
+    # current value is written as `contract_version <n>` while a bare `vN` names
+    # the generation a sentence was authored in.
+    stated = 0
+    for path in sorted(CONTRACTS.iterdir()):
+        if not path.is_file() or path.name.endswith(".schema.json"):
+            continue
+        for value in re.findall(
+            r"contract_version[^0-9]{0,12}(\d+)", path.read_text(encoding="utf-8")
+        ):
+            stated += 1
+            assert int(value) == terminal, path.name
+    assert stated
+
     # The UI declares the same number as a literal type, and `tsc` is the only
     # thing that would have caught it drifting — one language boundary away from
     # every check above, which is where this bump went half-applied a second time.

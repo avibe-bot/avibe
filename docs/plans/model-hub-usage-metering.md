@@ -548,6 +548,78 @@ owner hands off to the writer exactly once with nothing else in either module re
 anything. A third population cannot be written with its own write lifetime; it inherits
 one or it fails a test.
 
+### Round 10 (head `2520031c4`)
+
+Three findings, and class C a seventh time. The breaker is tripped, so this round starts
+with the diagnosis rather than an edit.
+
+**The class, restated over all seven heads.** Every member has the same shape: *a
+metering fact is recorded later than the moment it became true*, so any ending between
+those two moments loses the row permanently. What moved each round was only which gap
+was left. Heads 1 and 2 and round 3 moved *what* is metered (which populations exist);
+rounds 7 and 8 and 9 moved the *lifetime* of the write (who owns it once it is queued).
+Round 10 is the last remaining gap and a different axis from both: *when the fact is
+published to the object that will be asked for it*.
+
+Concretely, `_TurnExecution.reached_model` derived its answer from two later
+observations — a wire tracker, or a buffered verdict. The gateway adopts the upstream
+body at `turn_gateway.py:619`, then prepares the downstream response, then starts
+reading. A client that disconnects inside `response.prepare()` leaves neither
+observation behind, so cleanup asked a question that had a true answer and got nothing.
+
+**Why a third derivation would not close it.** Rounds 8 and 9 each added a mechanism to
+carry the answer further; round 10's reviewer found the one ending that arrives before
+any mechanism exists. Adding a fourth publication point only moves the gap earlier
+again. The terminal form removes the derivation: *adoption is itself the proof*. The
+gateway holds a body iff the call reached the model, the field is assigned before
+anything downstream can fail, and nothing after it can unset it.
+
+**Verified contract-preserving before shipping.** The pairing looked like a double-count
+risk, because `ResolvedInvocation` (`service.py:279`) carries both a `handle` and an
+`outcome`. `_invoke` (`service.py:4904`) settles it: `if handle.stream is not None:
+return handle, None` — the resolver meters exactly the calls it completed itself, and
+hands over exactly the ones it did not. The two populations are already partitioned by
+`handle.stream is not None`, which is also the condition under which the gateway adopts.
+The new branch is therefore purely additive: it fires only where the row used to be
+dropped.
+
+**Closing the unflagged sibling in the same edit.** The review reached the streaming
+path. The buffered path has the same gap — cancelled mid-`outcome()`, before any verdict
+exists — and `test_a_turn_cancelled_before_it_read_the_body_is_still_a_call_that_happened`
+pins it. Its assertion is the honest one: `requests == 1` with `token_reports == 0`, which
+is how the ledger says the vendor billed a call nobody got to read.
+
+The streaming test is written as an invariant, not a list: it derives its failure points
+from `FakeStreamResponse`'s own `*_error` parameters, so a downstream step that becomes
+failable later is covered when it can fail rather than when someone remembers this test.
+
+**P2 — ledger writes off the shared pool.** `record()` submitted one `asyncio.to_thread`
+job per completed call into the loop's *default* executor, where `BoundedUsageLedger`'s
+lock immediately serialized them across an `fsync`. A burst therefore occupied shared
+workers that unrelated controller work needs, all but one of them waiting, and nothing
+bounded the backlog. The fix owns the serialization instead of suffering it:
+`UsageWriter` is now a queue whose flush takes everything that accumulated during the
+previous write and hands it to `BoundedUsageLedger.record_many` as one transaction, on a
+dedicated single-worker executor. The backlog is bounded by what arrives during one
+fsync however hard the hub is driven, no row is ever dropped, and a batch of ten is
+arithmetically the ten writes it replaces rather than a summary of them.
+
+**P3 — the version-number class, closed rather than patched.** The reviewer flagged
+`api.md`'s declaration that "every versioned nested contract uses terminal version 5"
+while the same file's envelopes advertise 6 — the second contract-version finding on
+this PR. The class is nameable, so the remaining members were enumerated instead of
+waited for: the status header (line 3) and the `RuntimeDependency` note (line 55) made
+the same stale claim and the review had not reached either.
+
+The root cause is that `api.md` is listed under the README's version closure while the
+closure test globbed only `*.schema.json`, so eighteen machine-checkable literals were
+guarded and every prose declaration was not. The fix is one rule plus one guard: a claim
+about the current value is written as `contract_version <n>` — the token the guard
+matches — so a bare `vN` is a generation name by construction, and the closure test now
+reads every non-schema file in the directory. The four legitimately historical `v5`
+sentences the README already blessed stay untouched, and are now distinguishable
+mechanically rather than by judgment.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

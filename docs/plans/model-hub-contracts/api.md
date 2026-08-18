@@ -1,6 +1,6 @@
 # Model Hub — REST API contract
 
-Status: **Normative v5** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 6** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
 Success envelope: `{ok: true, contract_version: 6, ...}`.
 Failure envelope:
@@ -16,8 +16,9 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract use terminal version 5. Model
-Hub has not shipped, so there is no internal contract migration or compatibility path.
+The shared envelope and every versioned nested contract carry `contract_version` 6, the
+terminal value. Model Hub has not shipped, so there is no internal contract migration or
+compatibility path.
 
 ## Route table
 
@@ -52,7 +53,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v5; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 

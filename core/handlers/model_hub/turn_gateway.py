@@ -88,6 +88,9 @@ class _TurnExecution:
     """Resources and settlement state owned by one gateway request boundary."""
 
     resolved: ResolvedInvocation | None = None
+    # Set the moment this gateway takes the upstream body, which is also the
+    # moment it takes the call's metering from the resolver. Assigned before
+    # anything downstream can fail, so it outlives every ending after it.
     handle: InvokeHandle | None = None
     settlement_task: asyncio.Task[tuple[RawCallOutcome | None, HandleSettlement]] | None = None
     settlement_origin: HandleTerminationOrigin | None = None
@@ -105,7 +108,7 @@ class _TurnExecution:
     # The writer-owned task that persists this turn's row, and by its existence
     # the record that this turn has already been metered. A flag would only say
     # the write was started by something whose own death could still take it.
-    usage_write: asyncio.Task[None] | None = None
+    usage_write: asyncio.Future[None] | None = None
 
     @property
     def reported_usage(self) -> ProtocolUsageReport | None:
@@ -135,11 +138,27 @@ class _TurnExecution:
         body: a complete model answer was served upstream exactly as a stream that
         reached its terminal was, and an error envelope reached no model exactly as
         a stream that forwarded no output did.
+
+        Both halves are observations *of the body*, and the turn can end before
+        either one exists: the gateway adopts the body first, and only then
+        prepares the downstream response and starts reading. A client that goes
+        away in that gap leaves no wire tracker and no buffered verdict behind,
+        so the last answer is the adoption itself — which is both the earliest
+        moment the question is answerable and the last one that cannot fail.
+        It is an answer, not a guess: the engine hands this gateway a body only
+        after the prelude observed the first model output, or for a call it had
+        already completed upstream, and it keeps every other call to meter in
+        the resolver. An adopted body is therefore a call the vendor billed, and
+        `token_reports` staying at zero is how the ledger says nobody got to
+        read its tokens. Later evidence still overrules this, so it decides only
+        for the endings that collected none.
         """
 
         if self.wire_state is not None:
             return self.wire_state.reached_model
-        return self.buffered_outcome == "served"
+        if self.buffered_outcome is not None:
+            return self.buffered_outcome == "served"
+        return self.handle is not None
 
 
 @dataclass(frozen=True)

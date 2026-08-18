@@ -25,9 +25,11 @@ import logging
 import os
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Final, Optional
+from typing import Callable, Final, Optional, Sequence
 
 from .identifiers import canonical_model_id
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
@@ -342,42 +344,68 @@ class BoundedUsageLedger:
         metered later than the write that records it.
         """
 
+        self.record_many((UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at),))
+
+    def record_many(self, calls: Sequence["UsageCall"]) -> None:
+        """Fold a batch of metered calls into their days' rows in one transaction.
+
+        The batch is the reason a backlog cannot grow: one read, one retention
+        pass and one fsync serve however many calls arrived while the previous
+        batch was being written, so the queue drains in bursts of whatever size
+        it reached rather than one durable write at a time. Folding is what makes
+        that safe — every call still lands in its own day's row with its own
+        stamp, so a batch of ten is arithmetically the ten separate writes it
+        replaces, never a summary of them.
+
+        One `persisted_at` reading covers the batch, for the same reason `record`
+        takes its own: it is the moment these calls reached the disk, and none of
+        them was metered later than that.
+        """
+
+        if not calls:
+            return
         with self._lock:
             persisted_at = _aware(self._now())
-            metered_at = min(_aware(at), persisted_at)
-            increment = _normalize_row(
-                {
-                    "day": local_usage_day(metered_at).isoformat(),
-                    "source_id": source_id,
-                    "model_id": model_id,
-                    "requests": 1,
-                    "token_reports": 1 if usage is not None else 0,
-                    "input_tokens": usage.input_tokens if usage else 0,
-                    "cached_input_tokens": usage.cached_input_tokens if usage else 0,
-                    "output_tokens": usage.output_tokens if usage else 0,
-                    "last_metered_at": metered_at.isoformat(),
-                }
-            )
-            if increment is None:
-                # Unreachable for anything the hub admits: both boundaries that
-                # accept a model id store the canonical form this row is keyed by.
-                # Loud rather than silent so a future boundary that forgets shows
-                # up as lost metering instead of as a quietly incomplete tab.
-                logger.warning(
-                    "Model Hub usage metering skipped a call with an unusable identifier",
-                    extra={"source_id_usable": canonical_model_id(source_id) is not None},
-                )
-                return
             rows = {_row_key(row): row for row in self._read()}
-            existing = rows.get(_row_key(increment))
-            if existing is None:
-                rows[_row_key(increment)] = increment
-            else:
-                _accumulate(existing, increment)
-                existing["last_metered_at"] = _newer_timestamp(
-                    existing["last_metered_at"],
-                    increment["last_metered_at"],
+            folded = False
+            for call in calls:
+                metered_at = min(_aware(call.at), persisted_at)
+                usage = call.usage
+                increment = _normalize_row(
+                    {
+                        "day": local_usage_day(metered_at).isoformat(),
+                        "source_id": call.source_id,
+                        "model_id": call.model_id,
+                        "requests": 1,
+                        "token_reports": 1 if usage is not None else 0,
+                        "input_tokens": usage.input_tokens if usage else 0,
+                        "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+                        "output_tokens": usage.output_tokens if usage else 0,
+                        "last_metered_at": metered_at.isoformat(),
+                    }
                 )
+                if increment is None:
+                    # Unreachable for anything the hub admits: both boundaries that
+                    # accept a model id store the canonical form this row is keyed by.
+                    # Loud rather than silent so a future boundary that forgets shows
+                    # up as lost metering instead of as a quietly incomplete tab.
+                    logger.warning(
+                        "Model Hub usage metering skipped a call with an unusable identifier",
+                        extra={"source_id_usable": canonical_model_id(call.source_id) is not None},
+                    )
+                    continue
+                existing = rows.get(_row_key(increment))
+                if existing is None:
+                    rows[_row_key(increment)] = increment
+                else:
+                    _accumulate(existing, increment)
+                    existing["last_metered_at"] = _newer_timestamp(
+                        existing["last_metered_at"],
+                        increment["last_metered_at"],
+                    )
+                folded = True
+            if not folded:
+                return
             retained = self._retained(list(rows.values()), persisted_at)
             self._write(retained)
 
@@ -485,20 +513,69 @@ class BoundedUsageLedger:
         }
 
 
+_LEDGER_EXECUTOR_LOCK: Final = threading.Lock()
+_LEDGER_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
+def _ledger_executor() -> ThreadPoolExecutor:
+    """The one thread ledger writes run on, created when something is first metered.
+
+    Deliberately not the loop's default executor. `record_many` holds the ledger's
+    lock across an fsync, so submitting one job per completed call there would
+    occupy that many shared workers while all but one waited on the lock — and
+    whatever else in the process reaches for a thread would wait behind metering
+    for no gain, since the lock admits one writer regardless. Owning the
+    serialization makes it explicit instead of emergent, and it costs a single
+    idle thread once anything has been metered at all.
+    """
+
+    global _LEDGER_EXECUTOR
+    with _LEDGER_EXECUTOR_LOCK:
+        if _LEDGER_EXECUTOR is None:
+            _LEDGER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-hub-usage")
+        return _LEDGER_EXECUTOR
+
+
+@dataclass(frozen=True)
+class UsageCall:
+    """One metered upstream call, in the shape the ledger folds it in."""
+
+    source_id: str
+    model_id: str
+    usage: Optional[ProtocolUsageReport]
+    at: datetime
+
+
+@dataclass
+class _QueuedCall:
+    call: UsageCall
+    done: "asyncio.Future[None]"
+
+
 class UsageWriter:
     """Async ownership of every ledger write, so nothing can take one along.
 
     Metering has two populations — a call either hands its body onward or it does
     not — but the property that a queued write outlives whatever queued it belongs
-    to neither of them. It lives here once. A write is this object's task from the
+    to neither of them. It lives here once. A write is this object's from the
     moment it exists, so a caller cancelled mid-flight loses its own ordering and
     never the row, and a population added later inherits that by construction
     rather than by remembering to.
+
+    Queue, not fan-out. Calls accumulate while the flush ahead of them is on
+    disk, and the next flush takes all of them in one transaction, so the backlog
+    is bounded by what arrives during a single fsync however hard the hub is
+    driven — without a capacity to pick, and without ever dropping a row, which
+    would lose exactly the billed usage this module exists to keep.
     """
 
     def __init__(self, ledger: BoundedUsageLedger):
         self.ledger = ledger
-        self._writes: set[asyncio.Task[None]] = set()
+        self._pending: list[_QueuedCall] = []
+        # The batch on its way to disk, kept visible so a drain that times out
+        # can count it: in the executor is not the same as persisted.
+        self._writing: list[_QueuedCall] = []
+        self._flush: Optional[asyncio.Task[None]] = None
 
     def record(
         self,
@@ -507,59 +584,75 @@ class UsageWriter:
         model_id: str,
         usage: Optional[ProtocolUsageReport],
         at: datetime,
-    ) -> "asyncio.Task[None]":
-        """Own one write and start it, handing back the task that will finish it.
+    ) -> "asyncio.Future[None]":
+        """Own one call and queue it, handing back what will finish it.
 
         Synchronous on purpose: nothing may suspend between a caller deciding to
         meter a call and this object owning the result, or a cancellation could
         land in a window where the call is neither metered nor still meterable.
 
-        A caller that wants the row on disk before it returns awaits the task
+        `at` is the caller's own reading from when its call ended, carried rather
+        than re-read, because the flush that persists this can start well after
+        it and a queued write is still a report about the moment it finished.
+
+        A caller that wants the row on disk before it returns awaits the result
         through `asyncio.shield`; one that does not can simply drop it.
         """
 
-        write = asyncio.create_task(
-            self._persist(source_id=source_id, model_id=model_id, usage=usage, at=at)
+        queued = _QueuedCall(
+            call=UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at),
+            done=asyncio.get_running_loop().create_future(),
         )
-        self._writes.add(write)
-        write.add_done_callback(self._writes.discard)
-        return write
+        self._pending.append(queued)
+        if self._flush is None or self._flush.done():
+            self._flush = asyncio.create_task(self._flush_pending())
+        return queued.done
+
+    @property
+    def unpersisted(self) -> int:
+        """How many metered calls this writer still owes the ledger.
+
+        Queued and in-flight both count: handed to the writing thread is not the
+        same as on disk.
+        """
+
+        return len(self._pending) + len(self._writing)
 
     async def drain(self, *, timeout: float) -> int:
-        """Wait out the writes still in flight; answers how many did not finish.
+        """Wait out the calls still queued; answers how many did not reach disk.
 
         Bounded, because a ledger that cannot be reached must not hold a shutdown
         open — the same trade every owned drain in the hub makes.
         """
 
-        pending = tuple(self._writes)
-        if not pending:
-            return 0
-        _done, unfinished = await asyncio.wait(pending, timeout=timeout)
-        return len(unfinished)
+        flush = self._flush
+        if flush is not None and not flush.done():
+            await asyncio.wait((flush,), timeout=timeout)
+        return self.unpersisted
 
-    async def _persist(
-        self,
-        *,
-        source_id: str,
-        model_id: str,
-        usage: Optional[ProtocolUsageReport],
-        at: datetime,
-    ) -> None:
-        """Run one ledger write off the loop, absorbing whatever it costs.
+    async def _flush_pending(self) -> None:
+        """Write queued calls a batch at a time until nothing is left waiting.
 
-        `at` is captured by the caller when its call ended, not read here: this
-        coroutine can start well after that, and a queued write is still a report
-        about the moment the call finished.
+        The loop ends only with the queue empty and without having awaited since
+        it saw that, which is what lets `record` treat a finished flush as proof
+        that it must start the next one.
         """
 
-        try:
-            await asyncio.to_thread(
-                self.ledger.record,
-                source_id=source_id,
-                model_id=model_id,
-                usage=usage,
-                at=at,
-            )
-        except (OSError, ValueError) as exc:
-            logger.debug("Model Hub usage metering skipped one call: %s", exc)
+        loop = asyncio.get_running_loop()
+        while self._pending:
+            batch = self._pending
+            self._pending = []
+            self._writing = batch
+            try:
+                await loop.run_in_executor(
+                    _ledger_executor(),
+                    self.ledger.record_many,
+                    tuple(queued.call for queued in batch),
+                )
+            except (OSError, ValueError) as exc:
+                logger.debug("Model Hub usage metering skipped %d call(s): %s", len(batch), exc)
+            finally:
+                self._writing = []
+            for queued in batch:
+                if not queued.done.done():
+                    queued.done.set_result(None)

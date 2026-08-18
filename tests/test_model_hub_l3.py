@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,7 +73,7 @@ from core.handlers.model_hub.turn_gateway import (
     render_protocol_terminal_event,
 )
 from core.handlers.model_hub.stream_wire import ProtocolUsageReport
-from core.handlers.model_hub.usage import BoundedUsageLedger
+from core.handlers.model_hub.usage import BoundedUsageLedger, _ledger_executor
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -847,6 +849,30 @@ class BrokenUpstreamInvokeHandle:
 
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
+
+
+@contextmanager
+def _occupied_ledger_writer():
+    """Hold the one thread ledger writes run on, so a queued write cannot start.
+
+    That is the window where cancelling whoever awaits a write used to cancel the
+    write itself, and it is only reachable while the writing thread is busy.
+    """
+
+    occupied = threading.Event()
+    release = threading.Event()
+
+    def occupy() -> None:
+        occupied.set()
+        release.wait(5)
+
+    occupant = _ledger_executor().submit(occupy)
+    assert occupied.wait(5)
+    try:
+        yield
+    finally:
+        release.set()
+        occupant.result(timeout=5)
 
 
 class FakeStreamResponse:
@@ -6357,27 +6383,13 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
 ) -> None:
     """Review 4964754924: the gateway owns the write, so no ending can cancel it.
 
-    Occupy the loop's only executor thread and the ledger write is queued but not
-    started — the window where cancelling the awaiting task also cancels the work.
-    The turn dies there, and the row still lands, because what the turn owns is
-    the decision to meter and not the write that carries it out.
+    Occupy the writing thread and the ledger write is queued but not started —
+    the window where cancelling the awaiting task also cancels the work. The turn
+    dies there, and the row still lands, because what the turn owns is the
+    decision to meter and not the write that carries it out.
     """
 
     async def exercise() -> None:
-        loop = asyncio.get_running_loop()
-        executor = ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(executor)
-        occupied = threading.Event()
-        release = threading.Event()
-
-        def occupy() -> None:
-            occupied.set()
-            release.wait(5)
-
-        occupant = loop.run_in_executor(executor, occupy)
-        while not occupied.is_set():
-            await asyncio.sleep(0.01)
-
         source = _source("src_meterown01", "Owned write")
         service = _service(
             tmp_path,
@@ -6399,20 +6411,18 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
             stream=False,
         )
 
-        turn = asyncio.create_task(gateway._handle_request(request))
-        while not gateway._usage_writer._writes:
-            await asyncio.sleep(0.01)
-        # The scenario is only the scenario while the write is still queued.
-        assert _usage_of(service, source.id) == {}
+        with _occupied_ledger_writer():
+            turn = asyncio.create_task(gateway._handle_request(request))
+            while not gateway._usage_writer.unpersisted:
+                await asyncio.sleep(0.01)
+            # The scenario is only the scenario while the write is still queued.
+            assert _usage_of(service, source.id) == {}
 
-        turn.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(turn, timeout=5)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(turn, timeout=5)
 
-        release.set()
-        await occupant
         await gateway.close()
-        executor.shutdown()
 
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 1
@@ -6428,26 +6438,12 @@ def test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it(
     """Review 4964894667: the same window at the other metering owner.
 
     A call the resolver consumed itself still reports tokens the vendor billed.
-    Occupy the loop's only executor thread and its row is queued but not started;
-    the caller is cancelled there, and the row lands anyway. Neither owner keeps
-    a write of its own, so neither can lose one — `UsageWriter` holds both.
+    Occupy the writing thread and its row is queued but not started; the caller
+    is cancelled there, and the row lands anyway. Neither owner keeps a write of
+    its own, so neither can lose one — `UsageWriter` holds both.
     """
 
     async def exercise() -> None:
-        loop = asyncio.get_running_loop()
-        executor = ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(executor)
-        occupied = threading.Event()
-        release = threading.Event()
-
-        def occupy() -> None:
-            occupied.set()
-            release.wait(5)
-
-        occupant = loop.run_in_executor(executor, occupy)
-        while not occupied.is_set():
-            await asyncio.sleep(0.01)
-
         source = _source("src_meterown02", "Owned resolve write")
         service = _service(
             tmp_path,
@@ -6467,35 +6463,111 @@ def test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it(
         )
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
 
-        resolve = asyncio.create_task(
-            service.resolve(
-                backend="codex",
-                model_id=requested_model,
-                request=ModelHubRequest(
-                    {"model": requested_model, "input": "ping"},
-                    protocol="openai_responses",
-                ),
-                supply_channel="hub",
+        with _occupied_ledger_writer():
+            resolve = asyncio.create_task(
+                service.resolve(
+                    backend="codex",
+                    model_id=requested_model,
+                    request=ModelHubRequest(
+                        {"model": requested_model, "input": "ping"},
+                        protocol="openai_responses",
+                    ),
+                    supply_channel="hub",
+                )
             )
-        )
-        while not service.usage_writer._writes:
-            await asyncio.sleep(0.01)
-        # The scenario is only the scenario while the write is still queued.
-        assert _usage_of(service, source.id) == {}
+            while not service.usage_writer.unpersisted:
+                await asyncio.sleep(0.01)
+            # The scenario is only the scenario while the write is still queued.
+            assert _usage_of(service, source.id) == {}
 
-        resolve.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(resolve, timeout=5)
+            resolve.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(resolve, timeout=5)
 
-        release.set()
-        await occupant
         assert await service.usage_writer.drain(timeout=5) == 0
-        executor.shutdown()
 
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 1
         assert metered["input_tokens"] == 512
         assert metered["output_tokens"] == 16
+
+    asyncio.run(exercise())
+
+
+def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded(
+    tmp_path: Path,
+) -> None:
+    """Review 4965076681: the writes queue on their own thread, a batch at a time.
+
+    `record_many` holds the ledger's lock across an fsync, so one shared-pool job
+    per completed call would park that many workers on a lock that admits one,
+    and unrelated `asyncio.to_thread` work would wait behind metering for nothing.
+    Hold the loop's default executor for the whole test and metering still lands:
+    it was never borrowing from there.
+
+    What bounds the queue is in the same run. Calls that arrive while a flush is
+    on disk are taken together by the next one, so a burst costs transactions in
+    proportion to how long the disk takes rather than to how hard the hub is
+    driven — and every row still lands, which dropping them would not do.
+    """
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        shared = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(shared)
+        borrowed_started = threading.Event()
+        give_back = threading.Event()
+
+        def borrow() -> None:
+            borrowed_started.set()
+            give_back.wait(5)
+
+        borrower = loop.run_in_executor(shared, borrow)
+        assert borrowed_started.wait(5)
+
+        source = _source("src_meterburst1", "Burst")
+        service = _service(tmp_path, sources=[source])
+        transactions: list[int] = []
+        fold = service.usage.record_many
+
+        def counting(calls) -> None:
+            transactions.append(len(calls))
+            fold(calls)
+
+        service.usage.record_many = counting
+        writer = service.usage_writer
+
+        def meter() -> None:
+            writer.record(
+                source_id=source.id,
+                model_id="gpt-5-codex",
+                usage=ProtocolUsageReport.of(
+                    input_tokens=1, cached_input_tokens=0, output_tokens=1
+                ),
+                at=NOW,
+            )
+
+        with _occupied_ledger_writer():
+            meter()
+            # White-box on purpose: the batch boundary is the thing under test,
+            # and it is only observable once the first flush is holding one.
+            while not writer._writing:
+                await asyncio.sleep(0.01)
+            for _ in range(7):
+                meter()
+
+        assert await writer.drain(timeout=5) == 0
+        # Eight calls, two trips to disk — the second took every call that piled
+        # up behind the first, which is the whole of the bound.
+        assert transactions == [1, 7]
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 8
+        assert metered["input_tokens"] == 8
+
+        give_back.set()
+        await borrower
+        shared.shutdown()
 
     asyncio.run(exercise())
 
@@ -6520,6 +6592,112 @@ def test_no_ending_of_a_turn_decides_for_itself_what_the_call_did() -> None:
 
     assert calls, "the gateway must still meter the calls whose body it forwards"
     assert all(len(call.args) == 1 and not call.keywords for call in calls)
+
+
+def test_no_downstream_ending_after_adoption_can_drop_the_turn_from_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """Review 4965076681: the gateway takes the body before it can serve it.
+
+    Between adopting the upstream body and reading it, the gateway prepares a
+    downstream response — and a client that leaves in that gap leaves behind
+    neither a wire tracker nor a buffered verdict for the boundary to read. The
+    vendor billed the call either way, so what the ledger must not depend on is
+    *where* the turn died.
+
+    Driven off `FakeStreamResponse`'s own failure points instead of a list of
+    them: a downstream step that becomes failable later is covered the moment it
+    can fail, rather than the moment someone remembers this test.
+    """
+
+    failure_points = [
+        name for name in inspect.signature(FakeStreamResponse).parameters if name.endswith("_error")
+    ]
+    assert failure_points
+
+    async def exercise(point: str) -> None:
+        state = tmp_path / point
+        state.mkdir()
+        source = _source("src_meterdrop01", "Adopted body")
+        service = _service(
+            state,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=f"turn_meter_{point}",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(**{point: ConnectionResetError("client left")}),
+        ):
+            with pytest.raises(ConnectionError):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=5)
+        await gateway.close()
+
+        assert _usage_of(service, source.id).get("requests") == 1, point
+
+    for point in failure_points:
+        asyncio.run(exercise(point))
+
+
+def test_a_turn_cancelled_before_it_read_the_body_is_still_a_call_that_happened(
+    tmp_path: Path,
+) -> None:
+    """The same gap on the buffered path, which the review did not reach.
+
+    A non-streaming turn adopts the whole body and reads it in one go, so a
+    client that disconnects while that read is in flight leaves the boundary
+    exactly as empty-handed as the prepare gap does. Same adoption, same answer,
+    and `token_reports` at zero is the ledger saying nobody got to read the
+    tokens rather than that there were none.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterdrain01", "Adopted buffered body")
+        handle = BlockingLiveInvokeHandle(
+            _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id)
+        )
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_cancelled_drain",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(handle.started.wait(), timeout=5)
+        # The scenario is only the scenario while nothing has been read yet.
+        assert _usage_of(service, source.id) == {}
+
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=5)
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
 
 
 def test_gateway_meters_a_failed_turn_that_upstream_already_billed(
@@ -6812,7 +6990,7 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
     async def exercise() -> None:
         recording_threads: list[int] = []
 
-        def capture(**_kwargs: object) -> None:
+        def capture(_calls: object) -> None:
             recording_threads.append(threading.get_ident())
 
         resolver_source = _source("src_meterloop01", "Resolver owner")
@@ -6832,7 +7010,7 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
                 )
             ],
         )
-        resolver_service.usage.record = capture
+        resolver_service.usage.record_many = capture
         requested_model = _canonicalize_fixed_test_routes(resolver_service)["codex"]
         await resolver_service.resolve(
             backend="codex",
@@ -6857,7 +7035,7 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
                 )
             ],
         )
-        gateway_service.usage.record = capture
+        gateway_service.usage.record_many = capture
         gateway_model = _canonicalize_fixed_test_routes(gateway_service)["codex"]
         gateway = ModelHubTurnGateway(gateway_service)
         await gateway._handle_request(
@@ -6892,7 +7070,7 @@ def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) ->
                 )
             ],
         )
-        service.usage.record = Mock(side_effect=OSError("read-only state directory"))
+        service.usage.record_many = Mock(side_effect=OSError("read-only state directory"))
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         gateway = ModelHubTurnGateway(service)
         request = _prepared_gateway_request(
@@ -6907,7 +7085,7 @@ def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) ->
 
         assert result.status == 200
         assert result.body == body
-        service.usage.record.assert_called_once()
+        service.usage.record_many.assert_called_once()
         assert service.store.load().sources[0].state.status == "standby"
 
     asyncio.run(exercise())

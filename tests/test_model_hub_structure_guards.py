@@ -313,7 +313,7 @@ def _ledger_writes(tree: ast.AST) -> tuple[ast.Attribute, ...]:
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and node.attr == "record"
+        and node.attr in {"record", "record_many"}
         and isinstance(node.value, ast.Attribute)
         and node.value.attr in {"usage", "ledger"}
     )
@@ -543,7 +543,7 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
         for node in ast.walk(_tree(USAGE))
         if isinstance(node, ast.ClassDef) and node.name == "UsageWriter"
     )
-    persist = _functions(writer)["_persist"]
+    persist = _functions(writer)["_flush_pending"]
     writes = _ledger_writes(writer)
     assert writes
     assert all(write in set(ast.walk(persist)) for write in writes)
