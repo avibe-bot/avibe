@@ -284,6 +284,38 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByText('permissions.states.deniedTitle')).toBeNull();
   });
 
+  it.each([
+    [409, 'permissions_not_paired', 'permissions.states.unavailableTitle'],
+    [409, 'permissions_pairing_changed', 'permissions.states.unavailableTitle'],
+    [401, 'invalid_device_secret', 'permissions.states.unavailableTitle'],
+    [403, 'instance_access_forbidden', 'permissions.states.deniedTitle'],
+  ] as const)('clears the ready projection after authoritative %s/%s refresh failure', async (
+    status,
+    code,
+    terminalTitle,
+  ) => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockRejectedValueOnce(new PermissionsApiError(status, { error: code }));
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('owner@example.com')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'permissions.actions.addAccess' })).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+
+    expect(screen.getByText(terminalTitle)).toBeTruthy();
+    expect(screen.queryByText('owner@example.com')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'permissions.actions.addAccess' })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+  });
+
   it('refreshes a live applying policy until it converges', async () => {
     vi.useFakeTimers();
     const applying = response();

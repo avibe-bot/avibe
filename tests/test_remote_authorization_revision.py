@@ -19,6 +19,7 @@ from config.v2_config import (
 )
 from tests.ui_server_test_helpers import csrf_headers
 from storage import remote_access_authorization_service
+from storage.lock import MigrationLockTimeout
 from vibe import remote_access, ui_server
 from vibe.authorization import context_from_session_payload
 from vibe.ui_compat import g
@@ -1023,9 +1024,11 @@ def test_authorization_revision_cache_observes_another_process_watermark(
     ) == "mismatch"
 
 
+@pytest.mark.parametrize("persistence_failure", ("write_error", "lock_timeout"))
 def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
     monkeypatch,
     tmp_path,
+    persistence_failure,
 ):
     config = _paired_config(tmp_path)
     monkeypatch.setattr(
@@ -1033,11 +1036,21 @@ def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
         "_device_json_request",
         lambda *_args, **_kwargs: {"authorization_revision": 42},
     )
-    monkeypatch.setattr(
-        remote_access.runtime,
-        "write_json",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
-    )
+    if persistence_failure == "write_error":
+        monkeypatch.setattr(
+            remote_access.runtime,
+            "write_json",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+        )
+    else:
+        def timed_out_lock(_path):
+            raise MigrationLockTimeout("watermark lock timed out")
+
+        monkeypatch.setattr(
+            remote_access,
+            "_authorization_revision_file_lock",
+            timed_out_lock,
+        )
 
     assert remote_access.sync_authorization_revision_once(config) == {
         "ok": False,

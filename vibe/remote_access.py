@@ -819,7 +819,7 @@ def _install_authorization_revision(
                     },
                 )
                 file_signature = _authorization_revision_file_signature(state_path)
-        except OSError:
+        except (OSError, TimeoutError):
             if persistence_required:
                 raise
             if previous_revision is not None and revision < previous_revision:

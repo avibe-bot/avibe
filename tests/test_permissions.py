@@ -14,6 +14,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from storage.lock import MigrationLockTimeout
 from tests.ui_server_test_helpers import (
     csrf_headers,
     remote_peer,
@@ -1408,9 +1409,11 @@ def test_permissions_mutations_advance_and_publish_the_authorization_watermark(
 
 
 @pytest.mark.parametrize("operation", ("authorized_users", "project_access"))
+@pytest.mark.parametrize("persistence_failure", ("write_error", "lock_timeout"))
 def test_committed_permissions_mutations_survive_watermark_persistence_failure(
     monkeypatch,
     operation: str,
+    persistence_failure: str,
 ) -> None:
     config = _config()
     projection = _complete_projection()
@@ -1423,11 +1426,21 @@ def test_committed_permissions_mutations_survive_watermark_persistence_failure(
         "publish",
         lambda event_type, data: published.append((event_type, data)),
     )
-    monkeypatch.setattr(
-        remote_access.runtime,
-        "write_json",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
-    )
+    if persistence_failure == "write_error":
+        monkeypatch.setattr(
+            remote_access.runtime,
+            "write_json",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+        )
+    else:
+        def timed_out_lock(_path):
+            raise MigrationLockTimeout("watermark lock timed out")
+
+        monkeypatch.setattr(
+            remote_access,
+            "_authorization_revision_file_lock",
+            timed_out_lock,
+        )
     updated_entries = [
         {"kind": "email", "value": "new@example.com", "role": "editor"}
     ]

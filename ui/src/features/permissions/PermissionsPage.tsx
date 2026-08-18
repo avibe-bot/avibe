@@ -77,6 +77,7 @@ type PageState =
 type PageLoadResult = {
   state: Exclude<PageState, { kind: 'loading' }>;
   response: PermissionsResponse | null;
+  canPreserveReady: boolean;
 };
 
 type AuthoritativeRefreshResult =
@@ -88,15 +89,27 @@ type AuthoritativeRefresh = () => Promise<AuthoritativeRefreshResult>;
 
 const POLICY_REFRESH_INTERVAL_MS = 2_000;
 const POLICY_REFRESH_MAX_ATTEMPTS = 30;
+const RETRYABLE_PERMISSIONS_STATUSES = new Set([408, 425, 429]);
+
+const isTransientPermissionsFailure = (error: PermissionsApiError | null): boolean => (
+  error === null
+  || error.offline
+  || RETRYABLE_PERMISSIONS_STATUSES.has(error.status)
+  || error.status >= 500
+);
 
 async function fetchPermissionsPage(): Promise<PageLoadResult> {
   try {
     const response = await getPermissions();
-    return { state: { kind: 'ready', response }, response };
+    return { state: { kind: 'ready', response }, response, canPreserveReady: false };
   } catch (caught) {
     const error = caught instanceof PermissionsApiError ? caught : null;
     if (error?.code === 'instance_access_forbidden') {
-      return { state: { kind: 'denied', code: error.code }, response: null };
+      return {
+        state: { kind: 'denied', code: error.code },
+        response: null,
+        canPreserveReady: false,
+      };
     }
     return {
       state: {
@@ -105,6 +118,7 @@ async function fetchPermissionsPage(): Promise<PageLoadResult> {
         offline: error?.offline === true,
       },
       response: null,
+      canPreserveReady: isTransientPermissionsFailure(error),
     };
   }
 }
@@ -854,7 +868,7 @@ export function PermissionsPage() {
           : { kind: 'failed' };
       }
       if (!result.response) {
-        if (!preserveReady) installPageResult(result);
+        if (!preserveReady || !result.canPreserveReady) installPageResult(result);
         return { kind: 'failed' };
       }
       const accepted = installReadyResponse(result.response);
