@@ -504,8 +504,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
-    if (bypassSetupGuard) return children;
-    if (guardStatus === 'needs-setup') {
+    if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
         if (location.pathname === '/setup' && authorizationSession) {
             return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
         }
@@ -526,6 +525,10 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         return <Navigate to="/setup" replace />;
     }
     if (!authorizationSession) {
+        // Diagnostics / Logs remain reachable before a session exists so an
+        // unfinished install can still inspect doctor output. Once the session
+        // lands, wrap it so AppShell does not treat the owner as denied.
+        if (bypassSetupGuard) return children;
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
     return (
