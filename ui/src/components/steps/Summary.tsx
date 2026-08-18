@@ -386,6 +386,14 @@ const countConfiguredChannels = (channelConfigsByPlatform: Record<string, Record
 const buildConfigPayload = (data: any) => {
   const agents = data.agents || {};
   const enabledPlatforms = getEnabledPlatforms(data);
+  // Platform sections the user actually configured during THIS wizard
+  // run — untouched sections are left to their owners so a concurrent
+  // update (e.g. a WeChat QR token) is never overwritten by the
+  // wizard's mount-time snapshot.
+  const editedSections: string[] = Array.isArray(data.__wizardEditedSections)
+    ? data.__wizardEditedSections
+    : [];
+  const sectionFilter = (key: string): boolean => editedSections.includes(key);
   // Deselection encoding — see Wizard.tsx: baseline platforms the wizard
   // no longer selects become remove operations; concurrent additions by
   // other processes are preserved by construction.
@@ -402,40 +410,60 @@ const buildConfigPayload = (data: any) => {
     },
     mode: data.mode || 'self_host',
     version: 'v2',
-    slack: {
-      ...withSecretDrafts(data.slack, {
-        bot_token: data.slack?.bot_token,
-        app_token: data.slack?.app_token,
-      }),
-      require_mention: data.slack?.require_mention || false,
-    },
-    discord: {
-      ...withSecretDraft(data.discord, 'bot_token', data.discord?.bot_token),
-      require_mention: data.discord?.require_mention || false,
-    },
-    telegram: {
-      ...withSecretDraft(data.telegram, 'bot_token', data.telegram?.bot_token),
-      require_mention: data.telegram?.require_mention ?? true,
-      forum_auto_topic: data.telegram?.forum_auto_topic ?? true,
-      use_webhook: data.telegram?.use_webhook ?? false,
-    },
-    lark: (() => {
-      const lark = data.lark || {};
-      const appId = lark.app_id || '';
-      const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
-      const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
-      return {
-        ...withSecretDraft(base, 'app_secret', lark.app_secret),
-        app_id: appId,
-        domain: lark.domain || 'feishu',
-        require_mention: lark.require_mention || false,
-      };
-    })(),
-    wechat: {
-      ...withSecretDraft(data.wechat, 'bot_token', data.wechat?.bot_token),
-      base_url: data.wechat?.base_url || '',
-      require_mention: data.wechat?.require_mention || false,
-    },
+    ...(sectionFilter('slack')
+      ? {
+          slack: {
+            ...withSecretDrafts(data.slack, {
+              bot_token: data.slack?.bot_token,
+              app_token: data.slack?.app_token,
+            }),
+            require_mention: data.slack?.require_mention || false,
+          },
+        }
+      : {}),
+    ...(sectionFilter('discord')
+      ? {
+          discord: {
+            ...withSecretDraft(data.discord, 'bot_token', data.discord?.bot_token),
+            require_mention: data.discord?.require_mention || false,
+          },
+        }
+      : {}),
+    ...(sectionFilter('telegram')
+      ? {
+          telegram: {
+            ...withSecretDraft(data.telegram, 'bot_token', data.telegram?.bot_token),
+            require_mention: data.telegram?.require_mention ?? true,
+            forum_auto_topic: data.telegram?.forum_auto_topic ?? true,
+            use_webhook: data.telegram?.use_webhook ?? false,
+          },
+        }
+      : {}),
+    ...(sectionFilter('lark')
+      ? {
+          lark: (() => {
+            const lark = data.lark || {};
+            const appId = lark.app_id || '';
+            const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
+            const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
+            return {
+              ...withSecretDraft(base, 'app_secret', lark.app_secret),
+              app_id: appId,
+              domain: lark.domain || 'feishu',
+              require_mention: lark.require_mention || false,
+            };
+          })(),
+        }
+      : {}),
+    ...(sectionFilter('wechat')
+      ? {
+          wechat: {
+            ...withSecretDraft(data.wechat, 'bot_token', data.wechat?.bot_token),
+            base_url: data.wechat?.base_url || '',
+            require_mention: data.wechat?.require_mention || false,
+          },
+        }
+      : {}),
     runtime: {
       default_cwd: data.default_cwd || data.runtime?.default_cwd || '_tmp',
     },

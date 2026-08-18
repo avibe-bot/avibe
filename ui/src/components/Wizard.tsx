@@ -24,7 +24,19 @@ import { WizardChrome } from './visual';
 const getPersistableWizardPlatforms = (data: any) =>
   getEnabledPlatforms(data).filter((platform) => platformHasRunnableConfig(data, platform));
 
-const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
+const buildConfigPayload = (
+  data: any,
+  enabledPlatformOverride?: string[],
+  editedSections?: string[]
+) => {
+  // Sections the wizard may include: explicitly edited by a step (or, at
+  // finish, recorded in __wizardEditedSections). Omitted sections are
+  // left to their owners.
+  const sectionFilter = (key: string): boolean => {
+    if (editedSections && editedSections.length > 0) return editedSections.includes(key);
+    const recorded = data.__wizardEditedSections;
+    return Array.isArray(recorded) && recorded.includes(key);
+  };
   const enabledPlatforms = enabledPlatformOverride ?? getEnabledPlatforms(data);
   // Deselection encoding: baseline = platforms enabled when the wizard
   // loaded its config. A baseline platform the wizard no longer selects
@@ -56,43 +68,63 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
   // the selection (WeChat cannot render it) — a wizard-authored override
   // that must persist with the wizard's own save.
   ...(data.show_duration !== undefined ? { show_duration: data.show_duration } : {}),
-  slack: {
+  ...(sectionFilter('slack')
+    ? {
+        slack: {
     // Preserve all existing slack fields
     ...withSecretDrafts(data.slack, {
       bot_token: data.slack?.bot_token,
       app_token: data.slack?.app_token,
     }),
     // Override only the fields that setup modifies
-    require_mention: data.slack?.require_mention || false,
-  },
-  discord: {
+        require_mention: data.slack?.require_mention || false,
+        },
+      }
+    : {}),
+  ...(sectionFilter('discord')
+    ? {
+        discord: {
     ...withSecretDraft(data.discord, 'bot_token', data.discord?.bot_token),
-    require_mention: data.discord?.require_mention || false,
-  },
-  telegram: {
+        require_mention: data.discord?.require_mention || false,
+        },
+      }
+    : {}),
+  ...(sectionFilter('telegram')
+    ? {
+        telegram: {
     ...withSecretDraft(data.telegram, 'bot_token', data.telegram?.bot_token),
     require_mention: data.telegram?.require_mention ?? true,
     forum_auto_topic: data.telegram?.forum_auto_topic ?? true,
-    use_webhook: data.telegram?.use_webhook ?? false,
-  },
-  lark: (() => {
-    const lark = data.lark || {};
-    const appId = lark.app_id || '';
-    const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
-    const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
-    return {
-      ...withSecretDraft(base, 'app_secret', lark.app_secret),
-      app_id: appId,
-      domain: lark.domain || 'feishu',
-      require_mention: lark.require_mention || false,
-    };
-  })(),
-  wechat: {
+        use_webhook: data.telegram?.use_webhook ?? false,
+        },
+      }
+    : {}),
+  ...(sectionFilter('lark')
+    ? {
+        lark: (() => {
+          const lark = data.lark || {};
+          const appId = lark.app_id || '';
+          const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
+          const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
+          return {
+            ...withSecretDraft(base, 'app_secret', lark.app_secret),
+            app_id: appId,
+            domain: lark.domain || 'feishu',
+            require_mention: lark.require_mention || false,
+          };
+        })(),
+      }
+    : {}),
+  ...(sectionFilter('wechat')
+    ? {
+        wechat: {
     ...withSecretDraft(data.wechat, 'bot_token', data.wechat?.bot_token),
     base_url: data.wechat?.base_url || 'https://ilinkai.weixin.qq.com',
     cdn_base_url: data.wechat?.cdn_base_url || 'https://novac2c.cdn.weixin.qq.com/c2c',
-    require_mention: data.wechat?.require_mention || false,
-  },
+        require_mention: data.wechat?.require_mention || false,
+        },
+      }
+    : {}),
   runtime: {
     // The wizard owns only the default cwd it captured.
     default_cwd: data.default_cwd || data.runtime?.default_cwd || '.',
@@ -225,30 +257,37 @@ export const Wizard: React.FC = () => {
     const nextPlatforms = getEnabledPlatforms({ ...data, ...stepData });
     const platformsChanged = previousPlatforms.join(',') !== nextPlatforms.join(',');
 
+    // Platform sections the user EDITED during this wizard run (the
+    // step payloads carry only the section a step owns). Untouched
+    // sections must never ride along in a later save — the locked merge
+    // would overwrite concurrent updates with the wizard's mount-time
+    // snapshot (e.g. a WeChat QR token written while the wizard sat open).
+    const editedSections = ['slack', 'discord', 'telegram', 'lark', 'wechat'].filter(
+      (key) => stepData[key] !== undefined
+    );
+    const priorEdited = Array.isArray(data.__wizardEditedSections)
+      ? data.__wizardEditedSections
+      : [];
+
     const nextData = {
       ...data,
       ...(platformsChanged ? { channelConfigsByPlatform: {} } : {}),
       ...(nextPlatforms.includes('wechat') ? { show_duration: false } : {}),
       ...stepData,
+      __wizardEditedSections: Array.from(new Set([...priorEdited, ...editedSections])),
     };
     setData(nextData);
-    await persistStep(stepData, nextData);
-    // The intermediate save may have ADDED platforms to the persisted
-    // enabled list (add-ops from this step). Fold them into the wizard's
-    // deselection baseline so going back and unchecking one of them
-    // produces a remove op on the next save — otherwise the adapter
-    // stays enabled while the wizard shows it unselected.
-    // Fold ONLY the platforms this wizard step requested to add — the
-    // add-list from the wizard's own payload. The server's full enabled
-    // response can include platforms other processes enabled concurrently;
-    // folding those would misclassify them as wizard deselections on the
-    // next save and silently undo the concurrent enablement.
-    const wizardRequestedAdds = getPersistableWizardPlatforms(nextData);
-    if (wizardRequestedAdds.length > 0) {
+    const submittedAdds = await persistStep(stepData, nextData);
+    // Fold ONLY the additions this step actually submitted to saveConfig.
+    // Steps that skipped the config save (platform-selection-only) must
+    // NOT fold — an unsubmitted selection isn't persisted, so treating it
+    // as wizard-owned would let a later deselection remove a platform
+    // that only got enabled by another process in the meantime.
+    if (submittedAdds && submittedAdds.length > 0) {
       const currentBaseline: string[] = Array.isArray(nextData.__wizardEnabledBaseline)
         ? nextData.__wizardEnabledBaseline
         : [];
-      const mergedBaseline = Array.from(new Set([...currentBaseline, ...wizardRequestedAdds]));
+      const mergedBaseline = Array.from(new Set([...currentBaseline, ...submittedAdds]));
       nextData.__wizardEnabledBaseline = mergedBaseline;
       setData({ ...nextData });
     }
@@ -263,8 +302,12 @@ export const Wizard: React.FC = () => {
     }
   };
 
-  const persistStep = async (stepData: any, mergedData: any) => {
-    if (!mergedData) return;
+  // Returns the platform add-list the step actually submitted to
+  // saveConfig, or null when no config save ran (platform-selection-only
+  // steps skip it) — the caller folds ONLY submitted additions into the
+  // deselection baseline.
+  const persistStep = async (stepData: any, mergedData: any): Promise<string[] | null> => {
+    if (!mergedData) return null;
     const platformSelectionOnly =
       Boolean(stepData.platforms || stepData.platform) &&
       !stepData.agents &&
@@ -290,9 +333,12 @@ export const Wizard: React.FC = () => {
         mergedData.channelConfigsByPlatform
     );
     if (shouldPersistConfig) {
-      await api.saveConfig(
-        buildConfigPayload(mergedData, getPersistableWizardPlatforms(mergedData))
+      const submittedAdds = getPersistableWizardPlatforms(mergedData);
+      const editedSections = ['slack', 'discord', 'telegram', 'lark', 'wechat'].filter(
+        (key) => stepData[key] !== undefined
       );
+      await api.saveConfig(buildConfigPayload(mergedData, submittedAdds, editedSections));
+      return submittedAdds;
     }
     const discordGuildAllowlist = stepData?.discordGuildAllowlist;
     if (
@@ -314,6 +360,7 @@ export const Wizard: React.FC = () => {
         }
       }
     }
+    return null;
   };
 
   const CurrentComponent = steps[currentStep].component;
