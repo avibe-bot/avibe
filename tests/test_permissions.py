@@ -1807,6 +1807,51 @@ def test_permissions_mutations_advance_and_publish_the_authorization_watermark(
     ]
 
 
+def test_permissions_mutation_surfaces_pairing_change_during_watermark_ack(
+    monkeypatch,
+) -> None:
+    projection = _complete_projection()
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(
+            200,
+            {
+                "ok": True,
+                "entries": [],
+                "authorization_revision": 4,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "acknowledge_authorization_revision",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            remote_access.AuthorizationRevisionPairingChangedError(
+                "authorization_revision_pairing_changed"
+            )
+        ),
+    )
+
+    permissions._cache_projection("inst-123", projection)  # noqa: SLF001
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.replace_authorized_users(
+            {
+                "entries": [],
+                "if_match_revision": 3,
+                "if_match_instance_id": "inst-123",
+            },
+            _config(),
+        )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection == projection
+
+
 @pytest.mark.parametrize("operation", ("authorized_users", "project_access"))
 @pytest.mark.parametrize("persistence_failure", ("write_error", "lock_timeout"))
 def test_committed_permissions_mutations_survive_watermark_persistence_failure(

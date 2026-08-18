@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from config import paths
 from config.v2_config import V2Config
@@ -1028,6 +1028,58 @@ def test_last_known_organization_binding_is_exact_instance_scoped(monkeypatch, t
         assert repaired["mode"] == "organization_pending"
         assert repaired["instance_id"] == "inst-new"
         assert repaired["organization_id"] is None
+    finally:
+        store.close()
+
+
+def test_reconciliation_rejects_a_pairing_switch_before_policy_write(monkeypatch, tmp_path) -> None:
+    """A stale ownership snapshot cannot create a policy for the old instance."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config(tmp_path, instance_kind="organization")
+    store = ShowPageStore()
+    try:
+        with store.engine.begin() as connection:
+            connection.execute(
+                insert(show_pages).values(
+                    session_id="ses-pairing-race",
+                    access_mode="private",
+                    access_revision=0,
+                    share_id="share-pairing-race",
+                    offline_at=None,
+                    created_at="2026-01-01T00:00:00Z",
+                    updated_at="2026-01-01T00:00:00Z",
+                )
+            )
+
+        original_assert = resource_access_service._assert_show_page_pairing_current  # noqa: SLF001
+        switched = False
+
+        def switch_after_validation(ownership):
+            nonlocal switched
+            original_assert(ownership)
+            if not switched:
+                switched = True
+                current = V2Config.load()
+                current.remote_access.vibe_cloud.instance_id = "inst-new"
+                current.save()
+
+        monkeypatch.setattr(
+            resource_access_service,
+            "_assert_show_page_pairing_current",
+            switch_after_validation,
+        )
+
+        reconciliation = store.reconcile_resource_policy("ses-pairing-race")
+        assert reconciliation["status"] == "pending"
+        assert reconciliation["ownership"]["instance_id"] == "inst-new"
+
+        with store.engine.connect() as connection:
+            assert resource_access_service.get_resource_policy(
+                "show_page",
+                "ses-pairing-race",
+                connection=connection,
+            ) is None
     finally:
         store.close()
 

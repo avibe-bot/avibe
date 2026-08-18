@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -29,7 +30,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import jwt
 import psutil
@@ -37,7 +38,7 @@ import requests
 from jwt import PyJWKClient
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
@@ -182,6 +183,10 @@ class BackendRequestError(Exception):
         super().__init__(payload.get("detail") or payload.get("error") or f"HTTP {status}")
         self.status = status
         self.payload = payload
+
+
+class AuthorizationRevisionPairingChangedError(ValueError):
+    """The caller's revision acknowledgement belongs to an older pairing."""
 
 
 @dataclass(frozen=True)
@@ -683,6 +688,48 @@ def _normalize_authorization_revision(value: Any) -> int:
     return value
 
 
+def _authorization_revision_pairing_identity(
+    config: V2Config,
+) -> tuple[bool, str, str, str]:
+    cloud = config.remote_access.vibe_cloud
+    return (
+        bool(cloud.enabled),
+        str(cloud.backend_url or "").strip().rstrip("/"),
+        str(cloud.instance_id or "").strip(),
+        str(cloud.instance_secret or "").strip(),
+    )
+
+
+def _assert_authorization_revision_pairing(
+    expected: tuple[bool, str, str, str],
+) -> None:
+    """Fail closed when the captured acknowledgement no longer owns pairing."""
+
+    try:
+        current = _authorization_revision_pairing_identity(V2Config.load())
+    except Exception as exc:
+        raise AuthorizationRevisionPairingChangedError(
+            "authorization_revision_pairing_changed"
+        ) from exc
+    if current != expected:
+        raise AuthorizationRevisionPairingChangedError(
+            "authorization_revision_pairing_changed"
+        )
+
+
+@contextmanager
+def _authorization_revision_pairing_lock(*, persistence_required: bool):
+    try:
+        with config_file_lock():
+            yield
+    except TimeoutError as exc:
+        if persistence_required:
+            raise
+        raise AuthorizationRevisionPairingChangedError(
+            "authorization_revision_pairing_changed"
+        ) from exc
+
+
 def _authorization_revision_file_signature(path: Path) -> tuple[int, int, int, int] | None:
     try:
         metadata = path.stat()
@@ -792,76 +839,91 @@ def _install_authorization_revision(
     value: Any,
     *,
     persistence_required: bool,
+    pairing_guard: Callable[[], None] | None = None,
 ) -> int:
     global _AUTHORIZATION_REVISION_CACHE
 
     revision = _normalize_authorization_revision(value)
-    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    pairing_identity = _authorization_revision_pairing_identity(config)
+    instance_id = pairing_identity[2]
     if not instance_id:
         raise ValueError("invalid_authorization_revision")
     state_path = _authorization_revision_state_path()
     source_updated_at = time.time()
-    with _AUTHORIZATION_REVISION_LOCK:
-        cached = _AUTHORIZATION_REVISION_CACHE
-        cache_matches = (
-            cached is not None
-            and cached.state_path == state_path
-            and cached.instance_id == instance_id
-        )
-        cached_revision = cached.revision if cache_matches else None
-        previous_revision = cached_revision
-        changed = cached_revision != revision
-        file_signature = None
-        try:
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            with _authorization_revision_file_lock(state_path):
-                persisted = _read_authorization_revision_payload(state_path)
-                persisted_revision = None
-                if (
-                    isinstance(persisted, dict)
-                    and persisted.get("schema_version") == 1
-                    and str(persisted.get("instance_id") or "").strip() == instance_id
-                ):
-                    try:
-                        persisted_revision = _normalize_authorization_revision(
-                            persisted.get("authorization_revision")
-                        )
-                    except ValueError:
-                        persisted_revision = None
-                if persisted_revision is not None and (
-                    previous_revision is None or persisted_revision > previous_revision
-                ):
-                    previous_revision = persisted_revision
-                if cached_revision is None:
-                    changed = persisted_revision != revision
-                if previous_revision is not None and revision < previous_revision:
-                    raise ValueError("authorization_revision_regressed")
-                runtime.write_json(
-                    state_path,
-                    {
-                        "schema_version": 1,
-                        "instance_id": instance_id,
-                        "authorization_revision": revision,
-                        "source_updated_at": source_updated_at,
-                    },
-                )
-                file_signature = _authorization_revision_file_signature(state_path)
-        except (OSError, TimeoutError):
-            if persistence_required:
-                raise
-            if previous_revision is not None and revision < previous_revision:
-                raise ValueError("authorization_revision_regressed") from None
-            logger.warning(
-                "Authorization revision acknowledgement could not be persisted",
-                exc_info=True,
+    with _authorization_revision_pairing_lock(
+        persistence_required=persistence_required,
+    ):
+        with _AUTHORIZATION_REVISION_LOCK:
+            cached = _AUTHORIZATION_REVISION_CACHE
+            cache_matches = (
+                cached is not None
+                and cached.state_path == state_path
+                and cached.instance_id == instance_id
             )
-        _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
-            state_path=state_path,
-            instance_id=instance_id,
-            revision=revision,
-            source_updated_at=source_updated_at,
-            file_signature=file_signature,
-        )
+            cached_revision = cached.revision if cache_matches else None
+            previous_revision = cached_revision
+            changed = cached_revision != revision
+            file_signature = None
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                with _authorization_revision_file_lock(state_path):
+                    if pairing_guard is not None:
+                        try:
+                            pairing_guard()
+                        except AuthorizationRevisionPairingChangedError:
+                            raise
+                        except Exception as exc:
+                            raise AuthorizationRevisionPairingChangedError(
+                                "authorization_revision_pairing_changed"
+                            ) from exc
+                    _assert_authorization_revision_pairing(pairing_identity)
+                    persisted = _read_authorization_revision_payload(state_path)
+                    persisted_revision = None
+                    if (
+                        isinstance(persisted, dict)
+                        and persisted.get("schema_version") == 1
+                        and str(persisted.get("instance_id") or "").strip() == instance_id
+                    ):
+                        try:
+                            persisted_revision = _normalize_authorization_revision(
+                                persisted.get("authorization_revision")
+                            )
+                        except ValueError:
+                            persisted_revision = None
+                    if persisted_revision is not None and (
+                        previous_revision is None or persisted_revision > previous_revision
+                    ):
+                        previous_revision = persisted_revision
+                    if cached_revision is None:
+                        changed = persisted_revision != revision
+                    if previous_revision is not None and revision < previous_revision:
+                        raise ValueError("authorization_revision_regressed")
+                    runtime.write_json(
+                        state_path,
+                        {
+                            "schema_version": 1,
+                            "instance_id": instance_id,
+                            "authorization_revision": revision,
+                            "source_updated_at": source_updated_at,
+                        },
+                    )
+                    file_signature = _authorization_revision_file_signature(state_path)
+            except (OSError, TimeoutError):
+                if persistence_required:
+                    raise
+                if previous_revision is not None and revision < previous_revision:
+                    raise ValueError("authorization_revision_regressed") from None
+                logger.warning(
+                    "Authorization revision acknowledgement could not be persisted",
+                    exc_info=True,
+                )
+            _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+                state_path=state_path,
+                instance_id=instance_id,
+                revision=revision,
+                source_updated_at=source_updated_at,
+                file_signature=file_signature,
+            )
     if changed:
         try:
             from vibe.sse_broker import broker
@@ -875,15 +937,26 @@ def _install_authorization_revision(
     return revision
 
 
-def _replace_authorization_revision(config: V2Config, value: Any) -> int:
+def _replace_authorization_revision(
+    config: V2Config,
+    value: Any,
+    *,
+    pairing_guard: Callable[[], None] | None = None,
+) -> int:
     return _install_authorization_revision(
         config,
         value,
         persistence_required=True,
+        pairing_guard=pairing_guard,
     )
 
 
-def acknowledge_authorization_revision(config: V2Config, value: Any) -> int:
+def acknowledge_authorization_revision(
+    config: V2Config,
+    value: Any,
+    *,
+    pairing_guard: Callable[[], None] | None = None,
+) -> int:
     """Record a mutation acknowledgement without regressing a newer watermark."""
 
     try:
@@ -891,6 +964,7 @@ def acknowledge_authorization_revision(config: V2Config, value: Any) -> int:
             config,
             value,
             persistence_required=False,
+            pairing_guard=pairing_guard,
         )
     except ValueError as exc:
         if str(exc) != "authorization_revision_regressed":

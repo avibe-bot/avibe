@@ -1025,6 +1025,80 @@ def test_authorization_revision_cache_observes_another_process_watermark(
     ) == "mismatch"
 
 
+@pytest.mark.parametrize(
+    ("changed_field", "replacement"),
+    (
+        ("backend_url", "https://other-backend.test"),
+        ("instance_id", "inst_new"),
+        ("instance_secret", "other-secret"),
+    ),
+)
+def test_authorization_revision_acknowledgement_rejects_a_stale_pairing(
+    monkeypatch,
+    tmp_path,
+    changed_field,
+    replacement,
+):
+    """A mutation from instance A cannot replace the watermark after pairing B."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, revision=41)
+    current = V2Config.load()
+    setattr(current.remote_access.vibe_cloud, changed_field, replacement)
+    current.save()
+
+    with pytest.raises(
+        remote_access.AuthorizationRevisionPairingChangedError,
+        match="authorization_revision_pairing_changed",
+    ):
+        remote_access.acknowledge_authorization_revision(config, 42)
+
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()
+    )
+    assert persisted["instance_id"] == "inst_123"
+    assert persisted["authorization_revision"] == 41
+
+
+def test_authorization_revision_acknowledgement_rechecks_pairing_at_locked_write(
+    monkeypatch,
+    tmp_path,
+):
+    """A pairing switch at the watermark lock cannot let the old write through."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, revision=41)
+    original_lock = remote_access._authorization_revision_file_lock  # noqa: SLF001
+    switched = False
+
+    def switch_before_locked_read(path):
+        nonlocal switched
+        if not switched:
+            switched = True
+            current = V2Config.load()
+            current.remote_access.vibe_cloud.instance_id = "inst_new"
+            current.save()
+        return original_lock(path)
+
+    monkeypatch.setattr(
+        remote_access,
+        "_authorization_revision_file_lock",
+        switch_before_locked_read,
+    )
+
+    with pytest.raises(
+        remote_access.AuthorizationRevisionPairingChangedError,
+        match="authorization_revision_pairing_changed",
+    ):
+        remote_access.acknowledge_authorization_revision(config, 42)
+
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()
+    )
+    assert persisted["instance_id"] == "inst_123"
+    assert persisted["authorization_revision"] == 41
+
+
 @pytest.mark.parametrize("persistence_failure", ("write_error", "lock_timeout"))
 def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
     monkeypatch,

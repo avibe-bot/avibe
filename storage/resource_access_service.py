@@ -17,6 +17,7 @@ from typing import Any, Iterator
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
+from config.v2_config import config_file_lock
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies, state_meta
 from vibe.authorization import (
@@ -88,6 +89,22 @@ def _required_identifier(value: Any, *, code: str) -> str:
     if cleaned is None:
         raise ResourceAccessError(code)
     return cleaned
+
+
+def _assert_show_page_pairing_current(ownership: Mapping[str, Any]) -> None:
+    """Reject a reconciliation snapshot that no longer names the current pairing."""
+
+    configured = _configured_show_page_instance()
+    instance_id = _clean_optional_string(ownership.get("instance_id"))
+    if (
+        configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        or configured is None
+        or instance_id is None
+        or configured[0] != instance_id
+        or ownership.get("mode") not in {"personal", "organization"}
+        or configured[1] != ownership.get("mode")
+    ):
+        raise ResourceAccessError("show_page_pairing_changed")
 
 
 def _validate_resource_kind(resource_kind: Any) -> str:
@@ -440,6 +457,16 @@ def remember_show_page_instance_ownership(
 ) -> dict[str, Any]:
     """Persist an authoritative binding only while its exact pairing is current."""
 
+    with config_file_lock():
+        return _remember_show_page_instance_ownership_locked(connection, ownership)
+
+
+def _remember_show_page_instance_ownership_locked(
+    connection: Connection,
+    ownership: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Implement ownership persistence while the pairing lock is held."""
+
     configured = _configured_show_page_instance()
     instance_id = _clean_optional_string(ownership.get("instance_id"))
     mode = ownership.get("mode")
@@ -479,6 +506,26 @@ def reconcile_show_page_resource_policy(
     owner_user_id: str | None,
     owner_email: str | None = None,
 ) -> dict[str, Any]:
+    """Reconcile one Show Page policy under the persisted pairing lock."""
+
+    with config_file_lock():
+        return _reconcile_show_page_resource_policy_locked(
+            connection,
+            resource_id=resource_id,
+            ownership=ownership,
+            owner_user_id=owner_user_id,
+            owner_email=owner_email,
+        )
+
+
+def _reconcile_show_page_resource_policy_locked(
+    connection: Connection,
+    *,
+    resource_id: str,
+    ownership: Mapping[str, Any],
+    owner_user_id: str | None,
+    owner_email: str | None = None,
+) -> dict[str, Any]:
     """Reconcile one Show Page policy without changing either access axis."""
 
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
@@ -486,6 +533,7 @@ def reconcile_show_page_resource_policy(
     if mode not in _SHOW_PAGE_OWNERSHIP_MODES:
         raise ResourceAccessError("invalid_show_page_ownership")
     if mode in {"personal", "organization"}:
+        _assert_show_page_pairing_current(ownership)
         fence = remember_show_page_instance_ownership(connection, ownership)
     else:
         fence = current_show_page_instance_ownership(connection=connection)
@@ -503,6 +551,7 @@ def reconcile_show_page_resource_policy(
         status = SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
     elif mode == "personal":
         if policy is None:
+            _assert_show_page_pairing_current(fence)
             policy = ensure_resource_policy(
                 connection,
                 resource_kind="show_page",
@@ -522,6 +571,7 @@ def reconcile_show_page_resource_policy(
             fence.get("organization_id"), code="invalid_organization_id"
         )
         if policy is None:
+            _assert_show_page_pairing_current(fence)
             policy = ensure_resource_policy(
                 connection,
                 resource_kind="show_page",
@@ -535,6 +585,7 @@ def reconcile_show_page_resource_policy(
             )
             status = "created"
         elif policy_organization is None:
+            _assert_show_page_pairing_current(fence)
             connection.execute(
                 resource_access_policies.update()
                 .where(resource_access_policies.c.resource_kind == "show_page")

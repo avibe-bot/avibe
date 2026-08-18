@@ -853,10 +853,21 @@ def _cache_mutation_result(
     )
 
 
-def _acknowledge_authorization_revision(config: V2Config, revision: int) -> None:
+def _acknowledge_authorization_revision(
+    config: V2Config,
+    revision: int,
+    pairing_guard: Callable[[], None] | None = None,
+) -> None:
     from vibe import remote_access
 
-    remote_access.acknowledge_authorization_revision(config, revision)
+    try:
+        remote_access.acknowledge_authorization_revision(
+            config,
+            revision,
+            pairing_guard=pairing_guard,
+        )
+    except remote_access.AuthorizationRevisionPairingChangedError as exc:
+        raise PermissionsPairingChangedError("permissions_pairing_changed") from exc
 
 
 def _backend_request(
@@ -969,7 +980,11 @@ def replace_authorized_users(
     )
     result = _validated_authorized_users_result(payload_result)
     pairing_guard()
-    _acknowledge_authorization_revision(config, result["authorization_revision"])
+    _acknowledge_authorization_revision(
+        config,
+        result["authorization_revision"],
+        pairing_guard,
+    )
     _cache_mutation_result(
         instance_id,
         result["authorization_revision"],
@@ -1003,7 +1018,11 @@ def update_project_access(
     )
     result = _validated_project_result(payload_result, project_id)
     pairing_guard()
-    _acknowledge_authorization_revision(config, result["authorization_revision"])
+    _acknowledge_authorization_revision(
+        config,
+        result["authorization_revision"],
+        pairing_guard,
+    )
     _cache_mutation_result(
         instance_id,
         result["authorization_revision"],

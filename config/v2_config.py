@@ -1495,12 +1495,27 @@ def _config_file_lock(path: Path):
     return MigrationFileLock(path.with_name(f".{path.name}.lock"))
 
 
+@contextmanager
+def config_file_lock(config_path: Optional[Path] = None) -> Iterator[None]:
+    """Serialize work that must observe one exact persisted config snapshot.
+
+    This is the same cross-process transaction used by ``V2Config.save`` and
+    ``config_write_transaction``. Keeping one lock path for ordinary config
+    writes and guarded state transitions prevents a pairing update from racing
+    a reader that is about to persist instance-owned state.
+    """
+
+    path = config_path or paths.get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _memory_config_transaction(path):
+        yield
+
+
 def _write_config_payload(path: Path, payload: dict) -> None:
     content = json.dumps(payload, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with CONFIG_LOCK:
-        with _config_file_lock(path):
-            _atomic_write_text(path, content)
+    with config_file_lock(path):
+        _atomic_write_text(path, content)
 
 
 def _write_config_payload_if_unchanged(
