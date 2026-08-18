@@ -86,6 +86,17 @@ def test_retention_config_recovery_defaults_disable(monkeypatch) -> None:
     assert controller._agent_events_retention_config() is None
 
 
+def test_retention_config_ignores_unrelated_warnings(monkeypatch) -> None:
+    """Unrelated migration warnings must not disable a valid runtime section."""
+    controller = Controller.__new__(Controller)
+    config = SimpleNamespace(
+        runtime=SimpleNamespace(agent_events_trace_retention_enabled=True, agent_events_trace_retention_days=90),
+        load_warnings=("Legacy Model Hub route could not be mapped; kept as manual",),
+    )
+    monkeypatch.setattr("config.v2_config.V2Config.load", classmethod(lambda cls: config))
+    assert controller._agent_events_retention_config() == {"days": 90}
+
+
 def test_retention_pass_never_vacuums(monkeypatch) -> None:
     controller = Controller.__new__(Controller)
     captured: dict = {}

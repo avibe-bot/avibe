@@ -6686,8 +6686,13 @@ def cmd_data_retention(args):
         config_recovered = False
         try:
             config = V2Config.load()
-            if getattr(config, "load_warnings", None):
+            load_warnings = getattr(config, "load_warnings", None) or ()
+            if any("could not be recovered" in str(w) or "recovery defaults" in str(w) for w in load_warnings):
                 config_recovered = True
+                # Recovery defaults carry enabled=True, but the controller
+                # fails closed on them; the status view must agree. Unrelated
+                # warnings (legacy Model Hub migration notes) do not apply.
+                enabled = False
             runtime_cfg = getattr(config, "runtime", None)
             days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
             if isinstance(days_value, bool) or not isinstance(days_value, int) or days_value < 1:

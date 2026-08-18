@@ -296,16 +296,19 @@ def try_acquire_lease(conn: Connection, *, now: Optional[datetime] = None) -> Op
 def release_lease(conn: Connection, token: Optional[str] = None) -> None:
     """Release the lease, deleting only the row this runner owns.
 
-    A long run can outlive the lease TTL; deleting unconditionally would then
-    remove a *newer* runner's lease. With ``token``, the row is removed only
-    while it still carries that token.
+    With ``token`` the delete is a single statement conditioned on the stored
+    token (JSON_EXTRACT), so a replacement lease committed after any prior
+    read cannot be removed by this stale owner.
     """
     if token is None:
         conn.execute(state_meta.delete().where(state_meta.c.key == RETENTION_LEASE_KEY))
         return
-    stored = _read_meta(conn, RETENTION_LEASE_KEY)
-    if stored and stored.get("token") == token:
-        conn.execute(state_meta.delete().where(state_meta.c.key == RETENTION_LEASE_KEY))
+    conn.execute(
+        state_meta.delete().where(
+            state_meta.c.key == RETENTION_LEASE_KEY,
+            func.json_extract(state_meta.c.value_json, "$.token") == token,
+        )
+    )
 
 
 def compaction_status(conn: Connection) -> dict[str, Any]:
@@ -379,13 +382,14 @@ def maybe_compact(
         # compaction runs; if ownership is nonetheless lost, the heartbeat
         # stops renewing and reports it so this runner never finishes into a
         # state where a replacement runner was already admitted.
-        lease_state = {"owned": True}
+        lease_state = {"owned": True, "lost": False}
         heartbeat: Optional[threading.Thread] = None
         if lease_heartbeat is not None:
             def _beat() -> None:
                 while lease_state["owned"]:
                     if not lease_heartbeat():
                         lease_state["owned"] = False
+                        lease_state["lost"] = True
                         return
                     time.sleep(LEASE_HEARTBEAT_SECONDS)
 
@@ -395,10 +399,12 @@ def maybe_compact(
             with engine.connect() as conn:
                 conn.exec_driver_sql("VACUUM")
         finally:
+            # Normal shutdown flips only "owned" so the thread exits; "lost"
+            # is reserved for an actual renewal failure observed mid-run.
             lease_state["owned"] = False
             if heartbeat is not None:
                 heartbeat.join(timeout=LEASE_HEARTBEAT_SECONDS * 2)
-        if lease_heartbeat is not None and not lease_state["owned"]:
+        if lease_state["lost"]:
             # The heartbeat observed an ownership loss during VACUUM: report
             # the compaction as contested rather than a clean success.
             return {"status": "deferred", "reason": "lease_lost_during_compaction", **status}

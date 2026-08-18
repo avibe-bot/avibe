@@ -3113,9 +3113,14 @@ class Controller:
         except Exception:
             logger.warning("Agent trace-event retention: config unreadable; disabling automatic pass", exc_info=True)
             return None
-        if getattr(config, "load_warnings", None):
+        warnings = getattr(config, "load_warnings", None) or ()
+        if any("could not be recovered" in str(w) or "recovery defaults" in str(w) for w in warnings):
+            # Only recovery-substituted sections make the retention policy
+            # unknown. Unrelated warnings (e.g. legacy Model Hub migration
+            # notes) leave a valid runtime section in force — failing closed
+            # on those would disable retention indefinitely.
             logger.warning(
-                "Agent trace-event retention: config loaded with recovery warnings; "
+                "Agent trace-event retention: config loaded with recovery defaults; "
                 "retention policy is unknown, disabling automatic pass"
             )
             return None
