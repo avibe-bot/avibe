@@ -73,7 +73,7 @@ from .events import (
     contains_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import MODEL_ID_MAX_LENGTH, STANDARD_OPENCODE_VENDOR_IDS
+from .identifiers import STANDARD_OPENCODE_VENDOR_IDS, canonical_model_id
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -1406,14 +1406,21 @@ class ModelHubService:
         *,
         allow_empty: bool = False,
     ) -> None:
-        if (not allow_empty and not discovered and not manual_models) or any(
-            not isinstance(model_id, str)
-            or not model_id
-            or len(model_id) > MODEL_ID_MAX_LENGTH
-            or contains_credential_material(model_id)
-            for model_id in discovered
-        ) or len(set(discovered)) != len(discovered):
+        # Admit the canonical form, not the text upstream happened to send: what
+        # is stored here is what resolution compares and what usage meters, and a
+        # listing that names one model twice under two spellings is a failed
+        # discovery, not two models.
+        canonical = [canonical_model_id(model_id) for model_id in discovered]
+        if (
+            (not allow_empty and not discovered and not manual_models)
+            or any(
+                model_id is None or contains_credential_material(model_id)
+                for model_id in canonical
+            )
+            or len(set(canonical)) != len(canonical)
+        ):
             raise ModelHubError("discovery_failed", status=502)
+        discovered = [model_id for model_id in canonical if model_id is not None]
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         existing_by_id = {model.id: model for model in source.models}
@@ -3475,15 +3482,10 @@ class ModelHubService:
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("source_not_found", status=404)
-        model_id = payload.get("model_id")
+        model_id = canonical_model_id(payload.get("model_id"))
         display_name = payload.get("display_name")
         reasoning_efforts = payload.get("reasoning_efforts")
-        if (
-            not isinstance(model_id, str)
-            or not model_id
-            or len(model_id) > MODEL_ID_MAX_LENGTH
-            or contains_credential_material(model_id)
-        ):
+        if model_id is None or contains_credential_material(model_id):
             raise ModelHubError("mapping_target_unavailable")
         if display_name is not None and (
             not isinstance(display_name, str) or contains_credential_material(display_name)

@@ -110,6 +110,21 @@ class _RenderedTurnOutcome:
 class _SSEWireState(ProtocolSSEState):
     """Gateway-local name for the shared protocol stream tracker."""
 
+    @property
+    def reached_model(self) -> bool:
+        """Whether this stream got far enough upstream to have been billed.
+
+        Forwarded model output proves the call reached the model even when the
+        stream then ended without a recognized terminal — a connection lost after
+        a text delta is a request that happened, and `token_reports` staying at
+        zero is exactly how the ledger records that nobody reported its tokens.
+
+        One owner for the question, because every ending of a stream has to
+        answer it the same way.
+        """
+
+        return self.terminal_outcome == "served" or self.model_output_started
+
 
 class _DownstreamDisconnected(ConnectionError):
     pass
@@ -651,7 +666,7 @@ class ModelHubTurnGateway:
         await self._record_usage(
             execution,
             usage=wire_state.usage,
-            served=wire_state.terminal_outcome == "served",
+            served=wire_state.reached_model,
         )
         await self._write_stream_terminal_copy(
             response,
@@ -761,7 +776,7 @@ class ModelHubTurnGateway:
             await self._record_usage(
                 execution,
                 usage=wire_state.usage,
-                served=wire_state.terminal_outcome == "served",
+                served=wire_state.reached_model,
             )
         if execution.settlement_recorded:
             return

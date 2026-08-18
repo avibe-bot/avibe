@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Final, Literal, Mapping, Protocol, Sequence
 
+from .stream_wire import ProtocolUsageReport
+
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
 SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
 OBSERVATION_OUTCOMES = (
@@ -97,6 +99,11 @@ class RawCallOutcome:
     source_id: str
     error_type: str | None = None  # raw upstream error type, if present
     error_candidates: tuple[str, ...] = ()  # unsorted raw type/code candidates
+    # Tokens the upstream reported for this call, when the response carried a
+    # readable report. A call that settles before it can hand its body onward
+    # would otherwise take its token report with it, and a vendor that reported
+    # tokens billed for them whether or not the call ended well.
+    usage: ProtocolUsageReport | None = None
 
 
 class ObservationOutcome(str, Enum):

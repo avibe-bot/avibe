@@ -24,11 +24,11 @@ import logging
 import os
 import tempfile
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final, Optional
 
-from .identifiers import MODEL_ID_MAX_LENGTH
+from .identifiers import canonical_model_id
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
 
 logger = logging.getLogger(__name__)
@@ -38,10 +38,9 @@ logger = logging.getLogger(__name__)
 USAGE_RETENTION_DAYS: Final = 62
 USAGE_MAX_ROWS: Final = 400
 USAGE_DEFAULT_WINDOW_DAYS: Final = 30
-# Identifiers reaching this module are already bounded where they are admitted;
-# the same bound is re-checked here so a hand-edited or corrupt file cannot grow
-# one row without limit. Source ids are hub-generated and shorter still.
-_MAX_IDENTIFIER_LENGTH: Final = MODEL_ID_MAX_LENGTH
+# Anything older than every instant this ledger can hold, so a row that never
+# recorded one sorts as the least recently metered.
+_OLDEST_INSTANT: Final = datetime.min.replace(tzinfo=timezone.utc)
 
 _COUNTER_KEYS: Final = (
     "requests",
@@ -49,6 +48,14 @@ _COUNTER_KEYS: Final = (
     "input_tokens",
     "cached_input_tokens",
     "output_tokens",
+)
+# The cross-field guarantees the read contract makes, as (subset, superset).
+# Each one is repaired on read, so a corrupt or hand-edited file degrades into a
+# smaller true statement instead of publishing an impossible one: a coverage
+# figure above 100% is more misleading than a conservative one.
+_COUNTER_SUBSETS: Final = (
+    ("cached_input_tokens", "input_tokens"),
+    ("token_reports", "requests"),
 )
 
 
@@ -72,13 +79,18 @@ def _bounded_counter(value: object) -> int:
     return min(value, USAGE_TOKEN_CEILING)
 
 
-def _identifier(value: object) -> Optional[str]:
+def _text(value: object) -> Optional[str]:
+    """Read one persisted text field, dropping anything that is not text.
+
+    No length bound here: the only text fields this reads are a calendar day and
+    an instant, and the parsers below already reject anything that is not one.
+    The key fields go through `canonical_model_id` instead, so a ledger row is
+    keyed by exactly the identity configuration admitted.
+    """
+
     if not isinstance(value, str):
         return None
-    trimmed = value.strip()
-    if not trimmed or len(trimmed) > _MAX_IDENTIFIER_LENGTH:
-        return None
-    return trimmed
+    return value.strip() or None
 
 
 def _calendar_day(value: str) -> Optional[date]:
@@ -117,7 +129,7 @@ def _timestamp(value: object) -> Optional[str]:
     degrades the field to absent rather than travelling out through the API.
     """
 
-    text = _identifier(value)
+    text = _text(value)
     if text is None or _instant(text) is None:
         return None
     return text
@@ -128,9 +140,9 @@ def _normalize_row(row: object) -> Optional[dict]:
 
     if not isinstance(row, dict):
         return None
-    day = _identifier(row.get("day"))
-    source_id = _identifier(row.get("source_id"))
-    model_id = _identifier(row.get("model_id"))
+    day = _text(row.get("day"))
+    source_id = canonical_model_id(row.get("source_id"))
+    model_id = canonical_model_id(row.get("model_id"))
     if day is None or source_id is None or model_id is None:
         return None
     if _calendar_day(day) is None:
@@ -141,15 +153,22 @@ def _normalize_row(row: object) -> Optional[dict]:
         "model_id": model_id,
         **{key: _bounded_counter(row.get(key)) for key in _COUNTER_KEYS},
     }
-    # Cached input is a subset of input everywhere it is reported, so a file that
-    # claims otherwise is repaired on read instead of leaking out through a read
-    # surface that promises the subset.
-    normalized["cached_input_tokens"] = min(
-        normalized["cached_input_tokens"],
-        normalized["input_tokens"],
-    )
+    for subset, superset in _COUNTER_SUBSETS:
+        normalized[subset] = min(normalized[subset], normalized[superset])
     normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
     return normalized
+
+
+def _recency(row: dict) -> tuple[str, datetime]:
+    """Order rows oldest-metered first, so the bound evicts what costs least.
+
+    Ordering by key instead would evict by spelling: an early-sorting model would
+    be recreated and evicted again on every write while later-sorting stale rows
+    survived, so its usage could never accumulate. Instants are compared as points
+    in time — text order is not time order once two rows carry different offsets.
+    """
+
+    return (row["day"], _instant(row["last_metered_at"]) or _OLDEST_INSTANT)
 
 
 def _row_key(row: dict) -> tuple[str, str, str]:
@@ -203,16 +222,24 @@ class BoundedUsageLedger:
     def _read(self) -> list[dict]:
         if not self.path.exists():
             return []
+        # Degrading to empty keeps a broken optional-feature file from failing
+        # startup, but the next write replaces that file — so this is the last
+        # moment its history is recoverable, and saying nothing would erase it
+        # silently.
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Model Hub usage ledger %s is unreadable: %s", self.path, exc)
             return []
         if not isinstance(payload, list):
+            logger.warning("Model Hub usage ledger %s is not a list of rows", self.path)
             return []
         rows: dict[tuple[str, str, str], dict] = {}
+        dropped = 0
         for item in payload:
             row = _normalize_row(item)
             if row is None:
+                dropped += 1
                 continue
             existing = rows.get(_row_key(row))
             if existing is None:
@@ -223,12 +250,17 @@ class BoundedUsageLedger:
                 existing["last_metered_at"],
                 row["last_metered_at"],
             )
+        if dropped:
+            logger.warning(
+                "Model Hub usage ledger %s dropped %d unusable row(s)", self.path, dropped
+            )
         return sorted(rows.values(), key=_row_key)
 
     def _write(self, rows: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        retained = sorted(rows, key=_recency)[-self.max_rows :]
         content = json.dumps(
-            sorted(rows, key=_row_key)[-self.max_rows :],
+            sorted(retained, key=_row_key),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -253,31 +285,36 @@ class BoundedUsageLedger:
         usage: Optional[ProtocolUsageReport],
         at: datetime,
     ) -> None:
-        """Fold one metered upstream call into its day's row."""
+        """Fold one metered upstream call into its day's row.
 
-        safe_source_id = _identifier(source_id)
-        safe_model_id = _identifier(model_id)
-        if safe_source_id is None or safe_model_id is None:
-            # Unreachable for anything the hub admits: both boundaries that
-            # accept a model id bound it by the same constant. Loud rather than
-            # silent so a future boundary that forgets shows up as lost metering
-            # instead of as a quietly incomplete tab.
+        The new row goes through the same normalization as a persisted one, so
+        what this module writes and what it reads can never disagree about a
+        bound, a subset, or an identity.
+        """
+
+        increment = _normalize_row(
+            {
+                "day": local_usage_day(at).isoformat(),
+                "source_id": source_id,
+                "model_id": model_id,
+                "requests": 1,
+                "token_reports": 1 if usage is not None else 0,
+                "input_tokens": usage.input_tokens if usage else 0,
+                "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+                "output_tokens": usage.output_tokens if usage else 0,
+                "last_metered_at": at.isoformat(),
+            }
+        )
+        if increment is None:
+            # Unreachable for anything the hub admits: both boundaries that accept
+            # a model id store the canonical form this row is keyed by. Loud rather
+            # than silent so a future boundary that forgets shows up as lost
+            # metering instead of as a quietly incomplete tab.
             logger.warning(
-                "Model Hub usage metering skipped a turn with an unusable identifier",
-                extra={"source_id_usable": safe_source_id is not None},
+                "Model Hub usage metering skipped a call with an unusable identifier",
+                extra={"source_id_usable": canonical_model_id(source_id) is not None},
             )
             return
-        increment = {
-            "day": local_usage_day(at).isoformat(),
-            "source_id": safe_source_id,
-            "model_id": safe_model_id,
-            "requests": 1,
-            "token_reports": 1 if usage is not None else 0,
-            "input_tokens": usage.input_tokens if usage else 0,
-            "cached_input_tokens": usage.cached_input_tokens if usage else 0,
-            "output_tokens": usage.output_tokens if usage else 0,
-            "last_metered_at": at.isoformat(),
-        }
         with self._lock:
             rows = {_row_key(row): row for row in self._read()}
             existing = rows.get(_row_key(increment))

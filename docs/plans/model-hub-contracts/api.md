@@ -1000,12 +1000,14 @@ after its terminal frame and a buffered error that still billed us are both
 metered. A call that never reached the model is not, because the resolution feed
 and Source health already own that.
 
-`requests` is self-measured by hub code and is always present. Token counts are
-vendor-reported and may be absent for a served call — streaming chat completions
-report usage only when the client asked for it — so `token_reports` counts the
-calls that carried a report and a missing report is never read as zero usage. Every
-reported integer is bounded by a ceiling fixed in server code, never by a total the
-response declares.
+`requests` is self-measured by hub code and is always present: a stream that
+forwarded model output counts even when it then died without a terminal, because
+that call demonstrably reached the model. Token counts are vendor-reported and may
+be absent for a served call — streaming chat completions report usage only when the
+client asked for it — so `token_reports` counts the calls that carried a report, is
+never greater than `requests`, and a missing report is never read as zero usage.
+Every reported integer is bounded by a ceiling fixed in server code, never by a
+total the response declares.
 
 Input composition follows each protocol rather than one invented total.
 `cached_input_tokens` is always the subset of `input_tokens` that was served from
@@ -1013,8 +1015,13 @@ cache: Anthropic's own `input_tokens` excludes both cache members, so the report
 input total is their sum; OpenAI's already includes cached input, so the cached
 count is informational only. The subset holds even when an upstream reports a cached
 count above the input it belongs to, or reports one without a readable input count:
-the merged cached count is bounded by the merged input count, and a persisted row
-that claims otherwise is repaired on read.
+the merged cached count is bounded by the merged input count. Both subset promises —
+cached input inside input, token reports inside requests — are repaired on read, so a
+corrupt or hand-edited ledger degrades into a smaller true statement instead of
+publishing an impossible one.
+
+`source_id` and `model_id` are reported in the canonical form configuration admitted,
+so one model is one row rather than one row per spelling.
 
 Days are local-calendar days on the Avibe host. `from_day` and `to_day` bound the
 requested window even when no turn fell inside it; `days[]` contains only days that

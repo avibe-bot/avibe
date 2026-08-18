@@ -36,6 +36,7 @@ ROOT = Path(__file__).parents[1]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 TURN_GATEWAY = ROOT / "core/handlers/model_hub/turn_gateway.py"
 SERVICE = ROOT / "core/handlers/model_hub/service.py"
+USAGE = ROOT / "core/handlers/model_hub/usage.py"
 PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
@@ -550,6 +551,17 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     ]
     assert flags
     assert all(flag in set(ast.walk(recorder)) for flag in flags)
+
+
+def test_model_identity_is_decided_only_by_its_owner() -> None:
+    # Review 4959575659 finding 11: config, resolution, and metering only agree on
+    # what "the same model" is while one function decides it. A module that reaches
+    # for the raw bound instead is re-deriving the rule, and the notions drift apart
+    # again — that is exactly how one model became two ledger rows.
+    for path in (SERVICE, USAGE):
+        source = path.read_text(encoding="utf-8")
+        assert "canonical_model_id" in source
+        assert "MODEL_ID_MAX_LENGTH" not in source
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:

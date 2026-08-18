@@ -170,6 +170,33 @@ def test_usage_on_the_terminal_frame_is_observed_before_settlement() -> None:
     assert state.usage == ProtocolUsageReport(input_tokens=30, output_tokens=4)
 
 
+def test_a_terminal_error_carries_the_tokens_reported_before_it() -> None:
+    """Review 4959575659 finding 7: Anthropic bills input on `message_start`.
+
+    The terminal observation is what the runtime turns into a bodyless outcome for
+    resolver metering, so dropping the accumulated report there would lose tokens
+    on exactly the streams that end badly.
+    """
+
+    state = ProtocolSSEState("anthropic")
+    for frame in _frames(
+        {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 900, "cache_read_input_tokens": 128}},
+        },
+        {"type": "error", "error": {"type": "overloaded_error"}},
+    ):
+        state.observe(frame)
+
+    observation = state.terminal_observation()
+    assert observation is not None
+    assert observation.outcome != "served"
+    assert observation.usage == ProtocolUsageReport(
+        input_tokens=1028,
+        cached_input_tokens=128,
+    )
+
+
 def test_openai_chat_reports_usage_only_on_its_final_chunk() -> None:
     """Chat streaming carries usage on a dedicated chunk, then `[DONE]`."""
 
@@ -504,6 +531,39 @@ def test_the_row_cap_keeps_the_newest_rows(tmp_path: Path) -> None:
     assert [row["model_id"] for row in persisted] == ["model-3", "model-4", "model-5"]
 
 
+def test_the_row_cap_evicts_the_least_recently_metered_row(tmp_path: Path) -> None:
+    """Review 4959575659 finding 8: evicting by spelling starves a live model.
+
+    `model-a` sorts first by key and last by recency. Evicting by key would drop
+    the row that was just written, so every later call for that model would be
+    recreated and immediately evicted again while stale rows survived.
+    """
+
+    ledger = _ledger(tmp_path, max_rows=2)
+    for index, model_id in enumerate(("model-y", "model-z", "model-a")):
+        ledger.record(
+            source_id="src_a",
+            model_id=model_id,
+            usage=None,
+            at=NOW + timedelta(minutes=index),
+        )
+
+    assert [row["model_id"] for row in ledger.window(days=30, now=NOW)] == [
+        "model-a",
+        "model-z",
+    ]
+
+    ledger.record(
+        source_id="src_a",
+        model_id="model-a",
+        usage=None,
+        at=NOW + timedelta(minutes=3),
+    )
+
+    rows = {row["model_id"]: row for row in ledger.window(days=30, now=NOW)}
+    assert rows["model-a"]["requests"] == 2
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -654,6 +714,91 @@ def test_a_persisted_cached_count_above_its_input_is_repaired_on_read(tmp_path: 
     row = ledger.window(days=30, now=NOW)[0]
     assert row["input_tokens"] == 120
     assert row["cached_input_tokens"] == 120
+
+
+def test_a_persisted_report_count_above_its_requests_is_repaired_on_read(
+    tmp_path: Path,
+) -> None:
+    """Review 4959575659 finding 9: coverage can be partial, never over 100%.
+
+    `requests` is self-measured and `token_reports` counts a subset of it, so a
+    corrupt file degrades into a smaller true statement rather than claiming more
+    reports than there were calls.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 3,
+                    "token_reports": 40,
+                    "input_tokens": 120,
+                    "cached_input_tokens": 8,
+                    "output_tokens": 4,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert ledger.summary(days=30, now=NOW)["totals"] == {
+        "requests": 3,
+        "token_reports": 3,
+        "input_tokens": 120,
+        "cached_input_tokens": 8,
+        "output_tokens": 4,
+    }
+
+
+def test_a_written_row_is_validated_the_same_way_a_persisted_one_is(
+    tmp_path: Path,
+) -> None:
+    """One validation path: what this module writes, it could also have read."""
+
+    ledger = _ledger(tmp_path)
+    ledger.record(
+        source_id="src_a",
+        model_id="model-x",
+        usage=ProtocolUsageReport(input_tokens=40, cached_input_tokens=12, output_tokens=7),
+        at=NOW,
+    )
+
+    persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
+    assert persisted == ledger.window(days=30, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("not json", id="unparseable"),
+        pytest.param('{"rows": []}', id="object-instead-of-list"),
+        pytest.param('[{"day": "not-a-day", "source_id": "s", "model_id": "m"}]', id="bad-row"),
+    ],
+)
+def test_rejecting_existing_ledger_state_is_warned_not_silent(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    content: str,
+) -> None:
+    """Review 4959575659 finding 12: the next write erases what was rejected.
+
+    Degrading to empty is the persisted-shape rule; doing it quietly would spend
+    the last moment the old history was recoverable.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(content, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.usage"):
+        assert ledger.window(days=30, now=NOW) == []
+
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
 
 def test_duplicate_persisted_rows_merge_instead_of_shadowing(tmp_path: Path) -> None:

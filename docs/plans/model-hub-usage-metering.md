@@ -89,13 +89,29 @@ a value that is not one degrades the field to absent instead of being published,
 `last_metered_at` comparisons order two rows as *points in time* — text order is not
 time order once two rows carry different UTC offsets.
 
-Identifiers are bounded once, by `MODEL_ID_MAX_LENGTH` in `identifiers.py`, at both
-boundaries that admit a model ID (discovery and custom-model mapping) and again in
-the ledger. The ledger's re-check is unreachable for anything the hub admits, so it
-logs a warning rather than dropping silently: a future boundary that forgets the
-bound should show up as lost metering, not as a quietly incomplete tab. The bound is
-deliberately *not* applied when loading persisted config — per the persisted-shape
-rule, a legacy value must not make startup fail.
+Identity is decided once, by `canonical_model_id` in `identifiers.py`: a model ID is
+trimmed, non-empty, and within `MODEL_ID_MAX_LENGTH`. Both boundaries that admit one
+(discovery and custom-model mapping) store what it returns, and the ledger keys rows
+by it, so config, resolution, and metering cannot disagree about what "the same
+model" means — two spellings of one ID would otherwise become two rows in the tab,
+and a listing naming one model twice is a failed discovery rather than two models.
+The ledger's re-check is therefore unreachable for anything the hub admits, so it
+logs a warning rather than dropping silently: a future boundary that forgets should
+show up as lost metering, not as a quietly incomplete tab. The rule is deliberately
+*not* applied when loading persisted config — per the persisted-shape rule, a legacy
+value must not make startup fail.
+
+Every cross-field promise the read contract makes is a `_COUNTER_SUBSETS` entry
+repaired in one place — cached input inside input, token reports inside requests —
+and `record()` builds its row through the same normalization a persisted row gets, so
+what this module writes it could also have read. Rejected state is never silent: a
+ledger that fails to parse, is not a list, or holds unusable rows warns before the
+next write replaces it, which is the last moment that history is recoverable.
+
+Eviction under `USAGE_MAX_ROWS` orders rows by day and then by *when they were last
+metered*, not by key. Ordering by key would evict by spelling: an early-sorting model
+would be recreated and evicted again on every write while later-sorting stale rows
+survived, so its usage could never accumulate.
 
 ## Persisted shape
 
@@ -145,9 +161,17 @@ A call is recorded when it reached the model: the hub forwarded its output
 downstream, or upstream reported tokens for it. The second half matters because a
 vendor that reported tokens billed us whether or not the response ended well — a
 stream that died after its terminal frame, or a buffered error carrying a usage
-block. A call that never reached the model (rejected credential, engine down) is
-not recorded: resolution events and source health already own that surface, and
+block. Usage a stream reported before it failed counts too: Anthropic bills input
+tokens on `message_start`, so a terminal observation carries everything accumulated
+to reach it. A call that never reached the model (rejected credential, engine down)
+is not recorded: resolution events and source health already own that surface, and
 counting it here would duplicate the concept.
+
+For a stream, `_SSEWireState.reached_model` is the one place that answers "did this
+call reach the model", because every ending of a stream has to answer it the same
+way. Forwarded model output is sufficient on its own — a connection lost after a text
+delta is a request that happened, and `token_reports` staying at zero is exactly how
+the ledger records that nobody reported its tokens.
 
 Metering has **two owners over disjoint populations**, split by the one line that
 decides who can read a call's body — `handle.stream is not None` in
@@ -183,6 +207,36 @@ Contract work: an `api.md` route-table row, an `x-model-hub-routes` entry plus a
 `UsageResponse` definition in `api-response.schema.json`, and a new
 `usage-summary.schema.json`. The existing conformance guard then exercises the
 route against a real server response.
+
+## Review-loop diagnosis (2026-08-18, heads `847d681d` and `ac32d098`)
+
+Two findings-bearing heads produced twelve P2 findings. Classified by root cause
+rather than by comment, three classes recurred across both heads, which trips the
+`ENGINEERING.md` circuit breaker. The full inventory and the ruling:
+
+- **Class A — no owner for "the canonical form of a model identifier"** (findings 1,
+  11). Three notions coexisted: config accepted anything, the admission boundaries
+  checked length only, and the ledger trimmed *and* bounded. Consolidated into
+  `canonical_model_id`; both boundaries store its result and the ledger keys by it.
+- **Class B — persisted-state degradation versus read-contract promises** (findings
+  2, 9, 12). Each cross-field guarantee needs one normalization site, and per the
+  persisted-shape rule a rejection must warn. Consolidated into `_COUNTER_SUBSETS`,
+  one shared `_normalize_row` on both the read and write paths, and warnings in
+  `_read`.
+- **Class C — metering population coverage** (findings 3, 4, 7, 10). Ownership was
+  the fix on head 1 (`_invoke` splits the two populations); on head 2 the remaining
+  two were a dropped field and code contradicting its own written policy, now owned
+  by `reached_model`.
+- **Class E — blocking I/O on the controller loop** (finding 6). Fixed, no recurrence.
+- **Class F — bounded-retention eviction policy** (finding 8). No recurrence; evicting
+  by key starved an early-sorting active model, so eviction is by recency.
+
+Ruling: the breaker pauses blind patching, it does not automatically escalate to the
+owner. Every action above is local, reversible, and makes the code match a contract
+that was already written down, with no major trade-off and no irreversible risk — so
+the work continued rather than stopping for a decision. The recurring signal was real
+and was answered the way the property-ownership rule prescribes: consolidate the
+owner, then resume.
 
 ## Todo
 

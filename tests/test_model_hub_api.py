@@ -5674,6 +5674,77 @@ def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
     assert "sk-model-never-persist-this" not in json.dumps(store.config.to_payload())
 
 
+def test_admitted_model_ids_are_stored_in_their_canonical_form(tmp_path):
+    """Review 4959575659 finding 11: one notion of "the same model", everywhere.
+
+    A model ID is compared in config, sent upstream, and keys a usage row. If
+    admission kept the surrounding whitespace the ledger's canonical key would
+    split one model's usage in two, so admission stores what the ledger keys by.
+    """
+
+    service, store, adapter = _service(tmp_path)
+
+    async def padded_models(vendor, protocol, base_url, credential_ref):
+        return ("  discovered-model  ",)
+
+    adapter.discover_models = padded_models
+    source = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Padded source",
+                "key": "sk-test-transient-only",
+            },
+        )
+    )
+    asyncio.run(
+        service.add_custom_model(
+            source["id"],
+            {"model_id": "  manual-model  ", "reasoning_efforts": []},
+        )
+    )
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        "discovered-model",
+        "manual-model",
+    ]
+
+
+def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path):
+    """Two spellings of one identity are a failed listing, not two models."""
+
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "display_name": "Safe relay",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-test-transient-only",
+            },
+        )
+    )
+
+    async def duplicate_spellings(vendor, protocol, base_url, credential_ref):
+        return ("relay-model", " relay-model")
+
+    adapter.discover_models = duplicate_spellings
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.patch_source(
+                source["id"],
+                {"base_url": "https://other-relay.example/v1"},
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources[0].base_url == "https://relay.example/v1"
+
+
 def test_base_url_change_guards_and_prunes_invalid_exact_hops(
     monkeypatch,
     tmp_path,

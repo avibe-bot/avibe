@@ -699,11 +699,21 @@ class ProtocolSSEState:
             self.last_sequence_number = observation.sequence_number
 
     def terminal_observation(self) -> ProtocolObservation | None:
+        """Report the settled facts, including everything accumulated to get here.
+
+        Usage often arrives before the terminal — Anthropic reports input tokens on
+        ``message_start`` — so a terminal that dropped the accumulated report would
+        lose tokens the upstream already billed on exactly the streams that end
+        badly.
+        """
+
         if self.terminal_outcome is not None:
             return ProtocolObservation(
                 outcome=self.terminal_outcome,
                 error_payload=self.error_payload,
                 error_envelope_paths=self.error_envelope_paths,
+                model_output_started=self.model_output_started,
+                usage=self.usage,
             )
         return None
 

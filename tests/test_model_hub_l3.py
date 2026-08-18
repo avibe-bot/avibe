@@ -6172,6 +6172,59 @@ def test_gateway_meters_a_streamed_served_turn_from_the_wire(tmp_path: Path) -> 
     asyncio.run(exercise())
 
 
+def test_a_stream_that_forwarded_output_is_metered_without_a_token_report(
+    tmp_path: Path,
+) -> None:
+    """Review 4959575659 finding 10: `requests` is what our own code measured.
+
+    Model output reached the client, so the call reached the model — a connection
+    lost after a text delta is still a request that happened. Nobody reported its
+    tokens, which is exactly what `token_reports` staying at zero records.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterpart01", "Interrupted stream")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.NETWORK_ERROR,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_partial",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+        assert metered["input_tokens"] == 0
+        assert metered["output_tokens"] == 0
+
+    asyncio.run(exercise())
+
+
 def test_gateway_meters_a_failed_turn_that_upstream_already_billed(
     tmp_path: Path,
 ) -> None:
