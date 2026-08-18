@@ -798,6 +798,11 @@ export function PermissionsPage() {
   const [search, setSearch] = useState('');
   const mounted = useRef(true);
   const readyResponseRef = useRef<PermissionsResponse | null>(null);
+  const requestGenerationRef = useRef(0);
+  const latestRequestRef = useRef<{
+    generation: number;
+    promise: Promise<AuthoritativeRefreshResult>;
+  } | null>(null);
   const currentPolicySignature = state.kind === 'ready' && shouldRefreshPolicy(state.response)
     ? policyRefreshSignature(state.response)
     : null;
@@ -834,20 +839,41 @@ export function PermissionsPage() {
     setState(result.state);
   }, [installReadyResponse]);
 
-  const loadPage = useCallback(async (): Promise<void> => {
-    const result = await fetchPermissionsPage();
-    installPageResult(result);
-  }, [installPageResult]);
+  const requestPermissionsPage = useCallback((
+    preserveReady: boolean,
+  ): Promise<AuthoritativeRefreshResult> => {
+    const generation = requestGenerationRef.current + 1;
+    requestGenerationRef.current = generation;
+    const promise = (async (): Promise<AuthoritativeRefreshResult> => {
+      const result = await fetchPermissionsPage();
+      if (!mounted.current) return { kind: 'failed' };
+      if (generation !== requestGenerationRef.current) {
+        const latest = latestRequestRef.current;
+        return latest !== null && latest.generation > generation
+          ? latest.promise
+          : { kind: 'failed' };
+      }
+      if (!result.response) {
+        if (!preserveReady) installPageResult(result);
+        return { kind: 'failed' };
+      }
+      const accepted = installReadyResponse(result.response);
+      if (accepted.source !== 'live' || accepted.offline) {
+        return { kind: 'offline' };
+      }
+      return { kind: 'ready', response: accepted };
+    })();
+    latestRequestRef.current = { generation, promise };
+    return promise;
+  }, [installPageResult, installReadyResponse]);
 
-  const refreshReady = useCallback(async (): Promise<AuthoritativeRefreshResult> => {
-    const result = await fetchPermissionsPage();
-    if (!result.response) return { kind: 'failed' };
-    const accepted = installReadyResponse(result.response);
-    if (accepted.source !== 'live' || accepted.offline) {
-      return { kind: 'offline' };
-    }
-    return { kind: 'ready', response: accepted };
-  }, [installReadyResponse]);
+  const loadPage = useCallback(async (): Promise<void> => {
+    await requestPermissionsPage(false);
+  }, [requestPermissionsPage]);
+
+  const refreshReady = useCallback((): Promise<AuthoritativeRefreshResult> => (
+    requestPermissionsPage(true)
+  ), [requestPermissionsPage]);
 
   const refreshPolicyStatus = useCallback(async (): Promise<void> => {
     const result = await refreshReady();
@@ -860,16 +886,12 @@ export function PermissionsPage() {
   }, [refreshReady]);
 
   useEffect(() => {
-    let active = true;
     mounted.current = true;
-    void fetchPermissionsPage().then((result) => {
-      if (active) installPageResult(result);
-    });
+    void loadPage();
     return () => {
-      active = false;
       mounted.current = false;
     };
-  }, [installPageResult]);
+  }, [loadPage]);
 
   const policyRefreshExhausted = currentPolicySignature !== null
     && exhaustedPolicySignature === currentPolicySignature;

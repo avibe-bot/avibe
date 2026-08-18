@@ -378,6 +378,110 @@ describe('PermissionsPage state model', () => {
     ]);
   });
 
+  it('keeps the latest paired instance when recovery responses resolve out of order', async () => {
+    vi.useFakeTimers();
+    const cachedA = response({ source: 'cache', offline: true, cached_at: 123 });
+    const staleA = response();
+    staleA.projection.instance.name = 'stale-instance-a';
+    staleA.projection.policy_sync.status = 'applying';
+    staleA.projection.projects[0]!.sync.status = 'pending';
+    const cachedB = response({ source: 'cache', offline: true, cached_at: 456 });
+    cachedB.projection.instance.id = 'inst-b';
+    cachedB.projection.instance.name = 'instance-b';
+    cachedB.projection.instance.authorization_revision = 1;
+    const staleRequest = deferred<PermissionsResponse>();
+    const currentRequest = deferred<PermissionsResponse>();
+    api.getPermissions
+      .mockResolvedValueOnce(cachedA)
+      .mockReturnValueOnce(staleRequest.promise)
+      .mockReturnValueOnce(currentRequest.promise);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    const refresh = screen.getByRole('button', { name: 'permissions.actions.refresh' });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    expect(api.getPermissions).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      currentRequest.resolve(cachedB);
+      await Promise.resolve();
+    });
+    expect(screen.getByText('instance-b')).toBeTruthy();
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+
+    await act(async () => {
+      staleRequest.resolve(staleA);
+      await Promise.resolve();
+    });
+    expect(screen.getByText('instance-b')).toBeTruthy();
+    expect(screen.queryByText('stale-instance-a')).toBeNull();
+    expect(screen.getByText('permissions.states.offlineTitle')).toBeTruthy();
+    expect(screen.queryByText('permissions.states.applyingTitle')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses the newest same-instance response when a conflict refresh is superseded', async () => {
+    vi.useFakeTimers();
+    const applying = response();
+    applying.projection.policy_sync.status = 'applying';
+    applying.projection.projects[0]!.sync.status = 'pending';
+    applying.projection.access.entries = [{
+      kind: 'email',
+      value: 'viewer@example.com',
+      role: 'viewer',
+    }];
+    const staleInstance = response();
+    staleInstance.projection.instance.id = 'inst-b';
+    staleInstance.projection.instance.name = 'stale-instance-b';
+    const latest = response();
+    latest.projection.instance.authorization_revision = 5;
+    latest.projection.access.entries = applying.projection.access.entries;
+    const conflictRefresh = deferred<PermissionsResponse>();
+    api.getPermissions
+      .mockResolvedValueOnce(applying)
+      .mockReturnValueOnce(conflictRefresh.promise)
+      .mockResolvedValueOnce(latest);
+    api.replaceAuthorizedUsers
+      .mockRejectedValueOnce(new PermissionsApiError(409, {
+        error: 'permission_revision_conflict',
+        current_revision: 5,
+      }))
+      .mockResolvedValueOnce({
+        ok: true,
+        instance_id: 'inst-123',
+        authorization_revision: 6,
+        entries: [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+      });
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.editAccess' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(2);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.getPermissions).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      conflictRefresh.resolve(staleInstance);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('permissions.states.conflictBody')).toBeTruthy();
+    expect(screen.queryByText('permissions.states.conflictRefreshBody')).toBeNull();
+    expect(screen.queryByText('stale-instance-b')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.retrySave' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(api.replaceAuthorizedUsers.mock.calls[1]).toEqual([
+      [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+      5,
+      'inst-123',
+    ]);
+  });
+
   it.each([
     'access edit',
     'Project edit',
