@@ -975,7 +975,7 @@ def test_public_show_ignores_an_existing_limited_guest_lease(monkeypatch, tmp_pa
     assert "Cookie" not in response.headers.get("Vary", "")
 
 
-def test_limited_guest_lease_survives_rotation_only_for_that_browser(
+def test_limited_guest_lease_is_rejected_after_rotation(
     monkeypatch,
     tmp_path,
 ):
@@ -1016,7 +1016,6 @@ def test_limited_guest_lease_survives_rotation_only_for_that_browser(
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert continuing.status_code == 200
     rotated_navigation = admitted.get(
         f"/p/{old_share_id}/",
         base_url="https://alex.avibe.bot",
@@ -1029,6 +1028,7 @@ def test_limited_guest_lease_survives_rotation_only_for_that_browser(
         follow_redirects=False,
     )
     assert rotated_navigation.status_code == 404
+    assert continuing.status_code == 404
     fresh_old_link = app.test_client().get(
         f"/p/{old_share_id}/",
         base_url="https://alex.avibe.bot",
@@ -1038,7 +1038,7 @@ def test_limited_guest_lease_survives_rotation_only_for_that_browser(
     assert fresh_old_link.status_code == 404
 
 
-def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
+def test_limited_show_guest_is_rechecked_after_access_changes(
     monkeypatch,
     tmp_path,
 ):
@@ -1187,14 +1187,14 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             base_url="https://alex.avibe.bot",
             environ_base=_remote_peer(),
         )
-        assert existing_asset.status_code == 200
+        assert existing_asset.status_code == 404
         html_subresource = client.get(
             f"/p/{share_id}/index.html",
             base_url="https://alex.avibe.bot",
             environ_base=_remote_peer(),
             headers={"Accept": "text/html"},
         )
-        assert html_subresource.status_code == 200
+        assert html_subresource.status_code == 404
 
         stale_limited_navigation = client.get(
             f"/p/{share_id}/",
@@ -1203,10 +1203,7 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             headers={"Accept": "text/html"},
             follow_redirects=False,
         )
-        assert stale_limited_navigation.status_code == 302
-        assert urllib.parse.urlsplit(stale_limited_navigation.headers["Location"]).path == (
-            "/api/v1/instances/inst_123/show-identity/authorize"
-        )
+        assert stale_limited_navigation.status_code == 404
 
         fresh_client = app.test_client()
         fresh_login = fresh_client.get(
@@ -1251,7 +1248,7 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             base_url="https://alex.avibe.bot",
             environ_base=_remote_peer(),
         )
-        assert still_open.status_code == 200
+        assert still_open.status_code == 404
         stale_private_navigation = client.get(
             f"/p/{share_id}/",
             base_url="https://alex.avibe.bot",
