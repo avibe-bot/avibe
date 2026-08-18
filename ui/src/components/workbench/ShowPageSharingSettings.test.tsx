@@ -38,18 +38,27 @@ const showAccess = (overrides: Partial<ShowAccess> = {}): ShowAccess => ({
   ...overrides,
 });
 
-const settings = (sessionId = 'ses-1', showCustomLink = true) => (
+const settings = (
+  sessionId = 'ses-1',
+  showCustomLink = true,
+  onApplied?: (showAccess: ShowAccess) => void,
+) => (
   <I18nextProvider i18n={i18n}>
     <ShowPageSharingSettings
       active
       canManage
       sessionId={sessionId}
       showCustomLink={showCustomLink}
+      onApplied={onApplied}
     />
   </I18nextProvider>
 );
-const renderSettings = (sessionId = 'ses-1', showCustomLink = true) => (
-  render(settings(sessionId, showCustomLink))
+const renderSettings = (
+  sessionId = 'ses-1',
+  showCustomLink = true,
+  onApplied?: (showAccess: ShowAccess) => void,
+) => (
+  render(settings(sessionId, showCustomLink, onApplied))
 );
 
 const chooseMode = async (name: 'Private' | 'Limited' | 'Fully public') => {
@@ -198,6 +207,38 @@ describe('ShowPageSharingSettings', () => {
     expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
       'taken-link',
     );
+  });
+
+  it('reconciles a successful custom-link save after the editor unmounts', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({ access_mode: 'public' }),
+    });
+    let resolveApply = (_result: ShowAccessApplyResult) => undefined;
+    api.applyShowAccess.mockReturnValue(new Promise<ShowAccessApplyResult>((resolve) => {
+      resolveApply = resolve;
+    }));
+    const onApplied = vi.fn();
+    const view = renderSettings('ses-1', true, onApplied);
+    const input = await screen.findByRole('textbox', { name: 'Custom link' });
+
+    fireEvent.change(input, { target: { value: 'new-link' } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    await act(async () => {
+      resolveApply({
+        status: 'applied',
+        show_access: showAccess({
+          access_mode: 'public',
+          revision: 1,
+          share_id: 'new-link',
+        }),
+      });
+      await Promise.resolve();
+    });
+
+    expect(onApplied).toHaveBeenCalledWith(expect.objectContaining({ share_id: 'new-link' }));
   });
 
   it('can hide custom-link editing when embedded in the share popover', async () => {

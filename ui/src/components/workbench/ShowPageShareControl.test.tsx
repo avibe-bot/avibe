@@ -216,7 +216,8 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'limited',
-      active_url: '/p/stable-link/',
+      active_url: null,
+      public_url: 'https://alice.avibe.bot/p/stable-link/',
       share_id: 'stable-link',
       url_available: true,
       offline: false,
@@ -230,8 +231,41 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    expect(await screen.findByDisplayValue(/\/p\/stable-link\/$/)).toBeTruthy();
+    expect(await screen.findByDisplayValue('https://alice.avibe.bot/p/stable-link/')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
+  });
+
+  it('keeps the Limited share action disabled without Cloud identity', async () => {
+    api.getShowPageAccess.mockResolvedValue({
+      ok: true,
+      mode: 'local',
+      can_use: true,
+      can_manage: false,
+      can_publish_public: false,
+    });
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'limited',
+      active_url: null,
+      public_url: null,
+      share_id: 'stable-link',
+      url_available: false,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => expect(api.ensureShowPage).toHaveBeenCalledWith('ses-1'));
+    expect((screen.getByRole('button', { name: 'Copy link' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.queryByDisplayValue(/\/p\/stable-link\/$/)).toBeNull();
   });
 
   it('keeps online state and Workspace access out of the share popover', async () => {

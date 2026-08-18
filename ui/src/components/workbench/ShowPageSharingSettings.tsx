@@ -237,8 +237,16 @@ export function ShowPageSharingSettings({
         target_share_id: targetShareId,
         target_emails: nextTargetEmails,
       });
-      if (!isCurrent()) return;
       if (result.show_access.page_id !== requestSessionId) throw new Error('ShowAccess page identity mismatch');
+      if (!isCurrent()) {
+        // Collapsing the row unmounts this editor, but the successful write still
+        // has to reconcile the shared inventory so its copied link is not stale.
+        // A real session change updates sessionIdRef and remains discarded.
+        if (result.status === 'applied' && requestSessionId === sessionIdRef.current) {
+          onApplied?.(result.show_access);
+        }
+        return;
+      }
       if (result.status === 'conflict') {
         savingRef.current = false;
         setSaving(false);

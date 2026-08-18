@@ -1,7 +1,5 @@
 // Show Page link helpers shared by the admin Show Pages list and the in-chat
-// share control. Avibe Cloud-qualified urls in the payload are null on a local
-// install (no remote access configured), so fall back to the same-origin route
-// the page is actually served at locally.
+// share control.
 
 export type ShowPageLinkInfo = {
   session_id: string;
@@ -32,7 +30,10 @@ export function editorPath(page: ShowPageLinkInfo): string | null {
 }
 
 export function liveHref(page: ShowPageLinkInfo): string | null {
-  if (page.visibility === 'limited' && page.public_url) return page.public_url;
+  // Limited admission depends on Avibe Cloud identity. The server-projected
+  // public URL is therefore the only usable share link; a local /p fallback
+  // would lead recipients to an authorization flow this installation cannot run.
+  if (page.visibility === 'limited') return page.public_url ?? null;
   return page.active_url || localPath(page);
 }
 

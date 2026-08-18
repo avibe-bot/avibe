@@ -21,7 +21,7 @@ describe('Show Page link routes', () => {
   it('keeps Limited share links on the signed-in guest route', () => {
     const limited = {
       ...page('limited'),
-      active_url: 'https://show.example.test/p/shared-link/',
+      public_url: 'https://show.example.test/p/shared-link/',
     };
     expect(localPath(limited)).toBe('/p/shared-link/');
     expect(liveHref(limited)).toBe('https://show.example.test/p/shared-link/');
@@ -36,6 +36,17 @@ describe('Show Page link routes', () => {
     };
 
     expect(copyHref(limited)).toBe('https://alice.avibe.bot/p/shared-link/');
+  });
+
+  it('does not expose a Limited link without a Cloud-qualified URL', () => {
+    const limited = {
+      ...page('limited'),
+      active_url: '/p/shared-link/',
+      public_url: null,
+    };
+
+    expect(liveHref(limited)).toBeNull();
+    expect(copyHref(limited)).toBeNull();
   });
 
   it('keeps public share links on the guest-facing route', () => {
