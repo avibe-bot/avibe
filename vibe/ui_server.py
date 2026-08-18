@@ -2674,6 +2674,35 @@ def _permissions_mutation_payload(
     return payload
 
 
+def _resource_access_mutation_payload(payload: Any):
+    if not isinstance(payload, dict) or set(payload) != {
+        "access_level",
+        "group_ids",
+        "if_match_revision",
+        "if_match_instance_id",
+    }:
+        return None
+    access_level = payload.get("access_level")
+    group_ids = payload.get("group_ids")
+    revision = payload.get("if_match_revision")
+    instance_id = payload.get("if_match_instance_id")
+    if (
+        access_level not in {"private", "public", "scope"}
+        or not isinstance(group_ids, list)
+        or any(not isinstance(group_id, str) or not group_id.strip() for group_id in group_ids)
+        or len(group_ids) != len(set(group_ids))
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(instance_id, str)
+        or not instance_id
+    ):
+        return None
+    if (access_level == "scope") != bool(group_ids):
+        return None
+    return payload
+
+
 @app.get("/api/permissions", include_in_schema=False)
 async def current_instance_permissions_get(starlette_request: FastAPIRequest):
     async def handler():
@@ -2755,6 +2784,73 @@ async def current_instance_permissions_project_access_put(
             result = await asyncio.to_thread(
                 permissions.update_project_access,
                 project_id,
+                payload,
+            )
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get(
+    "/api/permissions/resources/{resource_kind}/{resource_id}/access",
+    include_in_schema=False,
+)
+async def current_instance_permissions_resource_access_get(
+    resource_kind: str,
+    resource_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_read_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            result = await asyncio.to_thread(
+                permissions.get_resource_access,
+                resource_kind,
+                resource_id,
+            )
+            response = jsonify(result)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put(
+    "/api/permissions/resources/{resource_kind}/{resource_id}/access",
+    include_in_schema=False,
+)
+async def current_instance_permissions_resource_access_put(
+    resource_kind: str,
+    resource_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _resource_access_mutation_payload(raw_payload)
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(
+                permissions.update_resource_access,
+                resource_kind,
+                resource_id,
                 payload,
             )
             return jsonify(result)

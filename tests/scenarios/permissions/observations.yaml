@@ -29,3 +29,14 @@ observations:
       - cache only sanitized successful projections bound to the paired instance
       - never mask credential or authorization failures with cached policy
       - keep revisions explicit on every mutation
+  - id: OBS-PERMISSIONS-003
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-011
+    summary: Show Page Workspace access is the exact-current-instance Resource ACL while link and Limited-email access remain local and independent.
+    previous_assumption: The Show Page access panel could derive Organization ownership from a browser claim or a hidden Cloud-management session.
+    observed_behavior: The local service resolves pairing ownership, proxies canonical Resource ACL reads and writes, and preserves stale drafts on revision conflict.
+    required_updates:
+      - bind every Resource ACL request to the paired instance and strip the browser match field before Backend contact
+      - preserve local link visibility and Limited-email grants as separate policy dimensions
+      - treat ownership uncertainty or mismatch as fail-closed without overwriting an existing policy

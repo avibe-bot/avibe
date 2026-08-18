@@ -1688,12 +1688,12 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
         page = store.get(session_id)
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        reconciliation = store.reconcile_resource_policy(
+            page.session_id,
+            user_context=context,
+        )
         with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
+            policy = reconciliation["policy"]
             can_use = resource_access_service.can_use_resource(
                 context,
                 "show_page",
@@ -1716,15 +1716,16 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
     finally:
         store.close()
 
-    organization_id = policy.get("organization_id") if policy else None
-    instance_id = context.instance_id
-    if context.is_instance_owner and organization_id and not instance_id:
-        instance_id = V2Config.load().remote_access.vibe_cloud.instance_id or None
+    ownership = reconciliation["ownership"]
+    organization_id = ownership.get("organization_id")
+    policy_organization_id = policy.get("organization_id") if policy else None
     return {
         "ok": True,
-        "mode": "organization" if organization_id else "personal",
-        "instance_id": instance_id,
+        "mode": ownership["mode"],
+        "ownership_status": reconciliation["status"],
+        "instance_id": ownership.get("instance_id"),
         "organization_id": organization_id,
+        "policy_organization_id": policy_organization_id,
         "access_level": policy.get("access_level", "private") if policy else "private",
         "group_ids": list(policy.get("group_ids") or []) if policy else [],
         "policy_revision": policy.get("policy_revision") if policy else None,

@@ -16,8 +16,10 @@ import {
 const access = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess => ({
   ok: true,
   mode: 'organization',
+  ownership_status: 'unchanged',
   instance_id: 'inst-1',
   organization_id: 'org-1',
+  policy_organization_id: 'org-1',
   access_level: 'private',
   group_ids: [],
   policy_revision: 4,

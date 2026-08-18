@@ -15,6 +15,7 @@ import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
@@ -222,7 +223,7 @@ export const ShowPageShareControl: React.FC<{
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="w-[min(22rem,calc(100vw-1rem))] space-y-3"
+        className="max-h-[var(--radix-popover-content-available-height)] w-[min(22rem,calc(100vw-1rem))] space-y-3 overflow-y-auto"
         data-window-owner-id={ownerWindowId}
         onInteractOutside={(event) => {
           if (confirmationOpen) event.preventDefault();
@@ -290,6 +291,17 @@ export const ShowPageShareControl: React.FC<{
               onApplied={handleShowAccessApplied}
               onConfirmationOpenChange={setConfirmationOpen}
               ownerWindowId={ownerWindowId}
+            />
+          </div>
+        ) : null}
+
+        {access ? (
+          <div className="border-t border-border pt-3">
+            <ShowPageWorkspaceAccessControl
+              access={access}
+              active={open}
+              canManageInstance={canManageInstance}
+              sessionId={sessionId}
             />
           </div>
         ) : null}

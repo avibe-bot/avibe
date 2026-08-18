@@ -3548,6 +3548,38 @@
       "sharingAccess": "Link access",
       "sharingAccessDesc": "Controls the shared /p link independently from Workspace access.",
       "loadingSharingAccess": "Loading link access…",
+      "workspaceAccess": "Workspace access",
+      "workspaceAccessDesc": "Controls authenticated access inside this Avibe. Link access remains separate.",
+      "loadingWorkspaceAccess": "Loading Workspace access…",
+      "workspacePersonal": "This Show Page belongs to a Personal Avibe.",
+      "workspaceUnmanaged": "Workspace access is unavailable until this Avibe is paired.",
+      "workspacePending": "Organization ownership is known, but its exact binding is temporarily unavailable. Access remains private.",
+      "workspaceOwnershipConflict": "This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.",
+      "workspaceModes": {
+        "private": "Private",
+        "organization": "Organization",
+        "scope": "Selected groups"
+      },
+      "workspaceHelp": {
+        "private": "Only the page owner and Instance Owner can use it.",
+        "public": "Authenticated members of this Organization can use it.",
+        "scope": "Only members of the selected Organization groups can use it."
+      },
+      "workspaceGroups": "Organization groups",
+      "workspaceArchived": "Archived",
+      "workspaceNoGroups": "No active groups are available.",
+      "workspaceGroupRequired": "Select at least one group.",
+      "workspaceRevisionConflict": "Workspace access changed elsewhere. Your draft was kept on the latest revision.",
+      "workspaceOffline": "The last known policy is shown while Permissions is offline. Editing is disabled.",
+      "workspaceReadOnly": "Avibe Cloud owns this policy. Edit it in Avibe Cloud.",
+      "workspaceOwnerOnly": "Only the Instance Owner can change Workspace access.",
+      "workspaceLoadError": "Workspace access could not be loaded.",
+      "applyWorkspaceAccess": "Apply",
+      "workspaceSync": {
+        "pending": "The policy is waiting for this Avibe to apply it.",
+        "offline": "This Avibe has not acknowledged the latest policy.",
+        "error": "The latest policy could not be applied."
+      },
       "sharingModes": {
         "private": "Private",
         "limited": "Limited",

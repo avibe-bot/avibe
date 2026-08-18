@@ -2,6 +2,7 @@ export type AccessRole = 'viewer' | 'editor';
 export type PrincipalKind = 'email' | 'email_domain' | 'organization_group';
 export type ProjectSyncStatus = 'in_sync' | 'pending' | 'offline' | 'error' | 'deleted';
 export type ResourceAccessLevel = 'public' | 'scope' | 'private';
+export type ResourceSyncStatus = 'in_sync' | 'pending' | 'offline' | 'error';
 
 export type AccessEntry = {
   kind: PrincipalKind;
@@ -103,6 +104,35 @@ export type ProjectAccessWriteResponse = {
   instance_id: string;
   project: PermissionProject;
   authorization_revision: number;
+};
+
+export type PermissionResource = {
+  instance_id: string;
+  resource_kind: 'agent' | 'vault_secret' | 'skill' | 'show_page';
+  resource_id: string;
+  display_name: string;
+  owner_user_id: string | null;
+  access: {
+    access_level: ResourceAccessLevel;
+    group_ids: string[];
+    revision: number;
+  };
+  sync: {
+    status: ResourceSyncStatus;
+    desired_acl_revision: number;
+    applied_acl_revision: number;
+    last_synced_at: string | null;
+    last_sync_error?: string;
+  };
+};
+
+export type ResourceAccessResponse = {
+  resource: PermissionResource;
+};
+
+export type ResourceAccessWriteResponse = {
+  ok: true;
+  resource: PermissionResource;
 };
 
 export type PermissionsErrorPayload = {

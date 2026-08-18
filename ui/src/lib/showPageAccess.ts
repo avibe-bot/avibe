@@ -1,9 +1,11 @@
 import type { ResourceAccessLevel } from '@/features/permissions/types';
 export type ShowPageAccess = {
   ok: true;
-  mode: 'personal' | 'organization';
+  mode: 'unmanaged' | 'personal' | 'organization' | 'organization_pending';
+  ownership_status: 'unmanaged' | 'created' | 'adopted' | 'unchanged' | 'pending' | 'conflict';
   instance_id: string | null;
   organization_id: string | null;
+  policy_organization_id: string | null;
   access_level: ResourceAccessLevel;
   group_ids: string[];
   policy_revision: number | null;
@@ -86,7 +88,13 @@ function isShowPageAccess(value: unknown): value is ShowPageAccess {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<ShowPageAccess>;
   return candidate.ok === true
-    && (candidate.mode === 'personal' || candidate.mode === 'organization')
+    && (
+      candidate.mode === 'unmanaged'
+      || candidate.mode === 'personal'
+      || candidate.mode === 'organization'
+      || candidate.mode === 'organization_pending'
+    )
+    && typeof candidate.ownership_status === 'string'
     && typeof candidate.can_use === 'boolean'
     && typeof candidate.can_manage === 'boolean'
     && typeof candidate.can_publish_public === 'boolean';

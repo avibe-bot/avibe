@@ -101,3 +101,12 @@ scenarios:
     given: Current-instance Permissions and local Show Page sharing are installed
     when: Registered routes and frontend sources are inventoried
     then: No Management OAuth proxy or embedded Organization route remains
+  - id: PERMISSIONS-011
+    name: Show Page Workspace access round-trips through exact-instance Resource ACL
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_011_show_page_resource_acl_round_trip_and_conflict
+    given: A paired Instance Owner has a canonical private Show Page Resource ACL
+    when: The owner saves Selected groups and then submits a stale revision
+    then: The canonical policy round-trips without a browser target field and the stale write changes nothing

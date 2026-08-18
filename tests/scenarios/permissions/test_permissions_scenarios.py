@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -219,5 +220,69 @@ def test_permissions_010_legacy_management_surfaces_are_absent() -> None:
     show_control = root / "ui" / "src" / "components" / "workbench" / "ShowPageShareControl.tsx"
     source = show_control.read_text(encoding="utf-8")
     assert "cloud-management" not in source
-    assert "ShowPageWorkspaceAccessControl" not in source
+    assert "ShowPageWorkspaceAccessControl" in source
     assert "ShowPageSharingSettings" in source
+
+
+def test_permissions_011_show_page_resource_acl_round_trip_and_conflict(harness) -> None:
+    """Scenario: PERMISSIONS-011."""
+    client = harness.local_client()
+    resource_path = "/api/permissions/resources/show_page/ses-resource/access"
+
+    initial = client.get(resource_path)
+    write = client.put(
+        resource_path,
+        json={
+            "access_level": "scope",
+            "group_ids": ["group-1"],
+            "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
+        },
+        headers=harness.csrf(client),
+    )
+    readback = client.get(resource_path)
+
+    assert initial.status_code == 200
+    assert initial.get_json()["resource"]["access"] == {
+        "access_level": "private",
+        "group_ids": [],
+        "revision": 0,
+    }
+    assert write.status_code == 200
+    assert write.get_json()["resource"]["access"] == {
+        "access_level": "scope",
+        "group_ids": ["group-1"],
+        "revision": 1,
+    }
+    assert readback.status_code == 200
+    assert readback.get_json()["resource"] == write.get_json()["resource"]
+    backend_write = next(
+        request
+        for request in harness.backend_requests
+        if request["method"] == "PUT" and "/permissions/resources/" in request["url"]
+    )
+    assert backend_write["json"] == {
+        "access_level": "scope",
+        "group_ids": ["group-1"],
+        "if_match_revision": 0,
+    }
+
+    before_conflict = deepcopy(harness.resource)
+    conflict = client.put(
+        resource_path,
+        json={
+            "access_level": "public",
+            "group_ids": [],
+            "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
+        },
+        headers=harness.csrf(client),
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.get_json() == {
+        "ok": False,
+        "error": "permission_revision_conflict",
+        "current_revision": 1,
+    }
+    assert harness.resource == before_conflict

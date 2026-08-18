@@ -50,6 +50,7 @@ class PermissionsScenarioHarness:
         self.backend_available = True
         self.backend_requests: list[dict] = []
         self.projection = self._projection()
+        self.resource = self._resource()
         self._backend_patch = patch.object(
             permissions.requests,
             "request",
@@ -148,6 +149,27 @@ class PermissionsScenarioHarness:
             },
         }
 
+    @staticmethod
+    def _resource() -> dict:
+        return {
+            "instance_id": "inst-current",
+            "resource_kind": "show_page",
+            "resource_id": "ses-resource",
+            "display_name": "Scenario Show Page",
+            "owner_user_id": "subject-owner",
+            "access": {
+                "access_level": "private",
+                "group_ids": [],
+                "revision": 0,
+            },
+            "sync": {
+                "status": "in_sync",
+                "desired_acl_revision": 0,
+                "applied_acl_revision": 0,
+                "last_synced_at": None,
+            },
+        }
+
     def _backend_request(self, method: str, url: str, **kwargs):
         request_record = {
             "method": method,
@@ -166,6 +188,10 @@ class PermissionsScenarioHarness:
         path = urlsplit(url).path
         if method == "GET" and path.endswith("/permissions"):
             return _BackendResponse(200, self.projection)
+        if method == "GET" and path.endswith(
+            "/permissions/resources/show_page/ses-resource/access"
+        ):
+            return _BackendResponse(200, {"resource": self.resource})
         if self.projection["instance"]["permission_authority"] == "cloud":
             return _BackendResponse(403, {"error": "permission_authority_cloud"})
         payload = request_record["json"] or {}
@@ -216,6 +242,28 @@ class PermissionsScenarioHarness:
                     "authorization_revision": self.projection["instance"]["authorization_revision"],
                 },
             )
+        if method == "PUT" and path.endswith(
+            "/permissions/resources/show_page/ses-resource/access"
+        ):
+            current = self.resource["access"]["revision"]
+            if payload.get("if_match_revision") != current:
+                return _BackendResponse(
+                    409,
+                    {"error": "permission_revision_conflict", "current_revision": current},
+                )
+            next_revision = current + 1
+            self.resource["access"] = {
+                "access_level": payload.get("access_level"),
+                "group_ids": deepcopy(payload.get("group_ids", [])),
+                "revision": next_revision,
+            }
+            self.resource["sync"].update(
+                {
+                    "status": "pending",
+                    "desired_acl_revision": next_revision,
+                }
+            )
+            return _BackendResponse(200, {"ok": True, "resource": self.resource})
         return _BackendResponse(404, {"error": "project_not_found"})
 
     def acknowledge_project(self) -> None:

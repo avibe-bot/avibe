@@ -3548,6 +3548,38 @@
       "sharingAccess": "链接访问",
       "sharingAccessDesc": "独立控制分享链接 /p，不改变 Workspace 权限。",
       "loadingSharingAccess": "正在加载链接访问设置…",
+      "workspaceAccess": "Workspace 访问",
+      "workspaceAccessDesc": "控制此 Avibe 内的已登录访问；与链接访问相互独立。",
+      "loadingWorkspaceAccess": "正在加载 Workspace 访问设置…",
+      "workspacePersonal": "此 Show Page 属于 Personal Avibe。",
+      "workspaceUnmanaged": "此 Avibe 配对后才能使用 Workspace 访问。",
+      "workspacePending": "已知此 Avibe 属于 Organization，但暂时无法取得精确绑定；访问保持私有。",
+      "workspaceOwnershipConflict": "此 Show Page 绑定到了其他所有权域；解决冲突前访问保持私有。",
+      "workspaceModes": {
+        "private": "私有",
+        "organization": "Organization",
+        "scope": "指定群组"
+      },
+      "workspaceHelp": {
+        "private": "只有页面所有者和 Instance Owner 可以使用。",
+        "public": "此 Organization 的已登录成员可以使用。",
+        "scope": "只有所选 Organization 群组的成员可以使用。"
+      },
+      "workspaceGroups": "Organization 群组",
+      "workspaceArchived": "已归档",
+      "workspaceNoGroups": "暂无可选的活跃群组。",
+      "workspaceGroupRequired": "请至少选择一个群组。",
+      "workspaceRevisionConflict": "Workspace 访问已在其他位置更新；你的草稿已保留到最新版本。",
+      "workspaceOffline": "Permissions 离线时显示上次已知策略，暂不可编辑。",
+      "workspaceReadOnly": "此策略由 Avibe Cloud 管理，请前往 Avibe Cloud 修改。",
+      "workspaceOwnerOnly": "只有 Instance Owner 可以修改 Workspace 访问。",
+      "workspaceLoadError": "无法加载 Workspace 访问设置。",
+      "applyWorkspaceAccess": "应用",
+      "workspaceSync": {
+        "pending": "策略正在等待此 Avibe 应用。",
+        "offline": "此 Avibe 尚未确认最新策略。",
+        "error": "无法应用最新策略。"
+      },
       "sharingModes": {
         "private": "私有",
         "limited": "指定用户",

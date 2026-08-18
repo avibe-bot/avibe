@@ -132,6 +132,33 @@ def _complete_projection(instance_id: str = "inst-123") -> dict:
     return projection
 
 
+def _resource(
+    instance_id: str = "inst-123",
+    resource_kind: str = "show_page",
+    resource_id: str = "page-1",
+    *,
+    revision: int = 4,
+) -> dict:
+    return {
+        "instance_id": instance_id,
+        "resource_kind": resource_kind,
+        "resource_id": resource_id,
+        "display_name": "Page",
+        "owner_user_id": "owner-1",
+        "access": {
+            "access_level": "scope",
+            "group_ids": ["group-1"],
+            "revision": revision,
+        },
+        "sync": {
+            "status": "in_sync",
+            "desired_acl_revision": revision,
+            "applied_acl_revision": revision,
+            "last_synced_at": "2026-08-18T06:00:00.000Z",
+        },
+    }
+
+
 _MISSING = object()
 
 
@@ -335,6 +362,82 @@ def test_permissions_client_binds_requests_to_paired_instance(monkeypatch) -> No
             },
         )
     ]
+
+
+def test_resource_access_client_binds_identity_and_strips_local_pairing_precondition(
+    monkeypatch,
+) -> None:
+    captured = []
+
+    def request(method, url, **kwargs):
+        captured.append((method, url, kwargs.get("json")))
+        resource = _resource(revision=5 if method == "PUT" else 4)
+        return _Response(
+            200,
+            {"ok": True, "resource": resource} if method == "PUT" else {"resource": resource},
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+
+    read = permissions.get_resource_access("show_page", "page-1", _config())
+    written = permissions.update_resource_access(
+        "show_page",
+        "page-1",
+        {
+            "access_level": "scope",
+            "group_ids": ["group-1"],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        _config(),
+    )
+
+    expected_url = (
+        "https://backend.example/api/v1/instances/inst-123/permissions/"
+        "resources/show_page/page-1/access"
+    )
+    assert read == {"resource": _resource(revision=4)}
+    assert written == {"ok": True, "resource": _resource(revision=5)}
+    assert captured == [
+        ("GET", expected_url, None),
+        (
+            "PUT",
+            expected_url,
+            {
+                "access_level": "scope",
+                "group_ids": ["group-1"],
+                "if_match_revision": 4,
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("instance_id", "inst-other"),
+        ("resource_kind", "agent"),
+        ("resource_id", "page-other"),
+    ],
+)
+def test_resource_access_client_rejects_response_identity_mismatch(
+    monkeypatch,
+    field,
+    value,
+) -> None:
+    resource = _resource()
+    resource[field] = value
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, {"resource": resource}),
+    )
+
+    with pytest.raises(
+        permissions.PermissionsInvalidResponseError,
+        match="permissions_resource_mismatch",
+    ):
+        permissions.get_resource_access("show_page", "page-1", _config())
 
 
 def test_permissions_response_enriches_legacy_display_from_the_exact_pairing() -> None:
@@ -1363,6 +1466,18 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
         http_authorization_policy("PUT", "/api/permissions/projects/project-1/access").minimum_role
         == "owner"
     )
+    assert (
+        http_authorization_policy(
+            "GET", "/api/permissions/resources/show_page/page-1/access"
+        ).minimum_role
+        == "viewer"
+    )
+    assert (
+        http_authorization_policy(
+            "PUT", "/api/permissions/resources/show_page/page-1/access"
+        ).minimum_role
+        == "owner"
+    )
 
 
 def test_permissions_projection_get_is_private_and_not_cached(monkeypatch) -> None:
@@ -1527,4 +1642,189 @@ def test_permissions_same_origin_route_surfaces_a_changed_pairing(monkeypatch) -
     assert response.get_json() == {
         "ok": False,
         "error": "permissions_pairing_changed",
+    }
+
+
+def test_resource_access_same_origin_routes_forward_exact_identity_and_conflict(
+    monkeypatch,
+) -> None:
+    client = app.test_client()
+    headers = csrf_headers(client)
+    captured = []
+
+    def get_resource(resource_kind, resource_id):
+        captured.append(("GET", resource_kind, resource_id, None))
+        return {"resource": _resource(resource_id=resource_id)}
+
+    def update_resource(resource_kind, resource_id, payload):
+        captured.append(("PUT", resource_kind, resource_id, payload))
+        raise permissions.PermissionsBackendError(
+            409,
+            {"error": "permission_revision_conflict", "current_revision": 7},
+        )
+
+    monkeypatch.setattr(permissions, "get_resource_access", get_resource)
+    monkeypatch.setattr(permissions, "update_resource_access", update_resource)
+    read = client.get("/api/permissions/resources/show_page/page-1/access")
+    write = client.put(
+        "/api/permissions/resources/show_page/page-1/access",
+        json={
+            "access_level": "scope",
+            "group_ids": ["group-1"],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        headers=headers,
+    )
+
+    assert read.status_code == 200
+    assert read.headers["Cache-Control"] == "private, no-store"
+    assert read.get_json()["resource"]["resource_id"] == "page-1"
+    assert write.status_code == 409
+    assert write.get_json() == {
+        "ok": False,
+        "error": "permission_revision_conflict",
+        "current_revision": 7,
+    }
+    assert captured == [
+        ("GET", "show_page", "page-1", None),
+        (
+            "PUT",
+            "show_page",
+            "page-1",
+            {
+                "access_level": "scope",
+                "group_ids": ["group-1"],
+                "if_match_revision": 4,
+                "if_match_instance_id": "inst-123",
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "access_level": "scope",
+            "group_ids": [],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        {
+            "access_level": "private",
+            "group_ids": ["group-1"],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        {
+            "access_level": "scope",
+            "group_ids": ["group-1", "group-1"],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        {
+            "access_level": "scope",
+            "group_ids": ["group-1"],
+            "if_match_revision": True,
+            "if_match_instance_id": "inst-123",
+        },
+    ],
+)
+def test_resource_access_same_origin_route_rejects_invalid_payload_before_backend(
+    monkeypatch,
+    payload,
+) -> None:
+    called = False
+
+    def update_resource(*_args):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr(permissions, "update_resource_access", update_resource)
+    client = app.test_client()
+    response = client.put(
+        "/api/permissions/resources/show_page/page-1/access",
+        json=payload,
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 422
+    assert response.get_json() == {"ok": False, "error": "invalid_request"}
+    assert called is False
+
+
+def test_resource_access_route_rejects_page_scoped_guest_before_backend(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    backend_called = False
+
+    def get_resource(*_args):
+        nonlocal backend_called
+        backend_called = True
+        return {"resource": _resource()}
+
+    monkeypatch.setattr(permissions, "get_resource_access", get_resource)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "guest@example.com",
+            "guest-1",
+            session_claims={
+                "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "show_page_email",
+                "vibe_show_page_id": "page-1",
+            },
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/api/permissions/resources/show_page/page-1/access",
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "ok": False,
+        "error": "show_page_access_forbidden",
+    }
+    assert backend_called is False
+
+
+def test_resource_access_route_surfaces_cloud_authority_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        permissions,
+        "update_resource_access",
+        lambda *_args: (_ for _ in ()).throw(
+            permissions.PermissionsBackendError(
+                403,
+                {"error": "permission_authority_cloud"},
+            )
+        ),
+    )
+    client = app.test_client()
+    response = client.put(
+        "/api/permissions/resources/show_page/page-1/access",
+        json={
+            "access_level": "private",
+            "group_ids": [],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "ok": False,
+        "error": "permission_authority_cloud",
     }

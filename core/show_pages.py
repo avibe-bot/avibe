@@ -759,26 +759,66 @@ class ShowPageStore:
             raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
     @staticmethod
-    def _register_created_resource_policy(connection, session_id: str, user_context: Any) -> None:
+    def _resolve_instance_ownership() -> dict[str, Any]:
+        from vibe import permissions
+
+        return permissions.resolve_current_instance_ownership()
+
+    @staticmethod
+    def _reconcile_resource_policy(
+        connection,
+        session_id: str,
+        user_context: Any,
+        ownership: dict[str, Any],
+    ) -> dict[str, Any]:
         from storage import resource_access_service
 
-        if not (user_context.subject and user_context.has_role("editor")):
-            return
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id=session_id,
-            organization_id=user_context.organization_id,
-            owner_user_id=user_context.subject,
-            owner_email=user_context.email,
-            access_level="private",
-            created_by_user_id=user_context.subject,
-            updated_by_user_id=user_context.subject,
+        owner_user_id = (
+            user_context.subject
+            if user_context.subject and user_context.has_role("editor")
+            else None
         )
+        return resource_access_service.reconcile_show_page_resource_policy(
+            connection,
+            resource_id=session_id,
+            ownership=ownership,
+            owner_user_id=owner_user_id,
+            owner_email=user_context.email,
+        )
+
+    def reconcile_resource_policy(
+        self,
+        session_id: str,
+        *,
+        user_context: Any = None,
+    ) -> dict[str, Any]:
+        """Resolve ownership outside SQLite, then reconcile one existing page."""
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
+        with self.engine.begin() as connection:
+            exists = connection.execute(
+                select(show_pages.c.session_id)
+                .where(show_pages.c.session_id == session_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if exists is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            return self._reconcile_resource_policy(
+                connection,
+                session_id,
+                context,
+                ownership,
+            )
 
     def ensure(self, session_id: str, *, user_context: Any = None) -> ShowPage:
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
         now = _utc_now_iso()
         page = ShowPage(
             session_id=session_id,
@@ -796,6 +836,7 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._reconcile_resource_policy(conn, session_id, context, ownership)
                 self._require_project_edit_access(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing)
@@ -812,7 +853,7 @@ class ShowPageStore:
                     updated_at=page.updated_at,
                 )
             )
-            self._register_created_resource_policy(conn, session_id, context)
+            self._reconcile_resource_policy(conn, session_id, context, ownership)
         return page
 
     def ensure_active(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, bool]:
@@ -827,6 +868,7 @@ class ShowPageStore:
         """
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             existing = (
@@ -835,6 +877,7 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._reconcile_resource_policy(conn, session_id, context, ownership)
                 self._require_project_edit_access(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing), False
@@ -889,9 +932,14 @@ class ShowPageStore:
                     "Could not allocate a unique share ID.",
                     code="share_id_allocation_failed",
                 )
-            if created:
-                self._register_created_resource_policy(conn, session_id, context)
-            self._require_resource_access(conn, session_id, context)
+            reconciliation = self._reconcile_resource_policy(
+                conn,
+                session_id,
+                context,
+                ownership,
+            )
+            if not (created and reconciliation["status"] == "pending"):
+                self._require_resource_access(conn, session_id, context)
         return _page_from_row(row), created
 
     def is_archived(self, session_id: str) -> bool:

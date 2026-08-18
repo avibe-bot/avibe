@@ -13,7 +13,7 @@ from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, show_pages
 from tests.ui_server_test_helpers import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import api, internal_client, remote_access, ui_server
+from vibe import api, internal_client, permissions, remote_access, ui_server
 from vibe.ui_server import app
 
 
@@ -53,6 +53,7 @@ def _organization_cookie(
         "vibe_organization_member_id": f"member-{subject}",
         "vibe_organization_role": organization_role,
         "vibe_membership_version": "membership-v2",
+        "vibe_instance_authorization_revision": 0,
     }
     if groups is not None:
         claims["vibe_group_ids"] = groups
@@ -62,6 +63,30 @@ def _organization_cookie(
         subject,
         session_claims=claims,
     )
+
+
+def _paired_config(tmp_path, *, instance_kind: str):
+    config = _save_config(tmp_path)
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.example"
+    cloud.instance_secret = "device-secret"
+    cloud.instance_kind = instance_kind
+    config.save()
+    return config
+
+
+def _ownership(
+    mode: str,
+    *,
+    organization_id: str | None = None,
+    source: str = "live",
+) -> dict:
+    return {
+        "mode": mode,
+        "instance_id": "inst_123",
+        "organization_id": organization_id,
+        "source": source,
+    }
 
 
 def _seed_show_pages_with_policies() -> ShowPageStore:
@@ -259,8 +284,17 @@ def test_remote_show_page_access_does_not_bypass_acl(
     assert page.status_code == (200 if instance_role == "owner" else 302)
 
 
-def test_remote_show_page_creation_persists_real_org_identity(monkeypatch, tmp_path) -> None:
+def test_show_page_creation_uses_exact_instance_organization_without_request_claims(
+    monkeypatch,
+    tmp_path,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config(tmp_path, instance_kind="organization")
+    monkeypatch.setattr(
+        permissions,
+        "resolve_current_instance_ownership",
+        lambda: _ownership("organization", organization_id="org-1"),
+    )
     owner_context = _organization_context("owner-1", instance_role="owner")
     store = ShowPageStore()
     try:
@@ -284,10 +318,7 @@ def test_remote_show_page_creation_persists_real_org_identity(monkeypatch, tmp_p
                     }],
                 },
             )
-        created = store.ensure(
-            session["id"],
-            user_context=_organization_context("member-1", instance_role="editor"),
-        )
+        created = store.ensure(session["id"])
         assert created.session_id == session["id"]
         with store.engine.connect() as connection:
             created_policy = resource_access_service.get_resource_policy(
@@ -295,7 +326,7 @@ def test_remote_show_page_creation_persists_real_org_identity(monkeypatch, tmp_p
             )
         assert created_policy is not None
         assert created_policy["organization_id"] == "org-1"
-        assert created_policy["owner_user_id"] == "member-1"
+        assert created_policy["owner_user_id"] is None
         assert "is_trusted_local" not in created_policy
         page = store.ensure("ses-org-public", user_context=owner_context)
         with store.engine.begin() as connection:
@@ -535,28 +566,53 @@ def test_organization_admin_can_read_show_page_access_metadata_without_use_acces
         api.get_show_page_access("ses-scope")
 
 
-def test_opening_existing_organization_page_does_not_register_new_policy(monkeypatch, tmp_path) -> None:
+def test_existing_show_page_is_adopted_idempotently_without_changing_link_access(
+    monkeypatch,
+    tmp_path,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
     try:
         store.ensure("ses-legacy")
-        page = store.ensure(
+        applied = store.apply_access(
             "ses-legacy",
-            user_context=_organization_context("owner-1", instance_role="owner"),
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id="stable-link",
+            target_emails=["guest@example.com"],
         )
+        store.set_offline("ses-legacy", True)
+        before = store.get_access("ses-legacy")
+        assert applied.status == "applied"
+        _paired_config(tmp_path, instance_kind="organization")
+        monkeypatch.setattr(
+            permissions,
+            "resolve_current_instance_ownership",
+            lambda: _ownership("organization", organization_id="org-1"),
+        )
+        page = store.ensure("ses-legacy")
+        store.ensure("ses-legacy")
         with store.engine.connect() as connection:
             policy = resource_access_service.get_resource_policy(
                 "show_page",
                 page.session_id,
                 connection=connection,
             )
-        assert policy is None
+        after = store.get_access("ses-legacy")
+        assert policy is not None
+        assert policy["organization_id"] == "org-1"
+        assert policy["access_level"] == "private"
+        assert policy["policy_revision"] == 0
+        assert before == after
+        assert page.offline
     finally:
         store.close()
 
 
 def test_show_page_access_api_distinguishes_personal_and_organization_modes(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    personal_home = tmp_path / "personal"
+    monkeypatch.setenv("AVIBE_HOME", str(personal_home))
+    _paired_config(personal_home, instance_kind="personal")
     personal_store = ShowPageStore()
     try:
         personal_store.ensure("ses-personal")
@@ -568,32 +624,39 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
     assert personal.get_json() == {
         "ok": True,
         "mode": "personal",
-        "instance_id": None,
+        "ownership_status": "unchanged",
+        "instance_id": "inst_123",
         "organization_id": None,
+        "policy_organization_id": None,
         "access_level": "private",
         "group_ids": [],
-        "policy_revision": None,
+        "policy_revision": 0,
         "last_applied_control_plane_revision": None,
         "can_use": True,
         "can_manage": True,
         "can_publish_public": True,
     }
 
-    config = _save_config(tmp_path)
+    organization_home = tmp_path / "organization"
+    monkeypatch.setenv("AVIBE_HOME", str(organization_home))
+    config = _paired_config(organization_home, instance_kind="organization")
+    monkeypatch.setattr(
+        permissions,
+        "resolve_current_instance_ownership",
+        lambda: _ownership("organization", organization_id="org-1"),
+    )
     store = ShowPageStore()
     try:
         store.ensure("ses-organization")
         with store.engine.begin() as connection:
-            resource_access_service.ensure_resource_policy(
+            resource_access_service.apply_control_plane_intent(
                 connection,
+                organization_id="org-1",
                 resource_kind="show_page",
                 resource_id="ses-organization",
-                organization_id="org-1",
-                owner_user_id="owner-1",
+                revision=4,
                 access_level="scope",
                 group_ids=["group-engineering"],
-                policy_revision=4,
-                last_applied_control_plane_revision=4,
             )
     finally:
         store.close()
@@ -619,8 +682,10 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
     assert organization.get_json() == {
         "ok": True,
         "mode": "organization",
+        "ownership_status": "unchanged",
         "instance_id": "inst_123",
         "organization_id": "org-1",
+        "policy_organization_id": "org-1",
         "access_level": "scope",
         "group_ids": ["group-engineering"],
         "policy_revision": 4,
@@ -629,6 +694,232 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "can_manage": True,
         "can_publish_public": True,
     }
+
+
+def test_null_organization_adoption_preserves_policy_and_show_access(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-adopt")
+        applied = store.apply_access(
+            "ses-adopt",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id="adopt-link",
+            target_emails=["guest@example.com"],
+        )
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses-adopt",
+                organization_id=None,
+                owner_user_id="owner-1",
+                owner_email="owner@example.com",
+                access_level="private",
+                policy_revision=4,
+                last_applied_control_plane_revision=3,
+            )
+        before_access = store.get_access("ses-adopt")
+        _paired_config(tmp_path, instance_kind="organization")
+        monkeypatch.setattr(
+            permissions,
+            "resolve_current_instance_ownership",
+            lambda: _ownership("organization", organization_id="org-1"),
+        )
+
+        store.ensure("ses-adopt")
+        store.ensure("ses-adopt")
+
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page",
+                "ses-adopt",
+                connection=connection,
+            )
+        assert applied.status == "applied"
+        assert store.get_access("ses-adopt") == before_access
+        assert policy is not None
+        assert policy["organization_id"] == "org-1"
+        assert policy["owner_user_id"] == "owner-1"
+        assert policy["owner_email"] == "owner@example.com"
+        assert policy["access_level"] == "private"
+        assert policy["group_ids"] == []
+        assert policy["policy_revision"] == 4
+        assert policy["last_applied_control_plane_revision"] == 3
+    finally:
+        store.close()
+
+
+def test_same_organization_retry_preserves_acl_revision_and_groups(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config(tmp_path, instance_kind="organization")
+    monkeypatch.setattr(
+        permissions,
+        "resolve_current_instance_ownership",
+        lambda: _ownership("organization", organization_id="org-1"),
+    )
+    store = ShowPageStore()
+    try:
+        store.ensure(
+            "ses-same-org",
+            user_context=_organization_context("owner-1", instance_role="owner"),
+        )
+        with store.engine.begin() as connection:
+            resource_access_service.apply_control_plane_intent(
+                connection,
+                organization_id="org-1",
+                resource_kind="show_page",
+                resource_id="ses-same-org",
+                revision=7,
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+            before = resource_access_service.get_resource_policy(
+                "show_page", "ses-same-org", connection=connection
+            )
+
+        store.ensure(
+            "ses-same-org",
+            user_context=_organization_context("owner-1", instance_role="owner"),
+        )
+
+        with store.engine.connect() as connection:
+            after = resource_access_service.get_resource_policy(
+                "show_page", "ses-same-org", connection=connection
+            )
+        assert after == before
+    finally:
+        store.close()
+
+
+def test_cross_organization_policy_conflict_fails_closed_without_breaking_link_guest(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-conflict")
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses-conflict",
+                organization_id="org-other",
+                owner_user_id="owner-other",
+                access_level="public",
+                policy_revision=5,
+                last_applied_control_plane_revision=5,
+            )
+        _paired_config(tmp_path, instance_kind="organization")
+        monkeypatch.setattr(
+            permissions,
+            "resolve_current_instance_ownership",
+            lambda: _ownership("organization", organization_id="org-1"),
+        )
+        store.ensure("ses-conflict")
+
+        response = api.get_show_page_access("ses-conflict")
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page", "ses-conflict", connection=connection
+            )
+            link_guest = resource_access_service.can_use_resource(
+                resource_access_service.ResourceUserContext(
+                    subject="guest-1",
+                    email="guest@example.com",
+                    instance_role="viewer",
+                    instance_access_source="show_page_email",
+                    show_page_id="ses-conflict",
+                    is_remote=True,
+                ),
+                "show_page",
+                "ses-conflict",
+                connection=connection,
+            )
+        with pytest.raises(ShowPageError):
+            store.require_access(
+                "ses-conflict",
+                user_context=_organization_context("member-1"),
+            )
+        assert store.list(user_context=_organization_context("member-1")) == []
+        assert response["ownership_status"] == "conflict"
+        assert response["organization_id"] == "org-1"
+        assert response["policy_organization_id"] == "org-other"
+        assert policy is not None
+        assert policy["organization_id"] == "org-other"
+        assert policy["access_level"] == "public"
+        assert policy["policy_revision"] == 5
+        assert link_guest is True
+    finally:
+        store.close()
+
+
+def test_organization_pending_is_stable_private_and_does_not_block_local_creation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config(tmp_path, instance_kind="organization")
+    monkeypatch.setattr(
+        permissions,
+        "get_current_permissions",
+        lambda _config=None: (_ for _ in ()).throw(
+            permissions.PermissionsUnavailableError("permissions_backend_unavailable")
+        ),
+    )
+    store = ShowPageStore()
+    try:
+        created = store.ensure("ses-pending")
+        response = api.get_show_page_access("ses-pending")
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page", "ses-pending", connection=connection
+            )
+        assert created.session_id == "ses-pending"
+        assert policy is None
+        assert response["mode"] == "organization_pending"
+        assert response["ownership_status"] == "pending"
+        assert response["access_level"] == "private"
+        assert response["organization_id"] is None
+        assert response["can_use"] is True
+    finally:
+        store.close()
+
+
+def test_last_known_organization_binding_is_exact_instance_scoped(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, instance_kind="organization")
+    store = ShowPageStore()
+    try:
+        with store.engine.begin() as connection:
+            resource_access_service.remember_show_page_instance_ownership(
+                connection,
+                _ownership("organization", organization_id="org-1"),
+            )
+        monkeypatch.setattr(
+            permissions,
+            "get_current_permissions",
+            lambda _config=None: (_ for _ in ()).throw(
+                permissions.PermissionsUnavailableError("permissions_backend_unavailable")
+            ),
+        )
+        offline = permissions.resolve_current_instance_ownership()
+        assert offline == _ownership(
+            "organization",
+            organization_id="org-1",
+            source="stored",
+        )
+
+        config.remote_access.vibe_cloud.instance_id = "inst-new"
+        config.save()
+        repaired = permissions.resolve_current_instance_ownership()
+        assert repaired["mode"] == "organization_pending"
+        assert repaired["instance_id"] == "inst-new"
+        assert repaired["organization_id"] is None
+    finally:
+        store.close()
 
 
 def test_show_page_access_api_reports_missing_page_as_definitive_denial(monkeypatch, tmp_path) -> None:

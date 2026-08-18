@@ -32,6 +32,9 @@ _ACCESS_ROLES = frozenset({"viewer", "editor"})
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted"})
 _PROJECT_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
+_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
+_RESOURCE_ACCESS_LEVELS = frozenset({"private", "public", "scope"})
+_RESOURCE_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error"})
 _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "error"})
 _SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
 _PROJECT_ID_PATH_SEPARATORS = frozenset({"/", "\\"})
@@ -173,6 +176,19 @@ def _is_valid_project_id(value: Any) -> bool:
 def _require_project_id(value: Any) -> None:
     if not _is_valid_project_id(value):
         _invalid_response()
+
+
+def _require_resource_identity(resource_kind: Any, resource_id: Any) -> tuple[str, str]:
+    _require_enum(resource_kind, _RESOURCE_KINDS)
+    if (
+        not isinstance(resource_id, str)
+        or resource_id != resource_id.strip()
+        or not resource_id
+        or len(resource_id) > 200
+        or any(ord(char) < 32 or ord(char) == 127 for char in resource_id)
+    ):
+        raise PermissionsInvalidResponseError("invalid_resource_id")
+    return resource_kind, resource_id
 
 
 def _require_enum(value: Any, allowed: frozenset[str]) -> None:
@@ -357,6 +373,88 @@ def _validated_project_result(payload: Any, project_id: str) -> dict[str, Any]:
     if project["project_id"] != project_id:
         _invalid_response()
     _require_nonnegative_integer(result["authorization_revision"])
+    return result
+
+
+def _validate_resource(
+    value: Any,
+    *,
+    instance_id: str,
+    resource_kind: str,
+    resource_id: str,
+) -> dict[str, Any]:
+    resource = _require_mapping(value)
+    _require_keys(
+        resource,
+        "instance_id",
+        "resource_kind",
+        "resource_id",
+        "display_name",
+        "owner_user_id",
+        "access",
+        "sync",
+    )
+    if (
+        resource["instance_id"] != instance_id
+        or resource["resource_kind"] != resource_kind
+        or resource["resource_id"] != resource_id
+    ):
+        raise PermissionsInvalidResponseError("permissions_resource_mismatch")
+    _require_string(resource["display_name"])
+    _require_nonempty_string(resource["owner_user_id"], nullable=True)
+
+    access = _require_mapping(resource["access"])
+    _require_keys(access, "access_level", "group_ids", "revision")
+    _require_enum(access["access_level"], _RESOURCE_ACCESS_LEVELS)
+    group_ids = _require_list(access["group_ids"])
+    for group_id in group_ids:
+        _require_nonempty_string(group_id)
+    if len(group_ids) != len(set(group_ids)):
+        _invalid_response()
+    if access["access_level"] == "scope":
+        if not group_ids:
+            _invalid_response()
+    elif group_ids:
+        _invalid_response()
+    _require_nonnegative_integer(access["revision"])
+
+    sync = _require_mapping(resource["sync"])
+    _require_keys(
+        sync,
+        "status",
+        "desired_acl_revision",
+        "applied_acl_revision",
+        "last_synced_at",
+    )
+    _require_enum(sync["status"], _RESOURCE_SYNC_STATUSES)
+    _require_nonnegative_integer(sync["desired_acl_revision"])
+    _require_nonnegative_integer(sync["applied_acl_revision"])
+    _require_string(sync["last_synced_at"], nullable=True)
+    if "last_sync_error" in sync:
+        _require_string(sync["last_sync_error"])
+    return resource
+
+
+def _validated_resource_result(
+    payload: Any,
+    *,
+    instance_id: str,
+    resource_kind: str,
+    resource_id: str,
+    mutation: bool,
+) -> dict[str, Any]:
+    result = _require_mapping(_strip_sensitive(payload))
+    _require_keys(result, "resource")
+    if mutation:
+        _require_keys(result, "ok")
+        if result["ok"] is not True:
+            _invalid_response()
+    result["resource"] = _validate_resource(
+        result["resource"],
+        instance_id=instance_id,
+        resource_kind=resource_kind,
+        resource_id=resource_id,
+    )
     return result
 
 
@@ -641,6 +739,100 @@ def update_project_access(
         project=result["project"],
     )
     return {**result, "instance_id": instance_id}
+
+
+def get_resource_access(
+    resource_kind: str,
+    resource_id: str,
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    resource_kind, resource_id = _require_resource_identity(resource_kind, resource_id)
+    config, load_current_config = _request_config(config)
+    payload_result, instance_id = _backend_request(
+        config,
+        load_current_config,
+        "GET",
+        f"resources/{quote(resource_kind, safe='')}/{quote(resource_id, safe='')}/access",
+    )
+    return _validated_resource_result(
+        payload_result,
+        instance_id=instance_id,
+        resource_kind=resource_kind,
+        resource_id=resource_id,
+        mutation=False,
+    )
+
+
+def update_resource_access(
+    resource_kind: str,
+    resource_id: str,
+    payload: Mapping[str, Any],
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    resource_kind, resource_id = _require_resource_identity(resource_kind, resource_id)
+    config, load_current_config = _request_config(config)
+    expected_instance_id, backend_payload = _mutation_payload(payload)
+    payload_result, instance_id = _backend_request(
+        config,
+        load_current_config,
+        "PUT",
+        f"resources/{quote(resource_kind, safe='')}/{quote(resource_id, safe='')}/access",
+        backend_payload,
+        expected_instance_id=expected_instance_id,
+    )
+    return _validated_resource_result(
+        payload_result,
+        instance_id=instance_id,
+        resource_kind=resource_kind,
+        resource_id=resource_id,
+        mutation=True,
+    )
+
+
+def resolve_current_instance_ownership(
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    """Resolve exact-instance ownership without trusting browser claims."""
+
+    from storage import resource_access_service
+
+    try:
+        config = config or V2Config.load()
+        credentials = config.remote_access.vibe_cloud.runtime_credentials()
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        credentials = None
+    if credentials is None:
+        return {
+            "mode": "unmanaged",
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
+
+    current = resource_access_service.current_show_page_instance_ownership()
+    if current["mode"] in {"personal", "organization"}:
+        return current
+    try:
+        result = get_current_permissions(config)
+    except PermissionsError:
+        return current
+    instance = result.projection["instance"]
+    organization = instance.get("organization")
+    if isinstance(organization, Mapping):
+        return {
+            "mode": "organization",
+            "instance_id": credentials[1],
+            "organization_id": organization["id"],
+            "source": result.source,
+        }
+    if "organization" in instance or config.remote_access.vibe_cloud.instance_kind == "personal":
+        return {
+            "mode": "personal",
+            "instance_id": credentials[1],
+            "organization_id": None,
+            "source": result.source,
+        }
+    return current
 
 
 def _local_instance_display(
