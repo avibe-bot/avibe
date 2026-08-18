@@ -1125,10 +1125,10 @@ class MemoryRuntime:
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
             error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
-            if not (self._process and self._process.running):
-                # No active child can still depend on the prior settings. Retain
-                # the desired config so a first artifact install can activate it
-                # immediately instead of waiting for another reconciliation.
+            if self._process is None:
+                # No retained supervisor can relaunch with the prior settings.
+                # Retain the desired config so a first artifact install can
+                # activate it without waiting for another reconciliation.
                 self._config = config
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
@@ -3474,6 +3474,9 @@ class MemoryRuntime:
                                 meta,
                                 candidate,
                             )
+                        previous_python = await asyncio.to_thread(
+                            self._artifact_manager.resolve_python
+                        )
                         commit()
                         result = await self._reconcile_locked(
                             self._config,
@@ -3482,6 +3485,12 @@ class MemoryRuntime:
                             resume_claims_on_failure=False,
                         )
                         if result.get("ok") is not True:
+                            if previous_python is None:
+                                # First artifact admission is durable even when
+                                # its desired config cannot activate immediately.
+                                # A later reconcile can retry the retained config
+                                # without forcing the user to download it again.
+                                return
                             raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
                         self._restart_config = deepcopy(self._config)
                         return
