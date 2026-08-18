@@ -1177,6 +1177,18 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
         )
         assert existing_asset.status_code == 200
 
+        stale_limited_navigation = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert stale_limited_navigation.status_code == 302
+        assert urllib.parse.urlsplit(stale_limited_navigation.headers["Location"]).path == (
+            "/api/v1/instances/inst_123/show-identity/authorize"
+        )
+
         fresh_client = app.test_client()
         fresh_login = fresh_client.get(
             f"/p/{share_id}/",
@@ -1221,6 +1233,14 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             environ_base=_remote_peer(),
         )
         assert still_open.status_code == 200
+        stale_private_navigation = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert stale_private_navigation.status_code == 404
         new_visit = app.test_client().get(
             f"/p/{share_id}/",
             base_url="https://alex.avibe.bot",

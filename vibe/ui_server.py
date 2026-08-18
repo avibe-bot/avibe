@@ -15321,6 +15321,19 @@ async def serve_public_show_page(share_id, asset_path):
             asset_path,
             request._request,
         )
+        if limited_guest and is_spa_navigation:
+            # A guest lease keeps an already-open page usable after an access
+            # change, but it must not authorize a new page navigation after the
+            # current limited-access record no longer admits that guest.
+            access = store.get_access(page.session_id)
+            if (
+                access is None
+                or page.visibility != "limited"
+                or access.access_mode != "limited"
+                or access.share_id != share_id
+                or lease.normalized_email not in access.normalized_emails
+            ):
+                limited_guest = False
         if page.visibility != "public" and is_spa_navigation:
             editor_context = await asyncio.to_thread(_show_public_editor_context)
             if editor_context is not None:
