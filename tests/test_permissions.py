@@ -515,6 +515,24 @@ def test_permissions_live_read_survives_cache_write_failure(monkeypatch) -> None
     assert result.projection["instance"]["id"] == "inst-123"
 
 
+def test_permissions_live_read_replaces_an_invalid_utf8_cache(monkeypatch) -> None:
+    cache_path = permissions._cache_path()  # noqa: SLF001
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"\xff")
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, _projection()),
+    )
+
+    result = permissions.get_current_permissions(_config())
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+
+    assert result.source == "live"
+    assert cached is not None
+    assert cached.projection == result.projection
+
+
 @pytest.mark.parametrize(
     ("status", "error"),
     [

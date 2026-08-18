@@ -433,7 +433,7 @@ def _write_cache(instance_id: str, projection: dict[str, Any]) -> None:
 def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
     try:
         envelope = json.loads(_cache_path().read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(envelope, dict):
         return None
