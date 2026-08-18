@@ -779,8 +779,17 @@ class ShowPageStore:
             session_id,
             connection=connection,
         )
-        if current_policy is None and not user_context.can_use_show_page(session_id):
-            cls._require_project_edit_access(connection, session_id, user_context)
+        if current_policy is None:
+            try:
+                cls._require_project_edit_access(connection, session_id, user_context)
+            except ShowPageError:
+                if not user_context.can_use_show_page(session_id):
+                    raise
+                return {
+                    "status": "unchanged",
+                    "ownership": ownership,
+                    "policy": None,
+                }
         owner_user_id = (
             user_context.subject
             if user_context.subject and user_context.has_role("editor")

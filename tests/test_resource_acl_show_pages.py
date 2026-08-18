@@ -609,7 +609,7 @@ def test_existing_show_page_is_adopted_idempotently_without_changing_link_access
         store.close()
 
 
-def test_legacy_show_page_policy_reconciliation_requires_existing_page_or_project_access(
+def test_legacy_show_page_policy_reconciliation_keeps_page_grants_read_only(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -617,7 +617,8 @@ def test_legacy_show_page_policy_reconciliation_requires_existing_page_or_projec
     store = ShowPageStore()
     project_path = tmp_path / "project"
     project_path.mkdir()
-    editor = _organization_context("editor-1", instance_role="editor")
+    instance_editor = _organization_context("editor-1", instance_role="editor")
+    project_editor = _organization_context("project-editor", instance_role="editor")
     try:
         with store.engine.begin() as connection:
             project = projects_service.create_project(connection, str(project_path))
@@ -644,8 +645,27 @@ def test_legacy_show_page_policy_reconciliation_requires_existing_page_or_projec
                 },
             )
 
+        page_guest = resource_access_service.ResourceUserContext(
+            subject="guest-1",
+            email="guest@example.com",
+            instance_role="viewer",
+            instance_access_source="show_page_email",
+            show_page_id=session_id,
+            is_remote=True,
+        )
+        guest_response = api.get_show_page_access(session_id, user_context=page_guest)
+        assert guest_response["ownership_status"] == "unchanged"
+        assert guest_response["can_use"] is True
+        assert guest_response["can_manage"] is False
+        with store.engine.connect() as connection:
+            assert resource_access_service.get_resource_policy(
+                "show_page",
+                session_id,
+                connection=connection,
+            ) is None
+
         with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            api.get_show_page_access(session_id, user_context=editor)
+            api.get_show_page_access(session_id, user_context=instance_editor)
         with store.engine.connect() as connection:
             assert resource_access_service.get_resource_policy(
                 "show_page",
@@ -662,13 +682,13 @@ def test_legacy_show_page_policy_reconciliation_requires_existing_page_or_projec
                     "mode": "restricted",
                     "bindings": [{
                         "principal_kind": "email",
-                        "principal_value": "editor-1@example.com",
+                        "principal_value": "project-editor@example.com",
                         "access_role": "editor",
                     }],
                 },
             )
 
-        response = api.get_show_page_access(session_id, user_context=editor)
+        response = api.get_show_page_access(session_id, user_context=project_editor)
         with store.engine.connect() as connection:
             policy = resource_access_service.get_resource_policy(
                 "show_page",
@@ -679,7 +699,7 @@ def test_legacy_show_page_policy_reconciliation_requires_existing_page_or_projec
         assert response["can_use"] is True
         assert response["can_manage"] is True
         assert policy is not None
-        assert policy["owner_user_id"] == "editor-1"
+        assert policy["owner_user_id"] == "project-editor"
         assert policy["organization_id"] == "org-1"
     finally:
         store.close()

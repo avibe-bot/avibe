@@ -1123,6 +1123,63 @@ describe('PermissionsPage conflict handling', () => {
     expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { draftRole: 'editor' as const, concurrentRole: 'viewer' as const, narrows: false },
+    { draftRole: 'viewer' as const, concurrentRole: 'editor' as const, narrows: true },
+  ])('rebases an access addition onto a concurrently created matching principal', async ({
+    draftRole,
+    concurrentRole,
+    narrows,
+  }) => {
+    const initial = response();
+    const latest = response();
+    latest.projection.instance.authorization_revision = 5;
+    latest.projection.access.entries = [
+      { kind: 'email', value: 'concurrent@example.com', role: concurrentRole },
+    ];
+    api.getPermissions
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(latest);
+    api.replaceAuthorizedUsers
+      .mockRejectedValueOnce(new PermissionsApiError(409, {
+        error: 'permission_revision_conflict',
+        current_revision: 5,
+      }))
+      .mockResolvedValueOnce({
+        ok: true,
+        instance_id: 'inst-123',
+        authorization_revision: 6,
+        entries: [{ kind: 'email', value: 'concurrent@example.com', role: draftRole }],
+      });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'permissions.actions.addAccess' }));
+    await user.type(screen.getByLabelText('permissions.fields.principal'), 'concurrent@example.com');
+    if (draftRole === 'editor') {
+      await user.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    }
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    expect(await screen.findByText('permissions.states.conflictTitle')).toBeTruthy();
+    expect(screen.getByText('permissions.access.editTitle')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.retrySave' }));
+    if (narrows) {
+      const narrowingDialog = (await screen.findByText('permissions.access.narrowTitle')).closest('[role="dialog"]');
+      await user.click(within(narrowingDialog as HTMLElement).getByRole('button', {
+        name: 'permissions.actions.save',
+      }));
+    }
+
+    await waitFor(() => expect(api.replaceAuthorizedUsers).toHaveBeenCalledTimes(2));
+    expect(api.replaceAuthorizedUsers.mock.calls[1]).toEqual([
+      [{ kind: 'email', value: 'concurrent@example.com', role: draftRole }],
+      5,
+      'inst-123',
+    ]);
+    expect(screen.queryByText('permissions.errors.duplicate_access_principal')).toBeNull();
+  });
+
   it('closes a principal replacement when conflict refresh shows it was already applied', async () => {
     const initial = response();
     initial.projection.access.entries = [

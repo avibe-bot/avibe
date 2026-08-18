@@ -354,7 +354,7 @@ function AccessEntryDialog({
   const authoritativeIndex = originalKey === null
     ? -1
     : entries.findIndex((entry) => accessEntryKey(entry) === originalKey);
-  const nextEntries = editingKey === null || authoritativeIndex < 0
+  const nextEntries = originalKey === null || authoritativeIndex < 0
     ? [...entries, candidate]
     : entries.map((entry, index) => (index === authoritativeIndex ? candidate : entry));
 
@@ -388,7 +388,12 @@ function AccessEntryDialog({
       onOpenChange(false);
       return true;
     }
-    baselineEntry.current = latestOriginal;
+    if (originalKey === null && latestCandidate) {
+      originalEntry.current = latestCandidate;
+      baselineEntry.current = latestCandidate;
+    } else {
+      baselineEntry.current = latestOriginal;
+    }
     setRevision(latest.response.projection.instance.authorization_revision);
     setRefreshRequired(false);
     setError(undefined);
@@ -453,7 +458,7 @@ function AccessEntryDialog({
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t(editingKey === null ? 'permissions.access.addTitle' : 'permissions.access.editTitle')}</DialogTitle>
+          <DialogTitle>{t(originalKey === null ? 'permissions.access.addTitle' : 'permissions.access.editTitle')}</DialogTitle>
           <DialogDescription>{t('permissions.access.dialogBody')}</DialogDescription>
         </DialogHeader>
         {conflict ? (
