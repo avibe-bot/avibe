@@ -228,7 +228,21 @@ export const Wizard: React.FC = () => {
       ...stepData,
     };
     setData(nextData);
-    await persistStep(stepData, nextData);
+    const persisted = await persistStep(stepData, nextData);
+    // The intermediate save may have ADDED platforms to the persisted
+    // enabled list (add-ops from this step). Fold them into the wizard's
+    // deselection baseline so going back and unchecking one of them
+    // produces a remove op on the next save — otherwise the adapter
+    // stays enabled while the wizard shows it unselected.
+    if (persisted?.platforms?.enabled) {
+      const persistedEnabled: string[] = persisted.platforms.enabled;
+      const currentBaseline: string[] = Array.isArray(nextData.__wizardEnabledBaseline)
+        ? nextData.__wizardEnabledBaseline
+        : [];
+      const mergedBaseline = Array.from(new Set([...currentBaseline, ...persistedEnabled]));
+      nextData.__wizardEnabledBaseline = mergedBaseline;
+      setData({ ...nextData });
+    }
     if (currentStep < steps.length - 1) {
       setCurrentStep(currentStep + 1);
     }
@@ -267,8 +281,12 @@ export const Wizard: React.FC = () => {
         mergedData.channelConfigsByPlatform
     );
     if (shouldPersistConfig) {
-      await api.saveConfig(buildConfigPayload(mergedData, getPersistableWizardPlatforms(mergedData)));
+      const saved = await api.saveConfig(
+        buildConfigPayload(mergedData, getPersistableWizardPlatforms(mergedData))
+      );
+      return saved;
     }
+    return null;
     const discordGuildAllowlist = stepData?.discordGuildAllowlist;
     if (
       Array.isArray(discordGuildAllowlist) &&
