@@ -42,6 +42,49 @@ def _complete_processing(*, llm_url: str = "https://llm.example.test/v1") -> dic
     }
 
 
+# Budget for one interleaved config writer, shared by every test below so the
+# value has a single owner. It looks like a handoff between two threads, but it
+# has to cover *two* sequential load -> merge -> validate -> write cycles: a
+# writer holds CONFIG_LOCK plus the Memory file lock across the rendezvous, so
+# the other one cannot even start its own cycle until the first one is done.
+# One cycle measures ~0.5s median and ~1.7s worst case on a fast dev machine, so
+# the pair alone can reach several seconds before a slower CI runner is priced
+# in; the previous 5s went flaky on the `memory-first` orders. These budgets are
+# timing slack and never part of what the tests assert, so prefer them loose.
+_WRITER_TIMEOUT_SECONDS = 30
+# A writer parked on a rendezvous only gives up after `_WRITER_TIMEOUT_SECONDS`
+# and still has its write to finish, so joining on that same budget could call a
+# writer stuck one moment before it unwinds on its own.
+_WRITER_JOIN_TIMEOUT_SECONDS = _WRITER_TIMEOUT_SECONDS * 2
+
+
+def _join_config_writers(
+    *writers: threading.Thread,
+    timeout: float = _WRITER_JOIN_TIMEOUT_SECONDS,
+) -> None:
+    """Join every writer, and fail here rather than leaving one running.
+
+    `api.save_config` resolves its target from the process-global `AVIBE_HOME`,
+    so a writer that outlives its test keeps writing after monkeypatch restores
+    the env: it lands in the *next* test's config, which surfaces as a bogus
+    assertion there instead of a hang here, or lands outside `tmp_path`
+    entirely. Call this from a `finally` so a failed wait above still reports
+    the writer that actually hung.
+    """
+
+    stuck: list[str] = []
+    for writer in writers:
+        # An unstarted writer (an earlier wait failed before its `start()`)
+        # reports the same `is_alive()` as a finished one, and `join()` would
+        # raise on it.
+        if writer.is_alive():
+            writer.join(timeout)
+        if writer.is_alive():
+            stuck.append(writer.name)
+    if stuck:
+        pytest.fail(f"config writers still running: {', '.join(stuck)}")
+
+
 def _stale_whole_config_writer(
     config_path,
     loaded,
@@ -50,7 +93,7 @@ def _stale_whole_config_writer(
 ) -> None:
     stale = V2Config.load(config_path)
     loaded.set()
-    if not start.wait(10):
+    if not start.wait(_WRITER_TIMEOUT_SECONDS):
         raise TimeoutError("whole-config writer was not released")
     stale.language = "zh"
     stale.save(config_path)
@@ -65,7 +108,7 @@ def _memory_writer(
     done,
 ) -> None:
     ready.set()
-    if not start.wait(10):
+    if not start.wait(_WRITER_TIMEOUT_SECONDS):
         raise TimeoutError("Memory writer was not released")
 
     def update(memory: MemoryConfig) -> MemoryConfig:
@@ -868,6 +911,24 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
     assert saved.memory.recovery_intent == "rebuild"
 
 
+def test_join_config_writers_reports_a_writer_that_overruns() -> None:
+    """An overrunning writer is named here instead of leaking into a later test."""
+
+    release = threading.Event()
+    worker = threading.Thread(
+        target=release.wait,
+        args=(_WRITER_TIMEOUT_SECONDS,),
+        name="slow-writer",
+    )
+    worker.start()
+    try:
+        with pytest.raises(pytest.fail.Exception, match="slow-writer"):
+            _join_config_writers(worker, timeout=0.05)
+    finally:
+        release.set()
+        _join_config_writers(worker)
+
+
 def test_concurrent_generic_config_saves_preserve_both_updates(
     monkeypatch,
     tmp_path,
@@ -886,7 +947,7 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
         merged = merge(base, update)
         if threading.current_thread().name == "first-config-save":
             first_merged.set()
-            if not release_first.wait(5):
+            if not release_first.wait(_WRITER_TIMEOUT_SECONDS):
                 raise TimeoutError("first config save was not released")
         return merged
 
@@ -909,16 +970,15 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
         name="second-config-save",
     )
 
-    first.start()
-    assert first_merged.wait(5)
-    second.start()
-    assert second_entered.wait(5)
-    release_first.set()
-    first.join(5)
-    second.join(5)
+    try:
+        first.start()
+        assert first_merged.wait(_WRITER_TIMEOUT_SECONDS)
+        second.start()
+        assert second_entered.wait(_WRITER_TIMEOUT_SECONDS)
+    finally:
+        release_first.set()
+        _join_config_writers(first, second)
 
-    assert not first.is_alive()
-    assert not second.is_alive()
     assert failures == []
     persisted = V2Config.load()
     assert persisted.language == "zh"
@@ -946,7 +1006,7 @@ def test_generic_config_save_preserves_interleaved_memory_update(
             }
         )
     ).save()
-    rendezvous = threading.Barrier(2, timeout=5)
+    rendezvous = threading.Barrier(2, timeout=_WRITER_TIMEOUT_SECONDS)
     failures: list[BaseException] = []
     merge = api._deep_merge_dicts
 
@@ -983,20 +1043,19 @@ def test_generic_config_save_preserves_interleaved_memory_update(
             failures.append(exc)
 
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_config_first)
-    generic_thread = threading.Thread(target=save_generic)
-    memory_thread = threading.Thread(target=save_memory)
+    generic_thread = threading.Thread(target=save_generic, name="generic-config-save")
+    memory_thread = threading.Thread(target=save_memory, name="memory-config-save")
     first, second = (
         (memory_thread, generic_thread)
         if memory_first
         else (generic_thread, memory_thread)
     )
-    first.start()
-    second.start()
-    first.join(5)
-    second.join(5)
+    try:
+        first.start()
+        second.start()
+    finally:
+        _join_config_writers(first, second)
 
-    assert not first.is_alive()
-    assert not second.is_alive()
     assert failures == []
     persisted = V2Config.load()
     assert persisted.language == "zh"
@@ -1158,8 +1217,8 @@ def test_spawned_writers_preserve_memory_and_non_memory_updates(
     try:
         for process in processes:
             process.start()
-        assert stale_loaded.wait(10)
-        assert memory_ready.wait(10)
+        assert stale_loaded.wait(_WRITER_TIMEOUT_SECONDS)
+        assert memory_ready.wait(_WRITER_TIMEOUT_SECONDS)
 
         first_start, first_done, second_start = (
             (memory_start, memory_done, config_start)
@@ -1167,13 +1226,13 @@ def test_spawned_writers_preserve_memory_and_non_memory_updates(
             else (config_start, config_done, memory_start)
         )
         first_start.set()
-        assert first_done.wait(10)
+        assert first_done.wait(_WRITER_TIMEOUT_SECONDS)
         second_start.set()
 
-        assert config_done.wait(10)
-        assert memory_done.wait(10)
+        assert config_done.wait(_WRITER_TIMEOUT_SECONDS)
+        assert memory_done.wait(_WRITER_TIMEOUT_SECONDS)
         for process in processes:
-            process.join(10)
+            process.join(_WRITER_TIMEOUT_SECONDS)
             assert process.exitcode == 0
     finally:
         for process in processes:
