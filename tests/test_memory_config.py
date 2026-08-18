@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import multiprocessing
 import threading
@@ -58,18 +59,38 @@ _WRITER_TIMEOUT_SECONDS = 30
 _WRITER_JOIN_TIMEOUT_SECONDS = _WRITER_TIMEOUT_SECONDS * 2
 
 
+def _config_writer(
+    target,
+    *,
+    name: str,
+    args: tuple = (),
+) -> threading.Thread:
+    """Build a config writer that cannot outlive the test session.
+
+    `get_vibe_remote_dir()` reads `AVIBE_HOME` on every call and falls back to
+    `Path.home()`, so a writer still running once monkeypatch has restored the
+    environment resolves against the developer's real home -- measured: a
+    non-daemon writer released after the session resolved
+    `$HOME/.avibe/config/config.json`. A daemon thread is killed at interpreter
+    shutdown rather than joined, so a writer nothing can release still cannot
+    reach real user state.
+    """
+
+    return threading.Thread(target=target, name=name, args=args, daemon=True)
+
+
 def _join_config_writers(
     *writers: threading.Thread,
     timeout: float = _WRITER_JOIN_TIMEOUT_SECONDS,
 ) -> None:
     """Join every writer, and fail here rather than leaving one running.
 
-    `api.save_config` resolves its target from the process-global `AVIBE_HOME`,
-    so a writer that outlives its test keeps writing after monkeypatch restores
-    the env: it lands in the *next* test's config, which surfaces as a bogus
-    assertion there instead of a hang here, or lands outside `tmp_path`
-    entirely. Call this from a `finally` so a failed wait above still reports
-    the writer that actually hung.
+    A writer that outlives its test resolves against whatever the environment
+    holds by then; while the session is still running that is the *next* test's
+    config, which surfaces as a bogus assertion there instead of a hang here.
+    `_config_writer` bounds what happens past the end of the session, and this
+    reports the overrun at the test that caused it. Call it from a `finally` so
+    a failed wait above still names the writer that actually hung.
     """
 
     stuck: list[str] = []
@@ -911,12 +932,44 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
     assert saved.memory.recovery_intent == "rebuild"
 
 
+def test_config_writers_cannot_outlive_the_test_session() -> None:
+    """No writer can resolve a config path once the isolation is restored.
+
+    Asserted at the single owner, plus the property that every writer is built
+    there -- listing today's writers would pass forever while the next one
+    added silently reopens the escape.
+    """
+
+    assert _config_writer(lambda: None, name="probe").daemon is True
+
+    module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    factory = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "_config_writer"
+    )
+    built_outside_the_factory = [
+        node.lineno
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Thread"
+        and not (factory.lineno <= node.lineno <= factory.end_lineno)
+    ]
+    assert built_outside_the_factory == []
+
+
 def test_join_config_writers_reports_a_writer_that_overruns() -> None:
-    """An overrunning writer is named here instead of leaking into a later test."""
+    """An overrunning writer is named here instead of leaking into a later test.
+
+    The `finally` releases the worker so this test does not itself leak one.
+    Containment for a writer that *cannot* be released is a separate property,
+    owned by `test_config_writers_cannot_outlive_the_test_session`.
+    """
 
     release = threading.Event()
-    worker = threading.Thread(
-        target=release.wait,
+    worker = _config_writer(
+        release.wait,
         args=(_WRITER_TIMEOUT_SECONDS,),
         name="slow-writer",
     )
@@ -959,13 +1012,13 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
 
     monkeypatch.setattr(api, "CONFIG_LOCK", _ObservedConfigLock(second_entered))
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_first_merge)
-    first = threading.Thread(
-        target=save,
+    first = _config_writer(
+        save,
         args=({"language": "zh"},),
         name="first-config-save",
     )
-    second = threading.Thread(
-        target=save,
+    second = _config_writer(
+        save,
         args=({"runtime": {"log_level": "DEBUG"}},),
         name="second-config-save",
     )
@@ -1043,8 +1096,8 @@ def test_generic_config_save_preserves_interleaved_memory_update(
             failures.append(exc)
 
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_config_first)
-    generic_thread = threading.Thread(target=save_generic, name="generic-config-save")
-    memory_thread = threading.Thread(target=save_memory, name="memory-config-save")
+    generic_thread = _config_writer(save_generic, name="generic-config-save")
+    memory_thread = _config_writer(save_memory, name="memory-config-save")
     first, second = (
         (memory_thread, generic_thread)
         if memory_first
