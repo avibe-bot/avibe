@@ -281,6 +281,9 @@
   --model-hub-model-current-ink: var(--model-hub-muted-cc);
   --model-hub-model-collapse-ink: var(--model-hub-ink-59);
   --model-hub-takeover-current-ink: var(--model-hub-violet-ink);
+  --model-hub-agent-head-action-height: 35px;
+  --model-hub-agent-head-action-leading: 17px;
+  --model-hub-agent-head-status-height: 16px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -288,6 +291,16 @@
 
 .model-hub-overview-chevron,
 .model-hub-overview-info { color: var(--model-hub-ink-40); }
+/* The agent group head is a fixed 66px band holding a 35px action row and a
+   16px status row with a 7px gap: 58px of content leaves a symmetric 4px inset.
+   Both rows have to be pinned, because inherited line-height alone grows them to
+   37px/17px and eats the top inset. */
+.model-hub-agent-head-action {
+  height: var(--model-hub-agent-head-action-height, 35px);
+  padding-block: 0;
+  line-height: var(--model-hub-agent-head-action-leading, 17px);
+}
+.model-hub-agent-head-status { line-height: var(--model-hub-agent-head-status-height, 16px); }
 .model-hub-upstream-count {
   border-color: var(--model-hub-wash-14);
   background: var(--model-hub-wash-0a);
@@ -628,7 +641,11 @@
   --model-hub-route-head-height: 72px;
   --model-hub-route-title-size: 15px;
   --model-hub-route-subtitle-size: 10.5px;
-  --model-hub-route-body-height: 302px;
+  /* The design's 302px body is what a two-hop chain measures, not a fixed box:
+     pinning it left short chains padded with dead space and long ones scrolling
+     inside a dialog that never grew. It survives only as the anchor the top
+     offset is computed from, so the resting placement still matches the design. */
+  --model-hub-route-body-anchor: 302px;
   --model-hub-route-body-gap: 14px;
   --model-hub-route-label-size: 10.5px;
   --model-hub-route-list-radius: 10px;
@@ -648,18 +665,19 @@
   --model-hub-dialog-action-height: 33px;
   --model-hub-dialog-action-radius: 7px;
   --model-hub-dialog-action-size: 12px;
-  top: min(
+  --model-hub-route-offset: min(
     var(--model-hub-route-top),
     max(
       var(--model-hub-route-viewport-inset),
       calc(
         100dvh - var(--model-hub-route-head-height) -
-          var(--model-hub-route-body-height) -
+          var(--model-hub-route-body-anchor) -
           var(--model-hub-dialog-foot-height) -
           var(--model-hub-route-viewport-inset)
       )
     )
   );
+  top: var(--model-hub-route-offset);
   width: min(
     var(--model-hub-route-width),
     calc(
@@ -668,8 +686,11 @@
     )
   );
   max-width: var(--model-hub-route-width);
+  /* Anchored at `top` rather than centred, so the room left over is what is
+     below the offset — subtracting only the two insets would let a long chain
+     push the footer off the bottom of the screen. */
   max-height: calc(
-    100dvh - var(--model-hub-route-viewport-inset) -
+    100dvh - var(--model-hub-route-offset) -
       var(--model-hub-route-viewport-inset)
   );
   border-radius: var(--model-hub-route-radius);
@@ -681,7 +702,7 @@
 .model-hub-route-close > svg { width: 15px; height: 15px; }
 .model-hub-route-title { font-size: var(--model-hub-route-title-size); }
 .model-hub-route-subtitle { font-size: var(--model-hub-route-subtitle-size); }
-.model-hub-route-body { height: var(--model-hub-route-body-height); min-height: 0; flex: 1 1 var(--model-hub-route-body-height); overflow-y: auto; padding: 20px; gap: var(--model-hub-route-body-gap); }
+.model-hub-route-body { min-height: 0; flex: 0 1 auto; overflow-y: auto; padding: 20px; gap: var(--model-hub-route-body-gap); }
 .model-hub-route-label { color: var(--model-hub-ink-73); font-size: var(--model-hub-route-label-size); letter-spacing: 1.1px; }
 .model-hub-route-list { padding: var(--model-hub-route-list-padding); gap: var(--model-hub-route-list-gap); border-color: var(--model-hub-wash-14); border-radius: var(--model-hub-route-list-radius); }
 .model-hub-route-hop { height: var(--model-hub-route-hop-height); padding-inline: 10px; gap: var(--model-hub-route-hop-gap); border-radius: var(--model-hub-route-hop-radius); }
@@ -695,7 +716,32 @@
 .model-hub-route-invalid,
 .model-hub-route-invalid-summary { color: var(--destructive-ink); font-size: 10px; line-height: 14px; }
 .model-hub-route-selector-label { color: var(--model-hub-ink-73); font-size: 10.5px; font-weight: 700; }
+/* The picker opens from a button that sits near the bottom of an anchored
+   dialog, so it has to bound itself against the space Radix reports instead of
+   letting a long model list run past the dialog and off the screen. Its metrics
+   live here rather than on `.model-hub-route-dialog` because the popover is
+   portalled out of the dialog and inherits nothing from it. */
+.model-hub-route-selector {
+  --model-hub-route-selector-max: 300px;
+  --model-hub-route-selector-confirm-height: 33px;
+  --model-hub-route-selector-confirm-size: 12px;
+  max-height: min(
+    var(--model-hub-route-selector-max),
+    var(--radix-popover-content-available-height, var(--model-hub-route-selector-max))
+  );
+}
+.model-hub-route-selector-list { min-height: 0; overflow-y: auto; }
 .model-hub-route-candidate { min-height: 28px; }
+.model-hub-route-candidate:hover { background: var(--model-hub-wash-0a); }
+.model-hub-route-candidate[aria-pressed="true"] {
+  background: var(--model-hub-mint-1a);
+  color: var(--mint-ink);
+}
+.model-hub-route-candidate[aria-pressed="true"] .model-hub-route-candidate-model { color: inherit; }
+.model-hub-route-selector-confirm {
+  height: var(--model-hub-route-selector-confirm-height);
+  font-size: var(--model-hub-route-selector-confirm-size);
+}
 .model-hub-route-remove { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
 .model-hub-route-remove > svg { width: 13px; height: 13px; }
 .model-hub-route-add { height: var(--model-hub-route-add-height); border-radius: var(--model-hub-route-hop-radius); border-color: var(--model-hub-wash-14); font-size: var(--model-hub-route-add-size); }
@@ -727,10 +773,13 @@
   --model-hub-source-table-gap: 16px;
   --model-hub-source-table-padding-x: 18px;
   --model-hub-source-table-padding-y: 11px;
-  --model-hub-source-title-size: 14px;
+  --model-hub-source-title-size: 12px;
   --model-hub-source-state-size: 12px;
   --model-hub-source-age-size: 11px;
   --model-hub-source-summary-size: 10.5px;
+  --model-hub-source-copy-gap: 4px;
+  --model-hub-source-line-height: 17px;
+  --model-hub-source-summary-line: 15px;
   --model-hub-source-label-size: 11px;
   --model-hub-source-model-size: 12px;
   --model-hub-source-pill-size: 10px;
@@ -744,6 +793,10 @@
   --model-hub-source-chip-fill: var(--model-hub-wash-0f);
   --model-hub-source-chip-padding-y: 4px;
   --model-hub-source-chip-padding-x: 9px;
+  --model-hub-source-pill-padding-y: 3px;
+  --model-hub-source-pill-padding-x: 8px;
+  --model-hub-source-entry-fill: var(--model-hub-wash-0a);
+  --model-hub-source-entry-manual-fill: var(--model-hub-wash-14);
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-source-gap);
@@ -760,10 +813,16 @@
   height: var(--model-hub-source-tile-size);
   border-radius: var(--model-hub-source-tile-radius);
 }
+.model-hub-source-copy { gap: var(--model-hub-source-copy-gap); }
+.model-hub-source-line { min-height: var(--model-hub-source-line-height); line-height: var(--model-hub-source-line-height); }
 .model-hub-source-title { font-size: var(--model-hub-source-title-size); }
 .model-hub-source-state { font-size: var(--model-hub-source-state-size); }
 .model-hub-source-age { font-size: var(--model-hub-source-age-size); }
-.model-hub-source-summary { color: var(--model-hub-source-summary-ink); font-size: var(--model-hub-source-summary-size); }
+.model-hub-source-summary {
+  color: var(--model-hub-source-summary-ink);
+  font-size: var(--model-hub-source-summary-size);
+  line-height: var(--model-hub-source-summary-line);
+}
 .model-hub-source-action {
   width: var(--model-hub-source-action-width);
   height: var(--model-hub-source-action-height);
@@ -779,9 +838,15 @@
 }
 .model-hub-source-table-head {
   height: var(--model-hub-source-table-head-height);
+  /* Grid items stretch by default, so a plain text cell renders its glyphs at
+     the top of a 35px box while a `flex items-center` cell centres them. That
+     mismatch is what makes the header row look ragged; the design centres every
+     column against the 36px band. */
+  align-items: center;
   background: var(--model-hub-source-table-head-fill);
   color: var(--model-hub-source-label-ink);
   font-size: var(--model-hub-source-label-size);
+  line-height: 16px;
 }
 .model-hub-source-table-row {
   min-height: var(--model-hub-source-table-row-height);
@@ -795,14 +860,40 @@
   min-height: var(--model-hub-source-table-add-height);
   padding-inline: var(--model-hub-source-table-padding-x);
 }
+.model-hub-source-add-hint {
+  color: var(--model-hub-source-summary-ink);
+  font-size: var(--model-hub-source-tier-size);
+}
 .model-hub-source-model { font-size: var(--model-hub-source-model-size); }
 .model-hub-source-manual-id { border-radius: var(--model-hub-source-manual-input-radius); }
 .model-hub-source-pill { font-size: var(--model-hub-source-pill-size); }
 .model-hub-source-tier { font-size: var(--model-hub-source-tier-size); }
-.model-hub-source-entry-pill,
 .model-hub-source-tier-chip {
   background: var(--model-hub-source-chip-fill);
   padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
+}
+/* The affordance for adding a tier is a chip too, hollow rather than filled —
+   as plain mint text it read as a caption in the middle of a chip row. */
+.model-hub-source-tier-add {
+  padding: var(--model-hub-source-chip-padding-y) var(--model-hub-source-chip-padding-x);
+  border-color: var(--model-hub-wash-24);
+  color: var(--muted);
+}
+.model-hub-source-tier-empty {
+  color: var(--model-hub-ink-59);
+  font-size: var(--model-hub-source-age-size);
+}
+/* Entry pills are fills, not outlines, and the two origins differ by weight of
+   fill and ink rather than by border. */
+.model-hub-source-entry-pill {
+  padding: var(--model-hub-source-pill-padding-y) var(--model-hub-source-pill-padding-x);
+  border-color: transparent;
+  background: var(--model-hub-source-entry-fill);
+  color: var(--muted);
+}
+.model-hub-source-entry-pill--manual {
+  background: var(--model-hub-source-entry-manual-fill);
+  color: var(--foreground);
 }
 .model-hub-source-footnote {
   min-height: 17px;

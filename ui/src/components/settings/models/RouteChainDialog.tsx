@@ -985,9 +985,14 @@ export const RouteChainDialog: React.FC<{
                 {t("settings.models.routeDialog.addHop")}
               </button>
             </PopoverTrigger>
+            {/* `collisionPadding` plus the class's available-height bound keep the
+                whole panel — not just its list — inside the viewport; without
+                them a source with many models opened a panel that ran past the
+                dialog and clipped its own last row. */}
             <PopoverContent
               align="start"
               sideOffset={6}
+              collisionPadding={16}
               className="model-hub-route-selector flex w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-64px)] flex-col gap-2 rounded-lg border border-border bg-background p-2"
               onOpenAutoFocus={(event) => {
                 event.preventDefault();
@@ -998,55 +1003,48 @@ export const RouteChainDialog: React.FC<{
                 addButtonRef.current?.focus();
               }}
             >
-              <div className="model-hub-route-selector-label grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
-                <span>{t("settings.models.routeDialog.add.source")}</span>
-                <span>{t("settings.models.routeDialog.add.model")}</span>
-              </div>
-              <div className="flex max-h-52 flex-col gap-2 overflow-auto">
+              <div className="model-hub-route-selector-list flex flex-col gap-2">
                 {candidateGroups.map((group) => (
                   <section
                     key={group.source.id}
                     aria-label={group.source.display_name}
                     className="flex flex-col gap-1"
                   >
-                    {group.items.map(
-                      ({ candidate: item, index }, groupIndex) => (
-                        <button
-                          ref={(node) => {
-                            candidateRefs.current[index] = node;
-                          }}
-                          key={`${item.hop.source_id}:${item.hop.model_id}`}
-                          type="button"
-                          aria-pressed={Boolean(
-                            candidate &&
-                            equalHopIdentity(candidate.hop, item.hop),
-                          )}
-                          tabIndex={
-                            candidate &&
-                            equalHopIdentity(candidate.hop, item.hop)
-                              ? 0
-                              : -1
-                          }
-                          onClick={() => chooseCandidate(item)}
-                          onKeyDown={(event) =>
-                            onCandidateKeyDown(event, index)
-                          }
-                          className="model-hub-route-candidate grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 rounded-md px-2 py-1 text-left text-xs text-foreground"
-                        >
-                          <span className="truncate">
-                            {groupIndex === 0 ? group.source.display_name : ""}
-                          </span>
-                          <span className="truncate font-mono text-muted">
-                            {item.hop.model_id}
-                          </span>
-                        </button>
-                      ),
-                    )}
+                    <p className="model-hub-route-selector-label truncate px-2">
+                      {group.source.display_name}
+                    </p>
+                    {group.items.map(({ candidate: item, index }) => (
+                      <button
+                        ref={(node) => {
+                          candidateRefs.current[index] = node;
+                        }}
+                        key={`${item.hop.source_id}:${item.hop.model_id}`}
+                        type="button"
+                        aria-pressed={Boolean(
+                          candidate &&
+                          equalHopIdentity(candidate.hop, item.hop),
+                        )}
+                        tabIndex={
+                          candidate &&
+                          equalHopIdentity(candidate.hop, item.hop)
+                            ? 0
+                            : -1
+                        }
+                        onClick={() => chooseCandidate(item)}
+                        onKeyDown={(event) => onCandidateKeyDown(event, index)}
+                        className="model-hub-route-candidate flex items-center rounded-md px-2 py-1 text-left text-xs text-foreground"
+                      >
+                        <span className="model-hub-route-candidate-model truncate font-mono text-muted">
+                          {item.hop.model_id}
+                        </span>
+                      </button>
+                    ))}
                   </section>
                 ))}
               </div>
               <Button
                 type="button"
+                className="model-hub-route-selector-confirm shrink-0 self-end px-4"
                 disabled={!candidate}
                 onClick={addCandidate}
               >
