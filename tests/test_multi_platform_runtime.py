@@ -1544,10 +1544,11 @@ def test_settlement_assistant_message_walks_back_to_the_owning_turn():
     cases = (
         ([error_assistant], "msg-err"),
         ([error_assistant, trailing_user], "msg-err"),
-        ([error_assistant, trailing_user, empty_inflight], "msg-err"),
-        ([error_assistant, live_followup], "msg-live"),
+        ([error_assistant, trailing_user, empty_inflight], None),
+        ([error_assistant, live_followup], None),
         ([completed_ok, trailing_user], "msg-ok"),
         ([trailing_user], None),
+        ([error_assistant, trailing_user, empty_inflight, completed_ok], "msg-ok"),
     )
     for messages, expected_id in cases:
         owner = _settlement_assistant_message(messages, set())
@@ -1762,10 +1763,14 @@ def test_opencode_poll_settles_error_when_trailing_user_is_last():
     ]
 
 
-def test_opencode_poll_settles_error_behind_empty_inflight_assistant():
-    """An empty leftover generation after a completed error is not a live turn."""
+def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypatch):
+    """Auto-retry ``continue`` must stay live until the new assistant completes."""
 
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
+    )
     emitted = []
+    polls = {"n": 0}
 
     class _AuthSvc:
         async def maybe_emit_auth_recovery_message(
@@ -1800,13 +1805,15 @@ def test_opencode_poll_settles_error_behind_empty_inflight_assistant():
         controller = _Controller()
 
         def _extract_response_text(self, message):
-            return ""
+            return "recovered"
 
         async def record_model_hub_native_failure(self, context, diagnostic):
-            return True
+            raise AssertionError("must not settle while retry is in flight")
 
     class _Server:
         async def list_messages(self, session_id, directory):
+            polls["n"] += 1
+            followup_completed = polls["n"] >= 3
             return [
                 {
                     "info": {
@@ -1819,16 +1826,18 @@ def test_opencode_poll_settles_error_behind_empty_inflight_assistant():
                 },
                 {
                     "info": {"id": "msg-user", "role": "user", "time": {}},
-                    "parts": [{"type": "text", "text": "继续"}],
+                    "parts": [{"type": "text", "text": "continue"}],
                 },
                 {
                     "info": {
                         "id": "msg-empty",
                         "role": "assistant",
-                        "time": {},
-                        "finish": None,
+                        "time": {"completed": 1} if followup_completed else {},
+                        "finish": "stop" if followup_completed else None,
                     },
-                    "parts": [],
+                    "parts": (
+                        [{"type": "text", "text": "recovered"}] if followup_completed else []
+                    ),
                 },
             ]
 
@@ -1854,9 +1863,9 @@ def test_opencode_poll_settles_error_behind_empty_inflight_assistant():
         )
     )
 
-    assert (final_text, should_emit) == (None, False)
-    assert [item[0] for item in emitted] == ["notify", "result"]
-    assert "tls failed" in emitted[0][1]
+    assert (final_text, should_emit) == ("recovered", True)
+    assert polls["n"] == 3
+    assert not any(item[0] == "result" for item in emitted)
 
 
 def test_opencode_poll_does_not_settle_error_while_followup_has_parts():

@@ -57,35 +57,32 @@ def _settlement_assistant_message(
 ) -> Optional[Dict[str, Any]]:
     """The assistant message that owns this poll's settlement.
 
-    Trailing user injects (steer, watch callbacks, a typed "继续") are not the
-    turn. Walk back to the latest new assistant. An in-flight assistant with
-    parts is still that turn. An empty in-flight assistant after a completed
-    error is leftover generation from a retry or follow-up — the completed
-    error is the terminal evidence.
+    Trailing user injects (steer, watch callbacks, typed "继续", auto-retry
+    ``continue``) are not the turn. An in-flight assistant after that inject —
+    even with no parts yet — is the live follow-up and must stay pending.
+    Only when nothing new is generating do we settle the latest completed
+    assistant behind the inject.
     """
 
-    latest_assistant: Optional[Dict[str, Any]] = None
-    latest_completed_error: Optional[Dict[str, Any]] = None
+    latest_new: Optional[Dict[str, Any]] = None
     for message in reversed(messages):
         info = _message_info(message)
         message_id = info.get("id")
         if not message_id or message_id in baseline_message_ids:
             continue
+        if latest_new is None:
+            latest_new = message
         if info.get("role") != "assistant":
             continue
-        if latest_assistant is None:
-            latest_assistant = message
-        if info.get("time", {}).get("completed") and info.get("error"):
-            latest_completed_error = message
-            break
-    if latest_assistant is None:
+        if info.get("time", {}).get("completed"):
+            return message
         return None
-    latest_info = _message_info(latest_assistant)
-    if latest_info.get("time", {}).get("completed"):
-        return latest_assistant
-    if latest_completed_error is not None and not (latest_assistant.get("parts") or []):
-        return latest_completed_error
-    return latest_assistant
+    if latest_new is None:
+        return None
+    info = _message_info(latest_new)
+    if info.get("role") == "assistant" and info.get("time", {}).get("completed"):
+        return latest_new
+    return None
 
 
 def restored_platform_from_poll_info(poll_info) -> str:

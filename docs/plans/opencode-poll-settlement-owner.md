@@ -11,9 +11,9 @@ error never became a terminal result.
 ## Goal
 
 Settle from the assistant that owns the current turn: skip trailing user
-injects; treat an empty in-flight assistant after a completed error as leftover
-generation, not a live turn. A follow-up assistant that already has parts stays
-the live turn.
+injects. An in-flight assistant after that inject — including an empty one
+just created by auto-retry ``continue`` or an accepted steer — stays pending.
+Only a completed assistant with nothing newer generating is terminal.
 
 ## Solution
 
