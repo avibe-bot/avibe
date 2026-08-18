@@ -101,29 +101,22 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
+        # The gate covers operating Avibe, not every Avibe-flavored question: a
+        # blanket "explanation" trigger made questions this prompt already answers
+        # pull in a 1000-line SKILL.md. `logs` and `runtime` keep read-only
+        # inspection inside the gate, which is where agents learn to read logs
+        # through the API and treat internal runtime state as opaque.
         self.assertIn(
-            "Consult the `use-avibe` playbook before any Avibe operation",
+            "Consult the `use-avibe` playbook before operating Avibe "
+            "(config, state, service, logs, runtime), not to explain what this "
+            "prompt already covers",
             prompt,
         )
-        # Read-only operations stay inside the gate: the playbook is where agents
-        # learn to read logs through the API and to treat internal runtime state
-        # as opaque, so dropping them would invite direct file inspection.
         self.assertIn(
-            "inspecting logs, service status, and runtime state",
-            prompt,
-        )
-        self.assertIn(
-            "Use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` "
+            "use `https://github.com/avibe-bot/avibe/raw/master/skills/use-avibe/SKILL.md` "
             "when it is not installed locally",
             prompt,
         )
-        self.assertIn(
-            "load the playbook for explanation only when the answer is not here",
-            prompt,
-        )
-        # The gate covers Avibe operations, not every Avibe-flavored question. A
-        # blanket "explanation" trigger made questions this prompt already answers
-        # pull in a 1000-line SKILL.md.
         self.assertNotIn("configuration, repair, explanation, and operations", prompt)
         self.assertIn("skills/use-avibe/SKILL.md", prompt)
         self.assertNotIn("new user turn", prompt)
