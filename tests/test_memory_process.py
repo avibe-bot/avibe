@@ -1341,8 +1341,6 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
     not_ours: list[tuple[dict, _ProcessIdentity | None]] = [
         # The process is confirmed gone.
         (_orphan_record(process), None),
-        # The pid was recycled: same number, different process.
-        (_orphan_record(process), _orphan_identity(process, create_time=_ORPHAN_CREATE_TIME + 1)),
         # Not our entrypoint.
         (_orphan_record(process), _orphan_identity(process, cmdline=(sys.executable, "-m", "http.server"))),
         # Our entrypoint name, but serving a different socket.
@@ -1383,6 +1381,12 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
         (
             _orphan_record(process),
             _orphan_identity(process, create_time=424_242.0, wall_create_time=None),
+        ),
+        # A different legacy wall time can be a clock step. Without the
+        # environment, no disclosed fact proves that the pid was recycled.
+        (
+            _orphan_record(process),
+            _orphan_identity(process, create_time=_ORPHAN_CREATE_TIME + 1),
         ),
     ]
     for record, identity in unverifiable:
@@ -1840,10 +1844,10 @@ def test_sidecar_launch_reaps_a_recorded_orphan_from_a_previous_run(
     assert not record_path.exists()
 
 
-def test_sidecar_launch_never_signals_a_pid_it_cannot_identify(
+def test_sidecar_launch_keeps_legacy_record_when_environment_is_undisclosed(
     tmp_path: Path,
 ) -> None:
-    """A recycled pid retires the record instead of killing its new owner."""
+    """A clock step without environment evidence cannot prove pid reuse."""
 
     host = _FakeProcessHost()
     process = _orphan_process(tmp_path, host=host)
@@ -1853,10 +1857,11 @@ def test_sidecar_launch_never_signals_a_pid_it_cannot_identify(
     )
     record_path = _write_orphan_record(process, _orphan_record(process))
 
-    asyncio.run(process._ownership.reap())
+    with pytest.raises(RuntimeError, match="recorded sidecar identity could not be verified"):
+        asyncio.run(process._ownership.reap())
 
     assert host.signal_calls == []
-    assert not record_path.exists()
+    assert record_path.exists()
 
 
 def test_sidecar_launch_refuses_to_start_beside_an_unreapable_orphan(

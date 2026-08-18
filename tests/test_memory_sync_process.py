@@ -582,11 +582,12 @@ async def test_handleless_spawn_failure_marks_discovered_pending_record_retryabl
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
     python = tmp_path / "runtime" / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.write_bytes(b"python")
     uid = os.getuid() if hasattr(os, "getuid") else None
-    parent = _ParentIdentity(pid=99, create_time=8.25, uid=uid)
+    parent = _ParentIdentity(pid=99, create_time=8.25, uid=uid, stamp=8.25)
 
     class HandlelessSpawnHost(_Host):
         child_is_present = True
@@ -628,11 +629,12 @@ async def test_handleless_spawn_failure_marks_uncertain_pending_record_retryable
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
     python = tmp_path / "runtime" / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.write_bytes(b"python")
     uid = os.getuid() if hasattr(os, "getuid") else None
-    parent = _ParentIdentity(pid=99, create_time=8.25, uid=uid)
+    parent = _ParentIdentity(pid=99, create_time=8.25, uid=uid, stamp=8.25)
 
     class UncertainHandlelessSpawnHost(_Host):
         discovery_is_uncertain = True

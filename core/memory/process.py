@@ -3168,7 +3168,7 @@ def _legacy_create_time_mismatch_verdict(
         if identity.uid != own_uid:
             return _RecordedSidecar.NOT_OURS
     if identity.environment is None:
-        return _RecordedSidecar.NOT_OURS
+        return _RecordedSidecar.UNVERIFIABLE
     if not _provider_roots_match(identity.environment.get("EVEROS_ROOT"), provider_root):
         return _RecordedSidecar.NOT_OURS
     return None
