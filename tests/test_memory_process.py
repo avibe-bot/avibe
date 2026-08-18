@@ -916,6 +916,37 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
                 await child.wait()
 
 
+async def test_sidecar_stop_signals_real_child_when_identity_stamp_is_poisoned(
+    tmp_path: Path,
+) -> None:
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(60)",
+        start_new_session=True,
+    )
+    try:
+        assert memory_process._live_direct_child_handle(child) is True
+        process_group = os.getpgid(child.pid)
+        identities = {child.pid: _ORPHAN_CREATE_TIME}
+        process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+        await process._terminate_owned_tree(
+            child,
+            process_group=process_group,
+            owned_processes=identities,
+        )
+        assert child.returncode is not None
+        assert not _pid_exists(child.pid)
+    finally:
+        if child.returncode is None:
+            child.terminate()
+            try:
+                await asyncio.wait_for(child.wait(), timeout=3.0)
+            except TimeoutError:
+                child.kill()
+                await child.wait()
+
+
 async def test_sidecar_cleanup_never_signals_spawned_pid_after_identity_changes(monkeypatch, tmp_path: Path) -> None:
     signals: list[tuple[str, int]] = []
 
@@ -1586,7 +1617,6 @@ def test_legacy_linux_ticks_identity_reaps_when_live_wall_drift_is_bounded(
     ticks = 424_242.0
     drifted_wall = _ORPHAN_CREATE_TIME + 48.0
     helper = {_ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 1}
-    monkeypatch.setattr(memory_process, "_process_wall_create_time", lambda _pid: drifted_wall)
     host = _FakeProcessHost(
         process_groups={_ORPHAN_PID: _ORPHAN_PID},
         groups={_ORPHAN_PID: (dict(helper), [])},
@@ -1597,7 +1627,7 @@ def test_legacy_linux_ticks_identity_reaps_when_live_wall_drift_is_bounded(
     host.identities[_ORPHAN_PID] = _orphan_identity(
         process,
         stamp=ticks,
-        wall_create_time=None,
+        wall_create_time=drifted_wall,
         environment={"EVEROS_ROOT": str(process.provider_root)},
     )
     record_path = _write_orphan_record(process, _orphan_record(process))
@@ -1611,21 +1641,15 @@ def test_legacy_linux_ticks_identity_reaps_when_live_wall_drift_is_bounded(
 
 
 def test_legacy_linux_ticks_identity_rejects_live_wall_drift_beyond_bound(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        memory_process,
-        "_process_wall_create_time",
-        lambda _pid: _ORPHAN_CREATE_TIME + 301.0,
-    )
     process = _orphan_process(tmp_path)
     assert _classify_recorded_sidecar(
         _orphan_record(process),
         _orphan_identity(
             process,
             stamp=424_242.0,
-            wall_create_time=None,
+            wall_create_time=_ORPHAN_CREATE_TIME + 301.0,
             environment={"EVEROS_ROOT": str(process.provider_root)},
         ),
         socket_path=process.socket_path,

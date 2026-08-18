@@ -12,6 +12,7 @@ import math
 import os
 import signal
 import stat
+import subprocess
 import sys
 import time
 from collections import deque
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Deque, Protocol, TypeVar, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -3124,17 +3125,9 @@ def _cmdline_matches_recorded_child(
     )
 
 
-def _legacy_live_wall_create_time(
-    record: object,
-    identity: _ProcessIdentity,
-) -> float | None:
-    """Wall-clock create_time for a legacy record, preferring a live read."""
+def _legacy_recorded_wall_create_time(identity: _ProcessIdentity) -> float | None:
+    """Wall-clock create_time captured with the rest of the identity snapshot."""
 
-    pid = _recorded_sidecar_pid(record)
-    if pid is not None:
-        live = _process_wall_create_time(pid)
-        if live is not None and _is_identity_stamp(live):
-            return live
     wall = identity.wall_create_time
     if wall is not None and not _is_identity_stamp(wall):
         return None
@@ -3212,7 +3205,7 @@ def _classify_recorded_child(
         provider_root=provider_root,
     )
     live_recorded_stamp = (
-        identity.stamp if has_starttime_ticks else _legacy_live_wall_create_time(record, identity)
+        identity.stamp if has_starttime_ticks else _legacy_recorded_wall_create_time(identity)
     )
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
@@ -3657,6 +3650,8 @@ def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, flo
 def _group_contains_only_confirmed_owned_processes(
     process_group: int | None,
     identities: Mapping[int, float],
+    *,
+    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Whether a group can be signaled without bypassing PID identity checks."""
 
@@ -3664,8 +3659,10 @@ def _group_contains_only_confirmed_owned_processes(
         return False
     group_members = _snapshot_process_group(process_group)
     confirmed = _confirmed_owned_processes(identities)
+    trusted = set() if trusted_pids is None else set(trusted_pids)
     return bool(group_members) and all(
-        confirmed.get(process_id) == created_at for process_id, created_at in group_members.items()
+        process_id in trusted or confirmed.get(process_id) == created_at
+        for process_id, created_at in group_members.items()
     )
 
 
@@ -3673,18 +3670,25 @@ def _signal_owned_group(
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
+    *,
+    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Signal a whole isolated group, but only if every member is confirmed owned.
 
     Returns whether the group signal settled the delivery, so a caller holding a
     direct child handle can fall back to it without widening the blast radius: a
-    group with an unverifiable member is never signaled group-wide.
+    group with an unverifiable member is never signaled group-wide. A live
+    spawned ``Popen`` child may be treated as confirmed for the direct child only.
     """
 
     if (
         process_group is None
         or not hasattr(os, "killpg")
-        or not _group_contains_only_confirmed_owned_processes(process_group, identities)
+        or not _group_contains_only_confirmed_owned_processes(
+            process_group,
+            identities,
+            trusted_pids=trusted_pids,
+        )
     ):
         return False
     try:
@@ -3696,21 +3700,46 @@ def _signal_owned_group(
     return True
 
 
+def _live_direct_child_handle(process: asyncio.subprocess.Process) -> bool:
+    """Whether ``process`` is an unreaped child this process actually spawned.
+
+    Only a live stdlib ``Popen`` is authoritative. A constructed asyncio
+    Process — even one that fakes ``_transport._proc`` — still requires a stamp.
+    """
+
+    if (
+        not isinstance(process, asyncio.subprocess.Process)
+        or process.returncode is not None
+        or process.pid is None
+    ):
+        return False
+    transport = getattr(process, "_transport", None)
+    popen = getattr(transport, "_proc", None)
+    return isinstance(popen, subprocess.Popen) and popen.returncode is None
+
+
 def _signal_owned_group_or_process(
     process: asyncio.subprocess.Process,
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
 ) -> None:
-    if _signal_owned_group(process_group, identities, signum):
+    trusted = {int(process.pid)} if _live_direct_child_handle(process) else set()
+    if _signal_owned_group(
+        process_group,
+        identities,
+        signum,
+        trusted_pids=trusted,
+    ):
         return
     if process.returncode is not None:
         return
-    created_at = identities.get(process.pid)
-    if created_at is None or process.pid not in _confirmed_owned_processes(
-        {process.pid: created_at}
-    ):
-        return
+    if not trusted:
+        created_at = identities.get(process.pid)
+        if created_at is None or process.pid not in _confirmed_owned_processes(
+            {process.pid: created_at}
+        ):
+            return
     try:
         process.send_signal(signum)
     except ProcessLookupError:

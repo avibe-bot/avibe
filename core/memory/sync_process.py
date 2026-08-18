@@ -24,6 +24,7 @@ import psutil
 
 from config import paths
 from core.memory.process import (
+    _LEGACY_CREATE_TIME_DRIFT_SECONDS,
     _MemoryChildRole,
     _ProcessKind,
     _ProcessIdentity,
@@ -31,6 +32,7 @@ from core.memory.process import (
     _ProviderRootBusy,
     _ProviderRootLock,
     _ensure_owner_directory,
+    _is_identity_stamp,
     _provider_rebuild_lock_path,
     _provider_root_coordination_path,
     _provider_roots_match,
@@ -272,13 +274,13 @@ class SyncOwnership:
         parent_identity = self.host.inspect_identity(int(record["parent_pid"]))
         if parent_identity is not None:
             expected_uid = record.get("parent_uid")
-            parent_stamp = getattr(parent_identity, "stamp", getattr(parent_identity, "create_time", None))
-            if parent_stamp is None or (
+            parent_wall = parent_identity.wall_create_time
+            if parent_wall is None or (
                 expected_uid is not None and parent_identity.uid is None
             ):
                 raise SyncOwnershipError("sync parent identity is unavailable")
             if (
-                parent_stamp == float(record["parent_create_time"])
+                parent_wall == float(record["parent_create_time"])
                 and parent_identity.uid == expected_uid
                 and record.get("cleanup_failed") is not True
             ):
@@ -316,6 +318,7 @@ class SyncOwnership:
                 "state": "finalized",
                 "pid": pid,
                 "create_time": created_at,
+                "starttime_ticks": created_at,
                 "process_group": group,
             }
             _validate_child_identity(identity, record, provider_root=self.provider_root)
@@ -345,13 +348,18 @@ class SyncOwnership:
         if foreign:
             raise SyncOwnershipError("sync process group contains unverifiable members")
         identities: dict[int, float] = {}
-        if identity is not None and record.get("create_time") is not None:
-            identities[pid] = float(record["create_time"])
+        if identity is not None and identity.stamp is not None:
+            identities[pid] = float(identity.stamp)
         for member_pid, created_at in claimed.items():
             member = self.host.inspect_identity(member_pid)
             if member is None:
                 continue
-            member_record = {**record, "pid": member_pid, "create_time": created_at}
+            member_record = {
+                **record,
+                "pid": member_pid,
+                "create_time": created_at,
+                "starttime_ticks": created_at,
+            }
             _validate_child_identity(
                 member,
                 member_record,
@@ -495,10 +503,26 @@ class EverOSSyncProcess:
             identity = self._ownership.host.inspect_identity(process.pid)
             if identity is None or group is None:
                 raise SyncOwnershipError("sync child identity could not be observed")
-            _validate_child_identity(identity, {**pending, "pid": process.pid, "create_time": identity.stamp}, provider_root=self.provider_root)
+            _validate_child_identity(
+                identity,
+                {
+                    **pending,
+                    "pid": process.pid,
+                    "create_time": identity.stamp,
+                    "starttime_ticks": identity.stamp,
+                },
+                provider_root=self.provider_root,
+            )
             if identity.stamp is None:
                 raise SyncOwnershipError("sync child creation time is unavailable")
-            finalized = {**pending, "state": "finalized", "pid": process.pid, "create_time": identity.stamp, "process_group": group}
+            finalized = {
+                **pending,
+                "state": "finalized",
+                "pid": process.pid,
+                "create_time": identity.stamp,
+                "starttime_ticks": identity.stamp,
+                "process_group": group,
+            }
             self._ownership.finalize(finalized, nonce=nonce)
             process.send_signal(signal.SIGCONT)
             if spawn_interrupted:
@@ -700,6 +724,10 @@ def _validate_record(record: Mapping[str, Any], *, provider_root: Path) -> None:
         raise SyncOwnershipError("sync parent uid is invalid")
 
 
+def _sync_record_has_starttime_ticks(record: Mapping[str, Any]) -> bool:
+    return _is_identity_stamp(record.get("starttime_ticks"))
+
+
 def _validate_child_identity(
     identity: _ProcessIdentity,
     record: Mapping[str, Any],
@@ -707,12 +735,22 @@ def _validate_child_identity(
     provider_root: Path,
     require_argv: bool = True,
 ) -> None:
-    expected_create = record.get("create_time")
-    if expected_create is not None:
+    if _sync_record_has_starttime_ticks(record):
         if identity.stamp is None:
             raise SyncOwnershipError("sync child creation time is unavailable")
-        if identity.stamp != float(expected_create):
+        if identity.stamp != float(record["starttime_ticks"]):
             raise _SyncIdentityMismatch("sync child creation time does not match")
+    else:
+        expected_create = record.get("create_time")
+        if expected_create is not None:
+            if not _is_identity_stamp(expected_create):
+                raise SyncOwnershipError("sync child creation time is unavailable")
+            wall = identity.wall_create_time
+            if wall is None or not _is_identity_stamp(wall):
+                raise SyncOwnershipError("sync child creation time is unavailable")
+            if wall != float(expected_create):
+                if abs(wall - float(expected_create)) > _LEGACY_CREATE_TIME_DRIFT_SECONDS:
+                    raise _SyncIdentityMismatch("sync child creation time does not match")
     uid = record.get("parent_uid")
     if uid is not None:
         if identity.uid is None:
