@@ -12,10 +12,12 @@ settlement scaffolding it depends on.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import stat
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,6 +42,7 @@ from core.handlers.model_hub.stream_wire import (
 from core.handlers.model_hub.usage import (
     USAGE_RETENTION_DAYS,
     BoundedUsageLedger,
+    UsageWriter,
     local_usage_day,
 )
 
@@ -1352,3 +1355,217 @@ def test_one_local_day_holds_moments_from_two_utc_days(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["day"] == "2026-07-23"
     assert rows[0]["requests"] == 2
+
+
+def _keying_populations(prefix: str) -> tuple[str, ...]:
+    """One identity from each population `usage_ledger_key` can put a key in.
+
+    A key is either the identity itself or a bounded head plus a digest of it, and
+    which one depends on a length no caller of the ledger is asked about. Naming
+    the populations here rather than a list of interesting strings is what makes a
+    join test cover the fold without enumerating it.
+    """
+
+    def padded(length: int) -> str:
+        return f"{prefix}{'a' * (length - len(prefix))}"
+
+    return (
+        padded(len(prefix) + 8),
+        padded(MODEL_ID_MAX_LENGTH),
+        padded(MODEL_ID_MAX_LENGTH + 1),
+        padded(USAGE_LEDGER_KEY_MAX_LENGTH * 2),
+    )
+
+
+def test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key(tmp_path: Path) -> None:
+    """MH-USAGE-008, review 4966281026: a join is keyed the way its rows were.
+
+    A label arrives as an identity and a row carries a key, and only this module
+    knows that those differ. The version of the read that took an already-keyed
+    mapping is what the rule looks like once it has leaked to a caller: the caller
+    keyed its own map, looked a label up by `row["source_id"]`, and every identity
+    the fold exists for silently reported no label at all while still existing —
+    and never showed a rename either.
+
+    Stated over the populations a key can be in rather than over the pair that
+    exposed it, so an identity shape that becomes reachable later is covered here
+    the moment it exists. The source IDs are `src_`-prefixed because config admits
+    `src_[a-z0-9]{8,}` with no upper bound, so a folded Source key is reachable
+    from a config that validates, not only from a legacy file.
+    """
+
+    sources = _keying_populations("src_")
+    models = _keying_populations("model-")
+    # The test is only the test while the seeds span both populations: an all-verbatim
+    # set would pass against a read that never keyed anything.
+    assert {identity == usage_ledger_key(identity) for identity in (*sources, *models)} == {
+        True,
+        False,
+    }
+
+    ledger = _ledger(tmp_path)
+    for source_id in sources:
+        for model_id in models:
+            ledger.record(source_id=source_id, model_id=model_id, usage=None, at=NOW)
+
+    def summarize(naming: str) -> dict:
+        return ledger.summary(
+            days=30,
+            now=NOW,
+            source_labels={identity: f"{naming} {identity}" for identity in sources},
+            # A model's label is its own identity: a folded row publishes a head
+            # plus a digest, so a tab drawing `model_id` would show a string
+            # nobody typed.
+            model_labels={identity: identity for identity in models},
+        )
+
+    for naming in ("named", "renamed"):
+        by_source = {source["source_id"]: source for source in summarize(naming)["sources"]}
+        assert set(by_source) == {usage_ledger_key(identity) for identity in sources}
+        for source_id in sources:
+            source = by_source[usage_ledger_key(source_id)]
+            assert source["label"] == f"{naming} {source_id}"
+            by_model = {model["model_id"]: model for model in source["models"]}
+            assert set(by_model) == {usage_ledger_key(identity) for identity in models}
+            for model_id in models:
+                assert by_model[usage_ledger_key(model_id)]["label"] == model_id
+
+
+def test_a_label_no_config_still_holds_is_absent_rather_than_stale(tmp_path: Path) -> None:
+    """MH-USAGE-008: the join is why a deleted Source reads as deleted.
+
+    Persisting the label would freeze a copy of user-supplied text in a file this
+    ledger keeps for two months. Joining it means a row whose identity config no
+    longer holds publishes no label — which is the honest reading, since the usage
+    happened and the thing that produced it is gone.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.record(source_id="src_gone0001", model_id="model-gone", usage=None, at=NOW)
+
+    source = ledger.summary(days=30, now=NOW, source_labels={}, model_labels={})["sources"][0]
+
+    assert source["label"] is None
+    assert source["models"][0]["label"] is None
+
+
+# --- Ownership: one queue, bounded by identity, loud when it loses a batch -----
+
+
+def test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate(tmp_path: Path) -> None:
+    """MH-USAGE-009, review 4966281026: a backlog bound traffic cannot move.
+
+    The queue exists so a served turn never waits on a disk, which means whatever
+    arrives while a flush is out has to go somewhere. Bounding it by a capacity
+    would mean choosing rows to drop — losing exactly the billed usage this module
+    exists to keep — and blocking the caller would stall a turn on a disk that is
+    already failing. So it folds: calls heading for one row become one queued row
+    as they arrive, and the backlog is bounded by the identities config holds
+    rather than by how hard the hub is driven.
+
+    Driven with the flush held open, because that is the only window in which a
+    backlog exists at all. 512 calls over four identities leave four queued rows,
+    and all 512 are still metered — a bound that dropped calls would pass the
+    first assertion and fail the last.
+    """
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        identities = (
+            ("src_a", "model-x"),
+            ("src_a", "model-y"),
+            ("src_b", "model-x"),
+            ("src_b", "model-y"),
+        )
+        fold = ledger.record_many
+        batches: list[int] = []
+        holding = threading.Event()
+        release = threading.Event()
+
+        def counting(calls) -> None:
+            batches.append(len(calls))
+            if len(batches) == 1:
+                holding.set()
+                assert release.wait(5)
+            fold(calls)
+
+        ledger.record_many = counting
+
+        # One call opens a flush and holds it on the writing thread; everything
+        # below therefore arrives while a write is out, which is the scenario.
+        writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        while not holding.is_set():
+            await asyncio.sleep(0.01)
+
+        for index in range(512):
+            source_id, model_id = identities[index % len(identities)]
+            writer.record(
+                source_id=source_id,
+                model_id=model_id,
+                usage=ProtocolUsageReport(input_tokens=1, output_tokens=1),
+                at=NOW,
+            )
+
+        assert len(writer._pending) == len(identities)
+        # Calls, not rows: a backlog must not look like it shrank because the hub
+        # got busier.
+        assert writer.unpersisted == 512 + 1
+        release.set()
+
+        assert await writer.drain(timeout=5) == 0
+        # One transaction for the held call, one for every call behind it.
+        assert batches == [1, len(identities)]
+
+        totals = ledger.summary(days=1, now=NOW)["totals"]
+        assert totals["requests"] == 512 + 1
+        assert totals["token_reports"] == 512
+        assert totals["input_tokens"] == 512
+        assert totals["output_tokens"] == 512
+
+    asyncio.run(exercise())
+
+
+def test_a_ledger_that_cannot_be_written_is_reported_once_per_outage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MH-USAGE-009: metering that stopped must not look like a hub with nothing to say.
+
+    A failed batch is lost by design — a ledger that cannot be reached must not
+    hold up the turns it meters — but a read-only state directory then reads
+    exactly like an idle hub, which is the one reading that makes this module's
+    absence invisible. Both edges of the outage are logged and nothing in between,
+    so the volume follows how often the ledger changes state rather than how long
+    it stays broken.
+    """
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        fold = ledger.record_many
+        broken = True
+
+        def refuse(calls) -> None:
+            if broken:
+                raise OSError("read-only file system")
+            fold(calls)
+
+        ledger.record_many = refuse
+
+        with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.usage"):
+            for attempt in range(3):
+                await writer.record(
+                    source_id="src_a", model_id=f"model-{attempt}", usage=None, at=NOW
+                )
+            outage = [record.getMessage() for record in caplog.records]
+
+            broken = False
+            await writer.record(source_id="src_a", model_id="model-back", usage=None, at=NOW)
+            recovery = [record.getMessage() for record in caplog.records][len(outage) :]
+
+        assert len(outage) == 1 and "dropping metered calls" in outage[0]
+        assert len(recovery) == 1 and "recovered" in recovery[0]
+        # The three lost batches really were lost; only the recovered one landed.
+        assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 1
+
+    asyncio.run(exercise())

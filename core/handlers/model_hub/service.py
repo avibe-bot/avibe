@@ -3623,16 +3623,24 @@ class ModelHubService:
     def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
         """Report metered token usage, labelled from current Source config.
 
-        Labels are joined here rather than persisted: a Source label is
-        user-supplied text that the ledger has no business storing, and a join
-        keeps a rename visible immediately instead of freezing old copies.
+        Config is what this method owns: which identities exist right now and what
+        they are called. The join itself belongs to the ledger, because only the
+        ledger knows how a row is keyed — the version of this method that looked a
+        label up by `row["source_id"]` is what that rule looks like once it has
+        leaked to a caller, and it silently dropped the label of every identity the
+        key fold exists for.
+
+        A model's own identity is its label, which matters for the same reason:
+        a folded row publishes a key, not the identifier the user typed.
         """
 
-        summary = self.usage.summary(days=days, now=self.now())
-        labels = {source.id: source.display_name for source in self.store.load().sources}
-        for source in summary["sources"]:
-            source["label"] = labels.get(source["source_id"])
-        return summary
+        config = self.store.load()
+        return self.usage.summary(
+            days=days,
+            now=self.now(),
+            source_labels={source.id: source.display_name for source in config.sources},
+            model_labels={model.id: model.id for source in config.sources for model in source.models},
+        )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         events = self.events.list(limit=limit, before=before)

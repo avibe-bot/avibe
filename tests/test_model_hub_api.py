@@ -541,6 +541,35 @@ def _seed_response_conformance_service(tmp_path: Path) -> ModelHubService:
     return service
 
 
+def _as_ui_client(service):
+    """Give a controller service the sync/async shape the UI routes are written against.
+
+    The routes call `ModelHubRemoteService`, and one of its reads is deliberately
+    async where the service's is sync: `usage_summary` blocks on the lock the
+    ledger's writers hold across an fsync, so the RPC hop crosses a thread and the
+    UI side awaits rather than occupying a worker. A stub shaped like the service
+    instead makes every route look synchronous, which is a shape no deployment
+    has — the conformance driver below reported HTTP 500 on a route that works.
+
+    Derived from the client class rather than from a list of method names, so the
+    next async-only read is carried without editing this helper.
+    """
+
+    class UIClientShape:
+        def __getattr__(self, name):
+            attribute = getattr(service, name)
+            over_the_wire = getattr(ModelHubRemoteService, name, None)
+            if not inspect.iscoroutinefunction(over_the_wire) or inspect.iscoroutinefunction(attribute):
+                return attribute
+
+            async def awaited(*args, **kwargs):
+                return attribute(*args, **kwargs)
+
+            return awaited
+
+    return UIClientShape()
+
+
 def test_api_response_registry_exactly_covers_contract_and_server_routes():
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
     documented = {
@@ -687,7 +716,7 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
     save_config(isolated_home)
     service = _seed_response_conformance_service(tmp_path)
-    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
     request_kwargs = {

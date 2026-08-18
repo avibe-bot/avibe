@@ -24,10 +24,10 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Final, Optional, Sequence
+from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
 from .state_file import write_state_document
@@ -196,6 +196,27 @@ def _normalize_row(row: object) -> Optional[dict]:
     return normalized
 
 
+def _keyed_labels(labels: Optional[Mapping[str, Optional[str]]]) -> dict[str, Optional[str]]:
+    """Key one identity-to-label mapping the way the rows it will join were keyed.
+
+    The read half of the rule `record_many` applies on the write half: an identity
+    a caller holds is not the key its rows carry, and a long one differs from it
+    entirely. Deriving here rather than in the caller is what keeps a join from
+    silently missing exactly the identities the fold exists for.
+
+    Two identities that key the same are the same identity spelled differently —
+    `usage_ledger_key` is injective over anything else — so the later one wins, as
+    it would in the mapping the caller built.
+    """
+
+    keyed: dict[str, Optional[str]] = {}
+    for identity, label in (labels or {}).items():
+        key = usage_ledger_key(identity)
+        if key is not None:
+            keyed[key] = label
+    return keyed
+
+
 def _recency(row: dict) -> tuple[str, datetime]:
     """Order rows oldest-metered first, so the bound evicts what costs least.
 
@@ -344,7 +365,9 @@ class BoundedUsageLedger:
         it reached rather than one durable write at a time. Folding is what makes
         that safe — every call still lands in its own day's row with its own
         stamp, so a batch of ten is arithmetically the ten separate writes it
-        replaces, never a summary of them.
+        replaces, never a summary of them. A call that already speaks for several
+        (`UsageCall.requests`) folds by the same arithmetic onto the same row those
+        calls would each have reached.
 
         One `persisted_at` reading covers the batch, for the same reason `record`
         takes its own: it is the moment these calls reached the disk, and none of
@@ -373,8 +396,8 @@ class BoundedUsageLedger:
                             "day": local_usage_day(metered_at).isoformat(),
                             "source_id": source_key,
                             "model_id": model_key,
-                            "requests": 1,
-                            "token_reports": 1 if usage is not None else 0,
+                            "requests": call.requests,
+                            "token_reports": call.requests if usage is not None else 0,
                             "input_tokens": usage.input_tokens if usage else 0,
                             "cached_input_tokens": usage.cached_input_tokens if usage else 0,
                             "output_tokens": usage.output_tokens if usage else 0,
@@ -453,12 +476,35 @@ class BoundedUsageLedger:
             rows = self._read()
         return [row for row in rows if first_day <= row["day"] <= last_day]
 
-    def summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS, now: datetime) -> dict:
-        """Aggregate the window into the label-free settings-page read shape."""
+    def summary(
+        self,
+        *,
+        days: int = USAGE_DEFAULT_WINDOW_DAYS,
+        now: datetime,
+        source_labels: Optional[Mapping[str, Optional[str]]] = None,
+        model_labels: Optional[Mapping[str, Optional[str]]] = None,
+    ) -> dict:
+        """Aggregate the window into the read shape the settings page consumes.
+
+        Labels are joined here rather than persisted, because a display name is
+        user-supplied text this ledger has no business storing and a join keeps a
+        rename visible immediately instead of freezing old copies. They arrive as
+        *identities* and are keyed here rather than by the caller, because a row is
+        keyed and the component holding config is not the one that knows that: the
+        caller that keyed its own map looked a label up by `row["source_id"]`, so a
+        source whose ID is past the admission bound reported no label while still
+        existing, and its renames never appeared.
+
+        A model's label is its own identity, which only matters for a folded row.
+        There the key is a head plus a digest, so a tab drawing `model_id` would
+        show a string nobody typed; the label carries the identity back.
+        """
 
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
         rows = self.window(days=bounded_days, now=now)
+        keyed_source_labels = _keyed_labels(source_labels)
+        keyed_model_labels = _keyed_labels(model_labels)
 
         totals = _empty_totals()
         sources: dict[str, dict] = {}
@@ -470,6 +516,7 @@ class BoundedUsageLedger:
                 row["source_id"],
                 {
                     "source_id": row["source_id"],
+                    "label": keyed_source_labels.get(row["source_id"]),
                     **_empty_totals(),
                     "last_metered_at": None,
                     "models": {},
@@ -482,7 +529,11 @@ class BoundedUsageLedger:
             )
             model = source["models"].setdefault(
                 row["model_id"],
-                {"model_id": row["model_id"], **_empty_totals()},
+                {
+                    "model_id": row["model_id"],
+                    "label": keyed_model_labels.get(row["model_id"]),
+                    **_empty_totals(),
+                },
             )
             _accumulate(model, row)
 
@@ -536,16 +587,70 @@ def _ledger_executor() -> ThreadPoolExecutor:
 
 @dataclass(frozen=True)
 class UsageCall:
-    """One metered upstream call, in the shape the ledger folds it in."""
+    """One metered upstream call, in the shape the ledger folds it in.
+
+    Or several of them. `requests` is how many calls this value speaks for, so a
+    queue can fold the ones that will land on a single row before they reach the
+    disk without a second shape existing for a folded call. Every call folded
+    together agrees on whether tokens were reported — that is part of what makes
+    them one row — so `token_reports` stays derivable from `usage` instead of
+    becoming a second additive field able to disagree with `requests`.
+    """
 
     source_id: str
     model_id: str
     usage: Optional[ProtocolUsageReport]
     at: datetime
+    requests: int = 1
+
+    @property
+    def fold_key(self) -> tuple[str, str, str, bool]:
+        """What makes two calls one row, in the terms available before the write.
+
+        The ledger's own row key plus whether tokens were reported, which is the
+        part that keeps a fold arithmetically identical to the calls it replaces.
+        The day is this call's own bucket, exactly as `record` describes: the write
+        may still clamp it to the moment it persists, and two buckets clamped onto
+        one day meet again in `record_many`, which folds by row key regardless.
+        """
+
+        return (
+            local_usage_day(_aware(self.at)).isoformat(),
+            self.source_id,
+            self.model_id,
+            self.usage is not None,
+        )
+
+    def folded_with(self, other: "UsageCall") -> "UsageCall":
+        """Fold a call that shares this one's row into a single value.
+
+        Arithmetically the calls it replaces: counts add, token counts add, and
+        the stamp is the later of the two — which is what the row would have kept
+        anyway, since `record_many` keeps the newer stamp. Nothing is bounded here;
+        every counter is bounded where rows are normalized, so a fold that
+        saturates the ceiling saturates it identically.
+        """
+
+        reports = [report for report in (self.usage, other.usage) if report is not None]
+        usage = None
+        if reports:
+            usage = ProtocolUsageReport.of(
+                input_tokens=sum(report.input_tokens for report in reports),
+                cached_input_tokens=sum(report.cached_input_tokens for report in reports),
+                output_tokens=sum(report.output_tokens for report in reports),
+            )
+        return replace(
+            self,
+            usage=usage,
+            at=max(_aware(self.at), _aware(other.at)),
+            requests=self.requests + other.requests,
+        )
 
 
 @dataclass
-class _QueuedCall:
+class _QueuedRow:
+    """One queued row and the future every call folded into it is waiting on."""
+
     call: UsageCall
     done: "asyncio.Future[None]"
 
@@ -560,20 +665,28 @@ class UsageWriter:
     never the row, and a population added later inherits that by construction
     rather than by remembering to.
 
-    Queue, not fan-out. Calls accumulate while the flush ahead of them is on
-    disk, and the next flush takes all of them in one transaction, so the backlog
-    is bounded by what arrives during a single fsync however hard the hub is
-    driven — without a capacity to pick, and without ever dropping a row, which
-    would lose exactly the billed usage this module exists to keep.
+    Queue, not fan-out, and folded rather than capped. Calls accumulate while the
+    flush ahead of them is on disk and the next flush takes all of them in one
+    transaction; the ones heading for a single row fold into a single queued row as
+    they arrive. The backlog is therefore bounded by the identities config holds
+    rather than by how hard the hub is driven or by how long one write takes — a
+    flush stuck on an unresponsive disk cannot grow it past that bound, which is
+    the whole of what "bounded" can mean here. The alternatives both cost
+    something this module exists to prevent: a capacity means choosing rows to
+    drop, which loses billed usage, and blocking the caller stalls a served turn
+    on a disk that is already failing.
     """
 
     def __init__(self, ledger: BoundedUsageLedger):
         self.ledger = ledger
-        self._pending: list[_QueuedCall] = []
+        self._pending: dict[tuple[str, str, str, bool], _QueuedRow] = {}
         # The batch on its way to disk, kept visible so a drain that times out
         # can count it: in the executor is not the same as persisted.
-        self._writing: list[_QueuedCall] = []
+        self._writing: tuple[_QueuedRow, ...] = ()
         self._flush: Optional[asyncio.Task[None]] = None
+        # Whether the last flush lost its batch, so an outage is reported when it
+        # starts and ends rather than once per failed write.
+        self._dropping = False
 
     def record(
         self,
@@ -594,14 +707,18 @@ class UsageWriter:
         it and a queued write is still a report about the moment it finished.
 
         A caller that wants the row on disk before it returns awaits the result
-        through `asyncio.shield`; one that does not can simply drop it.
+        through `asyncio.shield`; one that does not can simply drop it. Callers
+        whose calls fold together share one future, which is the same promise each
+        would have had alone: it completes when their row reaches the disk.
         """
 
-        queued = _QueuedCall(
-            call=UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at),
-            done=asyncio.get_running_loop().create_future(),
-        )
-        self._pending.append(queued)
+        call = UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at)
+        queued = self._pending.get(call.fold_key)
+        if queued is None:
+            queued = _QueuedRow(call=call, done=asyncio.get_running_loop().create_future())
+            self._pending[call.fold_key] = queued
+        else:
+            queued.call = queued.call.folded_with(call)
         if self._flush is None or self._flush.done():
             self._flush = asyncio.create_task(self._flush_pending())
         return queued.done
@@ -611,10 +728,12 @@ class UsageWriter:
         """How many metered calls this writer still owes the ledger.
 
         Queued and in-flight both count: handed to the writing thread is not the
-        same as on disk.
+        same as on disk. Calls, not queued rows — folding is how this object stays
+        bounded, and answering in rows would make a backlog look like it shrank
+        because the hub got busier.
         """
 
-        return len(self._pending) + len(self._writing)
+        return sum(queued.call.requests for queued in (*self._pending.values(), *self._writing))
 
     async def drain(self, *, timeout: float) -> int:
         """Wait out the calls still queued; answers how many did not reach disk.
@@ -638,8 +757,8 @@ class UsageWriter:
 
         loop = asyncio.get_running_loop()
         while self._pending:
-            batch = self._pending
-            self._pending = []
+            batch = tuple(self._pending.values())
+            self._pending = {}
             self._writing = batch
             try:
                 await loop.run_in_executor(
@@ -648,9 +767,51 @@ class UsageWriter:
                     tuple(queued.call for queued in batch),
                 )
             except (OSError, ValueError) as exc:
-                logger.debug("Model Hub usage metering skipped %d call(s): %s", len(batch), exc)
+                self._report_dropped(batch, exc)
+            else:
+                self._report_recovered()
             finally:
-                self._writing = []
+                self._writing = ()
             for queued in batch:
                 if not queued.done.done():
                     queued.done.set_result(None)
+
+    def _report_dropped(self, batch: Sequence[_QueuedRow], exc: BaseException) -> None:
+        """Report that metering stopped, once per outage rather than per flush.
+
+        A ledger that cannot be written must not hold up the turns it meters, so a
+        failed batch is lost by design — but a state directory that has gone
+        read-only then looks exactly like a hub with nothing to record, which is
+        the one reading that makes this module's absence invisible. Saying it at
+        `debug` said it to nobody.
+
+        The transition carries the information, so the transition is what is
+        logged: bounded by how often the ledger changes state rather than by how
+        long an outage lasts, which is the bound a counter would be approximating.
+        """
+
+        calls = sum(queued.call.requests for queued in batch)
+        if self._dropping:
+            logger.debug(
+                "Model Hub usage metering still cannot write %s, dropped %d call(s): %s",
+                self.ledger.path,
+                calls,
+                exc,
+            )
+            return
+        self._dropping = True
+        logger.warning(
+            "Model Hub usage metering cannot write %s and is dropping metered calls "
+            "(%d lost in this batch); the usage tab will under-report until it recovers: %s",
+            self.ledger.path,
+            calls,
+            exc,
+        )
+
+    def _report_recovered(self) -> None:
+        """Close an outage the same way it was opened, so the gap has both edges."""
+
+        if not self._dropping:
+            return
+        self._dropping = False
+        logger.warning("Model Hub usage metering recovered; %s is writable again", self.ledger.path)

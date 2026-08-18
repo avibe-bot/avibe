@@ -144,6 +144,7 @@
       "type": "object",
       "required": [
         "model_id",
+        "label",
         "requests",
         "token_reports",
         "input_tokens",
@@ -153,8 +154,13 @@
       "additionalProperties": false,
       "properties": {
         "model_id": {
+          "description": "Ledger key, which for a long identifier is a head plus a digest rather than the identifier itself. Display label, never model_id.",
           "type": "string",
           "minLength": 1
+        },
+        "label": {
+          "description": "The model identity this row was metered under, joined from current Source config; null once the model is gone.",
+          "type": ["string", "null"]
         },
         "requests": {
           "$ref": "#/definitions/Count"
@@ -231,6 +237,7 @@
           "models": [
             {
               "model_id": "claude-opus-4-6",
+              "label": "claude-opus-4-6",
               "requests": 12,
               "token_reports": 9,
               "input_tokens": 148230,

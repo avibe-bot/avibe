@@ -811,6 +811,78 @@ pair fails it without being named, and a read-back test fixes which keys a row m
 carry. Four mutations, four distinct failures: the late fold threshold, a re-deriving
 read path, a truncation-only fold, and an unbounded read.
 
+### Round 15 (head `5507c5708`)
+
+CI went fully green and the review returned four P2 findings: one more instance of the
+identity-keying property — its third consecutive head, at a new call site — and three
+first instances in code this PR introduced. The diagnosis is recorded before the edits.
+
+**F1: the label join was keyed by the identity, not by the row.** `usage_summary` built
+`{source.id: source.display_name}` and looked it up with `row["source_id"]`, which is a
+*key*. A source whose ID is past the admission bound therefore reported `label: null`
+while still existing, and a rename never appeared. The reviewer's one-line fix — key the
+map with `usage_ledger_key` — is correct and insufficient: this is the third head on
+which a call site had to remember the keying rule, so the property-ownership rule
+applies and ownership has to move rather than the site being patched. The ledger is the
+only component that knows its rows are keyed, so `summary` now takes the labels as
+*identities* and keys them itself, and `usage_summary` no longer touches a row's key
+fields at all. The model half ships with it instead of waiting for the reviewer to reach
+it: a folded model row publishes a key that is not the identity the user typed, so the
+tab has to join that identity back the same way a source label is joined.
+
+**F2: the queue was bounded by arrival rate, not by anything we measure.** The writer's
+own docstring claimed the backlog "is bounded by what arrives during a single fsync
+however hard the hub is driven". That is only a bound while an fsync is fast — under a
+hung disk it is a restatement of "unbounded", which is the same failure mode as rounds
+13 and 14: prose asserting a bound the code does not enforce. The three ways out are not
+equal. A capacity that drops loses exactly the billed usage this module exists to keep;
+backpressure stalls a served turn on a hung disk; folding loses nothing, because the
+ledger already folds calls onto `(day, source, model)` rows when it writes them. So the
+queue now folds on arrival: calls that share a day, a source, a model, and whether they
+reported tokens become one queued row carrying a `requests` count, and the pending set
+is bounded by the identities config holds rather than by traffic. Grouping on *whether*
+tokens were reported is what keeps `token_reports` derivable from `requests`, so no
+second additive field is needed and `token_reports <= requests` holds by construction.
+
+**F3: a dropped batch was invisible.** The `OSError`/`ValueError` branch logged at
+`debug`, so metering that stops because the state directory is read-only looks exactly
+like metering that has nothing to record. It now warns on the transition into that state
+and on recovery out of it, which bounds the volume by the number of state changes rather
+than by the number of failed flushes — a counter would need arithmetic to say the same
+thing less precisely.
+
+**F4: the new route expanded the compat surface.** `GET /api/models/usage` was added as
+`@app.route`, which the repo's Web UI Server rule reserves for the migration scaffold,
+and it reached the ledger through the sync 300s RPC from the compat threadpool. It is
+now a native FastAPI route awaiting an async client method. The guard that keeps it that
+way is the mirror image of the one already covering the controller: the ledger read
+blocks on the same lock writers hold across fsync, so *every* path into it must be off
+the thread that would otherwise be serving requests, in the UI process as much as in the
+controller.
+
+**Evidence.** `MH-USAGE-008` states F1's property as a join that survives folding: a
+source whose ID is past the admission bound gets its label, and a rename shows up
+immediately. `MH-USAGE-009` states F2's bound as one that traffic cannot move — 512
+calls over four identities leave four queued rows and still meter 512 requests — and a
+drop test fixes F3's transition warning. Three structure guards close the two classes
+against the next call site: `usage_ledger_key` has exactly one importer and
+`usage_summary` may not subscript a row's key fields; every UI function that reaches the
+read must be async, awaited, and served through the native dispatch, and the client
+method behind it may not be sync; and the list of ledger reads both loops scan for is
+asserted to be the whole of what the service exposes, so a second reader fails a test
+rather than escaping both name lists. Eight mutations, eight distinct failures.
+
+Making the read async also exposed a latent defect in the response-conformance driver,
+which enumerates every route in `api-response.schema.json` and drives it against a stub.
+The stub was the controller service, so the driver had been asserting that the routes
+work against a shape no deployment has — the routes call the *client*, whose
+`usage_summary` is async precisely because the service's is sync. `GET /api/models/usage`
+returned HTTP 500 there while working in the browser. The stub now takes its sync/async
+shape from `ModelHubRemoteService` itself rather than from a list of method names, so the
+next async-only read is carried without an edit. With that fixed, the driver validates a
+real summary against `usage-summary.schema.json`, which is what makes `label` a contract
+rather than a field the ledger happens to emit.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

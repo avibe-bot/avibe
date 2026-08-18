@@ -6579,8 +6579,10 @@ def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded
 
         assert await writer.drain(timeout=5) == 0
         # Eight calls, two trips to disk — the second took every call that piled
-        # up behind the first, which is the whole of the bound.
-        assert transactions == [1, 7]
+        # up behind the first, which is the whole of the bound. It carries one row
+        # rather than seven, because the seven were headed for one row anyway; the
+        # requests below are what proves that folded and lost are different things.
+        assert transactions == [1, 1]
 
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 8

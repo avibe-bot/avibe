@@ -43,7 +43,16 @@ PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
 CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
+HUB_CLIENT = ROOT / "vibe/model_hub_client.py"
+UI_SERVER = ROOT / "vibe/ui_server.py"
 INVOKE_CONTRACT = ROOT / "core/handlers/model_hub/adapter.py"
+# Every name a caller reaches the usage ledger's read through. Two processes
+# forbid reaching it the easy way for one reason -- the read blocks on the lock
+# the writers hold across an fsync -- so the rule is declared once here instead
+# of restated in each loop's scan, where a second reader would escape both.
+LEDGER_READ_NAMES = frozenset({"usage_summary"})
+LEDGER_TOUCH_NAMES = LEDGER_READ_NAMES | {"usage"}
+PRODUCT_PACKAGES = ("core", "config", "modules", "vibe")
 FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
 STREAM_TRANSPORT_FIXTURES = json.loads((FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8"))[
     "cases"
@@ -269,6 +278,22 @@ def _call_name(node: ast.AST) -> str | None:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return None
+
+
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+
+def _reaches_the_ledger(node: ast.AST) -> bool:
+    # ``self.usage.<anything>`` -- the ledger object itself, not the writer beside
+    # it, which is a different property with a different rule.
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "usage"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
+    )
 
 
 def _bool_keyword(call: ast.Call, name: str) -> bool | None:
@@ -676,12 +701,8 @@ def test_the_usage_ledger_is_never_touched_from_the_controller_loop() -> None:
     # caller happened to remember it. Every RPC entry into it is checked here so
     # the next one cannot quietly be the exception.
     tree = _tree(RPC)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    touches = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute) and node.attr in {"usage_summary", "usage"}
-    ]
+    parents = _parents(tree)
+    touches = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in LEDGER_TOUCH_NAMES]
     assert touches
     for touch in touches:
         enclosing = touch
@@ -692,6 +713,91 @@ def test_the_usage_ledger_is_never_touched_from_the_controller_loop() -> None:
                 off_loop = True
                 break
         assert off_loop, f"{touch.attr} is reached on the controller loop"
+
+
+def test_the_ledger_read_is_the_whole_of_what_both_loops_are_told_to_watch() -> None:
+    # Review 4966281026: two processes now scan for this read by name, and a
+    # second read added to the service would satisfy neither name list and so
+    # pass both scans. The list is therefore declared once and asserted here to
+    # be the whole of what the service exposes -- a new reader fails next to the
+    # declaration that has to grow with it, rather than in a review round.
+    readers = {
+        name for name, fn in _functions(_tree(SERVICE)).items() if any(map(_reaches_the_ledger, ast.walk(fn)))
+    }
+    assert readers == set(LEDGER_READ_NAMES)
+
+
+def test_the_ledger_read_reaches_the_web_ui_awaited_and_off_the_compat_surface() -> None:
+    # Review 4966281026 finding 4: the same property as the controller guard
+    # above, one process over. The read blocks on the writers' lock across an
+    # fsync, so reaching it from the compat surface -- whose handlers are sync and
+    # run in a threadpool worker -- occupies a UI worker for as long as the disk
+    # takes. Awaiting it on the native surface is what keeps that cost on the
+    # event loop's own terms.
+    tree = _tree(UI_SERVER)
+    parents = _parents(tree)
+    touches = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in LEDGER_TOUCH_NAMES]
+    assert touches
+    for touch in touches:
+        awaited = False
+        native = False
+        enclosing = touch
+        while enclosing in parents:
+            enclosing = parents[enclosing]
+            if isinstance(enclosing, ast.Await):
+                awaited = True
+            if isinstance(enclosing, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assert isinstance(enclosing, ast.AsyncFunctionDef), f"{enclosing.name} reaches {touch.attr} sync"
+                native = native or any(
+                    _call_name(node) == "_dispatch_native_ui_request" for node in ast.walk(enclosing)
+                )
+        assert awaited, f"{touch.attr} is called rather than awaited"
+        assert native, f"{touch.attr} is served off the native FastAPI surface"
+
+    # The client the route reaches it through has to keep the same shape: one sync
+    # method here would move the block back into a worker with nothing in
+    # `ui_server.py` to show for it.
+    for name, fn in _functions(_tree(HUB_CLIENT)).items():
+        if name not in LEDGER_READ_NAMES:
+            continue
+        assert isinstance(fn, ast.AsyncFunctionDef), f"{name} is a sync RPC"
+        assert not any(_call_name(node) == "_rpc_sync" for node in ast.walk(fn))
+
+
+def test_a_usage_row_is_labelled_without_its_caller_knowing_how_it_was_keyed() -> None:
+    # Review 4966281026 finding 1: a row's key is an identity or a bounded head
+    # plus a digest of it, and which one is a fold only this module performs. Three
+    # heads running, the reviewer has found a caller keying its own lookup at a
+    # new call site each time -- so the class is closed by leaving no caller with
+    # a key to join on. The service hands identities down and the ledger keys both
+    # sides of the join itself.
+    importers = set()
+    for package in PRODUCT_PACKAGES:
+        for path in (ROOT / package).rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            if "usage_ledger_key" not in source:
+                continue
+            if any(
+                isinstance(node, ast.ImportFrom) and any(alias.name == "usage_ledger_key" for alias in node.names)
+                for node in ast.walk(ast.parse(source))
+            ):
+                importers.add(path)
+    assert importers == {USAGE}
+
+    reader = _functions(_tree(SERVICE))["usage_summary"]
+    # Subscripting a row is how the fold leaked the first two times: the caller
+    # read `row["source_id"]` and looked a label up under an identity the row does
+    # not carry, reporting every folded row as unlabelled while it still existed.
+    assert not [
+        node
+        for node in ast.walk(reader)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value in {"source_id", "model_id", "sources", "models"}
+    ]
+    handoffs = [node for node in ast.walk(reader) if _call_name(node) == "summary"]
+    assert len(handoffs) == 1
+    assert {keyword.arg for keyword in handoffs[0].keywords} >= {"source_labels", "model_labels"}
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:

@@ -161,6 +161,18 @@ scenarios:
     kind: persistence
     layer: unit
     test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
+  - id: MH-USAGE-008
+    name: Every metered row is labelled under the identity it was metered for, however it was keyed
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key
+  - id: MH-USAGE-009
+    name: A metering backlog is bounded by configured identities rather than by request rate
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
