@@ -624,6 +624,16 @@ class EverOSProcess:
         )
 
     @property
+    def retains_active_config(self) -> bool:
+        """Whether owned execution can still use this supervisor's settings."""
+
+        return bool(
+            self._process is not None
+            or self._owned_processes
+            or self.restart_authorized
+        )
+
+    @property
     def last_error(self) -> MemoryErrorCode | None:
         return self._last_error
 
@@ -3794,7 +3804,7 @@ class _SystemProcessHost:
 class EverOSProcessPort(Protocol):
     """What the runtime needs from a supervised sidecar, and nothing more.
 
-    Deliberately six members over ``EverOSProcess``'s ~990 lines: the runtime
+    Deliberately seven members over ``EverOSProcess``'s ~990 lines: the runtime
     never inspects the child tree, the generated config, or the signal handling.
     Keeping those out of this interface is what lets tests substitute a fake
     instead of patching ``psutil``, ``os``, and private attributes.
@@ -3808,6 +3818,9 @@ class EverOSProcessPort(Protocol):
 
     @property
     def restart_authorized(self) -> bool: ...
+
+    @property
+    def retains_active_config(self) -> bool: ...
 
     async def start(self) -> bool: ...
 
@@ -3868,6 +3881,7 @@ class FakeEverOSProcess:
     _down: bool = False
     _desired_running: bool = True
     _restart_pending: bool = False
+    _process_tree_retained: bool = False
 
     @property
     def running(self) -> bool:
@@ -3889,11 +3903,16 @@ class FakeEverOSProcess:
             and (self._running or self._starting or self._restart_pending)
         )
 
+    @property
+    def retains_active_config(self) -> bool:
+        return self._running or self._process_tree_retained or self.restart_authorized
+
     async def start(self) -> bool:
         self.starts += 1
         self._desired_running = True
         self._down = False
         self._restart_pending = False
+        self._process_tree_retained = False
         before_start = self.before_start
         if before_start is not None:
             result = before_start()
@@ -3918,12 +3937,15 @@ class FakeEverOSProcess:
     async def stop(self) -> None:
         self.stops += 1
         self.stopped = True
+        owned_execution = self._running or self._process_tree_retained
         self._desired_running = False
         self._restart_pending = False
         self._running = False
         self._starting = False
         if self.stop_failure is not None:
+            self._process_tree_retained = owned_execution
             raise self.stop_failure
+        self._process_tree_retained = False
         await self._notify_reaped()
 
     async def _notify_reaped(self) -> None:

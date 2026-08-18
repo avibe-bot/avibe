@@ -2912,6 +2912,78 @@ async def test_repair_rechecks_vectors_after_retiring_restart_authority(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_repair_rechecks_vectors_after_retiring_owned_descendants(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreaped old-model tree keeps its config until Stop proves it gone."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    retained_tree = FakeEverOSProcess(
+        _running=False,
+        _down=True,
+        _desired_running=False,
+    )
+    retained_tree._process_tree_retained = True
+    runtime._process = retained_tree
+    vector_state = {"exists": False}
+    monkeypatch.setattr(
+        runtime,
+        "_provider_data_exists_strict",
+        lambda: vector_state["exists"],
+    )
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert retained_tree.restart_authorized is False
+    assert runtime._sidecar.snapshot().retains_active_config is True
+    assert runtime._config == active
+
+    vector_state["exists"] = True
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_clear_failed",
+        "download_error": None,
+    }
+    assert retained_tree.stopped is True
+    assert retained_tree.retains_active_config is False
+    assert runtime._process is None
+    assert runtime._config == active
+    assert runtime._restart_config == active
+    assert artifact.ensure_calls == []
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_missing_artifact_retains_active_config_until_rejected_child_is_gone(
     tmp_path: Path,
     memory_runtime_factory,

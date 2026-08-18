@@ -1982,6 +1982,45 @@ async def test_exited_child_watcher_retains_restart_authority_until_retry_is_sch
     assert process.restart_authorized is False
 
 
+async def test_unreaped_descendants_retain_active_config_until_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Captured settings remain authoritative while any owned tree may survive."""
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    child = _ExitedChild()
+    _supervising(process, child)
+    process._owned_processes[_ORPHAN_DESCENDANT_PID] = _ORPHAN_CREATE_TIME + 1
+    process._desired_running = True
+    cleanup_attempts = 0
+
+    async def terminate(*_args, **_kwargs) -> None:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        if cleanup_attempts == 1:
+            raise RuntimeError("descendant tree still alive")
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    monkeypatch.setattr(process._ownership, "retire_if_group_is_clear", lambda *_args: None)
+
+    await process._watch_child(child)
+
+    assert process.running is False
+    assert process.restart_authorized is False
+    assert process.retains_active_config is True
+    assert process._process is child
+    assert _ORPHAN_DESCENDANT_PID in process._owned_processes
+
+    await process.stop()
+    assert cleanup_attempts == 2
+    assert process.retains_active_config is False
+
+
 def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

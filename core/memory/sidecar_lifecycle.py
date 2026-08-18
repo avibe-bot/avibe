@@ -38,7 +38,7 @@ class SidecarSnapshot:
     def retains_active_config(self) -> bool:
         """Whether this supervisor can still execute under captured settings."""
 
-        return self.running or self.supervisor_can_restart
+        return bool(self.process and self.process.retains_active_config)
 
 
 @dataclass(frozen=True, slots=True)
