@@ -410,6 +410,48 @@ describe('ShowPagesInventoryStore', () => {
     release();
   });
 
+  // Same class as the workbench caches: the authorization change IS the
+  // invalidation, and demand decides only whether a replacement read follows it.
+  // Revalidating instead keeps revoked titles, paths and share URLs on screen for
+  // as long as the re-read takes — and indefinitely when it fails, because
+  // ``fetchCurrentRevision`` deliberately preserves the pages it could not replace.
+  it('drops revoked pages at the edge even while a consumer is reading them', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi
+      .fn()
+      .mockResolvedValueOnce({ pages: [page({ share_id: 'share-1' })] })
+      .mockRejectedValueOnce(new Error('read failed'));
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    await store.reload();
+    expect(store.getSnapshot().pages).toHaveLength(1);
+
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+
+    // Asserted before the replacement read settles.
+    expect(store.getSnapshot().pages).toEqual([]);
+    expect(store.getSnapshot().loaded).toBe(false);
+    // A consumer is reading, so the drop is followed by a replacement read.
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+
+    // Which fails — and the pages stay dropped, because the drop never depended
+    // on it. ``reload()`` joins that same single-flight rather than starting one.
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages).toEqual([]);
+    release();
+  });
+
   // Same rule as the workbench providers' looping reads: this one goes round again
   // only on evidence its own pass produced — a mutation that bumped the revision
   // under it. A failed request produced none, so it settles and waits for the next

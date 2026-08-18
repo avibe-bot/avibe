@@ -1973,4 +1973,295 @@ describe('Demand-driven shell bootstrap', () => {
       logged.mockRestore();
     });
   });
+
+  // An authorization change is an INVALIDATION. Demand decides only whether a
+  // replacement READ follows it — never whether the cache it voids is dropped.
+  // Reading the two as one question is what puts the drop in the no-consumer
+  // branch, which says "nothing is reading, so let it go" when the actual reason
+  // is that the change made the rows unauthorized. With a consumer the caches
+  // then merely revalidate, and every one of them deliberately PRESERVES what it
+  // holds when a read fails, so a revoked row stays rendered for as long as the
+  // replacement takes and indefinitely if it never lands.
+  describe('an authorization change invalidates whether or not anyone is reading', () => {
+    it('drops the project tree at the edge, then re-reads it as a first load', async () => {
+      const replacement = deferred<typeof bootstrapPayload>();
+      const bootstrap = vi.fn().mockResolvedValue(bootstrapPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const capture = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toHaveLength(1);
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(1);
+
+      bootstrap.mockReturnValue(replacement.promise);
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+
+      // Asserted while the replacement read is still in flight: the edge is what
+      // drops it, not the response.
+      expect(tree?.projects).toBeNull();
+      expect(tree?.sessionsOf(project.id).sessions).toBeNull();
+
+      // And what follows is the authoritative first load, not a reconcile of the
+      // window this same edge just dropped — a reconcile would re-read only the
+      // projects it still had cached, which is now none of them.
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      expect(bootstrap.mock.calls.at(-1)?.[0]).not.toHaveProperty('projectIds');
+
+      await act(async () => {
+        replacement.resolve(bootstrapPayload);
+      });
+      await settle();
+      expect(tree?.projects).toHaveLength(1);
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(1);
+    });
+
+    it('refuses a tree response the server produced before the change', async () => {
+      const stale = deferred<typeof bootstrapPayload>();
+      const pending = deferred<typeof bootstrapPayload>();
+      const bootstrap = vi
+        .fn()
+        .mockResolvedValueOnce(bootstrapPayload)
+        .mockReturnValueOnce(stale.promise)
+        .mockReturnValue(pending.promise);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const capture = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toHaveLength(1);
+
+      // A reconnect reconcile is in flight when access changes under it.
+      await act(async () => {
+        handlers?.onConnected?.();
+      });
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+      expect(tree?.projects).toBeNull();
+
+      // The pre-change snapshot now arrives. Fencing belongs to the edge for the
+      // same reason the drop does: this response describes the authorization the
+      // change replaced, whether or not a consumer is waiting for it.
+      await act(async () => {
+        stale.resolve(bootstrapPayload);
+      });
+      await settle();
+      expect(tree?.projects).toBeNull();
+    });
+
+    it('drops the inbox feed at the edge, not only when nothing reads it', async () => {
+      const replacement = deferred<typeof inboxPayload>();
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const feedReads = () => listInbox.mock.calls.filter(([args]) => args.limit > 1);
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(state?.inboxSessions).toHaveLength(1);
+      expect(state?.nextCursor).toBe('cursor_1');
+
+      listInbox.mockReturnValue(replacement.promise);
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+
+      // Asserted before the replacement read settles, and the cursor goes with
+      // the rows: a cursor is a position in a list this document may no longer be
+      // allowed to page through.
+      expect(state?.inboxSessions).toEqual([]);
+      expect(state?.nextCursor).toBeNull();
+
+      // The consumer is still reading, so a replacement follows the drop — and
+      // having dropped the window is what makes it the authoritative page one
+      // rather than a reconcile onto rows that are no longer there.
+      expect(feedReads()).toHaveLength(2);
+      expect(feedReads().at(-1)?.[0]).toMatchObject({ platform: 'avibe', limit: 30 });
+      expect(feedReads().at(-1)?.[0]).not.toHaveProperty('cache');
+
+      await act(async () => {
+        replacement.resolve({ sessions: [], next_cursor: null, unread_by_session: {} });
+      });
+      await settle();
+      expect(state?.inboxSessions).toEqual([]);
+    });
+
+    it('refuses a feed response the change outran, even when its replacement is dropped', async () => {
+      const stale = deferred<typeof inboxPayload>();
+      const countsOnly = { sessions: [], next_cursor: null, unread_by_session: { [session.id]: 3 } };
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(state?.inboxSessions).toHaveLength(1);
+
+      // A resume reconcile is in flight when access changes under it.
+      listInbox.mockImplementation((args: ListInboxArgs) =>
+        args.limit > 1 ? stale.promise : Promise.resolve(countsOnly),
+      );
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'));
+      });
+
+      // The change lands while the feed still has a reader, so a replacement read
+      // is queued behind the one in flight...
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+      expect(state?.inboxSessions).toEqual([]);
+
+      // ...and then the reader leaves, which drops that queued read. Nothing is
+      // left to replace the rows, so the edge itself has to have refused the
+      // response that is about to arrive.
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      await act(async () => {
+        stale.resolve(inboxPayload);
+      });
+      await settle();
+
+      expect(state?.inboxSessions).toEqual([]);
+      expect(state?.nextCursor).toBeNull();
+    });
+
+    // A straggler of the same rule that moved the gate onto the reads: this loop
+    // asks once on the way in, so a retry queued while a card was rendered still
+    // runs after the last feed consumer left.
+    it('stops a queued targeted retry whose feed consumer left, and owes the map instead', async () => {
+      const inFlight = deferred<typeof inboxPayload>();
+      const countsOnly = { sessions: [], next_cursor: null, unread_by_session: { [session.id]: 7 } };
+      const listInbox = vi.fn().mockImplementation((args: ListInboxArgs) => {
+        if (args.onlySession) return inFlight.promise;
+        return Promise.resolve(args.limit > 1 ? inboxPayload : countsOnly);
+      });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const targetedReads = () => listInbox.mock.calls.filter(([args]) => args.onlySession).length;
+      const wholeCountsReads = () =>
+        listInbox.mock.calls.filter(([args]) => args.limit === 1 && !args.onlySession).length;
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+
+      const restore = () =>
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'updated',
+          visibility: 'foreground',
+        });
+      await act(async () => {
+        restore();
+      });
+      expect(targetedReads()).toBe(1);
+      // A second restore lands mid-read, so the loop owes itself another pass.
+      await act(async () => {
+        restore();
+      });
+      expect(targetedReads()).toBe(1);
+
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      const countsBefore = wholeCountsReads();
+
+      await act(async () => {
+        inFlight.resolve(inboxPayload);
+      });
+      await settle();
+
+      // The card that pass would upsert is not rendered anywhere, so the request
+      // is declined — but its other half is the session's unread count, which
+      // every route badges, so the obligation moves to the whole-account map.
+      expect(targetedReads()).toBe(1);
+      expect(wholeCountsReads()).toBeGreaterThan(countsBefore);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 7 });
+    });
+  });
 });

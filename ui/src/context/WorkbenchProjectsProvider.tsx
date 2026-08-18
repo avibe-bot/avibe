@@ -661,15 +661,24 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // resumption path for the other signal that can arrive at a loaded tree — a
   // reconnect — so a returning consumer takes it too. The first-page bootstrap is
   // reserved for a tree that has none of this to preserve.
-  useEffect(() => {
-    if (!active) return;
+  //
+  // One owner for that choice, because activation is not the only caller: an
+  // authorization change re-reads for an active consumer too, and it drops the
+  // window first — so "which read" has to be answered from the cache as it is at
+  // that moment, not from which event asked.
+  const readTreeForActiveConsumer = useCallback(() => {
     if (!treeInitialFetched.current) {
       treeInitialFetched.current = true;
       void fetchProjects();
       return;
     }
     void reconcileProjectTree();
-  }, [active, fetchProjects, reconcileProjectTree]);
+  }, [fetchProjects, reconcileProjectTree]);
+
+  useEffect(() => {
+    if (!active) return;
+    readTreeForActiveConsumer();
+  }, [active, readTreeForActiveConsumer]);
 
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
     // Revalidation: dropped while nothing reads the tree (see ``reconcileSessions``).
@@ -827,15 +836,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       onConnected: () => {
         void reconcileProjectTree();
       },
-      // An authorization change is invalidation rather than revalidation, so the
-      // no-consumer case still has work to do: drop the cache instead of leaving
-      // it to be rendered on the way back. See ``discardAuthorizedTree``.
+      // An authorization change is invalidation rather than revalidation, and the
+      // two answer different questions. Demand decides whether a replacement READ
+      // is worth issuing; it never decides whether the cache the change voided is
+      // dropped. Putting the drop in the no-consumer branch reads as "nothing is
+      // watching, so let it go" when the actual reason is that these rows may no
+      // longer be authorized — so with a consumer the tree merely revalidated, and
+      // ``fetchProjects`` deliberately KEEPS the old list when a read fails.
+      // Revoked projects would stay on screen for as long as the replacement took,
+      // and indefinitely if it never landed. Drop at the edge, then re-read only
+      // for a consumer — which, the window having gone with the cache, is the
+      // authoritative first load rather than a reconcile of nothing.
       onAuthorizationChanged: () => {
-        if (!isActive()) {
-          discardAuthorizedTree();
-          return;
-        }
-        void reconcileProjectTree();
+        discardAuthorizedTree();
+        if (isActive()) readTreeForActiveConsumer();
       },
       onSessionActivity: (data) => {
         const projectId =
@@ -916,6 +930,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     discardAuthorizedTree,
     isActive,
     projectIdForSession,
+    readTreeForActiveConsumer,
     reconcileProjectTree,
     reconcileSessions,
     refreshCachedSessionRow,

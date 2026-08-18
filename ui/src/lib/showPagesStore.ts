@@ -188,12 +188,12 @@ export class ShowPagesInventoryStore {
     });
   };
 
-  // Access to Show Pages was revoked or re-granted while nothing reads the
-  // inventory. Advancing the revision fences any read already in flight — the
-  // single-flight loop discards that response and reconciles again — and the
-  // snapshot drops to pre-first-read state, so the next consumer cannot render
-  // revoked titles, paths or share URLs even if its own read is slow or fails.
-  // Stronger than revalidating, which depended on a fetch succeeding.
+  // Access to Show Pages was revoked or re-granted. Advancing the revision fences
+  // any read already in flight — the single-flight loop discards that response and
+  // reconciles again — and the snapshot drops to pre-first-read state, so neither
+  // the consumer reading it now nor the next one to reopen can render revoked
+  // titles, paths or share URLs while a replacement read is slow, or after one
+  // fails. Stronger than revalidating, which depended on a fetch succeeding.
   private discardAuthorizedPages(): void {
     this.revision += 1;
     this.updateSnapshot({ pages: [], loaded: false });
@@ -302,12 +302,15 @@ export class ShowPagesInventoryStore {
         // Normal session/user-message events do not change this inventory.
         if (data.event === 'show_event') this.invalidateAndReload();
       },
+      // Invalidation, so unlike the two above it is not the consumer count that
+      // decides whether it acts — only whether a replacement READ follows.
+      // Revalidating for an active consumer left the revoked pages in the
+      // snapshot until the re-read landed, and ``fetchCurrentRevision``
+      // deliberately keeps them when it fails, so a failed replacement kept
+      // revoked titles, paths and share URLs readable indefinitely.
       onAuthorizationChanged: () => {
-        if (this.activeConsumers === 0) {
-          this.discardAuthorizedPages();
-          return;
-        }
-        this.invalidateAndReload();
+        this.discardAuthorizedPages();
+        if (this.activeConsumers > 0) void this.reload();
       },
     });
   }

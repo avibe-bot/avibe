@@ -620,20 +620,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Never touches the cursor or replaces unrelated unread state.
   const reconcileSession = useCallback(
     async (sessionId: string) => {
-      // The demand gate belongs HERE rather than at the events that call this:
-      // every trigger of a request-backed revalidation would otherwise have to
-      // remember it, and this provider has more triggers than guards. With no feed
-      // consumer the card this upserts is not rendered and the next activation
-      // reconciles the window anyway — the same argument that lets a queued feed
-      // intent be dropped. What is NOT droppable is the other half of this read:
-      // it owns this session's unread count, which every route badges. So declining
-      // hands the whole-account map the debt instead of dropping the obligation with
-      // the request, and a burst of foreground restores costs one coalesced counts
-      // read instead of one targeted read each.
-      if (!isFeedActive()) {
-        oweWholeUnread();
-        return;
-      }
       if (targetedReadInFlightRef.current.has(sessionId)) {
         targetedReadPendingRef.current.add(sessionId);
         return;
@@ -642,6 +628,25 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       try {
         while (true) {
           targetedReadPendingRef.current.delete(sessionId);
+          // The demand gate belongs HERE rather than at the events that call this:
+          // every trigger of a request-backed revalidation would otherwise have to
+          // remember it, and this provider has more triggers than guards. With no
+          // feed consumer the card this upserts is not rendered and the next
+          // activation reconciles the window anyway — the same argument that lets a
+          // queued feed intent be dropped. What is NOT droppable is the other half
+          // of this read: it owns this session's unread count, which every route
+          // badges. So declining hands the whole-account map the debt instead of
+          // dropping the obligation with the request, and a burst of foreground
+          // restores costs one coalesced counts read instead of one targeted read
+          // each.
+          //
+          // Asked per REQUEST rather than on the way in, because this is a loop:
+          // an entry gate answers for the pass that queued a retry, and the retry
+          // runs later — after the navigation that removed the card it upserts.
+          if (!isFeedActive()) {
+            oweWholeUnread();
+            return;
+          }
           const sessionResource = `inbox-session:${sessionId}`;
           const unreadResource = `inbox-unread-session:${sessionId}`;
           const read = readOwnershipRef.current.beginRead([sessionResource, unreadResource]);
@@ -698,21 +703,31 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // runs the read — both for a workbench document's first paint and for a later
   // /admin → /chat navigation, which finds ``initialFetched`` still false and
   // loads page one exactly as a direct load would.
-  useEffect(() => {
-    if (!feedActive) return;
-    // First read loads page one; every later rerun reconciles the loaded window
-    // instead when an ``api`` identity change rebuilds the value — so
-    // a non-resume rerun never collapses a multi-page feed back to page one. The
-    // broker fans events out live with no replay (sse_broker.py ``/api/events``),
-    // so anything missed while the socket was down must be re-read; plain HTTP,
-    // independent of whether the SSE stream itself comes back up.
+  //
+  // First read loads page one; every later rerun reconciles the loaded window
+  // instead when an ``api`` identity change rebuilds the value — so a non-resume
+  // rerun never collapses a multi-page feed back to page one. The broker fans
+  // events out live with no replay (sse_broker.py ``/api/events``), so anything
+  // missed while the socket was down must be re-read; plain HTTP, independent of
+  // whether the SSE stream itself comes back up.
+  //
+  // One owner for that choice, because activation is not its only caller: an
+  // authorization change re-reads for an active consumer too, and it drops the
+  // window first — so the answer comes from the cache as it is at that moment
+  // rather than from which event asked.
+  const readFeedForActiveConsumer = useCallback(() => {
     if (!initialFetched.current) {
       initialFetched.current = true;
       void refresh();
-    } else {
-      void reconcile();
+      return;
     }
-  }, [feedActive, reconcile, refresh]);
+    void reconcile();
+  }, [reconcile, refresh]);
+
+  useEffect(() => {
+    if (!feedActive) return;
+    readFeedForActiveConsumer();
+  }, [feedActive, readFeedForActiveConsumer]);
 
   // The badges are shell-wide, so the unread map is loaded on every route — but on
   // a route with no feed consumer, only the map. The decision itself belongs to
@@ -735,23 +750,29 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
       onAuthorizationChanged: () => {
-        // A permission change invalidates whatever is loaded; re-read exactly
-        // what this route reads — and, when no route reads the feed, still drop
-        // the rows nobody is watching rather than keeping them for later.
+        // A permission change invalidates whatever is loaded. Demand decides only
+        // whether a replacement READ follows — never whether the voided cache is
+        // dropped, which is why the drop cannot sit in the no-consumer branch.
+        // With a consumer this used to merely re-read, and ``reconcile``
+        // deliberately KEEPS the rows a response omits, so revoked titles and
+        // previews survived a slow read and outlived a failed one entirely. Worse,
+        // the replacement is queued when a read is already in flight, and the
+        // demand gate in ``flushFeedReadIntent`` drops it if the last consumer
+        // leaves first — leaving the pre-change response free to repopulate rows
+        // the change had voided, with nothing left to correct them.
         //
         // No committed whole map describes the new scope, so owe one rather than
-        // naming the read that pays it: with a feed consumer the refresh below
+        // naming the read that pays it: with a feed consumer the read below
         // carries it, without one the counts effect runs on this very state
-        // change, and if the refresh is later dropped or fails the debt is still
+        // change, and if that read is later dropped or fails the debt is still
         // outstanding when the last consumer leaves. Owing also fences the
         // pre-change counts read that may be in flight — which is the whole reason
         // that fence lives with the debt and not at this call site.
         oweWholeUnread();
-        if (isFeedActive()) {
-          void refresh();
-          return;
-        }
         discardAuthorizedFeed();
+        // Dropping the window is also what makes this the authoritative page-one
+        // read rather than a reconcile onto rows that are no longer there.
+        if (isFeedActive()) readFeedForActiveConsumer();
       },
       onInboxSessionUpdated: (row) => {
         targetedSnapshotsRef.current.delete(row.session_id);
@@ -818,8 +839,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     discardAuthorizedFeed,
     isFeedActive,
     oweWholeUnread,
+    readFeedForActiveConsumer,
     reconcileSession,
-    refresh,
   ]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
