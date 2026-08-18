@@ -139,6 +139,8 @@ describe('PermissionsPage state model', () => {
   it('renders the current Avibe identity and Cloud handoff from the design contract', async () => {
     renderPage();
 
+    const heading = await screen.findByRole('heading', { name: 'permissions.title' });
+    expect(heading.previousElementSibling).toBeNull();
     expect(await screen.findByText('max-incus-1')).toBeTruthy();
     expect(screen.getByText('max-incus-1-app.avibe.bot')).toBeTruthy();
     expect(screen.getByText('CoinSummer')).toBeTruthy();

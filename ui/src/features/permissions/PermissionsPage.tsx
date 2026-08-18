@@ -1007,10 +1007,7 @@ export function PermissionsPage() {
     <div className="w-full space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="size-6 text-mint-ink" />
-            <h1 className="text-2xl font-semibold md:text-[30px]">{t('permissions.title')}</h1>
-          </div>
+          <h1 className="text-2xl font-semibold md:text-[30px]">{t('permissions.title')}</h1>
           <p className="mt-1.5 max-w-3xl text-[13px] leading-5 text-muted md:text-sm">{t('permissions.description')}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
