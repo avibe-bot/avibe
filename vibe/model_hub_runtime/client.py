@@ -25,6 +25,7 @@ from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
     ProtocolSSEState,
+    ProtocolUsageReport,
     SSE_MAX_FRAME_BYTES,
     SSE_MAX_PRELUDE_BYTES,
     SSEFrameLimitError,
@@ -301,6 +302,7 @@ class EngineClient:
                         error_payload=payload,
                         error_envelope_paths=observed_payload.error_envelope_paths,
                         message=f"upstream returned HTTP {response.status}",
+                        usage=observed_payload.usage,
                     ),
                     source=source,
                     model_id=model_id,
@@ -784,7 +786,13 @@ def _reduce_protocol_observation(
     http_status: int | None,
     stream_started: bool,
 ) -> RawCallOutcome | None:
-    """Sole conversion from protocol observations to runtime call outcomes."""
+    """Sole conversion from protocol observations to runtime call outcomes.
+
+    Every branch carries the observation's token report onward, including the
+    error ones: a vendor that reported tokens billed for them whether or not the
+    response ended well, and this is the only hop where a call that settles
+    without ever handing its body downstream can still report them.
+    """
 
     if observation is None or observation.outcome is None:
         return None
@@ -795,6 +803,7 @@ def _reduce_protocol_observation(
             model_id=model_id,
             http_status=http_status,
             stream_started=stream_started,
+            usage=observation.usage,
         )
     if observation.outcome == "failed_terminal":
         error_type, error_code, candidates = _raw_error_fields(
@@ -811,6 +820,7 @@ def _reduce_protocol_observation(
             error_candidates=candidates,
             message=observation.message or "upstream returned a protocol error event",
             stream_started=stream_started,
+            usage=observation.usage,
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -819,6 +829,7 @@ def _reduce_protocol_observation(
         http_status=http_status,
         message=observation.message or "upstream emitted invalid protocol data",
         stream_started=stream_started,
+        usage=observation.usage,
     )
 
 
@@ -885,6 +896,7 @@ def _outcome(
     error_candidates: tuple[str, ...] = (),
     message: str | None = None,
     stream_started: bool = False,
+    usage: ProtocolUsageReport | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -896,6 +908,7 @@ def _outcome(
         source_id=source.source_id,
         error_type=error_type,
         error_candidates=error_candidates,
+        usage=usage,
     )
 
 

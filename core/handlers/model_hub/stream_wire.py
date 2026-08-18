@@ -161,10 +161,39 @@ class ProtocolUsageReport:
     cached_input_tokens: int = 0
     output_tokens: int = 0
 
-    def merge(self, other: "ProtocolUsageReport") -> "ProtocolUsageReport":
-        """Combine two reports for the same turn by taking the larger of each."""
+    @classmethod
+    def of(
+        cls,
+        *,
+        input_tokens: int,
+        cached_input_tokens: int,
+        output_tokens: int,
+    ) -> "ProtocolUsageReport":
+        """Build one report with the cached-input subset invariant enforced.
 
-        return ProtocolUsageReport(
+        Cached input is a *part* of the input the turn was billed for, which is
+        what the read contract promises and what the settings page will divide
+        by. Both numbers come from the same upstream, so the only bound worth
+        trusting is the input count this module normalized itself — never a
+        total the response declares. Cached input reported without a readable
+        input count is a subset of nothing, so it clamps to zero.
+        """
+
+        return cls(
+            input_tokens=input_tokens,
+            cached_input_tokens=min(cached_input_tokens, input_tokens),
+            output_tokens=output_tokens,
+        )
+
+    def merge(self, other: "ProtocolUsageReport") -> "ProtocolUsageReport":
+        """Combine two reports for the same turn by taking the larger of each.
+
+        The per-field max is re-normalized because the winning input and cached
+        counts can come from different frames, which is a second way an upstream
+        could compose a cached count larger than the input it belongs to.
+        """
+
+        return ProtocolUsageReport.of(
             input_tokens=max(self.input_tokens, other.input_tokens),
             cached_input_tokens=max(self.cached_input_tokens, other.cached_input_tokens),
             output_tokens=max(self.output_tokens, other.output_tokens),
@@ -518,7 +547,7 @@ def extract_protocol_usage(
             output_tokens = _usage_sum(container, taxonomy.output_paths)
             if input_tokens is None and cached_input_tokens is None and output_tokens is None:
                 continue
-            candidate = ProtocolUsageReport(
+            candidate = ProtocolUsageReport.of(
                 input_tokens=input_tokens or 0,
                 cached_input_tokens=cached_input_tokens or 0,
                 output_tokens=output_tokens or 0,

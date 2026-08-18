@@ -75,6 +75,28 @@ a fixed structural ceiling before it is accumulated, so one buggy or hostile
 response cannot permanently poison the aggregate. The ceiling is a constant in our
 code, never a value the upstream declares.
 
+The same rule decides the cached-input subset. `cached_input_tokens` is a part of
+`input_tokens`, so after merging every container and frame the cached count is
+bounded by the input count *this code normalized itself* — a bound we measured,
+never a total the response declared. Cached input reported without a readable input
+count is a subset of nothing and clamps to zero. `ProtocolUsageReport.of` is the one
+constructor that holds the invariant, and a persisted row that violates it (older
+release, hand edit) is repaired on read rather than travelling out through a read
+surface that promises the subset.
+
+Persisted instants get the same treatment: the read surface promises `date-time`, so
+a value that is not one degrades the field to absent instead of being published, and
+`last_metered_at` comparisons order two rows as *points in time* — text order is not
+time order once two rows carry different UTC offsets.
+
+Identifiers are bounded once, by `MODEL_ID_MAX_LENGTH` in `identifiers.py`, at both
+boundaries that admit a model ID (discovery and custom-model mapping) and again in
+the ledger. The ledger's re-check is unreachable for anything the hub admits, so it
+logs a warning rather than dropping silently: a future boundary that forgets the
+bound should show up as lost metering, not as a quietly incomplete tab. The bound is
+deliberately *not* applied when loading persisted config — per the persisted-shape
+rule, a legacy value must not make startup fail.
+
 ## Persisted shape
 
 New state file `~/.avibe/state/model_hub_usage.json`, written through the same
@@ -98,7 +120,7 @@ owner. It can be added when a reader needs it.
   "input_tokens": 148230,
   "cached_input_tokens": 96010,
   "output_tokens": 4120,
-  "last_served_at": "2026-08-18T03:14:00+00:00"
+  "last_metered_at": "2026-08-18T03:14:00+00:00"
 }
 ```
 
@@ -114,14 +136,39 @@ rows are retained (oldest day evicted first).
 
 ## Recording policy
 
-Record one row increment at each of the two settlement points in
-`ModelHubTurnGateway._resolved_response`, and only when the turn actually reached
-the model — buffered: the settlement decision is `return`; streaming: the wire
-terminal was `served`. A turn that upstream reported usage for is also recorded
-even if its stream ended in a terminal error, because the vendor billed it.
+**The metered unit is one upstream call, not one turn.** A turn that failed over
+made several calls, and each hop that reported tokens billed the Source it was made
+against — attributing all of them to the Source that finally served would both
+undercount the failing Source and misprice the serving one.
 
-Failures already have their own surface (resolution events plus source health);
-counting them here would duplicate that concept.
+A call is recorded when it reached the model: the hub forwarded its output
+downstream, or upstream reported tokens for it. The second half matters because a
+vendor that reported tokens billed us whether or not the response ended well — a
+stream that died after its terminal frame, or a buffered error carrying a usage
+block. A call that never reached the model (rejected credential, engine down) is
+not recorded: resolution events and source health already own that surface, and
+counting it here would duplicate the concept.
+
+Metering has **two owners over disjoint populations**, split by the one line that
+decides who can read a call's body — `handle.stream is not None` in
+`ModelHubService._invoke`:
+
+- `ModelHubService._meter_call` records every call the resolver consumed itself.
+  These have no body to forward, so the gateway never sees them, and for an error
+  the resolver may not even name that Source in what it raises.
+- `ModelHubTurnGateway._record_usage` records every call whose body the gateway
+  forwards, reading tokens from the buffered body or the live SSE wire state.
+
+Each call therefore reaches exactly one owner. Within the gateway, several endings
+can describe one forwarded call — a stream that finished and then failed to flush,
+a downstream disconnect that raced the terminal chunk — so the first ending to
+report wins and later ones are no-ops. A structure guard pins both owners and the
+gateway's idempotence flag.
+
+Both owners write through `asyncio.to_thread`: the ledger's read-modify-write is
+file I/O, and per `CLAUDE.md` §6 blocking work must not run on the controller event
+loop. Metering is a report, never a control input, so a ledger failure is logged and
+the call the caller sees is unchanged.
 
 ## Read surface
 
@@ -129,7 +176,7 @@ counting them here would duplicate that concept.
 `[1, 62]`, defaulting to 30. The summary is derived entirely from the rows:
 
 - `totals` — window-wide counters
-- `sources[]` — per source, with a `models[]` breakdown and `last_served_at`
+- `sources[]` — per source, with a `models[]` breakdown and `last_metered_at`
 - `days[]` — one entry per local day, ascending, for a trend series
 
 Contract work: an `api.md` route-table row, an `x-model-hub-routes` entry plus a
@@ -141,7 +188,7 @@ route against a real server response.
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`
 - [x] `BoundedUsageLedger` in `core/handlers/model_hub/usage.py`
-- [x] Gateway recording at both settlement points
+- [x] Resolver and gateway recording over the two disjoint call populations
 - [x] `ModelHubService.usage_summary` + RPC + `GET /api/models/usage`
 - [x] Contract row, response registry entry, and usage schema
 - [x] Unit and contract coverage

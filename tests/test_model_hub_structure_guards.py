@@ -303,6 +303,19 @@ def _raw_outcome_constructors(tree: ast.AST) -> tuple[ast.Call, ...]:
     )
 
 
+def _ledger_writes(tree: ast.AST) -> tuple[ast.Attribute, ...]:
+    """Every reference to the usage ledger's write, called or handed to a thread."""
+
+    return tuple(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "record"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "usage"
+    )
+
+
 def _auth_status_branch(node: ast.AST) -> bool:
     if not isinstance(node, ast.Compare):
         return False
@@ -503,6 +516,40 @@ def test_protocol_outcome_owner_guard_rejects_each_bypassed_kind() -> None:
             ast.parse("RawCallOutcome(kind=RawOutcomeKind.HTTP_ERROR)")
         )
     ) == 1
+
+
+def test_usage_metering_has_one_owner_per_call_population() -> None:
+    # Review 4958923279 finding 3: a turn can make several upstream calls, and the
+    # gateway only ever sees the one whose body it forwards. Metering therefore has
+    # two owners over populations split by ``handle.stream is not None``, and a
+    # third write anywhere — or a second caller of either owner — would double
+    # count or silently drop a billed call.
+    service_tree = _tree(SERVICE)
+    gateway_tree = _tree(TURN_GATEWAY)
+    owners = (
+        _functions(service_tree)["_meter_call"],
+        _functions(gateway_tree)["_record_usage"],
+    )
+    writes = _ledger_writes(service_tree) + _ledger_writes(gateway_tree)
+    assert writes
+    assert all(any(write in set(ast.walk(owner)) for owner in owners) for write in writes)
+    invoke = _functions(service_tree)["_invoke"]
+    meter_calls = [
+        node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
+    ]
+    assert len(meter_calls) == 1
+    assert meter_calls[0] in set(ast.walk(invoke))
+    # Any of the gateway's endings may report the forwarded call, so exactly-once
+    # rests on its idempotence flag; a caller that pre-checks or clears the flag
+    # would move that decision outside the owner.
+    recorder = _functions(gateway_tree)["_record_usage"]
+    flags = [
+        node
+        for node in ast.walk(gateway_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "usage_recorded"
+    ]
+    assert flags
+    assert all(flag in set(ast.walk(recorder)) for flag in flags)
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ from core.handlers.model_hub.turn_gateway import (
     _SSEWireState,
     render_protocol_terminal_event,
 )
+from core.handlers.model_hub.stream_wire import ProtocolUsageReport
 from core.handlers.model_hub.usage import BoundedUsageLedger
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
@@ -1131,6 +1133,7 @@ def _outcome(
     message: str | None = None,
     source_id: str = "src_primary01",
     stream_started: bool = False,
+    usage: ProtocolUsageReport | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1140,6 +1143,7 @@ def _outcome(
         stream_started=stream_started,
         model_id="shared-model",
         source_id=source_id,
+        usage=usage,
     )
 
 
@@ -6246,6 +6250,278 @@ def test_gateway_meters_nothing_for_a_turn_that_never_reached_the_model(
         summary = service.usage_summary(days=30)
         assert summary["sources"] == []
         assert summary["totals"]["requests"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_surfaced_buffered_error_still_meters_the_tokens_it_billed(
+    tmp_path: Path,
+) -> None:
+    """The call never hands a body onward, so only the resolver can meter it."""
+
+    async def exercise() -> None:
+        source = _source("src_meterbuferr", "Surfaced billing")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=400,
+                    code="invalid_request_error",
+                    source_id=source.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=310,
+                        cached_input_tokens=64,
+                        output_tokens=0,
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        with pytest.raises(ModelHubError) as raised:
+            await service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+
+        assert raised.value.code == "upstream_request_invalid"
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 310
+        assert metered["cached_input_tokens"] == 64
+        assert metered["last_metered_at"] == NOW.isoformat()
+
+    asyncio.run(exercise())
+
+
+def test_a_billed_failover_hop_is_metered_against_the_source_that_billed_it(
+    tmp_path: Path,
+) -> None:
+    """Every hop that reported tokens billed its own Source, not the last one."""
+
+    async def exercise() -> None:
+        first = _source("src_meterhop001", "Billed hop")
+        second = _source("src_meterhop002", "Serving hop")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    code="rate_limit_error",
+                    source_id=first.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=88,
+                        cached_input_tokens=0,
+                        output_tokens=0,
+                    ),
+                ),
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    source_id=second.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=120,
+                        cached_input_tokens=0,
+                        output_tokens=17,
+                    ),
+                ),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(
+                ModelHubRouteHopConfig(first.id, "shared-model"),
+                ModelHubRouteHopConfig(second.id, "shared-model"),
+            )
+        )
+
+        resolved = await service.resolve(
+            backend="codex",
+            model_id=requested_model,
+            request=ModelHubRequest(
+                {"model": requested_model, "input": "ping"},
+                protocol="openai_responses",
+            ),
+            supply_channel="hub",
+        )
+
+        assert resolved.source_id == second.id
+        assert _usage_of(service, first.id)["input_tokens"] == 88
+        assert _usage_of(service, second.id)["input_tokens"] == 120
+        # One turn, two upstream calls: the unit is the call, so the total says so.
+        assert service.usage_summary(days=30)["totals"]["requests"] == 2
+
+    asyncio.run(exercise())
+
+
+def test_a_call_that_reached_no_model_is_never_metered(tmp_path: Path) -> None:
+    """A rejected credential billed nothing; source health already reports it."""
+
+    async def exercise() -> None:
+        source = _source("src_meterauth01", "Rejected")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=401,
+                    code="authentication_error",
+                    source_id=source.id,
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        with pytest.raises(ModelHubError):
+            await service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+
+        assert service.usage_summary(days=30)["totals"]["requests"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_downstream_disconnect_meters_the_terminal_frame_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """The wire read the tokens before the write failed, so the turn was billed."""
+
+    async def exercise() -> None:
+        source = _source("src_meterdrop01", "Dropped client")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.completed\ndata: {"type":"response.completed",'
+                        b'"sequence_number":1,"response":{"usage":{"input_tokens":512,'
+                        b'"output_tokens":33}}}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_disconnect",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        response = FakeStreamResponse(
+            write_error=ConnectionResetError("downstream write failed")
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=response,
+        ):
+            with pytest.raises(ConnectionError, match="downstream"):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 512
+        assert metered["output_tokens"] == 33
+
+    asyncio.run(exercise())
+
+
+def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
+    tmp_path: Path,
+) -> None:
+    """A ledger read-modify-write is file I/O; the controller loop must not wait."""
+
+    async def exercise() -> None:
+        recording_threads: list[int] = []
+
+        def capture(**_kwargs: object) -> None:
+            recording_threads.append(threading.get_ident())
+
+        resolver_source = _source("src_meterloop01", "Resolver owner")
+        resolver_service = _service(
+            tmp_path / "resolver",
+            sources=[resolver_source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    source_id=resolver_source.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=5,
+                        cached_input_tokens=0,
+                        output_tokens=1,
+                    ),
+                )
+            ],
+        )
+        resolver_service.usage.record = capture
+        requested_model = _canonicalize_fixed_test_routes(resolver_service)["codex"]
+        await resolver_service.resolve(
+            backend="codex",
+            model_id=requested_model,
+            request=ModelHubRequest(
+                {"model": requested_model, "input": "ping"},
+                protocol="openai_responses",
+            ),
+            supply_channel="hub",
+        )
+
+        gateway_source = _source("src_meterloop02", "Gateway owner")
+        gateway_service = _service(
+            tmp_path / "gateway",
+            sources=[gateway_source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS, status=200, source_id=gateway_source.id
+                    ),
+                    (json.dumps({"id": "resp", "usage": {"input_tokens": 9}}).encode(),),
+                )
+            ],
+        )
+        gateway_service.usage.record = capture
+        gateway_model = _canonicalize_fixed_test_routes(gateway_service)["codex"]
+        gateway = ModelHubTurnGateway(gateway_service)
+        await gateway._handle_request(
+            _prepared_gateway_request(
+                gateway,
+                turn_id="turn_meter_offloop",
+                requested_model=gateway_model,
+                source_id=gateway_source.id,
+                stream=False,
+            )
+        )
+
+        assert len(recording_threads) == 2
+        assert threading.get_ident() not in recording_threads
 
     asyncio.run(exercise())
 

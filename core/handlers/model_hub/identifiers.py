@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+# The longest model identifier the hub accepts. One constant so the boundaries
+# that admit an identifier (manual add and upstream discovery) and the usage
+# ledger that keys rows by it cannot disagree: a model config accepts is always
+# a model usage can meter, and a persisted row can never grow without limit.
+MODEL_ID_MAX_LENGTH = 200
+
 # Vendors with native, stable OpenCode provider identifiers. Compatible relays
 # and unrecognized vendors share the frozen contract's single custom/ prefix.
 STANDARD_OPENCODE_VENDOR_IDS = frozenset(

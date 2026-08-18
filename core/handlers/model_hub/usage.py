@@ -1,9 +1,13 @@
 """Bounded, credential-free persistence for Model Hub token usage.
 
-The turn gateway is the only place in the product that sees a complete upstream
-model response, so it is the only place that can count tokens. This module owns
-what happens to those counts afterwards: one bounded daily aggregate per served
-source and model, and the read shape the settings page consumes.
+Only the code that sees a complete upstream model response can count tokens, and
+one turn can make several upstream calls. Two callers therefore report calls here,
+over populations that ``InvokeHandle.stream is not None`` keeps disjoint: the
+resolver reports every call it consumed itself, including a failover hop that
+billed us before the turn moved on, and the turn gateway reports every call whose
+body it forwarded. This module owns what happens to those counts afterwards: one
+bounded daily aggregate per source and model, and the read shape the settings page
+consumes.
 
 Two properties are deliberate. `requests` is self-measured by our own code and is
 always available; token counts are vendor-reported and may be absent, which is
@@ -16,6 +20,7 @@ usage.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -23,16 +28,20 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Final, Optional
 
+from .identifiers import MODEL_ID_MAX_LENGTH
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
+
+logger = logging.getLogger(__name__)
 
 # Roughly two months of daily rows: long enough for a monthly view plus the
 # previous cycle, short enough that the file stays small on a busy machine.
 USAGE_RETENTION_DAYS: Final = 62
 USAGE_MAX_ROWS: Final = 400
 USAGE_DEFAULT_WINDOW_DAYS: Final = 30
-# Source and model identifiers are already bounded by their own validators; this
-# is the persistence-side backstop that keeps one row from growing without limit.
-_MAX_IDENTIFIER_LENGTH: Final = 200
+# Identifiers reaching this module are already bounded where they are admitted;
+# the same bound is re-checked here so a hand-edited or corrupt file cannot grow
+# one row without limit. Source ids are hub-generated and shorter still.
+_MAX_IDENTIFIER_LENGTH: Final = MODEL_ID_MAX_LENGTH
 
 _COUNTER_KEYS: Final = (
     "requests",
@@ -72,6 +81,48 @@ def _identifier(value: object) -> Optional[str]:
     return trimmed
 
 
+def _calendar_day(value: str) -> Optional[date]:
+    """Read one ISO calendar day, or None when the text is not a bare date."""
+
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _instant(value: object) -> Optional[datetime]:
+    """Parse one persisted instant, or None when it is not an ISO date-time.
+
+    A bare date is a day, not an instant, and the date-time parser would read one
+    as midnight — inventing a time of day this ledger never wrote. The same parser
+    that recognizes the ``day`` key decides that here, so the module holds one
+    notion of what a day is.
+
+    A naive value is read as local time, the same calendar the day buckets use.
+    """
+
+    if not isinstance(value, str) or _calendar_day(value) is not None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.astimezone()
+
+
+def _timestamp(value: object) -> Optional[str]:
+    """Read one persisted instant as text, dropping anything unparseable.
+
+    The read surface promises a date-time, so a corrupt or hand-edited value
+    degrades the field to absent rather than travelling out through the API.
+    """
+
+    text = _identifier(value)
+    if text is None or _instant(text) is None:
+        return None
+    return text
+
+
 def _normalize_row(row: object) -> Optional[dict]:
     """Project one persisted row onto the current shape, or drop it."""
 
@@ -82,9 +133,7 @@ def _normalize_row(row: object) -> Optional[dict]:
     model_id = _identifier(row.get("model_id"))
     if day is None or source_id is None or model_id is None:
         return None
-    try:
-        date.fromisoformat(day)
-    except ValueError:
+    if _calendar_day(day) is None:
         return None
     normalized = {
         "day": day,
@@ -92,8 +141,14 @@ def _normalize_row(row: object) -> Optional[dict]:
         "model_id": model_id,
         **{key: _bounded_counter(row.get(key)) for key in _COUNTER_KEYS},
     }
-    last_served_at = _identifier(row.get("last_served_at"))
-    normalized["last_served_at"] = last_served_at
+    # Cached input is a subset of input everywhere it is reported, so a file that
+    # claims otherwise is repaired on read instead of leaking out through a read
+    # surface that promises the subset.
+    normalized["cached_input_tokens"] = min(
+        normalized["cached_input_tokens"],
+        normalized["input_tokens"],
+    )
+    normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
     return normalized
 
 
@@ -111,15 +166,27 @@ def _accumulate(target: dict, row: dict) -> None:
 
 
 def _newer_timestamp(current: Optional[str], candidate: Optional[str]) -> Optional[str]:
+    """Keep the later of two instants, comparing points in time.
+
+    Text order is not time order once two rows carry different UTC offsets, which
+    a state file merged across machines or an older release can hold.
+    """
+
     if candidate is None:
         return current
     if current is None:
         return candidate
-    return max(current, candidate)
+    current_instant = _instant(current)
+    candidate_instant = _instant(candidate)
+    if current_instant is None:
+        return candidate
+    if candidate_instant is None:
+        return current
+    return candidate if candidate_instant > current_instant else current
 
 
 class BoundedUsageLedger:
-    """Persist served-turn token counts as a bounded daily aggregate."""
+    """Persist metered upstream-call token counts as a bounded daily aggregate."""
 
     def __init__(
         self,
@@ -152,9 +219,9 @@ class BoundedUsageLedger:
                 rows[_row_key(row)] = row
                 continue
             _accumulate(existing, row)
-            existing["last_served_at"] = _newer_timestamp(
-                existing["last_served_at"],
-                row["last_served_at"],
+            existing["last_metered_at"] = _newer_timestamp(
+                existing["last_metered_at"],
+                row["last_metered_at"],
             )
         return sorted(rows.values(), key=_row_key)
 
@@ -186,11 +253,19 @@ class BoundedUsageLedger:
         usage: Optional[ProtocolUsageReport],
         at: datetime,
     ) -> None:
-        """Fold one served turn into its day's row."""
+        """Fold one metered upstream call into its day's row."""
 
         safe_source_id = _identifier(source_id)
         safe_model_id = _identifier(model_id)
         if safe_source_id is None or safe_model_id is None:
+            # Unreachable for anything the hub admits: both boundaries that
+            # accept a model id bound it by the same constant. Loud rather than
+            # silent so a future boundary that forgets shows up as lost metering
+            # instead of as a quietly incomplete tab.
+            logger.warning(
+                "Model Hub usage metering skipped a turn with an unusable identifier",
+                extra={"source_id_usable": safe_source_id is not None},
+            )
             return
         increment = {
             "day": local_usage_day(at).isoformat(),
@@ -201,7 +276,7 @@ class BoundedUsageLedger:
             "input_tokens": usage.input_tokens if usage else 0,
             "cached_input_tokens": usage.cached_input_tokens if usage else 0,
             "output_tokens": usage.output_tokens if usage else 0,
-            "last_served_at": at.isoformat(),
+            "last_metered_at": at.isoformat(),
         }
         with self._lock:
             rows = {_row_key(row): row for row in self._read()}
@@ -210,9 +285,9 @@ class BoundedUsageLedger:
                 rows[_row_key(increment)] = increment
             else:
                 _accumulate(existing, increment)
-                existing["last_served_at"] = _newer_timestamp(
-                    existing["last_served_at"],
-                    increment["last_served_at"],
+                existing["last_metered_at"] = _newer_timestamp(
+                    existing["last_metered_at"],
+                    increment["last_metered_at"],
                 )
             retained = self._retained(list(rows.values()), local_usage_day(at))
             self._write(retained)
@@ -250,14 +325,14 @@ class BoundedUsageLedger:
                 {
                     "source_id": row["source_id"],
                     **_empty_totals(),
-                    "last_served_at": None,
+                    "last_metered_at": None,
                     "models": {},
                 },
             )
             _accumulate(source, row)
-            source["last_served_at"] = _newer_timestamp(
-                source["last_served_at"],
-                row["last_served_at"],
+            source["last_metered_at"] = _newer_timestamp(
+                source["last_metered_at"],
+                row["last_metered_at"],
             )
             model = source["models"].setdefault(
                 row["model_id"],

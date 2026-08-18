@@ -73,7 +73,7 @@ from .events import (
     contains_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import STANDARD_OPENCODE_VENDOR_IDS
+from .identifiers import MODEL_ID_MAX_LENGTH, STANDARD_OPENCODE_VENDOR_IDS
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -1409,6 +1409,7 @@ class ModelHubService:
         if (not allow_empty and not discovered and not manual_models) or any(
             not isinstance(model_id, str)
             or not model_id
+            or len(model_id) > MODEL_ID_MAX_LENGTH
             or contains_credential_material(model_id)
             for model_id in discovered
         ) or len(set(discovered)) != len(discovered):
@@ -3480,6 +3481,7 @@ class ModelHubService:
         if (
             not isinstance(model_id, str)
             or not model_id
+            or len(model_id) > MODEL_ID_MAX_LENGTH
             or contains_credential_material(model_id)
         ):
             raise ModelHubError("mapping_target_unavailable")
@@ -4901,8 +4903,51 @@ class ModelHubService:
             self.adapter.invoke(source.id, model_id, request, stream, backend)
         )
         if handle.stream is not None:
+            # The body is the gateway's to forward, so the tokens in it are the
+            # gateway's to meter.
             return handle, None
-        return handle, await self._engine_call(handle.outcome())
+        outcome = await self._engine_call(handle.outcome())
+        await self._meter_call(source_id=source.id, model_id=model_id, outcome=outcome)
+        return handle, outcome
+
+    async def _meter_call(
+        self,
+        *,
+        source_id: str,
+        model_id: str,
+        outcome: RawCallOutcome,
+    ) -> None:
+        """Fold one bodyless upstream call into the usage ledger, best-effort.
+
+        This is the resolver's half of metering. A call that ends here has no body
+        to hand onward — a terminal error, or a buffered response the resolver
+        itself consumed — so the gateway will never see its token report, and for
+        an error the resolver may not even name this Source in what it raises. A
+        vendor that reported tokens billed for them whether or not the call ended
+        well, and every hop of a failover chain that reported tokens billed the
+        Source it was made against, not the one that finally served the turn.
+
+        The population split with the gateway is ``handle.stream is not None``
+        one frame above: a call either hands its body onward or it does not, so
+        each call is metered exactly once and none is missed.
+
+        The ledger read-modify-write is file I/O, so it runs off the event loop;
+        metering is a report, never a control input, and a ledger failure must not
+        change the outcome the caller sees.
+        """
+
+        if outcome.usage is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.usage.record,
+                source_id=source_id,
+                model_id=model_id,
+                usage=outcome.usage,
+                at=self.now(),
+            )
+        except (OSError, ValueError) as exc:
+            logger.debug("Model Hub usage metering skipped one call: %s", exc)
 
     async def _classify_source_outcome(
         self,

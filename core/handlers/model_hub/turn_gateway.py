@@ -94,6 +94,11 @@ class _TurnExecution:
     settlement_recorded: bool = False
     terminal_fact_committed: bool = False
     rendered_turn_outcome: _RenderedTurnOutcome | None = None
+    # The live stream tracker, published here so a boundary that ends the turn
+    # without reaching the end of the chunk loop can still read the tokens the
+    # upstream had already reported.
+    wire_state: _SSEWireState | None = None
+    usage_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -561,6 +566,8 @@ class ModelHubTurnGateway:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
         if resolved.outcome is not None:
+            # A call that reached the resolver's own hands has already been
+            # metered there; its body never becomes this gateway's to forward.
             return self._outcome_response(resolved.outcome)
         handle = resolved.handle
         if handle is None or handle.stream is None:
@@ -594,8 +601,8 @@ class ModelHubTurnGateway:
                 streamed=False,
                 data=bytes(payload),
             ).usage
-            self._record_usage(
-                resolved,
+            await self._record_usage(
+                execution,
                 usage=buffered_usage,
                 served=settlement.decision.action == "return",
             )
@@ -624,6 +631,7 @@ class ModelHubTurnGateway:
         )
         await self._downstream_io(response.prepare(request))
         wire_state = _SSEWireState(protocol)
+        execution.wire_state = wire_state
         async for chunk in handle.stream:
             output_started_before = wire_state.model_output_started
             wire_state.observe(chunk)
@@ -640,8 +648,8 @@ class ModelHubTurnGateway:
             terminalizer,
             settlement,
         )
-        self._record_usage(
-            resolved,
+        await self._record_usage(
+            execution,
             usage=wire_state.usage,
             served=wire_state.terminal_outcome == "served",
         )
@@ -655,30 +663,47 @@ class ModelHubTurnGateway:
         await self._downstream_io(response.write_eof())
         return response
 
-    def _record_usage(
+    async def _record_usage(
         self,
-        resolved: ResolvedInvocation,
+        execution: _TurnExecution,
         *,
         usage: ProtocolUsageReport | None,
         served: bool,
     ) -> None:
-        """Fold one proxied turn into the usage ledger, best-effort.
+        """Fold one forwarded upstream call into the usage ledger, best-effort.
 
-        A turn counts when it reached the model: either the hub returned upstream
+        A call counts when it reached the model: either the hub returned upstream
         output downstream, or upstream reported usage for it — a vendor that
-        reported tokens billed us even when the stream ended in an error. Turns
+        reported tokens billed us even when the stream ended in an error. Calls
         that never reached the model already have their own surface in the
         resolution feed and source health, so counting them here would duplicate
         that concept.
 
-        Metering is a report, never a control input, so a ledger failure must not
+        This is the gateway's half of metering, and it covers exactly the calls
+        whose body the gateway forwards. A call the resolver consumed itself was
+        already metered by ``ModelHubService._meter_call``, so no call is counted
+        twice and none is missed.
+
+        Sole metering owner for the boundary. Several endings can reach it for one
+        forwarded call — a stream that finished and then failed to flush, a
+        disconnect that raced the terminal chunk — so the first ending to describe
+        it wins and every later one is a no-op. One call is one request, whatever
+        killed it.
+
+        The ledger read-modify-write is file I/O, so it runs off the event loop;
+        metering is a report, never a control input, and a ledger failure must not
         change the turn the caller sees.
         """
 
+        resolved = execution.resolved
+        if execution.usage_recorded or resolved is None:
+            return
         if not served and usage is None:
             return
+        execution.usage_recorded = True
         try:
-            self.usage.record(
+            await asyncio.to_thread(
+                self.usage.record,
                 source_id=resolved.source_id,
                 model_id=resolved.model_id,
                 usage=usage,
@@ -727,6 +752,17 @@ class ModelHubTurnGateway:
         *,
         termination_origin: HandleTerminationOrigin,
     ) -> None:
+        # Ahead of the settlement guard: a downstream disconnect can arrive after
+        # the upstream already reported its tokens, so the turn was billed even
+        # though the chunk loop never reached its own metering call. The recorder
+        # is idempotent, so an ending that already metered costs nothing here.
+        wire_state = execution.wire_state
+        if wire_state is not None:
+            await self._record_usage(
+                execution,
+                usage=wire_state.usage,
+                served=wire_state.terminal_outcome == "served",
+            )
         if execution.settlement_recorded:
             return
         _outcome, settlement = await self._settle_turn_handle(

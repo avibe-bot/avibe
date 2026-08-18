@@ -69,11 +69,11 @@
       "properties": {
         "requests": {
           "$ref": "#/definitions/Count",
-          "description": "Self-measured served turns. Always available."
+          "description": "Self-measured upstream calls that reached the model. One turn contributes more than one when it failed over. Always available."
         },
         "token_reports": {
           "$ref": "#/definitions/Count",
-          "description": "Served turns whose upstream response carried a token report. Never greater than requests; a shortfall means missing reports, not zero usage."
+          "description": "Metered calls whose upstream response carried a token report. Never greater than requests; a shortfall means missing reports, not zero usage."
         },
         "input_tokens": {
           "$ref": "#/definitions/Count",
@@ -98,7 +98,7 @@
         "input_tokens",
         "cached_input_tokens",
         "output_tokens",
-        "last_served_at",
+        "last_metered_at",
         "models"
       ],
       "additionalProperties": false,
@@ -126,7 +126,8 @@
         "output_tokens": {
           "$ref": "#/definitions/Count"
         },
-        "last_served_at": {
+        "last_metered_at": {
+          "description": "When this Source last had a call metered, served or billed-and-failed.",
           "type": ["string", "null"],
           "format": "date-time"
         },
@@ -226,7 +227,7 @@
           "input_tokens": 148230,
           "cached_input_tokens": 96010,
           "output_tokens": 4120,
-          "last_served_at": "2026-08-18T03:14:00+00:00",
+          "last_metered_at": "2026-08-18T03:14:00+00:00",
           "models": [
             {
               "model_id": "claude-opus-4-6",

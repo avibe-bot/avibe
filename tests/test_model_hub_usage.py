@@ -13,6 +13,7 @@ settlement scaffolding it depends on.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 from datetime import date, datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
     USAGE_TOKEN_CEILING,
@@ -271,6 +273,73 @@ def test_a_composed_input_total_cannot_exceed_our_own_ceiling() -> None:
 
 
 @pytest.mark.parametrize(
+    "reported_input,reported_cached,expected_cached",
+    [
+        pytest.param(100, 4096, 100, id="cached-above-input"),
+        pytest.param(0, 4096, 0, id="cached-without-input"),
+        pytest.param(4096, 4096, 4096, id="fully-cached"),
+    ],
+)
+def test_cached_input_never_exceeds_the_input_it_is_a_part_of(
+    reported_input: int,
+    reported_cached: int,
+    expected_cached: int,
+) -> None:
+    """The subset the read contract promises is bounded by our own input count."""
+
+    report = extract_protocol_usage(
+        "openai_responses",
+        {
+            "usage": {
+                "input_tokens": reported_input,
+                "input_tokens_details": {"cached_tokens": reported_cached},
+                "output_tokens": 7,
+            }
+        },
+    )
+
+    assert report == ProtocolUsageReport(
+        input_tokens=reported_input,
+        cached_input_tokens=expected_cached,
+        output_tokens=7,
+    )
+
+
+def test_the_subset_holds_when_two_frames_each_win_one_field() -> None:
+    """Per-field max can compose a cached count larger than its own input."""
+
+    usage = _observed(
+        "openai_responses",
+        {
+            "type": "response.in_progress",
+            "response": {
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {"cached_tokens": 8},
+                    "output_tokens": 1,
+                }
+            },
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 12,
+                    "input_tokens_details": {"cached_tokens": 4096},
+                    "output_tokens": 3,
+                }
+            },
+        },
+    )
+
+    assert usage == ProtocolUsageReport(
+        input_tokens=12,
+        cached_input_tokens=12,
+        output_tokens=3,
+    )
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         pytest.param({"type": "ping"}, id="no-container"),
@@ -313,7 +382,7 @@ def test_records_fold_into_one_row_per_day_source_and_model(tmp_path: Path) -> N
     assert rows[0]["input_tokens"] == 300
     assert rows[0]["cached_input_tokens"] == 40
     assert rows[0]["output_tokens"] == 7 + 3
-    assert rows[0]["last_served_at"] == (NOW + timedelta(hours=1)).isoformat()
+    assert rows[0]["last_metered_at"] == (NOW + timedelta(hours=1)).isoformat()
 
 
 def test_a_turn_without_a_report_counts_the_request_only(tmp_path: Path) -> None:
@@ -490,6 +559,103 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
     assert row["output_tokens"] == USAGE_TOKEN_CEILING
 
 
+@pytest.mark.parametrize(
+    "persisted",
+    [
+        pytest.param("yesterday", id="not-a-datetime"),
+        pytest.param("2026-07-23", id="date-only"),
+        pytest.param("", id="empty"),
+        pytest.param(1753272000, id="epoch-number"),
+    ],
+)
+def test_an_unparseable_instant_degrades_to_absent(tmp_path: Path, persisted: object) -> None:
+    """The read surface promises a date-time, so a corrupt value never travels."""
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "last_metered_at": persisted,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    row = ledger.window(days=30, now=NOW)[0]
+    assert row["requests"] == 1
+    assert row["last_metered_at"] is None
+
+
+def test_the_later_instant_wins_even_when_its_text_sorts_first(tmp_path: Path) -> None:
+    """Text order is not time order once two rows carry different offsets."""
+
+    earlier = datetime(2026, 7, 23, 20, 0, tzinfo=timezone(timedelta(hours=8)))
+    later = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
+    assert later.isoformat() < earlier.isoformat() and later > earlier
+
+    ledger = _ledger(tmp_path)
+    day = local_usage_day(NOW).isoformat()
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": day,
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "last_metered_at": earlier.isoformat(),
+                },
+                {
+                    "day": day,
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "last_metered_at": later.isoformat(),
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert ledger.window(days=30, now=NOW)[0]["last_metered_at"] == later.isoformat()
+
+
+def test_a_persisted_cached_count_above_its_input_is_repaired_on_read(tmp_path: Path) -> None:
+    """The subset invariant is a read-surface promise, not only a wire check."""
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": 120,
+                    "cached_input_tokens": 900,
+                    "output_tokens": 4,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    row = ledger.window(days=30, now=NOW)[0]
+    assert row["input_tokens"] == 120
+    assert row["cached_input_tokens"] == 120
+
+
 def test_duplicate_persisted_rows_merge_instead_of_shadowing(tmp_path: Path) -> None:
     """An older file could hold the same key twice; both counts must survive."""
 
@@ -528,19 +694,35 @@ def test_accumulated_counters_stop_at_the_ceiling(tmp_path: Path) -> None:
     [
         pytest.param("", "model-x", id="empty-source"),
         pytest.param("   ", "model-x", id="blank-source"),
-        pytest.param("src_a", "m" * 500, id="oversized-model"),
+        pytest.param("src_a", "m" * (MODEL_ID_MAX_LENGTH + 1), id="oversized-model"),
     ],
 )
 def test_an_unusable_identifier_is_never_persisted(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
     source_id: str,
     model_id: str,
 ) -> None:
+    """Loud, not silent: a dropped turn is lost metering, not a tidy no-op."""
+
     ledger = _ledger(tmp_path)
 
-    ledger.record(source_id=source_id, model_id=model_id, usage=None, at=NOW)
+    with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.usage"):
+        ledger.record(source_id=source_id, model_id=model_id, usage=None, at=NOW)
 
     assert ledger.window(days=30, now=NOW) == []
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_the_longest_admissible_model_id_is_still_metered(tmp_path: Path) -> None:
+    """One constant bounds admission and metering, so neither can drop the other's."""
+
+    ledger = _ledger(tmp_path)
+    longest = "m" * MODEL_ID_MAX_LENGTH
+
+    ledger.record(source_id="src_a", model_id=longest, usage=None, at=NOW)
+
+    assert [row["model_id"] for row in ledger.window(days=30, now=NOW)] == [longest]
 
 
 def test_the_ledger_file_is_owner_only(tmp_path: Path) -> None:
