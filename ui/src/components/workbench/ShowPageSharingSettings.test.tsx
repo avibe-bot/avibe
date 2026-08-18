@@ -104,7 +104,9 @@ describe('ShowPageSharingSettings', () => {
 
     await chooseMode('Limited');
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
-    fireEvent.change(screen.getByRole('textbox', { name: 'People with access' }), {
+    const emailInput = screen.getByRole('textbox', { name: 'People with access' });
+    expect(emailInput.parentElement?.parentElement?.className).toContain('max-w-[17.5rem]');
+    fireEvent.change(emailInput, {
       target: { value: ' Guest@Example.COM ' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
@@ -189,7 +191,7 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.getByText(/changed elsewhere/)).toBeTruthy();
   });
 
-  it('keeps the custom-link draft visible after an automatic collision response', async () => {
+  it('shows an explicit custom-link save action only after editing', async () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({ access_mode: 'public' }),
     });
@@ -200,8 +202,15 @@ describe('ShowPageSharingSettings', () => {
     renderSettings();
     const input = await screen.findByRole('textbox', { name: 'Custom link' });
 
+    expect(screen.getByText('Custom link')).toBeTruthy();
+    expect(input.parentElement?.className).toContain('max-w-[17.5rem]');
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     fireEvent.change(input, { target: { value: 'taken-link' } });
     fireEvent.blur(input);
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText('That custom link is already taken. Pick another.')).toBeTruthy();
     expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
@@ -222,7 +231,7 @@ describe('ShowPageSharingSettings', () => {
     const input = await screen.findByRole('textbox', { name: 'Custom link' });
 
     fireEvent.change(input, { target: { value: 'new-link' } });
-    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
     view.unmount();
 
@@ -239,6 +248,43 @@ describe('ShowPageSharingSettings', () => {
     });
 
     expect(onApplied).toHaveBeenCalledWith(expect.objectContaining({ share_id: 'new-link' }));
+  });
+
+  it('keeps an unsaved custom-link draft out of access autosaves', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['first@example.com'],
+      }),
+    });
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['first@example.com', 'second@example.com'],
+        revision: 1,
+      }),
+    });
+    renderSettings();
+
+    const customLink = await screen.findByRole('textbox', { name: 'Custom link' });
+    fireEvent.change(customLink, { target: { value: 'unsaved-link' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'People with access' }), {
+      target: { value: 'second@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
+
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_emails: ['first@example.com', 'second@example.com'],
+    });
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'unsaved-link',
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   });
 
   it('can hide custom-link editing when embedded in the share popover', async () => {

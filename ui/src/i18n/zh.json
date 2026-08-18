@@ -3563,7 +3563,6 @@
       "limitedEmailRequired": "请至少添加一个邮箱。",
       "limitedEmailHint": "输入邮箱后按回车添加 · 最多 {{count}} 个",
       "keepOneLimitedEmail": "切换为私有后可移除最后一个邮箱",
-      "shareIdAutoSaveHint": "按回车或离开输入框后自动保存",
       "sharingErrors": {
         "conflict": "链接访问设置已在其他位置更新，已载入最新版本。",
         "invalid": "请检查访问模式、链接和邮箱列表。",

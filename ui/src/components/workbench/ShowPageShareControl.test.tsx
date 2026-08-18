@@ -232,6 +232,9 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
     expect(await screen.findByDisplayValue('https://alice.avibe.bot/p/stable-link/')).toBeTruthy();
+    const openLink = screen.getByRole('link', { name: 'Open' });
+    expect(openLink.getAttribute('href')).toBe('https://alice.avibe.bot/p/stable-link/');
+    expect(openLink.getAttribute('target')).toBe('_blank');
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
   });
 
@@ -262,13 +265,14 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
     await waitFor(() => expect(api.ensureShowPage).toHaveBeenCalledWith('ses-1'));
+    expect((screen.getByRole('button', { name: 'Open' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Copy link' }) as HTMLButtonElement).disabled).toBe(
       true,
     );
     expect(screen.queryByDisplayValue(/\/p\/stable-link\/$/)).toBeNull();
   });
 
-  it('keeps online state and Workspace access out of the share popover', async () => {
+  it('keeps explicit custom-link saving while online and Workspace controls stay out', async () => {
     api.getShowPageAccess.mockResolvedValue({
       ok: true,
       mode: 'local',
@@ -278,8 +282,8 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     });
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
-      visibility: 'private',
-      active_url: '/show/ses-1/',
+      visibility: 'public',
+      active_url: '/p/stable-link/',
       share_id: 'stable-link',
       url_available: true,
       offline: false,
@@ -288,9 +292,19 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: {
         page_id: 'ses-1',
-        access_mode: 'private',
+        access_mode: 'public',
         share_id: 'stable-link',
         revision: 0,
+        normalized_emails: [],
+      },
+    });
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: {
+        page_id: 'ses-1',
+        access_mode: 'public',
+        share_id: 'new-link',
+        revision: 1,
         normalized_emails: [],
       },
     });
@@ -302,10 +316,28 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Access: Fully public' })).toBeTruthy();
+    const customLink = screen.getByRole('textbox', { name: 'Custom link' });
+    expect((customLink as HTMLInputElement).value).toBe('stable-link');
+    expect(screen.getByText('Custom link')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    fireEvent.change(customLink, { target: { value: 'new-link' } });
+    fireEvent.blur(customLink);
+
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+        expected_revision: 0,
+        target_access_mode: 'public',
+        target_share_id: 'new-link',
+        target_emails: [],
+      });
+    });
     expect(screen.queryByText('Workspace access')).toBeNull();
     expect(screen.queryByText('Page online')).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
     expect(api.setShowPageAvailability).not.toHaveBeenCalled();
   });
 

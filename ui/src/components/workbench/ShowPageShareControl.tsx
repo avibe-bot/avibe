@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '../ui/button';
@@ -206,7 +206,7 @@ export const ShowPageShareControl: React.FC<{
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="w-[min(27rem,calc(100vw-1rem))] space-y-3"
+        className="w-[min(23rem,calc(100vw-1rem))] space-y-3"
         data-window-owner-id={ownerWindowId}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
@@ -229,6 +229,34 @@ export const ShowPageShareControl: React.FC<{
               onFocus={(event) => event.currentTarget.select()}
               className="h-8 min-w-0 flex-1 text-xs"
             />
+            {link ? (
+              <Button
+                asChild
+                variant="outline"
+                size="icon"
+                className="size-8 shrink-0"
+              >
+                <a
+                  href={link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={t('showPages.open')}
+                >
+                  <ExternalLink className="size-3.5" />
+                </a>
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="size-8 shrink-0"
+                disabled
+                aria-label={t('showPages.open')}
+              >
+                <ExternalLink className="size-3.5" />
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -264,7 +292,6 @@ export const ShowPageShareControl: React.FC<{
               sessionId={sessionId}
               onApplied={handleShowAccessApplied}
               ownerWindowId={ownerWindowId}
-              showCustomLink={false}
             />
           </div>
         ) : null}
