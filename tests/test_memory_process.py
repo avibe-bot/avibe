@@ -916,9 +916,7 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
                 await child.wait()
 
 
-async def test_sidecar_stop_signals_real_child_when_identity_stamp_is_poisoned(
-    tmp_path: Path,
-) -> None:
+async def test_sidecar_stop_does_not_signal_real_child_when_identity_stamp_is_poisoned() -> None:
     child = await asyncio.create_subprocess_exec(
         sys.executable,
         "-c",
@@ -926,17 +924,17 @@ async def test_sidecar_stop_signals_real_child_when_identity_stamp_is_poisoned(
         start_new_session=True,
     )
     try:
-        assert memory_process._live_direct_child_handle(child) is True
         process_group = os.getpgid(child.pid)
         identities = {child.pid: _ORPHAN_CREATE_TIME}
-        process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
-        await process._terminate_owned_tree(
+        memory_process._signal_owned_group_or_process(
             child,
-            process_group=process_group,
-            owned_processes=identities,
+            process_group,
+            identities,
+            signal.SIGTERM,
         )
-        assert child.returncode is not None
-        assert not _pid_exists(child.pid)
+        await asyncio.sleep(0.05)
+        assert child.returncode is None
+        assert _pid_exists(child.pid)
     finally:
         if child.returncode is None:
             child.terminate()
