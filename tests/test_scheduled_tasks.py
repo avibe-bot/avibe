@@ -11278,6 +11278,139 @@ def test_hfr_483_registered_job_fires_through_its_own_scheduler_arguments(
         assert refreshed.retired_at is not None
 
 
+@pytest.mark.parametrize("mirror", ["fresh", "stale"])
+def test_hfr_484_in_flight_cron_fire_cannot_spend_a_replacement_one_shot(
+    tmp_path: Path,
+    monkeypatch,
+    mirror: str,
+) -> None:
+    """HFR-484 -- a cron callback that races an edit to ``at`` enqueues nothing.
+
+    A cron registration carries no schedule identity, so nothing downstream could
+    retire the replacement. Enqueueing would spend a fire the new run_at has not
+    reached and leave that one-shot still armed to run a second time.
+
+    Both layers are exercised because ``refresh_task`` is a mirror read and can
+    legitimately lag a writer on another connection (HFR-277). ``fresh`` rejects
+    in the callback and hands the replacement schedule back to the scheduler;
+    ``stale`` falls through to the storage CAS, which is the real authority.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="daily digest",
+        schedule_type="cron",
+        cron="0 11 * * *",
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    cron_job = service.scheduler.get_job(task.id)
+    assert cron_job is not None
+
+    writer = store if mirror == "fresh" else ScheduledTaskStore()
+    run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    replacement = writer.update_task(
+        task.id,
+        name=task.name,
+        session_key=task.session_key,
+        session_id=task.session_id,
+        prompt=task.prompt,
+        schedule_type="at",
+        post_to=task.post_to,
+        deliver_key=task.deliver_key,
+        cron=None,
+        run_at=run_at,
+        timezone_name="UTC",
+        agent_name=task.agent_name,
+        session_policy=task.session_policy,
+    )
+
+    # The already-dispatched cron callback still carries the cron registration.
+    asyncio.run(cron_job.func(*cron_job.args))
+
+    assert service.request_store.list_pending() == []
+    refreshed = ScheduledTaskStore().get_task(task.id)
+    assert refreshed is not None
+    assert refreshed.enabled is True
+    assert refreshed.retired_at is None
+    assert refreshed.run_at == run_at
+    if mirror == "fresh":
+        # The rejected fire hands the replacement schedule back to the scheduler.
+        jobs = service.scheduler.get_jobs()
+        assert len(jobs) == 1
+        assert tuple(jobs[0].args[1:4]) == (run_at, "UTC", replacement.updated_at)
+
+
+def test_hfr_484_cron_fire_runs_the_definition_current_at_fire_time(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-484 -- a cron fire racing a benign edit runs the refreshed definition.
+
+    ``refresh_task`` is deliberate: a recurring schedule has no fire to spend, so
+    the useful reading of "run this definition now" is the definition as it stands
+    at fire time. This is the counterpart to the rejection above -- an edit that
+    keeps the definition recurring must not silently drop the fire.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="original prompt",
+        schedule_type="cron",
+        cron="0 11 * * *",
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    cron_job = service.scheduler.get_job(task.id)
+    assert cron_job is not None
+
+    writer = ScheduledTaskStore()
+    writer.update_task(
+        task.id,
+        name=task.name,
+        session_key=task.session_key,
+        session_id=task.session_id,
+        prompt="edited prompt",
+        schedule_type="cron",
+        post_to=task.post_to,
+        deliver_key=task.deliver_key,
+        cron="0 11 * * *",
+        run_at=None,
+        timezone_name="UTC",
+        agent_name=task.agent_name,
+        session_policy=task.session_policy,
+    )
+
+    asyncio.run(cron_job.func(*cron_job.args))
+
+    pending = service.request_store.list_pending()
+    assert [(request.task_id, request.prompt) for request in pending] == [
+        (task.id, "edited prompt")
+    ]
+    refreshed = store.refresh_task(task.id)
+    assert refreshed is not None
+    assert refreshed.enabled is True
+    assert refreshed.retired_at is None
+
+
 def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
     tmp_path: Path,
     monkeypatch,

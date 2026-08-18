@@ -5844,13 +5844,25 @@ class ScheduledTaskService:
             if expected_run_at is not None:
                 await self._reconcile_rejected_one_shot_fire(task_id)
             return
-        if expected_run_at is not None and (
-            task.schedule_type != "at"
-            or task.run_at != expected_run_at
-            or task.timezone != expected_timezone
-            or task.updated_at != expected_updated_at
-        ):
-            await self._reconcile_rejected_one_shot_fire(task_id)
+        # The registration's own shape says what this callback fired for, and the
+        # refreshed definition has to still be that thing. A one-shot must match
+        # the exact schedule identity it registered. A cron registration must at
+        # least still find a cron definition: enqueueing against a definition that
+        # became a one-shot would spend a fire its run_at has not reached, and
+        # would not retire it, so that same one-shot would run again later.
+        if expected_run_at is not None:
+            if (
+                task.schedule_type != "at"
+                or task.run_at != expected_run_at
+                or task.timezone != expected_timezone
+                or task.updated_at != expected_updated_at
+            ):
+                await self._reconcile_rejected_one_shot_fire(task_id)
+                return
+        elif expected_job_id is not None and task.schedule_type != "cron":
+            # refresh_task above already consumed any invalidation; hand the
+            # replacement schedule back to the scheduler that owns it.
+            self.reconcile_jobs()
             return
         # Every registered job carries its APScheduler job id so the callback can
         # reject a stale generation above. Only a one-shot fire carries it further:
