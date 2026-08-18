@@ -6728,6 +6728,14 @@ def cmd_data_retention(args):
             config_recovered = True
         if days_override is not None:
             retention_days = int(days_override)
+            if retention_days < agent_events_retention.MIN_RETENTION_DAYS:
+                # Never silently clamp an explicit window: --days 0 would
+                # delete everything older than one day after normalization.
+                print(
+                    i18n_t("data.retention.invalidDays", language, minimum=agent_events_retention.MIN_RETENTION_DAYS),
+                    file=sys.stderr,
+                )
+                return 1
             config_recovered = False
         should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
         if config_recovered and should_run:
@@ -15430,37 +15438,29 @@ def build_parser():
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)
+    _retention_help_lang = _configured_cli_language()
     data_retention_parser = data_subparsers.add_parser(
         "retention",
-        help="Show or run bounded retention for internal agent trace events",
-        description=(
-            "Status and manual control for the agent_events trace retention policy: "
-            "tool_call trace rows older than the retention window are deleted; "
-            "messages, non-trace events, and newer traces are never touched."
-        ),
+        help=i18n_t("data.retention.helpCommand", _retention_help_lang),
+        description=i18n_t("data.retention.helpDescription", _retention_help_lang),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data retention --help",
     )
     data_retention_parser.add_argument(
         "--run",
         action="store_true",
-        help="Run one retention pass now (bypasses the daily cadence gate, still respects the lease).",
+        help=i18n_t("data.retention.helpRun", _retention_help_lang),
     )
     data_retention_parser.add_argument(
         "--days",
         type=int,
         default=None,
-        help="Retention window override in days (default: the configured value, currently 30).",
+        help=i18n_t("data.retention.helpDays", _retention_help_lang),
     )
     data_retention_parser.add_argument(
         "--compact",
         action="store_true",
-        help=(
-            "Also physically compact the database (VACUUM) when safe; implies --run. "
-            "Off by default: VACUUM holds the database's sole writer lock and can stall "
-            "the running service's writes; run it during a maintenance window or with "
-            "the service stopped."
-        ),
+        help=i18n_t("data.retention.helpCompact", _retention_help_lang),
     )
     _add_json_noop(data_retention_parser)
 
