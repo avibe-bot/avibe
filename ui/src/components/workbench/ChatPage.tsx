@@ -67,6 +67,7 @@ import {
   insertMessageOrdered,
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
+import { pickScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
   archiveSessionShortcutLabel,
@@ -3473,6 +3474,10 @@ const Transcript: React.FC<TranscriptProps> = ({
   const anchorRef = useRef<{ el: HTMLElement; top: number } | null>(null);
   const lastSessionRef = useRef<string | null>(null);
   const [showJump, setShowJump] = useState(false);
+  // Whether the transcript is actually scrollable. Measured by the same
+  // ResizeObserver that owns the anchor restore, so it needs no observer of its
+  // own and is fresh in the commit that changes the content's height.
+  const [historyOverflows, setHistoryOverflows] = useState(false);
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
   // Load ONE older page per scroll gesture, not a cascade. The top threshold can
@@ -3545,12 +3550,19 @@ const Transcript: React.FC<TranscriptProps> = ({
       />
     ) : null;
   const empty = messages.length === 0 && !working;
+  // The end-of-history line answers "why did paging stop?" — a question only a
+  // reader who actually scrolled can have asked. A chat that fits the viewport
+  // never paged, so there the same line is noise rather than an answer.
+  const atHistoryStart = !hasOlder && historyOverflows;
 
   // Capture the topmost (partly) visible row as the restore anchor. Viewport-
   // relative rects keep this correct regardless of the scroll container's padding;
   // it breaks at the first visible row, so the common case (reading near the top of
   // the loaded window) is a couple of reads. Called from the scroll handler while
   // the user is reading history, so the anchor is always fresh when a resize lands.
+  // ``pickScrollAnchor`` owns which elements qualify — transient chrome such as the
+  // older-page spinner is skipped, because an anchor that disappears in the very
+  // commit it has to survive restores nothing (see the module's own note).
   const captureAnchor = useCallback(() => {
     // A programmatic jump is in flight — don't record an anchor mid-jump (the
     // restore would later snap back to it and undo the jump).
@@ -3558,15 +3570,10 @@ const Transcript: React.FC<TranscriptProps> = ({
     const el = scrollRef.current;
     const content = contentRef.current;
     if (!el || !content) return;
-    const containerTop = el.getBoundingClientRect().top;
-    for (const child of Array.from(content.children) as HTMLElement[]) {
-      const rect = child.getBoundingClientRect();
-      if (rect.bottom > containerTop) {
-        anchorRef.current = { el: child, top: rect.top - containerTop };
-        return;
-      }
-    }
-    anchorRef.current = null;
+    anchorRef.current = pickScrollAnchor(
+      Array.from(content.children) as HTMLElement[],
+      el.getBoundingClientRect().top,
+    );
   }, []);
 
   // Jump to the exact bottom and resume following. Instant, not smooth: a smooth
@@ -3730,6 +3737,11 @@ const Transcript: React.FC<TranscriptProps> = ({
     const content = contentRef.current;
     if (!el || !content) return;
     const ro = new ResizeObserver(() => {
+      // Recomputed on every content resize, ahead of the anchor branches below so
+      // no early return can leave it stale. Monotone, so it cannot oscillate: the
+      // end-of-history line it gates is only ever ADDED to a transcript that
+      // already overflows, and removing it can only shrink the content further.
+      setHistoryOverflows(el.scrollHeight > el.clientHeight + 1);
       // A programmatic jump owns scrollTop right now — neither pin-to-bottom nor
       // anchor-restore should move it, or it would fight the jump.
       if (suppressAnchorRef.current) return;
@@ -3791,11 +3803,28 @@ const Transcript: React.FC<TranscriptProps> = ({
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
           {forkSourceBanner}
-          {loadingOlder && (
-            <div className="flex h-8 items-center justify-center text-muted">
+          {/* One slot at the head of the history, so the spinner resolves into the
+              end-of-history line in place instead of the top twitching. Both are
+              transient by construction — they mount and unmount around the very
+              commits that prepend a page — so neither may become the scroll-anchor
+              (see pickScrollAnchor). */}
+          {loadingOlder ? (
+            <div
+              data-scroll-anchor="skip"
+              role="status"
+              aria-label={t('chat.loadingOlder')}
+              className="flex h-8 items-center justify-center text-muted"
+            >
               <Loader2 className="size-4 animate-spin" />
             </div>
-          )}
+          ) : atHistoryStart ? (
+            <div
+              data-scroll-anchor="skip"
+              className="flex h-8 items-center justify-center text-[12px] text-muted"
+            >
+              {t('chat.noEarlierMessages')}
+            </div>
+          ) : null}
           {/* Degenerate null-anchor groups render at the TOP (never the tail). */}
           {activity?.enabled && activity.topGroups.map((group) => renderActivityChip(group))}
           {messages.map((message) => {
