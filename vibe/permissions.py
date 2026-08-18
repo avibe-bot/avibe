@@ -551,6 +551,7 @@ def _backend_request(
             allow_redirects=False,
         )
     except requests.RequestException as exc:
+        _guard_current_pairing(credentials, load_current_config)
         raise PermissionsUnavailableError("permissions_backend_unavailable") from exc
     _guard_current_pairing(credentials, load_current_config)
     if 300 <= response.status_code < 400:

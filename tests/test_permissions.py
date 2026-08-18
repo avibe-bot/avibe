@@ -714,6 +714,26 @@ def test_permissions_rejects_inflight_results_after_the_pairing_tuple_changes(
     assert acknowledged == []
 
 
+def test_permissions_rejects_cached_fallback_after_inflight_pairing_change(
+    monkeypatch,
+) -> None:
+    config = _config()
+    cached_projection = _complete_projection()
+    permissions._cache_projection("inst-123", cached_projection)  # noqa: SLF001
+
+    def request(_method, _url, **_kwargs):
+        config.remote_access.vibe_cloud.instance_id = "inst-new"
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.get_current_permissions(config)
+
+
 @pytest.mark.parametrize(("path", "replacement"), MALFORMED_PROJECTION_CASES)
 def test_permissions_rejects_each_malformed_nested_projection_before_caching(
     monkeypatch,
