@@ -15163,6 +15163,14 @@ def _with_limited_show_policy(response: Response) -> Response:
     return response
 
 
+def _show_limited_not_found_response():
+    result = _show_page_not_found_response()
+    if isinstance(result, tuple):
+        response, status = result
+        return _with_limited_show_policy(response), status
+    return _with_limited_show_policy(result)
+
+
 @app.route("/auth/show-identity/callback", methods=["POST"])
 async def complete_show_identity_login():
     from core.show_pages import ShowPageStore
@@ -15311,7 +15319,7 @@ async def serve_public_show_page(share_id, asset_path):
             if page is not None:
                 access = store.get_access(page.session_id)
                 if access is None or access.share_id != share_id:
-                    return _show_page_not_found_response()
+                    return _show_limited_not_found_response()
         if page is None:
             return _show_page_not_found_response()
         limited_guest = (
@@ -15355,7 +15363,7 @@ async def serve_public_show_page(share_id, asset_path):
                 or access.share_id != share_id
                 or lease.normalized_email not in access.normalized_emails
             ):
-                return _show_page_not_found_response()
+                return _show_limited_not_found_response()
         if page.visibility == "limited":
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:

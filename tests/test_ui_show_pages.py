@@ -1020,6 +1020,8 @@ def test_rotated_public_share_rejects_an_old_guest_lease(monkeypatch, tmp_path):
     )
 
     assert old_response.status_code == 404
+    assert old_response.headers["Cache-Control"] == "private, no-store"
+    assert "Cookie" in old_response.headers["Vary"]
     assert new_response.status_code == 200
 
 
@@ -1236,6 +1238,8 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
             environ_base=_remote_peer(),
         )
         assert existing_asset.status_code == 404
+        assert existing_asset.headers["Cache-Control"] == "private, no-store"
+        assert "Cookie" in existing_asset.headers["Vary"]
         html_subresource = client.get(
             f"/p/{share_id}/index.html",
             base_url="https://alex.avibe.bot",
