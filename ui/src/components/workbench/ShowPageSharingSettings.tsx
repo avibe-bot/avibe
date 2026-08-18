@@ -166,13 +166,16 @@ export function ShowPageSharingSettings({
     [sessionId],
   );
 
-  const load = useCallback(async (settledGate: Gate = 'ready') => {
+  const load = useCallback(async (
+    settledGate: Gate = 'ready',
+    preserveShareIdDraft = false,
+  ) => {
     const generation = ++generationRef.current;
     setGate('loading');
     try {
       const result = await api.getShowAccessSettings(sessionId);
       if (generation !== generationRef.current) return;
-      adopt(result.show_access);
+      adopt(result.show_access, preserveShareIdDraft);
       setGate(settledGate);
     } catch {
       if (generation !== generationRef.current) return;
@@ -259,7 +262,7 @@ export function ShowPageSharingSettings({
       if (result.status === 'conflict') {
         savingRef.current = false;
         setSaving(false);
-        await load('conflict');
+        await load('conflict', preserveShareIdDraft);
         return;
       }
       if (result.status === 'share_id_taken' || result.status === 'invalid') {

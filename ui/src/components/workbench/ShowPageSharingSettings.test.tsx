@@ -172,9 +172,14 @@ describe('ShowPageSharingSettings', () => {
     expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last email');
   });
 
-  it('reloads the latest snapshot after an automatic CAS conflict', async () => {
+  it('reloads the latest access snapshot without dropping a custom-link draft after a CAS conflict', async () => {
     api.getShowAccessSettings
-      .mockResolvedValueOnce({ show_access: showAccess() })
+      .mockResolvedValueOnce({
+        show_access: showAccess({
+          access_mode: 'limited',
+          normalized_emails: ['guest@example.com'],
+        }),
+      })
       .mockResolvedValueOnce({
         show_access: showAccess({ access_mode: 'public', revision: 3 }),
       });
@@ -184,11 +189,18 @@ describe('ShowPageSharingSettings', () => {
     });
     renderSettings();
 
+    const customLink = await screen.findByRole('textbox', { name: 'Custom link' });
+    fireEvent.change(customLink, { target: { value: 'unsaved-link' } });
+
     await chooseMode('Fully public');
 
     await waitFor(() => expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2));
     expect(screen.getByRole('button', { name: 'Access: Fully public' })).toBeTruthy();
     expect(screen.getByText(/changed elsewhere/)).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'unsaved-link',
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   });
 
   it('shows an explicit custom-link save action only after editing', async () => {
