@@ -6691,13 +6691,10 @@ def cmd_data_retention(args):
             runtime_cfg = getattr(config, "runtime", None)
             days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
             if isinstance(days_value, bool) or not isinstance(days_value, int) or days_value < 1:
-                # Booleans are JSON true/false accepted into the int field; a
-                # malformed window must refuse deletion (fail closed), matching
-                # the controller, rather than coercing to a shorter window.
-                if days_value is not None:
-                    retention_days = days_value if not isinstance(days_value, bool) else None
-                    if retention_days is None:
-                        config_recovered = True
+                # Any malformed persisted window (boolean, non-int, < 1) must
+                # refuse deletion (fail closed), matching the controller:
+                # normalize_retention_days would silently coerce it to 30 or 1.
+                config_recovered = True
             else:
                 retention_days = days_value
             enabled = bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True))
@@ -6722,8 +6719,11 @@ def cmd_data_retention(args):
                 force=True,
                 compact=not bool(getattr(args, "no_compact", False)),
             )
-            if str(payload.get("status")) == "busy":
-                # Nothing was deleted; automation must see the run as failed.
+            run_status = str(payload.get("status"))
+            if run_status in {"busy", "lease_lost"}:
+                # busy: nothing deleted; lease_lost: partial deletion without
+                # completion marker — automation must retry both, not record
+                # success.
                 exit_code = 1
         else:
             payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
@@ -6797,6 +6797,8 @@ def _print_data_retention_human(payload: dict, language: str) -> None:
         print(i18n_t("data.retention.notDue", language))
     elif status == "busy":
         print(i18n_t("data.retention.busy", language))
+    elif status == "lease_lost":
+        print(i18n_t("data.retention.leaseLost", language))
     else:
         print(f"retention status: {status}")
 
