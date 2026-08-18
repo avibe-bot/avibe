@@ -24,9 +24,9 @@ import { ConfirmDialog } from '../ui/confirm-dialog';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
-import type { DependencyItem, InstallResult, MemorySettings } from '@/context/ApiContext';
+import type { DependencyItem, InstallResult, MemorySettings, MemoryStatusResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { dependencyHasInstallAction } from './SettingsDependenciesPage.logic';
+import { dependencyHasInstallAction, memoryRuntimeSidecarRunning } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import type { MemoryFactoryResetResult } from '@/lib/memoryFactoryReset';
 import { memoryErrorMessage } from '@/lib/memoryRead';
@@ -62,6 +62,8 @@ export const SettingsDependenciesPage: React.FC = () => {
   const [deps, setDeps] = useState<DependencyItem[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [memorySettings, setMemorySettings] = useState<MemorySettings | null>(null);
+  const [memoryStatus, setMemoryStatus] = useState<MemoryStatusResult | null>(null);
+  const [memoryStatusLoaded, setMemoryStatusLoaded] = useState(false);
   const [reinitializeOpen, setReinitializeOpen] = useState(false);
   const [reinitializeBusy, setReinitializeBusy] = useState(false);
   const [reinitializeResult, setReinitializeResult] = useState<MemoryFactoryResetResult | null>(null);
@@ -84,9 +86,19 @@ export const SettingsDependenciesPage: React.FC = () => {
     }
   }, [api]);
 
+  const refreshMemoryStatus = useCallback(async () => {
+    try {
+      setMemoryStatus(await api.getMemoryStatus());
+    } catch {
+      setMemoryStatus(null);
+    } finally {
+      setMemoryStatusLoaded(true);
+    }
+  }, [api]);
+
   const refreshAll = useCallback(async () => {
-    await Promise.all([refreshDependencies(), refreshMemorySettings()]);
-  }, [refreshDependencies, refreshMemorySettings]);
+    await Promise.all([refreshDependencies(), refreshMemorySettings(), refreshMemoryStatus()]);
+  }, [refreshDependencies, refreshMemorySettings, refreshMemoryStatus]);
 
   useEffect(() => {
     void refreshAll();
@@ -191,6 +203,8 @@ export const SettingsDependenciesPage: React.FC = () => {
             const showAction = dependencyHasInstallAction(d);
             const isMemoryRuntime = d.id === 'memory-runtime';
             const memoryRuntimeReady = isMemoryRuntime && d.installed && d.status === 'ready';
+            const sidecarRunning = isMemoryRuntime && memoryRuntimeSidecarRunning(memoryStatus);
+            const repairBlockedBySidecar = isMemoryRuntime && (!memoryStatusLoaded || sidecarRunning);
             const dependencyOperationBusy = busy !== null;
             const reinitializeDisabled = !memoryRuntimeReady
               || memorySettings === null
@@ -228,7 +242,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                       <Button
                         variant={d.installed ? 'secondary' : 'brand'}
                         size="xs"
-                        disabled={dependencyOperationBusy || reinitializeBusy}
+                        disabled={dependencyOperationBusy || reinitializeBusy || repairBlockedBySidecar}
                         onClick={() => void install(d)}
                       >
                         {installing ? (
@@ -251,6 +265,11 @@ export const SettingsDependenciesPage: React.FC = () => {
                 }
                 footer={isMemoryRuntime ? (
                   <div className="flex flex-col gap-3 border-t border-destructive/25 pt-3">
+                    {sidecarRunning ? (
+                      <div className="text-[11px] leading-snug text-muted">
+                        {t('settings.dependencies.memoryRuntimeDisableBeforeRepair')}
+                      </div>
+                    ) : null}
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <div className="text-[12px] font-semibold text-foreground">
