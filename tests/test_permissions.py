@@ -65,6 +65,27 @@ def _cache_projection_process(
     permissions._cache_projection("inst-123", projection)  # noqa: SLF001
 
 
+def _cache_mutation_rebase_process(
+    access_entries: list[dict[str, str]],
+    entered_lock,
+    release_lock,
+) -> None:
+    original_lock = permissions._cache_file_lock  # noqa: SLF001
+
+    def delayed_lock(path):
+        entered_lock.set()
+        if not release_lock.wait(10):
+            raise TimeoutError("cache lock was not released")
+        return original_lock(path)
+
+    permissions._cache_file_lock = delayed_lock  # noqa: SLF001
+    permissions._cache_mutation_result(  # noqa: SLF001
+        "inst-123",
+        3,
+        access_entries=access_entries,
+    )
+
+
 def _projection(instance_id: str = "inst-123") -> dict:
     return {
         "schema_version": 1,
@@ -622,6 +643,46 @@ def test_permissions_cache_revision_is_monotonic_across_processes() -> None:
     cached = permissions._read_cache("inst-123")  # noqa: SLF001
     assert cached is not None
     assert cached.projection["instance"]["authorization_revision"] == 4
+
+
+def test_permissions_cache_mutation_rebase_reads_complete_equal_revision_projection() -> None:
+    base = _complete_projection()
+    complete = deepcopy(base)
+    complete["directory"]["members"][0]["email"] = "new-member@example.com"
+    complete["projects"][0]["display_name"] = "Newest Project"
+    complete["policy_sync"]["projects"]["active"] = 7
+    updated_entries = [
+        {"kind": "email", "value": "updated@example.com", "role": "editor"}
+    ]
+    permissions._cache_projection("inst-123", base)  # noqa: SLF001
+
+    context = mp.get_context("spawn")
+    entered_lock = context.Event()
+    release_lock = context.Event()
+    mutation = context.Process(
+        target=_cache_mutation_rebase_process,
+        args=(updated_entries, entered_lock, release_lock),
+    )
+
+    try:
+        mutation.start()
+        assert entered_lock.wait(10)
+        permissions._cache_projection("inst-123", complete)  # noqa: SLF001
+        release_lock.set()
+        mutation.join(10)
+        assert mutation.exitcode == 0
+    finally:
+        release_lock.set()
+        if mutation.is_alive():
+            mutation.terminate()
+        mutation.join(5)
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection["directory"] == complete["directory"]
+    assert cached.projection["projects"] == complete["projects"]
+    assert cached.projection["policy_sync"] == complete["policy_sync"]
+    assert cached.projection["access"]["entries"] == updated_entries
 
 
 @pytest.mark.parametrize(

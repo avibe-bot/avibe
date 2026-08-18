@@ -594,14 +594,22 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
     )
 
 
-def _cache_projection(instance_id: str, projection: Any) -> None:
-    validated = _validated_projection(projection, instance_id)
+def _cache_read_merge_write(
+    instance_id: str,
+    merge: Callable[[dict[str, Any] | None], Any],
+) -> None:
+    """Read, merge, and atomically replace one instance cache under one lock."""
+
     with _CACHE_LOCK:
         try:
             cache_path = _cache_path()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             with _cache_file_lock(cache_path):
                 cached = _read_cache(instance_id)
+                candidate = merge(cached.projection if cached is not None else None)
+                if candidate is None:
+                    return
+                validated = _validated_projection(candidate, instance_id)
                 if (
                     cached is not None
                     and cached.projection["instance"]["authorization_revision"]
@@ -613,6 +621,10 @@ def _cache_projection(instance_id: str, projection: Any) -> None:
             logger.warning("Unable to cache the current Permissions projection", exc_info=True)
 
 
+def _cache_projection(instance_id: str, projection: Any) -> None:
+    _cache_read_merge_write(instance_id, lambda _cached: projection)
+
+
 def _cache_mutation_result(
     instance_id: str,
     authorization_revision: int,
@@ -620,36 +632,36 @@ def _cache_mutation_result(
     access_entries: list[Any] | None = None,
     project: Mapping[str, Any] | None = None,
 ) -> None:
-    with _CACHE_LOCK:
-        cached = _read_cache(instance_id)
+    def merge(cached: dict[str, Any] | None) -> dict[str, Any] | None:
         if cached is None:
-            return
-        projection = cached.projection
-        current_revision = projection["instance"]["authorization_revision"]
+            return None
+        current_revision = cached["instance"]["authorization_revision"]
         if authorization_revision < current_revision:
-            return
+            return None
         projection = {
-            **projection,
+            **cached,
             "instance": {
-                **projection["instance"],
+                **cached["instance"],
                 "authorization_revision": authorization_revision,
             },
         }
         if access_entries is not None:
             projection["access"] = {
-                **projection["access"],
+                **cached["access"],
                 "entries": access_entries,
             }
         if project is not None:
             project_id = project.get("project_id")
             projects = [
                 project if current.get("project_id") == project_id else current
-                for current in projection["projects"]
+                for current in cached["projects"]
             ]
             if not any(current.get("project_id") == project_id for current in projects):
                 projects.append(project)
             projection["projects"] = projects
-        _cache_projection(instance_id, _validated_projection(projection, instance_id))
+        return projection
+
+    _cache_read_merge_write(instance_id, merge)
 
 
 def _acknowledge_authorization_revision(config: V2Config, revision: int) -> None:
