@@ -59,11 +59,17 @@ def _cache_projection_process(
             candidate: dict[str, Any],
             *,
             cache_order: int = 0,
+            mutation_orders: dict[str, Any] | None = None,
         ) -> None:
             entered_write.set()
             if not release_write.wait(10):
                 raise TimeoutError("cache write was not released")
-            original_write(instance_id, candidate, cache_order=cache_order)
+            original_write(
+                instance_id,
+                candidate,
+                cache_order=cache_order,
+                mutation_orders=mutation_orders,
+            )
 
         permissions._write_cache = delayed_write  # noqa: SLF001
 
@@ -1002,6 +1008,69 @@ def test_permissions_cache_mutation_rebase_preserves_newer_same_project_policy()
     assert cached.cache_order == 20
     assert cached.projection["instance"]["authorization_revision"] == 5
     assert cached.projection["projects"][0] == newer
+
+
+def test_permissions_cache_mutation_rebase_preserves_newer_authorized_users_entries() -> None:
+    base = _complete_projection()
+    newer_entries = [
+        {"kind": "email", "value": "newer@example.com", "role": "editor"}
+    ]
+    delayed_entries = [
+        {"kind": "email", "value": "delayed@example.com", "role": "viewer"}
+    ]
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        base,
+        request_order=18,
+    )
+
+    # The newer authorized-users mutation commits first; its delayed response
+    # must remain authoritative for access entries across a process rebase.
+    permissions._cache_mutation_result(  # noqa: SLF001
+        "inst-123",
+        5,
+        access_entries=newer_entries,
+        request_order=20,
+    )
+    permissions._cache_mutation_result(  # noqa: SLF001
+        "inst-123",
+        4,
+        access_entries=delayed_entries,
+        request_order=19,
+    )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.cache_order == 20
+    assert cached.projection["instance"]["authorization_revision"] == 5
+    assert cached.projection["access"]["entries"] == newer_entries
+
+
+def test_permissions_live_read_rechecks_pairing_after_cache_write_failure(monkeypatch) -> None:
+    config = _config()
+    switched = False
+
+    def failed_write(*_args, **_kwargs):
+        nonlocal switched
+        if not switched:
+            switched = True
+            replacement = V2Config.load()
+            replacement.remote_access.vibe_cloud.instance_id = "inst-new"
+            replacement.save()
+        raise OSError("read-only state")
+
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, _projection()),
+    )
+    monkeypatch.setattr(permissions, "_write_cache", failed_write)
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.get_current_permissions(config)
 
 
 @pytest.mark.parametrize("entity", ["access", "project"])

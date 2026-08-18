@@ -6,6 +6,7 @@ from config.v2_config import V2Config
 from storage import resource_access_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
+from storage.models import state_meta
 from vibe import permissions
 
 
@@ -303,6 +304,77 @@ def test_show_page_authorizers_adopt_legacy_policy_before_enforcing_organization
             ) == [{"session_id": "legacy-page"}]
             policy = resource_access_service.get_resource_policy(
                 "show_page", "legacy-page", connection=connection
+            )
+        assert policy is not None
+        assert policy["organization_id"] == "org-1"
+    finally:
+        engine.dispose()
+
+
+def test_show_page_legacy_reconciliation_reopens_after_authority_lookup(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """An authority lookup must finish before the legacy policy read snapshot."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.backend_url = "https://backend.example"
+    cloud.instance_id = "inst-1"
+    cloud.instance_secret = "device-secret"
+    cloud.instance_kind = "organization"
+    config.save()
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    owner = _context("owner-1", instance_role="editor")
+
+    try:
+        with engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="legacy-page",
+                organization_id=None,
+                owner_user_id="owner-1",
+                access_level="private",
+            )
+
+        def resolve_ownership() -> dict[str, str]:
+            # A concurrent writer commits while the authoritative lookup is
+            # in flight. The later reconciliation must use a fresh snapshot.
+            with engine.begin() as writer:
+                writer.execute(
+                    state_meta.insert().values(
+                        key="interleaved-lookup",
+                        value_json="{}",
+                        updated_at="now",
+                    )
+                )
+            return {
+                "mode": "organization",
+                "instance_id": "inst-1",
+                "organization_id": "org-1",
+                "source": "live",
+            }
+
+        monkeypatch.setattr(permissions, "resolve_current_instance_ownership", resolve_ownership)
+
+        with engine.begin() as connection:
+            assert resource_access_service.can_use_resource(
+                owner,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+
+        with engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page",
+                "legacy-page",
+                connection=connection,
             )
         assert policy is not None
         assert policy["organization_id"] == "org-1"

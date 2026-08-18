@@ -77,6 +77,7 @@ class PermissionsProjectionResult:
     source: str
     cached_at: int | None = None
     cache_order: int = 0
+    mutation_orders: dict[str, Any] | None = None
 
     @property
     def offline(self) -> bool:
@@ -576,17 +577,52 @@ def _write_cache(
     projection: dict[str, Any],
     *,
     cache_order: int = 0,
+    mutation_orders: Mapping[str, Any] | None = None,
 ) -> None:
-    _atomic_write_json(
-        _cache_path(),
-        {
-            "cache_schema_version": CACHE_SCHEMA_VERSION,
-            "instance_id": instance_id,
-            "cached_at": int(time.time()),
-            "cache_order": cache_order,
-            "projection": projection,
-        },
-    )
+    envelope = {
+        "cache_schema_version": CACHE_SCHEMA_VERSION,
+        "instance_id": instance_id,
+        "cached_at": int(time.time()),
+        "cache_order": cache_order,
+        "projection": projection,
+    }
+    normalized_orders = _normalize_mutation_orders(mutation_orders, projection)
+    if normalized_orders:
+        envelope["mutation_orders"] = normalized_orders
+    _atomic_write_json(_cache_path(), envelope)
+
+
+def _valid_cache_order(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _normalize_mutation_orders(
+    value: Any,
+    projection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep optional per-entity mutation freshness metadata well-shaped."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    normalized: dict[str, Any] = {}
+    access_order = value.get("access")
+    if _valid_cache_order(access_order):
+        normalized["access"] = access_order
+    project_orders = value.get("projects")
+    if isinstance(project_orders, Mapping):
+        project_ids = {
+            project.get("project_id")
+            for project in projection.get("projects", [])
+            if isinstance(project, Mapping)
+        }
+        normalized_projects = {
+            str(project_id): order
+            for project_id, order in project_orders.items()
+            if project_id in project_ids and _valid_cache_order(order)
+        }
+        if normalized_projects:
+            normalized["projects"] = normalized_projects
+    return normalized
 
 
 def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
@@ -610,11 +646,16 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
         projection = _validated_projection(envelope.get("projection"), instance_id)
     except PermissionsInvalidResponseError:
         return None
+    mutation_orders = _normalize_mutation_orders(
+        envelope.get("mutation_orders"),
+        projection,
+    )
     return PermissionsProjectionResult(
         projection=projection,
         source="cache",
         cached_at=cached_at,
         cache_order=cache_order,
+        mutation_orders=mutation_orders,
     )
 
 
@@ -754,10 +795,23 @@ def _merge_equal_revision_projection(
 def _merge_mutation_rebase_projection(
     cached: dict[str, Any],
     candidate: dict[str, Any],
+    *,
+    mutation_target: tuple[str, str | None] | None,
+    cached_mutation_orders: Mapping[str, Any],
+    request_order: int,
 ) -> dict[str, Any]:
-    """Apply mutation policy fields while retaining newer cached sync state."""
+    """Apply a delayed mutation without regressing newer entity state."""
 
     merged = _prefer_mapping(candidate, cached)
+    if mutation_target is not None and mutation_target[0] == "access":
+        cached_access_order = cached_mutation_orders.get("access")
+        if _valid_cache_order(cached_access_order) and cached_access_order > request_order:
+            # Access entries have no backend entity revision. Their mutation
+            # order is the only durable ordering signal across processes.
+            merged["access"] = _prefer_mapping(
+                cached["access"],
+                candidate["access"],
+            )
     cached_projects = {
         project["project_id"]: project for project in cached["projects"]
     }
@@ -786,6 +840,8 @@ def _cache_read_merge_write(
     *,
     request_order: int,
     mutation_rebase: bool = False,
+    mutation_target: tuple[str, str | None] | None = None,
+    complete_projection: bool = False,
     pairing_guard: Callable[[], None] | None = None,
 ) -> None:
     """Read, merge, and atomically replace one instance cache under one lock."""
@@ -803,6 +859,10 @@ def _cache_read_merge_write(
                     return
                 validated = _validated_projection(candidate, instance_id)
                 cache_order = request_order
+                cached_mutation_orders = (
+                    cached.mutation_orders if cached is not None else {}
+                ) or {}
+                candidate_wins_complete_projection = cached is None
                 if cached is not None:
                     cached_revision = cached.projection["instance"][
                         "authorization_revision"
@@ -813,6 +873,13 @@ def _cache_read_merge_write(
                     if cached_revision > candidate_revision:
                         return
                     cache_order = max(cached.cache_order, request_order)
+                    candidate_wins_complete_projection = (
+                        candidate_revision > cached_revision
+                        or (
+                            candidate_revision == cached_revision
+                            and request_order >= cached.cache_order
+                        )
+                    )
                     if cached_revision == candidate_revision and not mutation_rebase:
                         validated = _merge_equal_revision_projection(
                             cached.projection,
@@ -832,11 +899,36 @@ def _cache_read_merge_write(
                         validated = _merge_mutation_rebase_projection(
                             cached.projection,
                             validated,
+                            mutation_target=mutation_target,
+                            cached_mutation_orders=cached_mutation_orders,
+                            request_order=request_order,
                         )
                         validated = _validated_projection(validated, instance_id)
+                mutation_orders = dict(cached_mutation_orders)
+                if complete_projection and candidate_wins_complete_projection:
+                    # A newer complete read is authoritative for every entity;
+                    # older mutation markers must not affect later rebases.
+                    mutation_orders = {}
+                elif mutation_target is not None:
+                    target_kind, target_id = mutation_target
+                    if target_kind == "access":
+                        current_order = mutation_orders.get("access")
+                        if not _valid_cache_order(current_order) or request_order > current_order:
+                            mutation_orders["access"] = request_order
+                    elif target_kind == "project" and target_id is not None:
+                        project_orders = dict(mutation_orders.get("projects") or {})
+                        current_order = project_orders.get(target_id)
+                        if not _valid_cache_order(current_order) or request_order > current_order:
+                            project_orders[target_id] = request_order
+                        mutation_orders["projects"] = project_orders
                 if pairing_guard is not None:
                     pairing_guard()
-                _write_cache(instance_id, validated, cache_order=cache_order)
+                _write_cache(
+                    instance_id,
+                    validated,
+                    cache_order=cache_order,
+                    mutation_orders=mutation_orders,
+                )
         except (OSError, TimeoutError):
             logger.warning("Unable to cache the current Permissions projection", exc_info=True)
 
@@ -853,6 +945,7 @@ def _cache_projection(
         instance_id,
         lambda _cached: projection,
         request_order=order,
+        complete_projection=True,
         pairing_guard=pairing_guard,
     )
 
@@ -916,6 +1009,13 @@ def _cache_mutation_result(
         merge,
         request_order=order,
         mutation_rebase=True,
+        mutation_target=(
+            ("access", None)
+            if access_entries is not None
+            else ("project", str(project.get("project_id")))
+            if project is not None
+            else None
+        ),
         pairing_guard=pairing_guard,
     )
 
@@ -1008,6 +1108,9 @@ def get_current_permissions(config: V2Config | None = None) -> PermissionsProjec
             request_order=request_order,
             pairing_guard=pairing_guard,
         )
+        # Cache persistence is best effort; it may fail before its locked
+        # boundary guard runs. Recheck before publishing the live projection.
+        pairing_guard()
         return PermissionsProjectionResult(
             projection=projection,
             source="live",
@@ -1058,6 +1161,7 @@ def replace_authorized_users(
         request_order=request_order,
         pairing_guard=pairing_guard,
     )
+    pairing_guard()
     return {**result, "instance_id": instance_id}
 
 
@@ -1096,6 +1200,7 @@ def update_project_access(
         request_order=request_order,
         pairing_guard=pairing_guard,
     )
+    pairing_guard()
     return {**result, "instance_id": instance_id}
 
 
