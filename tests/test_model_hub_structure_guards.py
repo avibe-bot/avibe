@@ -315,7 +315,7 @@ def _ledger_writes(tree: ast.AST) -> tuple[ast.Attribute, ...]:
         if isinstance(node, ast.Attribute)
         and node.attr == "record"
         and isinstance(node.value, ast.Attribute)
-        and node.value.attr == "usage"
+        and node.value.attr in {"usage", "ledger"}
     )
 
 
@@ -530,25 +530,43 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     service_tree = _tree(SERVICE)
     gateway_tree = _tree(TURN_GATEWAY)
     recorder = _functions(gateway_tree)["_record_usage"]
-    # The gateway owner is a pair: `_record_usage` decides, `_persist_usage` carries
-    # the write off the loop so no turn's cancellation can take it. That is still one
-    # owner only while the second half has exactly one caller, asserted below.
-    persister = _functions(gateway_tree)["_persist_usage"]
-    owners = (_functions(service_tree)["_meter_call"], recorder, persister)
-    writes = _ledger_writes(service_tree) + _ledger_writes(gateway_tree)
+    owners = (_functions(service_tree)["_meter_call"], recorder)
+    # Reviews 4964754924 / 4964894667: an owner decides *that* a call is metered,
+    # but how long that write outlives whoever queued it is a third property and
+    # belongs to neither population. `UsageWriter` owns it once, so neither owner
+    # may touch the ledger itself and a population added later inherits the
+    # lifetime by construction instead of by remembering to.
+    assert not _ledger_writes(service_tree)
+    assert not _ledger_writes(gateway_tree)
+    writer = next(
+        node
+        for node in ast.walk(_tree(USAGE))
+        if isinstance(node, ast.ClassDef) and node.name == "UsageWriter"
+    )
+    persist = _functions(writer)["_persist"]
+    writes = _ledger_writes(writer)
     assert writes
-    assert all(any(write in set(ast.walk(owner)) for owner in owners) for write in writes)
+    assert all(write in set(ast.walk(persist)) for write in writes)
+    # Which leaves each owner one job at the writer, and leaves nothing else in
+    # either module recording anything at all.
+    handoffs = [
+        node
+        for tree in (service_tree, gateway_tree)
+        for node in ast.walk(tree)
+        if _call_name(node) == "record"
+    ]
+    assert handoffs
+    assert all(any(handoff in set(ast.walk(owner)) for owner in owners) for handoff in handoffs)
+    assert all(
+        len([handoff for handoff in handoffs if handoff in set(ast.walk(owner))]) == 1
+        for owner in owners
+    )
     invoke = _functions(service_tree)["_invoke"]
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
     assert len(meter_calls) == 1
     assert meter_calls[0] in set(ast.walk(invoke))
-    persist_calls = [
-        node for node in ast.walk(gateway_tree) if _call_name(node) == "_persist_usage"
-    ]
-    assert len(persist_calls) == 1
-    assert persist_calls[0] in set(ast.walk(recorder))
     # Any of the gateway's endings may report the forwarded call, so exactly-once
     # rests on the write it owns; a caller that pre-checks or clears that handle
     # would move the decision outside the owner.

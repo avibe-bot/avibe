@@ -506,6 +506,48 @@ second name with the constraint that makes it one owner: `_persist_usage` has ex
 one call site and it is inside `_record_usage`, the same single-caller assertion
 `_meter_call` already carries.
 
+### Round 9 (head `839498456`)
+
+One P2 finding, and class C a sixth time — at the address round 8 should have covered.
+`ModelHubService._meter_call` still awaited `asyncio.to_thread()` inline, so a bodyless
+attempt that upstream had already billed (a failover error carrying usage) lost its row
+to exactly the window round 8 closed at the gateway: cancellation reaching the queued
+executor future before `record()` starts.
+
+This is not a new class, it is the sibling the round-8 note could already have named.
+The skill's rule is explicit — *the moment you can enumerate the members the reviewer
+has not reached yet, close the class now* — and round 8 knew metering has exactly two
+owners, because the guard that asserts it was edited in the same commit. Patching the
+second site would buy the same finding back at whatever third population arrives.
+
+So the closure is ownership, not a second patch. Write-lifetime is a third property:
+neither population decides it, both need it, and it had no owner. `UsageWriter` in
+`usage.py` is that owner.
+
+- `UsageWriter.record()` is **synchronous** on purpose. Nothing may suspend between a
+  caller deciding to meter a call and the writer owning the result, or a cancellation
+  could land in the window where the call is neither metered nor still meterable. It
+  starts the task, keeps a strong reference, and hands the task back.
+- Both owners keep their existing shape: decide, hand off, `await asyncio.shield(...)`.
+  A caller that wants the row on disk before it returns awaits; one that does not can
+  drop the task. Read-your-write survives on the ordinary path, and only cancellation
+  gives up ordering — never the write.
+- `drain(timeout=...)` replaces the gateway's private set. The gateway reuses
+  `service.usage_writer` whenever both write the same ledger, so one bounded drain at
+  `close()` covers both populations rather than one drain per population.
+
+`test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it` mirrors the
+round-8 test at the resolver: one-thread executor occupied, row queued-not-started,
+ledger asserted empty, caller cancelled, then released and drained. Dropping the shield
+fails it with `KeyError: 'requests'` — the same permanent omission, at the other owner.
+
+The structure guard is what makes this a closure rather than a second patch. It now
+asserts that **neither** `service.py` nor `turn_gateway.py` touches the ledger at all,
+that every ledger write in `usage.py` is inside `UsageWriter._persist`, and that each
+owner hands off to the writer exactly once with nothing else in either module recording
+anything. A third population cannot be written with its own write lifetime; it inherits
+one or it fails a test.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

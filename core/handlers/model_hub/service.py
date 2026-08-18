@@ -110,7 +110,7 @@ from .resolver import (
     source_runnable,
 )
 from .revocations import CredentialRevocationJournal
-from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger
+from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, UsageWriter
 
 CONTRACT_VERSION = 6
 AGENT_CHAIN_CONTRACT_VERSION = 6
@@ -595,6 +595,9 @@ class ModelHubService:
             paths.get_state_dir() / "model_hub_usage.json",
             now=now,
         )
+        # One writer per ledger, shared with the gateway: both metering populations
+        # then have the same owner for the lifetime of what they write.
+        self.usage_writer = UsageWriter(self.usage)
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(
             paths.get_state_dir() / "model_hub_oauth_flows.json",
@@ -4942,20 +4945,23 @@ class ModelHubService:
         The ledger read-modify-write is file I/O, so it runs off the event loop;
         metering is a report, never a control input, and a ledger failure must not
         change the outcome the caller sees.
+
+        Which is also why the write is the writer's and not this call's: a resolve
+        cancelled downstream while its row sat queued would otherwise discard usage
+        the vendor had already billed. Shielded rather than dropped so the ordinary
+        path still leaves the row on disk before the caller sees its outcome.
         """
 
         if outcome.usage is None:
             return
-        try:
-            await asyncio.to_thread(
-                self.usage.record,
+        await asyncio.shield(
+            self.usage_writer.record(
                 source_id=source_id,
                 model_id=model_id,
                 usage=outcome.usage,
                 at=self.now(),
             )
-        except (OSError, ValueError) as exc:
-            logger.debug("Model Hub usage metering skipped one call: %s", exc)
+        )
 
     async def _classify_source_outcome(
         self,

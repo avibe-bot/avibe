@@ -6400,7 +6400,7 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
         )
 
         turn = asyncio.create_task(gateway._handle_request(request))
-        while not gateway._usage_writes:
+        while not gateway._usage_writer._writes:
             await asyncio.sleep(0.01)
         # The scenario is only the scenario while the write is still queued.
         assert _usage_of(service, source.id) == {}
@@ -6412,6 +6412,84 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
         release.set()
         await occupant
         await gateway.close()
+        executor.shutdown()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["input_tokens"] == 512
+        assert metered["output_tokens"] == 16
+
+    asyncio.run(exercise())
+
+
+def test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it(
+    tmp_path: Path,
+) -> None:
+    """Review 4964894667: the same window at the other metering owner.
+
+    A call the resolver consumed itself still reports tokens the vendor billed.
+    Occupy the loop's only executor thread and its row is queued but not started;
+    the caller is cancelled there, and the row lands anyway. Neither owner keeps
+    a write of its own, so neither can lose one — `UsageWriter` holds both.
+    """
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        occupied = threading.Event()
+        release = threading.Event()
+
+        def occupy() -> None:
+            occupied.set()
+            release.wait(5)
+
+        occupant = loop.run_in_executor(executor, occupy)
+        while not occupied.is_set():
+            await asyncio.sleep(0.01)
+
+        source = _source("src_meterown02", "Owned resolve write")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    source_id=source.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=512,
+                        cached_input_tokens=0,
+                        output_tokens=16,
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        resolve = asyncio.create_task(
+            service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+        )
+        while not service.usage_writer._writes:
+            await asyncio.sleep(0.01)
+        # The scenario is only the scenario while the write is still queued.
+        assert _usage_of(service, source.id) == {}
+
+        resolve.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(resolve, timeout=5)
+
+        release.set()
+        await occupant
+        assert await service.usage_writer.drain(timeout=5) == 0
         executor.shutdown()
 
         metered = _usage_of(service, source.id)

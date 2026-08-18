@@ -19,6 +19,7 @@ usage.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -482,3 +483,83 @@ class BoundedUsageLedger:
             ],
             "days": [by_day[day] for day in sorted(by_day)],
         }
+
+
+class UsageWriter:
+    """Async ownership of every ledger write, so nothing can take one along.
+
+    Metering has two populations — a call either hands its body onward or it does
+    not — but the property that a queued write outlives whatever queued it belongs
+    to neither of them. It lives here once. A write is this object's task from the
+    moment it exists, so a caller cancelled mid-flight loses its own ordering and
+    never the row, and a population added later inherits that by construction
+    rather than by remembering to.
+    """
+
+    def __init__(self, ledger: BoundedUsageLedger):
+        self.ledger = ledger
+        self._writes: set[asyncio.Task[None]] = set()
+
+    def record(
+        self,
+        *,
+        source_id: str,
+        model_id: str,
+        usage: Optional[ProtocolUsageReport],
+        at: datetime,
+    ) -> "asyncio.Task[None]":
+        """Own one write and start it, handing back the task that will finish it.
+
+        Synchronous on purpose: nothing may suspend between a caller deciding to
+        meter a call and this object owning the result, or a cancellation could
+        land in a window where the call is neither metered nor still meterable.
+
+        A caller that wants the row on disk before it returns awaits the task
+        through `asyncio.shield`; one that does not can simply drop it.
+        """
+
+        write = asyncio.create_task(
+            self._persist(source_id=source_id, model_id=model_id, usage=usage, at=at)
+        )
+        self._writes.add(write)
+        write.add_done_callback(self._writes.discard)
+        return write
+
+    async def drain(self, *, timeout: float) -> int:
+        """Wait out the writes still in flight; answers how many did not finish.
+
+        Bounded, because a ledger that cannot be reached must not hold a shutdown
+        open — the same trade every owned drain in the hub makes.
+        """
+
+        pending = tuple(self._writes)
+        if not pending:
+            return 0
+        _done, unfinished = await asyncio.wait(pending, timeout=timeout)
+        return len(unfinished)
+
+    async def _persist(
+        self,
+        *,
+        source_id: str,
+        model_id: str,
+        usage: Optional[ProtocolUsageReport],
+        at: datetime,
+    ) -> None:
+        """Run one ledger write off the loop, absorbing whatever it costs.
+
+        `at` is captured by the caller when its call ended, not read here: this
+        coroutine can start well after that, and a queued write is still a report
+        about the moment the call finished.
+        """
+
+        try:
+            await asyncio.to_thread(
+                self.ledger.record,
+                source_id=source_id,
+                model_id=model_id,
+                usage=usage,
+                at=at,
+            )
+        except (OSError, ValueError) as exc:
+            logger.debug("Model Hub usage metering skipped one call: %s", exc)
