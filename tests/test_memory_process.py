@@ -986,6 +986,8 @@ def test_sidecar_cleanup_reverifies_asyncio_pid_before_signaling(monkeypatch) ->
     signals: list[int] = []
 
     class _Transport:
+        _proc = SimpleNamespace(returncode=None)
+
         def get_pid(self) -> int:
             return _ORPHAN_PID
 
