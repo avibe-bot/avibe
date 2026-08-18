@@ -706,6 +706,9 @@ def _config_recovery_message() -> Optional[str]:
 _LIST_OPS_PAYLOAD_KEY = "__avibe_list_ops"
 
 
+_LIST_OPS_ALLOWED_PATHS = frozenset({"platforms.enabled"})
+
+
 def _apply_list_ops(base: dict, list_ops: dict) -> dict:
     """Apply add/remove operations to list-valued config paths.
 
@@ -713,8 +716,10 @@ def _apply_list_ops(base: dict, list_ops: dict) -> dict:
     mutates the lock-fresh base's list instead of replacing it wholesale,
     so a stale browser snapshot of the list cannot drop entries another
     process added (#1458 stage ③: lists are replace-on-merge otherwise).
-    Unknown or non-list paths are ignored (no error surface yet — the
-    only producer is first-party UI code).
+    Only whitelisted paths are accepted: resolving arbitrary dotted paths
+    would let a client mutate lists whose owners need service-mediated
+    synchronization (e.g. ``model_hub.sources`` must go through
+    ModelHubService) — anything outside the whitelist raises.
     """
     import copy as _copy
 
@@ -731,6 +736,10 @@ def _apply_list_ops(base: dict, list_ops: dict) -> dict:
     for dotted, ops in list_ops.items():
         if not isinstance(ops, dict):
             continue
+        if str(dotted) not in _LIST_OPS_ALLOWED_PATHS:
+            raise ValueError(
+                f"Config list operation path '{dotted}' is not supported"
+            )
         target = _resolve(merged, dotted)
         if not isinstance(target, list):
             continue

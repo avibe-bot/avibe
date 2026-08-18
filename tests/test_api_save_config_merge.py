@@ -1716,3 +1716,18 @@ def test_list_ops_enable_requires_credentials(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="lark"):
         api.save_config({"__avibe_list_ops": {"platforms.enabled": {"add": ["lark"]}}})
+
+
+def test_list_ops_reject_unwhitelisted_paths(monkeypatch, tmp_path):
+    """Only whitelisted list paths accept operations — arbitrary dotted
+    paths (e.g. model_hub.sources, which must go through ModelHubService)
+    are rejected instead of silently mutating the persisted base."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    import pytest
+
+    with pytest.raises(ValueError, match="not supported"):
+        api.save_config(
+            {"__avibe_list_ops": {"model_hub.sources": {"add": ["rogue"]}}}
+        )
