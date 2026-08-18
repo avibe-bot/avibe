@@ -697,6 +697,17 @@ def _merge_project_projection(
     return _prefer_mapping(preferred, fallback)
 
 
+def _merge_project_mutation_acknowledgement(
+    acknowledged: Mapping[str, Any],
+    cached: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge one Project mutation without regressing its policy revision."""
+
+    if cached["access"]["revision"] > acknowledged["access"]["revision"]:
+        return _merge_project_projection(cached, acknowledged)
+    return _merge_project_projection(acknowledged, cached)
+
+
 def _merge_projects(
     preferred: list[Any],
     fallback: list[Any],
@@ -756,7 +767,10 @@ def _merge_mutation_rebase_projection(
         if cached_project is None:
             projects.append(dict(project))
             continue
-        merged_project = _merge_project_projection(project, cached_project)
+        merged_project = _merge_project_mutation_acknowledgement(
+            project,
+            cached_project,
+        )
         merged_project["sync"] = _prefer_mapping(
             cached_project["sync"],
             project["sync"],
@@ -883,7 +897,7 @@ def _cache_mutation_result(
                 None,
             )
             merged_project = (
-                _merge_project_projection(project, cached_project)
+                _merge_project_mutation_acknowledgement(project, cached_project)
                 if cached_project is not None
                 else project
             )

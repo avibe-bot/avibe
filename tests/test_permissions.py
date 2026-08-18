@@ -940,6 +940,70 @@ def test_permissions_cache_mutation_rebase_preserves_newer_project_sync_state() 
     assert cached.projection["projects"][0]["sync"] == newer_project["sync"]
 
 
+def test_permissions_cache_mutation_rebase_preserves_newer_same_project_policy() -> None:
+    base = _complete_projection()
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        base,
+        request_order=18,
+    )
+    delayed = deepcopy(base["projects"][0])
+    delayed["display_name"] = "Delayed Project"
+    delayed["access"] = {
+        **delayed["access"],
+        "mode": "inherit",
+        "revision": 3,
+        "bindings": [],
+    }
+    delayed["sync"] = {
+        **delayed["sync"],
+        "status": "pending",
+        "desired_access_revision": 3,
+        "applied_access_revision": 2,
+    }
+    newer = deepcopy(delayed)
+    newer["display_name"] = "Newest Project"
+    newer["access"] = {
+        **newer["access"],
+        "mode": "restricted",
+        "revision": 4,
+        "bindings": [
+            {
+                "principal_kind": "email",
+                "principal_value": "newest@example.com",
+                "access_role": "editor",
+            }
+        ],
+    }
+    newer["sync"] = {
+        **newer["sync"],
+        "status": "error",
+        "desired_access_revision": 4,
+        "applied_access_revision": 3,
+        "last_sync_error": "latest failure",
+    }
+
+    # The R+1 acknowledgement wins the cache before the delayed R response arrives.
+    permissions._cache_mutation_result(  # noqa: SLF001
+        "inst-123",
+        5,
+        project=newer,
+        request_order=20,
+    )
+    permissions._cache_mutation_result(  # noqa: SLF001
+        "inst-123",
+        4,
+        project=delayed,
+        request_order=19,
+    )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.cache_order == 20
+    assert cached.projection["instance"]["authorization_revision"] == 5
+    assert cached.projection["projects"][0] == newer
+
+
 @pytest.mark.parametrize("entity", ["access", "project"])
 def test_permissions_cache_replays_superseded_mutation_entity_without_lowering_revision(
     entity: str,
