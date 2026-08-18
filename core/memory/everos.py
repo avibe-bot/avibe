@@ -1606,12 +1606,14 @@ def _chat_probe_response_issue(value: Any) -> str | None:
     content = message["content"]
     if not isinstance(content, str):
         return "provider_response_invalid_content"
-    if not content:
+    if not content.strip():
         if message.get("role") != "assistant":
             return "provider_response_invalid_role"
         finish_reason = choices[0].get("finish_reason")
         if finish_reason is None:
             return "provider_response_missing_finish_reason"
+        if not isinstance(finish_reason, str):
+            return "provider_response_invalid_finish_reason"
         if finish_reason not in _CHAT_PROBE_TERMINAL_FINISH_REASONS:
             return "provider_response_invalid_finish_reason"
     return None

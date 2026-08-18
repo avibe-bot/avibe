@@ -1525,6 +1525,8 @@ def test_processing_preflight_reports_the_rejected_2xx_shape() -> None:
     [
         ({"content": ""}, "provider_response_invalid_role"),
         ({"role": "assistant", "content": ""}, "provider_response_missing_finish_reason"),
+        ({"content": " "}, "provider_response_invalid_role"),
+        ({"role": "assistant", "content": " "}, "provider_response_missing_finish_reason"),
     ],
 )
 def test_processing_preflight_requires_completion_metadata_for_empty_chat_content(
@@ -1556,6 +1558,46 @@ def test_processing_preflight_requires_completion_metadata_for_empty_chat_conten
     assert result.ok is False
     assert result.failure is not None
     assert result.failure.diagnostic.message == expected
+
+
+def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": {},
+                            "message": {"role": "assistant", "content": ""},
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.diagnostic.http_status == 200
+    assert result.failure.diagnostic.message == "provider_response_invalid_finish_reason"
 
 
 def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
