@@ -34,6 +34,12 @@ class SidecarSnapshot:
 
         return bool(self.process and self.process.restart_authorized)
 
+    @property
+    def retains_active_config(self) -> bool:
+        """Whether this supervisor can still execute under captured settings."""
+
+        return self.running or self.supervisor_can_restart
+
 
 @dataclass(frozen=True, slots=True)
 class RecorderAdmission:

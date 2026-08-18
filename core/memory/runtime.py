@@ -1125,9 +1125,9 @@ class MemoryRuntime:
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
             error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
-            if not self._sidecar.snapshot().supervisor_can_restart:
-                # No retained supervisor can relaunch with the prior settings,
-                # including one that exhausted its restart budget.
+            if not self._sidecar.snapshot().retains_active_config:
+                # No retained supervisor can run now or relaunch with the prior
+                # settings, including one that exhausted its restart budget.
                 # Retain the desired config so a first artifact install can
                 # activate it without waiting for another reconciliation.
                 self._config = config
