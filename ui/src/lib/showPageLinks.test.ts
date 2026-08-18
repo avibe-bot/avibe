@@ -28,6 +28,16 @@ describe('Show Page link routes', () => {
     expect(copyHref(limited)).toBe('https://show.example.test/p/shared-link/');
   });
 
+  it('prefers the Cloud-qualified Limited URL over the local fallback', () => {
+    const limited = {
+      ...page('limited'),
+      active_url: '/p/shared-link/',
+      public_url: 'https://alice.avibe.bot/p/shared-link/',
+    };
+
+    expect(copyHref(limited)).toBe('https://alice.avibe.bot/p/shared-link/');
+  });
+
   it('keeps public share links on the guest-facing route', () => {
     expect(localPath(page('public'))).toBe('/p/shared-link/');
   });

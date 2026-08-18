@@ -67,7 +67,9 @@ describe('ShowPageSharingSettings', () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     renderSettings();
 
-    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    const trigger = await screen.findByRole('button', { name: 'Access: Private' });
+    expect(trigger.className).toContain('w-40');
+    expect(trigger.className).not.toContain('w-full');
     expect(screen.queryAllByRole('radio')).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'Access: Private' }));
 

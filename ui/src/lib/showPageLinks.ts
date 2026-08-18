@@ -7,6 +7,7 @@ export type ShowPageLinkInfo = {
   session_id: string;
   visibility: string;
   active_url: string | null;
+  public_url?: string | null;
   share_id: string | null;
 };
 
@@ -31,6 +32,7 @@ export function editorPath(page: ShowPageLinkInfo): string | null {
 }
 
 export function liveHref(page: ShowPageLinkInfo): string | null {
+  if (page.visibility === 'limited' && page.public_url) return page.public_url;
   return page.active_url || localPath(page);
 }
 

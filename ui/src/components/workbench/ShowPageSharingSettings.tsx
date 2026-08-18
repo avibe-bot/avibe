@@ -67,7 +67,7 @@ function AccessModeSelect({
           aria-label={t('chat.showPage.sharingModeCurrent', {
             mode: t(`chat.showPage.sharingModes.${value}`),
           })}
-          className="flex h-9 w-full items-center gap-2 rounded-md border border-border bg-background px-3 text-left text-[13px] font-medium text-foreground outline-none transition hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-9 w-40 items-center gap-2 rounded-md border border-border bg-background px-3 text-left text-[13px] font-medium text-foreground outline-none transition hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         >
           <CurrentIcon data-access-icon={value} className="size-4 shrink-0 text-cyan-ink" />
           <span className="min-w-0 flex-1 truncate">{t(`chat.showPage.sharingModes.${value}`)}</span>
@@ -75,12 +75,12 @@ function AccessModeSelect({
         </button>
       </PopoverTrigger>
       <PopoverContent
-        align="start"
+        align="end"
         sideOffset={4}
         role="listbox"
         aria-label={t('chat.showPage.sharingAccess')}
         data-window-owner-id={ownerWindowId}
-        className="w-[var(--radix-popover-trigger-width)] space-y-0.5 p-1"
+        className="w-64 space-y-0.5 p-1"
       >
         {modes.map(({ mode, label, description }) => {
           const Icon = MODE_ICONS[mode];
@@ -301,36 +301,40 @@ export function ShowPageSharingSettings({
 
   return (
     <section className="space-y-2.5" aria-label={t('chat.showPage.sharingAccess')}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
-        <div className="flex shrink-0 items-center gap-1 text-[11px] text-muted" role="status">
-          {saving ? (
-            <>
-              <Loader2 className="size-3 animate-spin" />
-              {t('common.saving')}
-            </>
-          ) : (
-            <>
-              <Check className="size-3 text-mint-ink" />
-              {t('chat.showPage.sharingAutoSave')}
-            </>
-          )}
-        </div>
-      </div>
-
       {gate === 'loading' || gate === 'idle' ? (
-        <div className="flex h-9 items-center gap-1.5 text-[11px] text-muted">
-          <Loader2 className="size-3.5 animate-spin" />
-          {t('chat.showPage.loadingSharingAccess')}
+        <div className="flex min-h-9 items-center justify-between gap-3">
+          <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
+          <div className="flex items-center gap-1.5 text-[11px] text-muted">
+            <Loader2 className="size-3.5 animate-spin" />
+            {t('chat.showPage.loadingSharingAccess')}
+          </div>
         </div>
       ) : saved ? (
         <>
-          <AccessModeSelect
-            value={mode}
-            disabled={!editable}
-            onChange={changeMode}
-            ownerWindowId={ownerWindowId}
-          />
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
+              <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted" role="status">
+                {saving ? (
+                  <>
+                    <Loader2 className="size-3 animate-spin" />
+                    {t('common.saving')}
+                  </>
+                ) : (
+                  <>
+                    <Check className="size-3 text-mint-ink" />
+                    {t('chat.showPage.sharingAutoSave')}
+                  </>
+                )}
+              </div>
+            </div>
+            <AccessModeSelect
+              value={mode}
+              disabled={!editable}
+              onChange={changeMode}
+              ownerWindowId={ownerWindowId}
+            />
+          </div>
 
           {mode === 'limited' ? (
             <div className="space-y-2">
