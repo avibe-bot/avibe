@@ -4028,9 +4028,16 @@ class SQLiteBackgroundTaskStore:
                     # is stale and owns no enqueue at all.
                     return None
                 if scheduled_one_shot and expected_run_at is None:
-                    raise ValueError(
-                        "scheduler one-shot enqueue requires its expected run_at and timezone"
-                    )
+                    # The mirror image of the branch above: an APScheduler cron
+                    # generation whose definition has since become a one-shot. It
+                    # carries no schedule identity, so nothing here could retire
+                    # the replacement -- enqueueing would spend a fire the new
+                    # run_at has not reached and leave that one-shot still armed.
+                    # A stale generation owns no enqueue, so reject rather than
+                    # raise: the only caller is a scheduler callback, where an
+                    # exception is swallowed by the executor and the definition
+                    # keeps no record of the fire at all.
+                    return None
                 if (
                     scheduled_one_shot and definition["retired_at"] is not None
                 ):

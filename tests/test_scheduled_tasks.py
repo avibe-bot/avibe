@@ -130,7 +130,9 @@ class _StubScheduler:
         return self.jobs.get(job_id)
 
     def add_job(self, func, trigger, id, replace_existing, coalesce, max_instances, args):
-        self.jobs[id] = SimpleNamespace(id=id, trigger=trigger, args=args)
+        # ``func`` is retained so a test can fire a registered job exactly the way
+        # APScheduler does: ``await job.func(*job.args)``.
+        self.jobs[id] = SimpleNamespace(id=id, func=func, trigger=trigger, args=args)
 
     def remove_job(self, job_id):
         self.jobs.pop(job_id, None)
@@ -11208,6 +11210,261 @@ def test_hfr_477_stale_scheduler_enqueue_cannot_consume_a_replacement_generation
     )
     assert stale_after_cron is None
     assert store.refresh_task(task.id).schedule_type == "cron"
+
+
+@pytest.mark.parametrize("schedule", ["cron", "at"])
+def test_hfr_483_registered_job_fires_through_its_own_scheduler_arguments(
+    tmp_path: Path,
+    monkeypatch,
+    schedule: str,
+) -> None:
+    """HFR-483 -- every registered schedule enqueues from the args it registered.
+
+    ``reconcile_jobs`` gives every job its APScheduler job id so the callback can
+    reject a stale generation, but only an ``at`` job carries a run_at. Firing the
+    registered arguments -- rather than a hand-built call -- is what proves a cron
+    job never presents the job id as half of a one-shot schedule identity.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    run_at = (
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        if schedule == "at"
+        else None
+    )
+    task = store.add_task(
+        session_key="",
+        prompt="daily digest",
+        schedule_type=schedule,
+        cron="0 11 * * *" if schedule == "cron" else None,
+        run_at=run_at,
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+
+    jobs = service.scheduler.get_jobs()
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.args[0] == task.id
+    assert job.args[4] == job.id
+    if schedule == "cron":
+        assert job.id == task.id
+        assert tuple(job.args[1:4]) == (None, None, None)
+    else:
+        assert tuple(job.args[1:4]) == (run_at, "UTC", task.updated_at)
+
+    asyncio.run(job.func(*job.args))
+
+    pending = service.request_store.list_pending()
+    assert [(request.task_id, request.source_kind) for request in pending] == [
+        (task.id, "scheduler")
+    ]
+    refreshed = store.refresh_task(task.id)
+    assert refreshed is not None
+    if schedule == "cron":
+        # A recurring definition survives its own fire; only a one-shot is consumed.
+        assert refreshed.enabled is True
+        assert refreshed.retired_at is None
+    else:
+        assert refreshed.enabled is False
+        assert refreshed.retired_at is not None
+
+
+@pytest.mark.parametrize("mirror", ["fresh", "stale"])
+def test_hfr_484_in_flight_cron_fire_cannot_spend_a_replacement_one_shot(
+    tmp_path: Path,
+    monkeypatch,
+    mirror: str,
+) -> None:
+    """HFR-484 -- a cron callback that races an edit to ``at`` enqueues nothing.
+
+    A cron registration carries no schedule identity, so nothing downstream could
+    retire the replacement. Enqueueing would spend a fire the new run_at has not
+    reached and leave that one-shot still armed to run a second time.
+
+    Both layers are exercised because ``refresh_task`` is a mirror read and can
+    legitimately lag a writer on another connection (HFR-277). ``fresh`` rejects
+    in the callback; ``stale`` falls through to the storage CAS, which is the
+    real authority. Both must end with the replacement schedule registered.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="daily digest",
+        schedule_type="cron",
+        cron="0 11 * * *",
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    cron_job = service.scheduler.get_job(task.id)
+    assert cron_job is not None
+
+    writer = store if mirror == "fresh" else ScheduledTaskStore()
+    run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    replacement = writer.update_task(
+        task.id,
+        name=task.name,
+        session_key=task.session_key,
+        session_id=task.session_id,
+        prompt=task.prompt,
+        schedule_type="at",
+        post_to=task.post_to,
+        deliver_key=task.deliver_key,
+        cron=None,
+        run_at=run_at,
+        timezone_name="UTC",
+        agent_name=task.agent_name,
+        session_policy=task.session_policy,
+    )
+
+    # The already-dispatched cron callback still carries the cron registration.
+    asyncio.run(cron_job.func(*cron_job.args))
+
+    assert service.request_store.list_pending() == []
+    refreshed = ScheduledTaskStore().get_task(task.id)
+    assert refreshed is not None
+    assert refreshed.enabled is True
+    assert refreshed.retired_at is None
+    assert refreshed.run_at == run_at
+    # Either way the rejected fire hands the replacement schedule back to the
+    # scheduler. Nothing else can: the cron job that keeps firing IS the stale
+    # generation, so a rejection that left it installed would strand the
+    # one-shot -- unregistered, and never fired.
+    jobs = service.scheduler.get_jobs()
+    assert len(jobs) == 1
+    assert tuple(jobs[0].args[1:4]) == (run_at, "UTC", replacement.updated_at)
+
+
+def test_hfr_484_cron_fire_runs_the_definition_current_at_fire_time(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-484 -- a cron fire racing a benign edit runs the refreshed definition.
+
+    ``refresh_task`` is deliberate: a recurring schedule has no fire to spend, so
+    the useful reading of "run this definition now" is the definition as it stands
+    at fire time. This is the counterpart to the rejection above -- an edit that
+    keeps the definition recurring must not silently drop the fire.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="original prompt",
+        schedule_type="cron",
+        cron="0 11 * * *",
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    cron_job = service.scheduler.get_job(task.id)
+    assert cron_job is not None
+
+    writer = ScheduledTaskStore()
+    writer.update_task(
+        task.id,
+        name=task.name,
+        session_key=task.session_key,
+        session_id=task.session_id,
+        prompt="edited prompt",
+        schedule_type="cron",
+        post_to=task.post_to,
+        deliver_key=task.deliver_key,
+        cron="0 11 * * *",
+        run_at=None,
+        timezone_name="UTC",
+        agent_name=task.agent_name,
+        session_policy=task.session_policy,
+    )
+
+    asyncio.run(cron_job.func(*cron_job.args))
+
+    pending = service.request_store.list_pending()
+    assert [(request.task_id, request.prompt) for request in pending] == [
+        (task.id, "edited prompt")
+    ]
+    refreshed = store.refresh_task(task.id)
+    assert refreshed is not None
+    assert refreshed.enabled is True
+    assert refreshed.retired_at is None
+
+
+def test_hfr_484_backlogged_cron_fire_leaves_its_own_registration_alone(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-484 -- a refused cron fire only reconciles when the schedule changed.
+
+    Successor suppression refuses a fire whose predecessor has not started yet,
+    and that refusal looks exactly like the stale-generation one at the callback.
+    Reconciling on every refusal would re-register a live cron job -- and reset
+    its next fire -- each time the queue is merely backed up, so the reconcile
+    is gated on the reloaded definition no longer being that cron.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="daily digest",
+        schedule_type="cron",
+        cron="0 11 * * *",
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    cron_job = service.scheduler.get_job(task.id)
+    assert cron_job is not None
+
+    # The predecessor fire is queued and unstarted, so the next one is refused.
+    service.request_store.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        suppress_scheduler_successor=True,
+    )
+    reconciled = 0
+
+    def _count_reconcile() -> None:
+        nonlocal reconciled
+        reconciled += 1
+
+    monkeypatch.setattr(service, "reconcile_jobs", _count_reconcile)
+
+    asyncio.run(cron_job.func(*cron_job.args))
+
+    assert reconciled == 0
+    assert len(service.request_store.list_pending()) == 1
 
 
 def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
