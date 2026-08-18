@@ -186,6 +186,7 @@ def _runtime_state_signature(memory: MemoryConfig) -> tuple[object, ...]:
         memory.recovery_intent,
         memory.runtime_source(),
         memory.runtime_processing(),
+        memory.effective_multimodal_available(),
     )
 
 

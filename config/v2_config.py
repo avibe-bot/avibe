@@ -1293,6 +1293,13 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
     cloud.pop(field_name, None)
     if field_name == "runtime_apply_pending":
         cloud["runtime_apply_pending"] = True
+    elif field_name == "memory_llm_source":
+        # A source mismatch means the cached effective LLM cannot be trusted.
+        # Keep the rest of the cloud identity for diagnostics, but fail closed
+        # until the next authoritative status refresh supplies a new pair.
+        capabilities = cloud.get("capabilities")
+        if isinstance(capabilities, dict):
+            capabilities["memory_llm"] = False
     elif field_name == "applied_embedding_identity":
         live_identity = cloud.get("embedding_identity")
         if isinstance(live_identity, str) and live_identity.strip():
@@ -2190,8 +2197,11 @@ class MemoryConfig:
 
     def effective_multimodal_available(self) -> bool:
         if self.cloud_runtime_selected():
-            # Cloud chat is the declared fallback when no dedicated mm slot exists.
-            return self.cloud.runtime_ready() and self.cloud.capabilities.chat
+            # Cloud chat is the declared fallback when no dedicated mm slot exists;
+            # a dedicated multimodal slot remains valid without Chat.
+            return self.cloud.runtime_ready() and (
+                self.cloud.capabilities.multimodal or self.cloud.capabilities.chat
+            )
         return bool(self.processing.multimodal and self.processing.multimodal.complete())
 
 

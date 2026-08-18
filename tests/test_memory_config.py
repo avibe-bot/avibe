@@ -528,6 +528,40 @@ def test_memory_cloud_persists_effective_memory_llm_source() -> None:
 
 
 @pytest.mark.parametrize(
+    ("chat", "source"),
+    [(False, "chat_fallback"), (True, "future_source")],
+)
+def test_disk_recovery_of_untrusted_memory_llm_source_disables_cloud_memory(
+    tmp_path,
+    chat: bool,
+    source: str,
+) -> None:
+    config_path = tmp_path / "config.json"
+    cloud = _acknowledged_organization_cloud()
+    cloud["capabilities"]["chat"] = chat
+    cloud["memory_llm_source"] = source
+    payload = _payload(
+        {
+            "enabled": True,
+            "mode": "platform",
+            "processing": _complete_processing(),
+            "cloud": cloud,
+        }
+    )
+
+    with pytest.raises(ValueError, match="memory_llm_source"):
+        V2Config.from_payload(payload)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.cloud.memory_llm_source is None
+    assert loaded.memory.cloud.capabilities.memory_llm is False
+    assert loaded.memory.cloud.runtime_ready() is False
+    assert loaded.memory.runtime_source() == "unavailable"
+
+
+@pytest.mark.parametrize(
     ("field", "invalid"),
     [
         ("scope", "unsupported"),

@@ -206,6 +206,69 @@ def test_dedicated_memory_llm_can_activate_without_chat_capability() -> None:
     assert activated.runtime_source() == "cloud"
 
 
+def test_dedicated_multimodal_can_be_available_without_chat_capability() -> None:
+    memory = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(
+                chat=False,
+                embedding=True,
+                multimodal=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="dedicated",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+
+    assert memory.effective_multimodal_available() is True
+    assert memory.runtime_processing().multimodal is not None
+    assert memory.runtime_processing().multimodal.base_url.endswith("/mm")
+
+
+def test_chat_capability_change_reconciles_attachment_gate_for_dedicated_memory_llm() -> None:
+    current = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(
+                chat=True,
+                embedding=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="dedicated",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+    candidate = _resolved(
+        current,
+        _status(
+            chat=False,
+            memory_llm=True,
+            memory_llm_source="dedicated",
+            multimodal=False,
+            identity="emb-v1",
+            revision=2,
+        ),
+    )
+
+    assert current.runtime_source() == candidate.runtime_source() == "cloud"
+    assert current.effective_multimodal_available() is True
+    assert candidate.effective_multimodal_available() is False
+    assert candidate.cloud.runtime_apply_pending is True
+
+
 def test_chat_fallback_without_chat_capability_is_not_advertised_as_available() -> None:
     status = _status(
         chat=False,
