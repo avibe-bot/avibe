@@ -1,12 +1,19 @@
 # Model Hub contracts
 
-Status: **FINAL v5 shape, implementation-gated (2026-08-11 contract completion)**.
+Status: **FINAL shape, implementation-gated. `contract_version` is 6 (2026-08-19 usage
+metering); 5 published the 2026-08-11 contract completion.**
 
-These files describe the terminal contract for Model Hub before first release. There is
-no v4-to-v5 data migration, compatibility reader, conversion transaction, or version
-discriminator: Model Hub has not shipped. `contract_version` is 5 wherever a versioned
-object exists. The owner-approved pre-release network correction removes the earlier
-persistent network/timeout cooldown spelling without adding a compatibility path.
+These files describe the terminal contract for Model Hub before first release. No bump
+carries a data migration, compatibility reader, conversion transaction, or version
+discriminator: Model Hub has not shipped, so republishing the shape converts nothing.
+`contract_version` is 6 wherever a versioned object exists. The owner-approved
+pre-release network correction removes the earlier persistent network/timeout cooldown
+spelling without adding a compatibility path.
+
+`v5` is still written throughout these files and stays: it names the contract-completion
+generation they were authored in, and sentences such as "Minimum v5 set" or
+`adapter-interface.py`'s dated header describe what that generation said. Only
+`contract_version` — the value a consumer reads and the closure below guards — moves.
 
 The contracts and their consumers must coexist on one tested PR head before Model Hub
 can be enabled. CI evaluates that head, not individual commits. A green intermediate
@@ -83,7 +90,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-The terminal value 5 must coexist in all registered version locations on the same tested head:
+The terminal value 6 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -92,11 +99,30 @@ The terminal value 5 must coexist in all registered version locations on the sam
 - `runtime-dependency.schema.json`
 - `guard-refusal.schema.json`
 - `turn-provenance.schema.json`
+- `api-response.schema.json`
+- `api.md`
 - `core/handlers/model_hub/service.py`
 - `core/handlers/model_hub/provenance.py`
+- `ui/src/components/settings/models/types.ts`
 - `tests/test_model_hub_config.py`
 - `tests/test_model_hub_api.py`
 - `tests/test_model_hub_l3.py`
+- `tests/test_model_hub_resolution.py`
+- `tests/test_model_hub_runtime.py`
+- `ui/src/components/settings/models/*.test.*`
+
+`tests/test_model_hub_config.py::test_every_versioned_object_ends_at_the_terminal_version_the_code_writes`
+enforces the closure over whatever schemas this directory holds rather than over this
+list, so a versioned object added later is covered without an edit here. This list stays
+as the reader's map of where the value is published.
+
+One object diverges, and only in what it accepts. Every versioned object except
+`TurnProvenance` is an envelope built and consumed inside one request, so it is pinned
+to the terminal value alone. `TurnProvenance` is written to disk, where records a
+released build persisted outlive the bump that republished the shape — the same
+persisted-shape rule that governs config files. It therefore accepts the released values
+as a set ending at the terminal one, and nothing branches on which member a record
+carries.
 
 The three-value protocol closure includes `source.schema.json`, `adapter-interface.py`,
 and the byte-identical `core/handlers/model_hub/adapter.py` on the same tested head.
@@ -115,13 +141,15 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, live connection backoff, retry metadata, and model supply state. |
 | `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops, including the live connection-backoff reason without persistent network health. |
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, response-backed protocol, and inventory observation. |
-| `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. |
+| `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
+| `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, lifecycle, and health. |
 | `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
-| `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, and runtime status. |
+| `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, usage, and runtime status. |
+| `api-response.schema.json` | Machine-readable response contract and real-response exercise for every route in `api.md`, at exact route-table parity. |
 | `opencode-overlay.md` | Stable OpenCode provider/model identifiers and exact configured-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |
 | `mirror-registry.json` | Executable authority/mirror registry and terminal contract version. |

@@ -2914,7 +2914,13 @@ class ModelHubRouteHopConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
-        return cls(source_id=source_id, model_id=model_id)
+        # A hop names a model in some source's inventory, and membership is decided
+        # by an exact comparison against that inventory. So the reference has to be
+        # spelled by whatever spells the thing it refers to: normalizing one side
+        # only would turn a working chain into `model_unsupported` on upgrade.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
+        return cls(source_id=source_id, model_id=normalized_model_id(model_id))
 
     def to_payload(self) -> dict:
         return {"source_id": self.source_id, "model_id": self.model_id}
@@ -2932,10 +2938,23 @@ class ModelHubRouteConfig:
         if not isinstance(hops, list):
             raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
         parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
-        pairs = [(hop.source_id, hop.model_id) for hop in parsed]
-        if len(set(pairs)) != len(pairs):
+        # Duplicates as written stay a malformed payload. Duplicates that appear
+        # only once spelling is settled are a legacy file naming one upstream model
+        # in two spellings — the second hop could never have been reached past the
+        # first, so dropping it preserves the chain, where raising would fail the
+        # config load the persisted-shape rule requires to succeed.
+        as_written = [(hop["source_id"], hop["model_id"]) for hop in hops]
+        if len(set(as_written)) != len(as_written):
             raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
-        return cls(hops=parsed)
+        deduplicated: list[ModelHubRouteHopConfig] = []
+        seen: set[tuple[str, str]] = set()
+        for hop in parsed:
+            pair = (hop.source_id, hop.model_id)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            deduplicated.append(hop)
+        return cls(hops=tuple(deduplicated))
 
     def to_payload(self) -> dict:
         return {"hops": [hop.to_payload() for hop in self.hops]}

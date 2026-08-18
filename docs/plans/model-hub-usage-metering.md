@@ -307,6 +307,47 @@ OpenCode identity helpers by relative import without tripping it. Pre-existing a
 alone here — closing it requires ruling on `service.py`'s existing relative import of
 `STANDARD_OPENCODE_VENDOR_IDS`, which is a separate question from this stage.
 
+### Round 5 (head `8e2af4a4b`)
+
+The two remaining P2 threads. Both fixes are one line of behavior; what took the round
+was that each one, once written, exposed something the change it belonged to had left
+half-done.
+
+- **Route hops are spelled by whatever spells what they name** (`config/v2_config.py`).
+  Round 4 moved model-ID canonicalization into `ModelHubModelConfig.from_payload` so a
+  persisted inventory normalizes on load. A route hop names a model in that inventory,
+  and `inspect_exact_hop` decides membership by an exact comparison — so normalizing one
+  side only converts a working chain into `model_unsupported` on upgrade. `from_payload`
+  now applies `normalized_model_id` to the hop too. The dedup check that follows had to
+  split in two: duplicates *as written* stay a malformed payload and raise, while
+  duplicates that appear only once spelling is settled are a legacy file naming one
+  upstream model twice — the second hop was already unreachable past the first, so it
+  collapses and the chain loads, where raising would fail a config load the
+  persisted-shape rule requires to succeed.
+- **`contract_version` 5 → 6, and the persisted object that cannot follow it**
+  (9 contract files, `service.py`, `provenance.py`). The usage route is a new versioned
+  surface, so the contract's single-number closure has to move as a whole. Bumping it
+  broke `test_released_v5_permission_denied_records_degrade_at_read_boundary`, which is
+  the point: `TurnProvenance` is the only versioned object written to disk, so records a
+  released v5 build persisted outlive the bump that republished the shape. It now accepts
+  `{5, 6}` — a set ending at the terminal value — while every other versioned object,
+  being an envelope built and consumed inside one request, stays pinned to 6 alone.
+
+Two invariant tests hold the properties rather than the cases.
+`test_every_versioned_object_ends_at_the_terminal_version_the_code_writes` reads the
+accepted values out of whatever schemas the contracts directory holds and compares them
+with each other *and* with `CONTRACT_VERSION`; nothing did that before, which is how
+round 4 could have shipped a half-applied bump.
+`test_config_reload_spells_route_hops_like_the_inventory_they_name` seeds a model and the
+hop naming it in every spelling a persisted config can carry, rather than listing the
+spellings that are exempt.
+
+Writing them surfaced a third gap of the same shape: the contracts `README.md` index had
+been missing `api-response.schema.json` since before this PR and `usage-summary.schema.json`
+since this one — a file that ships but is invisible to anyone reading the index.
+`test_contracts_readme_indexes_every_file_beside_it` now compares the table with the
+directory, so the next file added is caught here instead of by whoever needed it.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

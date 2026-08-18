@@ -112,9 +112,9 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger
 
-CONTRACT_VERSION = 5
-AGENT_CHAIN_CONTRACT_VERSION = 5
-PROBE_RESULT_CONTRACT_VERSION = 5
+CONTRACT_VERSION = 6
+AGENT_CHAIN_CONTRACT_VERSION = 6
+PROBE_RESULT_CONTRACT_VERSION = 6
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -540,7 +540,7 @@ def _runtime_payload(status: EngineStatus) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 5,
+        "contract_version": 6,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
         "status": {

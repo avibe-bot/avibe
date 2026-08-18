@@ -805,7 +805,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     runtime = asyncio.run(service.runtime_start())
 
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 5
+    assert runtime["contract_version"] == 6
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -975,7 +975,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 5, "status": {"health": "ok"}}
+        return {"contract_version": 6, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -992,7 +992,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 5, "status": {"health": "installing"}}
+        return {"contract_version": 6, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -5235,7 +5235,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 5
+    assert runtime["contract_version"] == 6
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

@@ -2,9 +2,9 @@
 
 Status: **Normative v5** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 5, ...}`.
+Success envelope: `{ok: true, contract_version: 6, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 5, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 6, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -441,7 +441,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -519,7 +519,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -651,7 +651,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -742,7 +742,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -802,9 +802,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "chain": {
-    "contract_version": 5,
+    "contract_version": 6,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "chain": [
@@ -829,7 +829,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -843,9 +843,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "probe": {
-    "contract_version": 5,
+    "contract_version": 6,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -868,7 +868,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 5,
+  "contract_version": 6,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -881,7 +881,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 5,
+  "contract_version": 6,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -897,7 +897,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -956,7 +956,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -965,7 +965,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
