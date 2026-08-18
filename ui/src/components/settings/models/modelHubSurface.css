@@ -200,7 +200,7 @@
 }
 
 /* The glyph is the control: the frame draws a bare 13px hint icon beside the
-   page title, exactly like the one in the 来源 panel head, with no 26px box
+   page title, exactly like the one in the sources panel head, with no 26px box
    around it pushing the title's baseline off-centre. */
 .model-hub-shell-info {
   width: 13px;
@@ -748,7 +748,7 @@
    letting a long model list run past the dialog and off the screen. Its metrics
    live here rather than on `.model-hub-route-dialog` because the popover is
    portalled out of the dialog and inherits nothing from it — including the
-   dialog-action tokens the confirmation shares with 取消 / 保存.
+   dialog-action tokens the confirmation shares with the dialog's Cancel/Save.
 
    Bounding the panel is only half of it: the bound has to land on the list, so
    every fixed band (search, column head, confirm foot) stays out of the way and
