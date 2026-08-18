@@ -609,6 +609,82 @@ def test_existing_show_page_is_adopted_idempotently_without_changing_link_access
         store.close()
 
 
+def test_legacy_show_page_policy_reconciliation_requires_existing_page_or_project_access(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    editor = _organization_context("editor-1", instance_role="editor")
+    try:
+        with store.engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_path))
+            session_id = sessions_service.create_session(
+                connection,
+                scope_id=project["scope_id"],
+                agent_backend="codex",
+            )["id"]
+        store.ensure(session_id)
+        _paired_config(tmp_path, instance_kind="organization")
+        monkeypatch.setattr(
+            permissions,
+            "resolve_current_instance_ownership",
+            lambda: _ownership("organization", organization_id="org-1"),
+        )
+        with store.engine.begin() as connection:
+            project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "bindings": [],
+                },
+            )
+
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            api.get_show_page_access(session_id, user_context=editor)
+        with store.engine.connect() as connection:
+            assert resource_access_service.get_resource_policy(
+                "show_page",
+                session_id,
+                connection=connection,
+            ) is None
+
+        with store.engine.begin() as connection:
+            project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 2,
+                    "mode": "restricted",
+                    "bindings": [{
+                        "principal_kind": "email",
+                        "principal_value": "editor-1@example.com",
+                        "access_role": "editor",
+                    }],
+                },
+            )
+
+        response = api.get_show_page_access(session_id, user_context=editor)
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page",
+                session_id,
+                connection=connection,
+            )
+        assert response["ownership_status"] == "created"
+        assert response["can_use"] is True
+        assert response["can_manage"] is True
+        assert policy is not None
+        assert policy["owner_user_id"] == "editor-1"
+        assert policy["organization_id"] == "org-1"
+    finally:
+        store.close()
+
+
 def test_show_page_access_api_distinguishes_personal_and_organization_modes(monkeypatch, tmp_path) -> None:
     personal_home = tmp_path / "personal"
     monkeypatch.setenv("AVIBE_HOME", str(personal_home))

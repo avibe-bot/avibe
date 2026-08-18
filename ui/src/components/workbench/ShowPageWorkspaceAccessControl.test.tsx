@@ -1,10 +1,11 @@
 /** @vitest-environment jsdom */
 
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PermissionsApiError } from '@/features/permissions/api';
+import { requiresResourcePolicyNarrowing } from '@/features/permissions/policy';
 import type {
   DirectoryGroup,
   PermissionResource,
@@ -51,6 +52,8 @@ const translations: Record<string, string> = {
   'chat.showPage.workspaceReadOnly': 'Avibe Cloud owns this policy. Edit it in Avibe Cloud.',
   'chat.showPage.workspaceOwnerOnly': 'Only the Instance Owner can change Workspace access.',
   'chat.showPage.workspaceLoadError': 'Workspace access could not be loaded.',
+  'chat.showPage.workspaceNarrowTitle': 'Narrow Workspace access?',
+  'chat.showPage.workspaceNarrowBody': 'Some people may lose access as soon as this policy is applied.',
   'chat.showPage.applyWorkspaceAccess': 'Apply',
   'chat.showPage.workspaceSync.pending': 'The policy is waiting for this Avibe to apply it.',
   'chat.showPage.workspaceSync.offline': 'This Avibe has not acknowledged the latest policy.',
@@ -199,6 +202,48 @@ afterEach(() => {
 });
 
 describe('ShowPageWorkspaceAccessControl', () => {
+  it('classifies every Workspace policy reduction at the shared boundary', () => {
+    expect(requiresResourcePolicyNarrowing('public', [], 'private', [])).toBe(true);
+    expect(requiresResourcePolicyNarrowing('public', [], 'scope', ['group-active'])).toBe(true);
+    expect(requiresResourcePolicyNarrowing('scope', ['group-active'], 'private', [])).toBe(true);
+    expect(requiresResourcePolicyNarrowing(
+      'scope',
+      ['group-active', 'group-archived'],
+      'scope',
+      ['group-active'],
+    )).toBe(true);
+    expect(requiresResourcePolicyNarrowing('scope', ['group-active'], 'public', [])).toBe(false);
+    expect(requiresResourcePolicyNarrowing('private', [], 'public', [])).toBe(false);
+  });
+
+  it('confirms a Workspace policy reduction before sending it', async () => {
+    api.getResourceAccess.mockResolvedValue({
+      resource: resource({ level: 'public' }),
+    });
+    api.updateResourceAccess.mockResolvedValue({
+      ok: true,
+      resource: resource({ level: 'private', revision: 5 }),
+    });
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Private' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    const dialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(api.updateResourceAccess).not.toHaveBeenCalled();
+
+    await user.click(within(dialog as HTMLElement).getByRole('button', { name: 'Apply' }));
+    expect(api.updateResourceAccess).toHaveBeenCalledWith(
+      { resource_kind: 'show_page', resource_id: 'ses-1' },
+      'private',
+      [],
+      4,
+      'inst-1',
+    );
+  });
+
   it('saves Organization and selected-group policies and reloads the canonical group selection', async () => {
     api.updateResourceAccess
       .mockResolvedValueOnce({ ok: true, resource: resource({ level: 'public', revision: 5 }) })
@@ -222,6 +267,8 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(screen.getByRole('radio', { name: 'Selected groups' }));
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
+    const narrowingDialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    await user.click(within(narrowingDialog as HTMLElement).getByRole('button', { name: 'Apply' }));
     expect(api.updateResourceAccess).toHaveBeenLastCalledWith(
       { resource_kind: 'show_page', resource_id: 'ses-1' },
       'scope',
@@ -307,6 +354,8 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
+    const narrowingDialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    await user.click(within(narrowingDialog as HTMLElement).getByRole('button', { name: 'Apply' }));
 
     expect(await screen.findByText(/Your draft was kept/)).toBeTruthy();
     expect(screen.getByRole('checkbox', { name: 'Design' }).getAttribute('aria-checked')).toBe('true');
@@ -322,6 +371,30 @@ describe('ShowPageWorkspaceAccessControl', () => {
       5,
       'inst-1',
     );
+  });
+
+  it('disables the mounted editor when the authoritative conflict refresh fails', async () => {
+    api.getPermissions
+      .mockResolvedValueOnce(permissions())
+      .mockRejectedValueOnce(new PermissionsApiError(503, {
+        error: 'permissions_backend_unavailable',
+      }));
+    api.updateResourceAccess.mockRejectedValueOnce(new PermissionsApiError(409, {
+      error: 'permission_revision_conflict',
+      current_revision: 5,
+    }));
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Organization' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect(await screen.findByText('Workspace access could not be loaded.')).toBeTruthy();
+    expect((screen.getByRole('radio', { name: 'Private' }) as HTMLButtonElement).disabled).toBe(true);
+    const apply = screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement;
+    expect(apply.disabled).toBe(true);
+    await user.click(apply);
+    expect(api.updateResourceAccess).toHaveBeenCalledTimes(1);
   });
 
   it('fails closed for personal, pending, and conflicting ownership without contacting Permissions', () => {

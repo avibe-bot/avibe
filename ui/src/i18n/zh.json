@@ -3595,6 +3595,8 @@
       "workspaceReadOnly": "此策略由 Avibe Cloud 管理，请前往 Avibe Cloud 修改。",
       "workspaceOwnerOnly": "只有 Instance Owner 可以修改 Workspace 访问。",
       "workspaceLoadError": "无法加载 Workspace 访问设置。",
+      "workspaceNarrowTitle": "收紧 Workspace 访问权限？",
+      "workspaceNarrowBody": "策略应用后，部分用户可能立即失去访问权限。",
       "applyWorkspaceAccess": "应用",
       "workspaceSync": {
         "pending": "策略正在等待此 Avibe 应用。",

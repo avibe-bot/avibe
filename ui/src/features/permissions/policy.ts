@@ -3,6 +3,7 @@ import type {
   PermissionProject,
   PrincipalKind,
   ProjectBinding,
+  ResourceAccessLevel,
 } from './types';
 
 export type ProjectAccessMode = 'inherit' | 'owner_only' | 'restricted';
@@ -65,4 +66,18 @@ export function requiresProjectNarrowing(
     const next = nextByPrincipal.get(bindingKey(binding));
     return !next || (binding.access_role === 'editor' && next.access_role === 'viewer');
   });
+}
+
+export function requiresResourcePolicyNarrowing(
+  currentLevel: ResourceAccessLevel,
+  currentGroupIds: string[],
+  nextLevel: ResourceAccessLevel,
+  nextGroupIds: string[],
+): boolean {
+  if (currentLevel === 'public') return nextLevel !== 'public';
+  if (currentLevel === 'private') return nextLevel === 'scope';
+  if (nextLevel === 'private') return true;
+  if (nextLevel === 'public') return false;
+  const nextGroups = new Set(nextGroupIds);
+  return currentGroupIds.some((groupId) => !nextGroups.has(groupId));
 }

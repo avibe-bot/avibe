@@ -468,9 +468,7 @@ def _runtime_credentials(config: V2Config) -> tuple[str, str, str]:
 def _request_config(
     config: V2Config | None,
 ) -> tuple[V2Config, Callable[[], V2Config]]:
-    if config is not None:
-        return config, lambda: config
-    return V2Config.load(), V2Config.load
+    return (config if config is not None else V2Config.load()), V2Config.load
 
 
 def _guard_current_pairing(
@@ -496,6 +494,15 @@ def _mutation_payload(payload: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
 
 def _cache_path() -> Path:
     return paths.get_state_dir() / CACHE_FILENAME
+
+
+def _cache_file_lock(path: Path):
+    """Return the cross-process lock for projection read-compare-write updates."""
+
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_name(f".{path.stem}.lock"))
 
 
 def _write_cache(instance_id: str, projection: dict[str, Any]) -> None:
@@ -556,16 +563,19 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
 def _cache_projection(instance_id: str, projection: Any) -> None:
     validated = _validated_projection(projection, instance_id)
     with _CACHE_LOCK:
-        cached = _read_cache(instance_id)
-        if (
-            cached is not None
-            and cached.projection["instance"]["authorization_revision"]
-            > validated["instance"]["authorization_revision"]
-        ):
-            return
         try:
-            _write_cache(instance_id, validated)
-        except OSError:
+            cache_path = _cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with _cache_file_lock(cache_path):
+                cached = _read_cache(instance_id)
+                if (
+                    cached is not None
+                    and cached.projection["instance"]["authorization_revision"]
+                    > validated["instance"]["authorization_revision"]
+                ):
+                    return
+                _write_cache(instance_id, validated)
+        except (OSError, TimeoutError):
             logger.warning("Unable to cache the current Permissions projection", exc_info=True)
 
 

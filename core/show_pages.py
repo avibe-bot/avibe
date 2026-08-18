@@ -764,8 +764,9 @@ class ShowPageStore:
 
         return permissions.resolve_current_instance_ownership()
 
-    @staticmethod
+    @classmethod
     def _reconcile_resource_policy(
+        cls,
         connection,
         session_id: str,
         user_context: Any,
@@ -773,6 +774,13 @@ class ShowPageStore:
     ) -> dict[str, Any]:
         from storage import resource_access_service
 
+        current_policy = resource_access_service.get_resource_policy(
+            "show_page",
+            session_id,
+            connection=connection,
+        )
+        if current_policy is None and not user_context.can_use_show_page(session_id):
+            cls._require_project_edit_access(connection, session_id, user_context)
         owner_user_id = (
             user_context.subject
             if user_context.subject and user_context.has_role("editor")

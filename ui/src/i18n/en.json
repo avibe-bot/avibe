@@ -3595,6 +3595,8 @@
       "workspaceReadOnly": "Avibe Cloud owns this policy. Edit it in Avibe Cloud.",
       "workspaceOwnerOnly": "Only the Instance Owner can change Workspace access.",
       "workspaceLoadError": "Workspace access could not be loaded.",
+      "workspaceNarrowTitle": "Narrow Workspace access?",
+      "workspaceNarrowBody": "Some people may lose access as soon as this policy is applied.",
       "applyWorkspaceAccess": "Apply",
       "workspaceSync": {
         "pending": "The policy is waiting for this Avibe to apply it.",

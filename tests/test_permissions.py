@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 from typing import Any
 
 import pytest
@@ -39,7 +40,27 @@ def _config(instance_id: str = "inst-123") -> V2Config:
     cloud.backend_url = "https://backend.example"
     cloud.instance_id = instance_id
     cloud.instance_secret = "device-secret"
+    config.save()
     return config
+
+
+def _cache_projection_process(
+    projection: dict[str, Any],
+    entered_write,
+    release_write,
+) -> None:
+    original_write = permissions._write_cache  # noqa: SLF001
+
+    if entered_write is not None:
+        def delayed_write(instance_id: str, candidate: dict[str, Any]) -> None:
+            entered_write.set()
+            if not release_write.wait(10):
+                raise TimeoutError("cache write was not released")
+            original_write(instance_id, candidate)
+
+        permissions._write_cache = delayed_write  # noqa: SLF001
+
+    permissions._cache_projection("inst-123", projection)  # noqa: SLF001
 
 
 def _projection(instance_id: str = "inst-123") -> dict:
@@ -518,13 +539,14 @@ def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeyp
 def test_permissions_cache_remains_atomic_without_os_fchmod(monkeypatch) -> None:
     monkeypatch.delattr(permissions.os, "fchmod", raising=False)
     projection = _complete_projection()
+    config = _config()
     monkeypatch.setattr(
         permissions.requests,
         "request",
         lambda *_args, **_kwargs: _Response(200, projection),
     )
 
-    result = permissions.get_current_permissions(_config())
+    result = permissions.get_current_permissions(config)
     cached = permissions._read_cache("inst-123")  # noqa: SLF001
     assert result.source == "live"
     assert cached is not None
@@ -543,7 +565,7 @@ def test_permissions_cache_remains_atomic_without_os_fchmod(monkeypatch) -> None
         lambda *_args, **_kwargs: _Response(200, newer),
     )
 
-    live = permissions.get_current_permissions(_config())
+    live = permissions.get_current_permissions(config)
     retained = permissions._read_cache("inst-123")  # noqa: SLF001
 
     assert live.projection == newer
@@ -551,6 +573,44 @@ def test_permissions_cache_remains_atomic_without_os_fchmod(monkeypatch) -> None
     assert retained.projection == projection
     cache_path = permissions._cache_path()  # noqa: SLF001
     assert list(cache_path.parent.glob(f".{cache_path.name}.*")) == []
+
+
+def test_permissions_cache_revision_is_monotonic_across_processes() -> None:
+    stale = _complete_projection()
+    stale["instance"]["authorization_revision"] = 3
+    newer = _complete_projection()
+    newer["instance"]["authorization_revision"] = 4
+    context = mp.get_context("spawn")
+    entered_write = context.Event()
+    release_write = context.Event()
+    stale_writer = context.Process(
+        target=_cache_projection_process,
+        args=(stale, entered_write, release_write),
+    )
+    newer_writer = context.Process(
+        target=_cache_projection_process,
+        args=(newer, None, None),
+    )
+
+    try:
+        stale_writer.start()
+        assert entered_write.wait(10)
+        newer_writer.start()
+        release_write.set()
+        stale_writer.join(10)
+        newer_writer.join(10)
+        assert stale_writer.exitcode == 0
+        assert newer_writer.exitcode == 0
+    finally:
+        release_write.set()
+        for process in (stale_writer, newer_writer):
+            if process.is_alive():
+                process.terminate()
+            process.join(5)
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection["instance"]["authorization_revision"] == 4
 
 
 @pytest.mark.parametrize(
@@ -782,7 +842,9 @@ def test_permissions_rejects_inflight_results_after_the_pairing_tuple_changes(
             return super().json()
 
     def request(_method, _url, **_kwargs):
-        setattr(config.remote_access.vibe_cloud, credential_field, replacement)
+        current = V2Config.load()
+        setattr(current.remote_access.vibe_cloud, credential_field, replacement)
+        current.save()
         if operation == "get":
             payload = backend_projection
         elif operation == "authorized_users":
@@ -848,7 +910,9 @@ def test_permissions_rejects_cached_fallback_after_inflight_pairing_change(
     permissions._cache_projection("inst-123", cached_projection)  # noqa: SLF001
 
     def request(_method, _url, **_kwargs):
-        config.remote_access.vibe_cloud.instance_id = "inst-new"
+        current = V2Config.load()
+        current.remote_access.vibe_cloud.instance_id = "inst-new"
+        current.save()
         raise requests.ConnectionError()
 
     monkeypatch.setattr(permissions.requests, "request", request)

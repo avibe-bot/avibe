@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import {
   getPermissions,
@@ -12,6 +13,7 @@ import {
   PermissionsApiError,
   updateResourceAccess,
 } from '@/features/permissions/api';
+import { requiresResourcePolicyNarrowing } from '@/features/permissions/policy';
 import type {
   DirectoryGroup,
   PermissionResource,
@@ -63,6 +65,7 @@ export function ShowPageWorkspaceAccessControl({
   const [level, setLevel] = useState<ResourceAccessLevel>('private');
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [confirmNarrowing, setConfirmNarrowing] = useState(false);
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const generationRef = useRef(0);
   const sessionIdRef = useRef(sessionId);
@@ -154,6 +157,7 @@ export function ShowPageWorkspaceAccessControl({
     setLevel('private');
     setGroupIds([]);
     setSaving(false);
+    setConfirmNarrowing(false);
     setErrorCode(null);
     if (active && organizationReady) void load();
     return () => {
@@ -181,11 +185,11 @@ export function ShowPageWorkspaceAccessControl({
   );
   const editable = canManageInstance
     && localMutationAllowed
-    && gate !== 'loading'
+    && (gate === 'ready' || gate === 'conflict')
     && !saving;
   const invalid = level === 'scope' && targetGroupIds.length === 0;
 
-  const save = async () => {
+  const commit = async () => {
     if (!resource || !instanceId || !dirty || invalid || !editable) return;
     const generation = generationRef.current;
     const requestSessionId = sessionId;
@@ -216,6 +220,7 @@ export function ShowPageWorkspaceAccessControl({
       ) return;
       if (isRevisionConflict(caught)) {
         setSaving(false);
+        setConfirmNarrowing(false);
         await load('conflict', draft);
         return;
       }
@@ -225,8 +230,26 @@ export function ShowPageWorkspaceAccessControl({
       if (
         generation === generationRef.current
         && requestSessionId === sessionIdRef.current
-      ) setSaving(false);
+      ) {
+        setSaving(false);
+        setConfirmNarrowing(false);
+      }
     }
+  };
+
+  const save = async () => {
+    if (!resource || !instanceId || !dirty || invalid || !editable) return;
+    const draft = draftRef.current;
+    if (requiresResourcePolicyNarrowing(
+      resource.access.access_level,
+      resource.access.group_ids,
+      draft.level,
+      draft.level === 'scope' ? uniqueSorted(draft.groupIds) : [],
+    )) {
+      setConfirmNarrowing(true);
+      return;
+    }
+    await commit();
   };
 
   return (
@@ -376,6 +399,15 @@ export function ShowPageWorkspaceAccessControl({
           </Button>
         </div>
       ) : null}
+      <ConfirmDialog
+        open={confirmNarrowing}
+        onOpenChange={setConfirmNarrowing}
+        title={t('chat.showPage.workspaceNarrowTitle')}
+        description={t('chat.showPage.workspaceNarrowBody')}
+        confirmLabel={t('chat.showPage.applyWorkspaceAccess')}
+        confirmDisabled={!editable}
+        onConfirm={commit}
+      />
     </section>
   );
 }
