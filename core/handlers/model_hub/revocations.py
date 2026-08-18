@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast, get_args
+
+from .state_file import write_state_document
 
 
 RevocationOperation = Literal[
@@ -80,23 +80,17 @@ class CredentialRevocationJournal:
         return entries
 
     def _write(self, entries: list[PendingCredentialRevocation]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [
-            {
-                "source_id": entry.source_id,
-                "credential_ref": entry.credential_ref,
-                "operation": entry.operation,
-            }
-            for entry in entries
-        ]
-        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, self.path)
+        write_state_document(
+            self.path,
+            [
+                {
+                    "source_id": entry.source_id,
+                    "credential_ref": entry.credential_ref,
+                    "operation": entry.operation,
+                }
+                for entry in entries
+            ],
+        )
 
     def add(
         self,

@@ -651,9 +651,8 @@ async def _read_stream_prelude(
     raise for the call to be metered.
     """
 
-    if not prelude.write(first):
+    if not _received(first, prelude=prelude, wire_state=wire_state):
         return _prelude_ended_outcome(source, model_id, response.status)
-    wire_state.observe(first)
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -677,10 +676,35 @@ async def _read_stream_prelude(
             if completion is not None:
                 return completion
             return _prelude_ended_outcome(source, model_id, response.status)
-        if not prelude.write(chunk):
+        if not _received(chunk, prelude=prelude, wire_state=wire_state):
             return _prelude_ended_outcome(source, model_id, response.status)
-        wire_state.observe(chunk)
     return None
+
+
+def _received(
+    chunk: bytes,
+    *,
+    prelude: _StreamPrelude,
+    wire_state: ProtocolSSEState,
+) -> bool:
+    """Take receipt of bytes the wire delivered: read them, then keep a copy.
+
+    Two different questions get asked about the same bytes, and only the second
+    one can fail: what they say, and whether there is room to store a replay of
+    them. Asking the storage question first lets a full prelude erase the report
+    that arrived in the chunk that filled it — tokens the vendor billed, delivered
+    on the socket, dropped because we had nowhere to put a copy. Whether we can
+    hold a copy is not a question about what happened.
+
+    Every earlier round of this class was the reading half: a fact was observed
+    and some ending could not reach it. This is the writing half, and it has no
+    reader-side remedy at all — bytes nobody observed leave nothing behind to fall
+    back to. So this is the sole caller of ``prelude.write``, and an arrival site
+    added later cannot reorder the two questions by forgetting which comes first.
+    """
+
+    wire_state.observe(chunk)
+    return prelude.write(chunk)
 
 
 def _prelude_ended_outcome(

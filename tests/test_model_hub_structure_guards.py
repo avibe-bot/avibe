@@ -1111,3 +1111,38 @@ def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:
         seen_states.add(settlement_state)
         assert state.terminal_outcome == (None if settlement_state == "pending" else settlement_state)
     assert seen_states == set(STREAM_BOUNDARY_DIMENSIONS["settlement_state"])
+
+
+def test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them() -> None:
+    """Review 4965677908: a full prelude must not erase a report it received.
+
+    Two questions get asked about the same bytes and only the second can fail:
+    what they say, and whether there is room to keep a replay of them. Every
+    arrival site therefore hands them to one owner, and that owner reads before
+    it stores — so a site added later cannot reintroduce the order that drops a
+    usage frame the vendor already billed.
+    """
+
+    source = CLIENT.read_text(encoding="utf-8")
+    assert source.count("prelude.write(") == 1
+    owner = ast.get_source_segment(source, _functions(_tree(CLIENT))["_received"])
+    assert owner is not None
+    assert "prelude.write(" in owner
+    assert owner.index("wire_state.observe(") < owner.index("prelude.write(")
+
+
+def test_model_hub_state_documents_have_one_atomic_replacement_owner() -> None:
+    """Review 4965677908: a failed replacement must not leave a temp file behind.
+
+    Cleanup is unobservable from outside — the writers swallow ``OSError`` so a
+    full disk cannot break metering — so it cannot be maintained one collection
+    at a time. A module that spells its own temporary file is a second owner of
+    the property, whether or not it remembers the cleanup.
+    """
+
+    owners = set()
+    for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
+        text = module.read_text(encoding="utf-8")
+        if any(marker in text for marker in ("tempfile", "os.replace", "os.rename")):
+            owners.add(module.name)
+    assert owners == {"state_file.py"}

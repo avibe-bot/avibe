@@ -22,8 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -32,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Final, Optional, Sequence
 
 from .identifiers import canonical_model_id
+from .state_file import write_state_document
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
 
 logger = logging.getLogger(__name__)
@@ -299,25 +298,8 @@ class BoundedUsageLedger:
         return sorted(rows.values(), key=_row_key)
 
     def _write(self, rows: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         retained = sorted(rows, key=_recency)[-self.max_rows :]
-        content = json.dumps(
-            sorted(retained, key=_row_key),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=self.path.parent,
-            delete=False,
-        ) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, self.path)
+        write_state_document(self.path, sorted(retained, key=_row_key))
 
     def record(
         self,

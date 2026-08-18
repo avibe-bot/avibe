@@ -269,6 +269,76 @@ def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
     asyncio.run(run())
 
 
+def test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-USAGE-005, review 4965677908: the vendor billed the frame that broke the buffer.
+
+    Every earlier round of this class was a reader that could not reach an
+    observed fact. This one is the producer: the socket delivered a complete
+    usage report, and the only reason it would go unrecorded is that the prelude
+    had no room left to keep a replay of the bytes carrying it. Whether we can
+    store a copy is not a question about what the upstream said.
+    """
+
+    async def run() -> None:
+        message_start = (
+            b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+            b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+        )
+        filler = b": " + b"k" * 4090 + b"\n\n"
+        budget = len(filler) + len(message_start) - 1
+        reads = iter([filler, message_start])
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=budget, total_limit=budget)
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return next(reads)
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_overflowbill",
+            vendor="anthropic",
+            protocol="anthropic",
+            base_url="https://overflow.example.test",
+            credential_ref="cred_overflowbill",
+            allowed_origins=("codex",),
+            model_ids=("claude-sonnet-4-5",),
+            prefix="overflow",
+        )
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15222", "management", "gateway")
+        )
+
+        handle = await client.invoke(source, "claude-sonnet-4-5", {}, stream=True)
+        outcome = await handle.outcome()
+
+        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
+        assert outcome.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
+
+    asyncio.run(run())
+
+
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = (

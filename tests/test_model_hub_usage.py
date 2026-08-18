@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from core.handlers.model_hub import state_file
 from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
@@ -1115,6 +1116,33 @@ def test_a_record_leaves_no_temporary_file_behind(tmp_path: Path) -> None:
     ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
 
     assert [entry.name for entry in ledger.path.parent.iterdir()] == [ledger.path.name]
+
+
+def test_a_write_that_fails_leaves_neither_residue_nor_a_damaged_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MH-USAGE-003, review 4965677908: a failed replacement must cost only that write.
+
+    The recorder above this ledger swallows `OSError` so a full disk cannot break
+    metering, which means nobody downstream ever sees what a failed write left
+    behind. A ledger bounded to `max_rows` whose state directory gains one orphan
+    per failure is not bounded, and a half-written document would lose the days
+    already recorded — so the write either lands whole or changes nothing.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+    recorded = ledger.path.read_bytes()
+
+    def refuse(*_args, **_kwargs) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(state_file.os, "replace", refuse)
+    with pytest.raises(OSError):
+        ledger.record(source_id="src_b", model_id="model-y", usage=None, at=NOW)
+
+    assert [entry.name for entry in ledger.path.parent.iterdir()] == [ledger.path.name]
+    assert ledger.path.read_bytes() == recorded
 
 
 def test_days_bucket_by_the_host_calendar_not_utc(tmp_path: Path) -> None:

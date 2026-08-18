@@ -6679,7 +6679,7 @@ def test_no_downstream_ending_after_adoption_can_drop_the_turn_from_the_ledger(
 def test_the_tokens_the_engine_already_read_survive_every_ending_before_our_first(
     tmp_path: Path,
 ) -> None:
-    """Review 4965405530: the engine read the head of this body before we did.
+    """MH-USAGE-001, review 4965405530: the engine read this body's head before we did.
 
     The gateway asks the engine for a stream, and the engine only knows there is
     one because it read far enough to see the first model output — which for
@@ -6926,7 +6926,7 @@ def test_a_surfaced_buffered_error_still_meters_the_tokens_it_billed(
 def test_a_billed_failover_hop_is_metered_against_the_source_that_billed_it(
     tmp_path: Path,
 ) -> None:
-    """Every hop that reported tokens billed its own Source, not the last one."""
+    """MH-USAGE-002: every hop that reported tokens billed its own Source, not the last one."""
 
     async def exercise() -> None:
         first = _source("src_meterhop001", "Billed hop")
@@ -7078,7 +7078,7 @@ def test_a_downstream_disconnect_meters_the_terminal_frame_exactly_once(
 def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
     tmp_path: Path,
 ) -> None:
-    """A ledger read-modify-write is file I/O; the controller loop must not wait."""
+    """MH-USAGE-004: a ledger read-modify-write is file I/O; the loop must not wait."""
 
     async def exercise() -> None:
         recording_threads: list[int] = []

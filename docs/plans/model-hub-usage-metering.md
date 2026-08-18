@@ -666,6 +666,58 @@ reader asking only fakes for it. The behavioural test reuses round 10's enumerat
 form, driving the same `FakeStreamResponse` failure points and asserting the prelude's
 1028 input tokens land in the ledger at every one of them.
 
+### Round 12 (head `69c51cbaf`)
+
+Three findings. One is class C a ninth time, but through the half every earlier round
+was not.
+
+**Reader half versus producer half.** Rounds 7 through 11 were all readers: a fact had
+been observed, and some ending could not reach it. Each fix pointed one more ending at
+the observation. This finding is upstream of all of them — bytes the socket delivered
+that nobody extracted. `_read_stream_prelude` asked the storage question before the
+reading question, so a `prelude.write` that refused the chunk which overflowed the
+16 MiB budget returned before anything parsed it. A vendor that reports usage in the
+frame that happens to land past the budget was billed and never metered, and no
+reader-side fallback can recover it: unobserved bytes leave nothing behind to fall back
+to.
+
+**Why `_received` is the terminal form.** Two questions get asked about the same bytes
+and only the second can fail — what they say, and whether there is room to keep a replay
+of them. Whether we can hold a copy is not a question about what happened upstream, so
+it cannot come first. Both arrival sites now go through one owner that observes before it
+buffers, and that owner is the sole caller of `prelude.write`, so an arrival site added
+later cannot reorder the two questions by forgetting which comes first. The overflow path
+then reaches `ended()`, which has attached the wire's report to the outcome since round 7.
+`test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them` states the
+ordering; `test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered`
+drives it, with the overflowing chunk carrying a complete `message_start`.
+
+**Class D: five copies of one durability property.** The review flagged
+`usage.py:_write` for leaving its temporary file behind when the replacement raised. The
+members were enumerable immediately: `revocations.py`, `events.py`, `usage.py`,
+`provenance.py`, and `oauth.py` each carried the same seven lines — mkdir, compact
+credential-free `json.dumps`, `NamedTemporaryFile`, fsync, `chmod 0o600`, `os.replace` —
+so one orphan was really five latent orphans in one directory. Nothing downstream can
+notice: the recorders swallow `OSError` deliberately, so a full disk cannot break
+metering. A ledger bounded to `max_rows` whose state directory grows by one file per
+failed write is not bounded. `state_file.write_state_document` now owns the property and
+the five call sites shrank to one to three lines each. The guard is enumeration-free by
+construction: no module in the package other than `state_file.py` may name `tempfile`,
+`os.replace`, or `os.rename`, so a sixth collection cannot spell its own replacement.
+
+**Scope decision on the sixth site.** `config/v2_config._atomic_write_text` is the same
+property in another subsystem and is already correct, including directory fsync. Promoting
+both onto one owner would mean editing a widely used config module inside a metering PR
+for no behavioural gain, so it stays where it is; the shared home is worth revisiting when
+something else needs it.
+
+**Class E: the catalog rows this stage never wrote.** Five `MH-USAGE-*` scenarios now name
+the properties the stage actually claims — a reported token count surviving the turn's
+ending, per-hop attribution on failover, a failed write costing only that write, the
+read-modify-write staying off the event loop, and a report surviving a full prelude buffer.
+`tests/test_model_hub_l3.py` and `tests/test_model_hub_usage.py` join `canonical_tests` and
+the project index, and each scenario ID is greppable from its test's docstring.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

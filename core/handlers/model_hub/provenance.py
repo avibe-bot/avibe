@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import secrets
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +31,7 @@ from .events import (
     event_reason_label,
 )
 from .resolver import ModelHubTurnResolution, source_eligible_for_backend
+from .state_file import write_state_document
 
 
 BackendName = Literal["claude", "codex", "opencode"]
@@ -707,24 +706,7 @@ class BoundedProvenanceStore:
         return self._read_path(self.path)
 
     def _write_path(self, path: Path, records: list[dict]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(
-            records[-self.max_entries :],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            delete=False,
-        ) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temporary_path = tmp.name
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, path)
+        write_state_document(path, records[-self.max_entries :])
 
     def _write(self, records: list[dict]) -> None:
         self._write_path(self.path, records)
