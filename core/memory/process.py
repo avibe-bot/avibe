@@ -610,6 +610,7 @@ class EverOSProcess:
     def restart_authorized(self) -> bool:
         """Whether this supervisor still owns a current or future launch."""
 
+        watch_task = self._watch_task
         restart_task = self._restart_task
         return bool(
             self._desired_running
@@ -617,6 +618,7 @@ class EverOSProcess:
             and (
                 self.running
                 or self._starting
+                or (watch_task is not None and not watch_task.done())
                 or (restart_task is not None and not restart_task.done())
             )
         )

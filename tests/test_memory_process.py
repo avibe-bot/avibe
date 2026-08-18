@@ -1944,6 +1944,44 @@ def _supervising(process: EverOSProcess, child: _ExitedChild) -> None:
     process._owned_processes = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
 
 
+async def test_exited_child_watcher_retains_restart_authority_until_retry_is_scheduled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An exit watcher owns the old settings until it chooses a terminal state."""
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    child = _ExitedChild()
+    _supervising(process, child)
+    process._desired_running = True
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def terminate(*_args, **_kwargs) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    watch_task = asyncio.create_task(process._watch_child(child))
+    process._watch_task = watch_task
+
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    assert process.running is False
+    assert process._restart_task is None
+    assert process.restart_authorized is True
+
+    release_cleanup.set()
+    await asyncio.wait_for(watch_task, timeout=0.5)
+    assert process._restart_task is not None
+    assert process.restart_authorized is True
+    await process.stop()
+    assert process.restart_authorized is False
+
+
 def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
