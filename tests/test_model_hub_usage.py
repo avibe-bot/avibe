@@ -382,7 +382,23 @@ def test_a_document_with_no_readable_report_yields_none(payload: dict) -> None:
 # --- Persistence: bounded, credential-free, and safe to load -----------------
 
 
+class _Clock:
+    """The moment a write happens, which a test moves independently of `at`.
+
+    They are the same clock read at two times, and the gap between them is the
+    point: `at` is captured when a call ends, this is read when its row is
+    persisted, and metering runs off the event loop in between.
+    """
+
+    def __init__(self, moment: datetime) -> None:
+        self.moment = moment
+
+    def __call__(self) -> datetime:
+        return self.moment
+
+
 def _ledger(tmp_path: Path, **kwargs) -> BoundedUsageLedger:
+    kwargs.setdefault("now", _Clock(NOW + timedelta(hours=12)))
     return BoundedUsageLedger(tmp_path / "state" / "usage.json", **kwargs)
 
 
@@ -505,12 +521,14 @@ def test_a_requested_window_is_clamped_to_what_is_retained(
 
 
 def test_retention_drops_rows_past_the_horizon(tmp_path: Path) -> None:
-    ledger = _ledger(tmp_path, retention_days=3)
+    clock = _Clock(NOW - timedelta(days=10))
+    ledger = _ledger(tmp_path, retention_days=3, now=clock)
 
-    ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW - timedelta(days=10))
+    ledger.record(source_id="src_a", model_id="model-x", usage=None, at=clock.moment)
     assert len(ledger.window(days=3, now=NOW - timedelta(days=10))) == 1
 
-    # Recording under a later day is what advances the horizon.
+    # Writing under a later day is what advances the horizon.
+    clock.moment = NOW
     ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
     persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
     assert [row["day"] for row in persisted] == [local_usage_day(NOW).isoformat()]
@@ -578,7 +596,8 @@ def test_a_new_call_is_metered_whatever_recency_the_ledger_already_claims(
     without editing this test.
     """
 
-    ledger = _ledger(tmp_path, max_rows=3)
+    clock = _Clock(NOW)
+    ledger = _ledger(tmp_path, max_rows=3, now=clock)
     ahead = NOW + timedelta(days=400)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
     ledger.path.write_text(
@@ -607,7 +626,41 @@ def test_a_new_call_is_metered_whatever_recency_the_ledger_already_claims(
 
     rows = {row["model_id"]: row for row in ledger.window(days=30, now=NOW)}
     assert rows["model-new"]["requests"] == 1
-    assert all(datetime.fromisoformat(row["last_metered_at"]) <= NOW for row in rows.values())
+    assert all(
+        datetime.fromisoformat(row["last_metered_at"]) <= clock.moment for row in rows.values()
+    )
+
+
+def test_a_write_never_rewrites_what_a_later_stamped_write_already_persisted(
+    tmp_path: Path,
+) -> None:
+    """Review 4964520496: one call's stamp cannot bound the whole ledger.
+
+    Metering runs off the event loop, so concurrent calls reach the lock in
+    whatever order the executor ran them, not in stamp order. Seed one row of
+    every shape a later-stamped write can leave behind — an instant this write
+    has not reached, and a day it has not reached — then let the earlier-stamped
+    write land on top of them. It contributes its own row and nothing else;
+    stating that rather than listing the two shapes covers whatever a later write
+    persists next.
+    """
+
+    clock = _Clock(NOW)
+    ledger = _ledger(tmp_path, now=clock)
+    for model_id, stamp in (
+        ("model-later-instant", NOW + timedelta(minutes=5)),
+        ("model-later-day", NOW + timedelta(days=1)),
+    ):
+        clock.moment = stamp
+        ledger.record(source_id="src_a", model_id=model_id, usage=None, at=stamp)
+    persisted = {row["model_id"]: row for row in json.loads(ledger.path.read_text("utf-8"))}
+
+    # Captured before both of them, reaching the lock after both.
+    ledger.record(source_id="src_a", model_id="model-earlier", usage=None, at=NOW)
+
+    after = {row["model_id"]: row for row in json.loads(ledger.path.read_text("utf-8"))}
+    assert {model_id: after.get(model_id) for model_id in persisted} == persisted
+    assert after["model-earlier"]["requests"] == 1
 
 
 @pytest.mark.parametrize(

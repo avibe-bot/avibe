@@ -592,7 +592,8 @@ class ModelHubService:
             paths.get_state_dir() / "model_hub_turn_provenance.json"
         )
         self.usage = usage or BoundedUsageLedger(
-            paths.get_state_dir() / "model_hub_usage.json"
+            paths.get_state_dir() / "model_hub_usage.json",
+            now=now,
         )
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(

@@ -393,6 +393,66 @@ instead of costing a review round.
 shape a persisted row can use to outrank the present (future day, future instant, both)
 rather than listing the ones that are handled.
 
+### Round 7 (head `ac907286b`)
+
+Two P2 findings. One of them is class C again — a fourth findings-bearing head for
+that class — and the other is a regression introduced by round 6's own fix.
+
+- **Class C — metering population coverage, closed by removing the question**
+  (`core/handlers/model_hub/turn_gateway.py`). Round 3 gave "what tokens did upstream
+  report" one owner, `_TurnExecution.reported_usage`, because a boundary that ends the
+  turn early cannot know which shape the response took. Its sibling question — "did
+  this call reach the model" — was left to the endings, and each answered in the
+  vocabulary of the shape it happened to see: the buffered ending read the settlement
+  decision, the streaming ending read the wire tracker, and the boundary read the wire
+  tracker *and a buffered turn never has one*, so `served` there was structurally
+  `False`. A complete upstream body carrying no usage block, cancelled downstream
+  mid-settlement, was therefore never counted. That is why the class kept recurring at
+  a new site each round: the finding is not any one ending, it is that endings answer
+  at all.
+
+  So the closure is not a third owner but one fewer question. `reached_model` joins
+  `reported_usage` on `_TurnExecution` — reading `wire_state.reached_model` for a
+  stream and the buffered observation's own `outcome == "served"` otherwise, which the
+  gateway already computed and discarded — and `_record_usage` now takes only the turn.
+  An ending is a *when*, never a *what*; an ending added later cannot get this wrong
+  because it has nothing to pass in.
+
+- **A ledger-wide bound cannot come from one call's stamp**
+  (`core/handlers/model_hub/usage.py`). Round 6 fixed retention by measuring the window
+  against a clock instead of the file — and then handed it `at`, the *captured* moment
+  the call ended. Metering runs off the event loop, so concurrent calls reach the lock
+  in whatever order the executor ran them: a call stamped just before local midnight
+  persisting after one stamped just after it dated the newer row into the future and
+  dropped it, and a same-day inversion clamped a newer `last_metered_at` backward.
+
+  `at` and the horizon are the same clock read at two different times, and the gap is
+  the whole point — so the ledger now takes the clock, not a moment, and reads it under
+  the lock where the write happens. `at` decides this call's bucket and stamp and
+  nothing else, bounded by that reading because nothing is metered later than the write
+  that records it. The hub's callers pass their own clock in, so a fixed service clock
+  still decides every day the ledger writes; this is one clock read at the right place,
+  not a second clock. Round 6's ceiling property is unchanged and now holds under
+  concurrency.
+
+Three invariant tests, each proven to fail without its fix.
+`test_a_cancelled_buffered_turn_is_counted_even_when_it_reported_no_tokens` is the
+existing cancellation test with the one thing removed that was carrying it, the usage
+block; without the fix it fails with `KeyError: 'requests'`, nothing metered at all.
+`test_no_ending_of_a_turn_decides_for_itself_what_the_call_did` asserts the closure
+rather than today's three endings: every `_record_usage` call passes the turn and
+nothing else. `test_a_write_never_rewrites_what_a_later_stamped_write_already_persisted`
+seeds one row of every shape a later-stamped concurrent write can leave behind — an
+instant this write has not reached, and a day it has not reached — and asserts the
+earlier-stamped write contributes its own row and changes nothing else; without the fix
+it reproduces both harms at once, one row dropped and one clamped backward.
+
+The ledger's clock also removes a latent test defect: retention was previously measured
+against whatever moment a test happened to pass as `at`, so the fixed 2026-07-29 clock
+in `test_model_hub_l3.py` would have started failing once the wall clock drifted past
+the retention horizon from it. Ledger construction now carries the same fake clock as
+its service.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

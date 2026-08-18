@@ -26,7 +26,7 @@ import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Final, Optional
+from typing import Callable, Final, Optional
 
 from .identifiers import canonical_model_id
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
@@ -57,6 +57,20 @@ _COUNTER_SUBSETS: Final = (
     ("cached_input_tokens", "input_tokens"),
     ("token_reports", "requests"),
 )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _aware(moment: datetime) -> datetime:
+    """Read one caller-supplied moment, taking a naive one as local time.
+
+    The same rule `_instant` applies to persisted text, so a naive value means the
+    same thing however it reached this module.
+    """
+
+    return moment if moment.tzinfo is not None else moment.astimezone()
 
 
 def local_usage_day(moment: datetime) -> date:
@@ -227,10 +241,15 @@ class BoundedUsageLedger:
         *,
         max_rows: int = USAGE_MAX_ROWS,
         retention_days: int = USAGE_RETENTION_DAYS,
+        now: Callable[[], datetime] = _utc_now,
     ):
         self.path = path
         self.max_rows = max_rows
         self.retention_days = retention_days
+        # Not a second clock: hub callers pass their own so a fixed service clock
+        # still decides every day this ledger writes. What matters is that this one
+        # is *read* where the write happens rather than handed in from a call.
+        self._now = now
         self._lock = threading.RLock()
 
     def _read(self) -> list[dict]:
@@ -310,32 +329,44 @@ class BoundedUsageLedger:
         The new row goes through the same normalization as a persisted one, so
         what this module writes and what it reads can never disagree about a
         bound, a subset, or an identity.
+
+        `at` is a value the caller captured when its call ended; the horizon and
+        the ceiling below are a reading taken where the write happens. The two are
+        not interchangeable, because metering runs off the event loop and reaches
+        this lock in whatever order the executor ran it: a call stamped just before
+        local midnight can persist after one stamped just after it. Handing the
+        captured value to a ledger-wide bound would then date the newer row into
+        the future and drop it. So `at` decides this call's own bucket and stamp
+        and nothing else — up to the moment it is persisted, since nothing is
+        metered later than the write that records it.
         """
 
-        increment = _normalize_row(
-            {
-                "day": local_usage_day(at).isoformat(),
-                "source_id": source_id,
-                "model_id": model_id,
-                "requests": 1,
-                "token_reports": 1 if usage is not None else 0,
-                "input_tokens": usage.input_tokens if usage else 0,
-                "cached_input_tokens": usage.cached_input_tokens if usage else 0,
-                "output_tokens": usage.output_tokens if usage else 0,
-                "last_metered_at": at.isoformat(),
-            }
-        )
-        if increment is None:
-            # Unreachable for anything the hub admits: both boundaries that accept
-            # a model id store the canonical form this row is keyed by. Loud rather
-            # than silent so a future boundary that forgets shows up as lost
-            # metering instead of as a quietly incomplete tab.
-            logger.warning(
-                "Model Hub usage metering skipped a call with an unusable identifier",
-                extra={"source_id_usable": canonical_model_id(source_id) is not None},
-            )
-            return
         with self._lock:
+            persisted_at = _aware(self._now())
+            metered_at = min(_aware(at), persisted_at)
+            increment = _normalize_row(
+                {
+                    "day": local_usage_day(metered_at).isoformat(),
+                    "source_id": source_id,
+                    "model_id": model_id,
+                    "requests": 1,
+                    "token_reports": 1 if usage is not None else 0,
+                    "input_tokens": usage.input_tokens if usage else 0,
+                    "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+                    "output_tokens": usage.output_tokens if usage else 0,
+                    "last_metered_at": metered_at.isoformat(),
+                }
+            )
+            if increment is None:
+                # Unreachable for anything the hub admits: both boundaries that
+                # accept a model id store the canonical form this row is keyed by.
+                # Loud rather than silent so a future boundary that forgets shows
+                # up as lost metering instead of as a quietly incomplete tab.
+                logger.warning(
+                    "Model Hub usage metering skipped a call with an unusable identifier",
+                    extra={"source_id_usable": canonical_model_id(source_id) is not None},
+                )
+                return
             rows = {_row_key(row): row for row in self._read()}
             existing = rows.get(_row_key(increment))
             if existing is None:
@@ -346,10 +377,10 @@ class BoundedUsageLedger:
                     existing["last_metered_at"],
                     increment["last_metered_at"],
                 )
-            retained = self._retained(list(rows.values()), at)
+            retained = self._retained(list(rows.values()), persisted_at)
             self._write(retained)
 
-    def _retained(self, rows: list[dict], now: datetime) -> list[dict]:
+    def _retained(self, rows: list[dict], measured: datetime) -> list[dict]:
         """Keep the rows this ledger's own clock can place, bounded at both edges.
 
         `window` already refuses to report a row dated after today, so a future row
@@ -366,9 +397,10 @@ class BoundedUsageLedger:
         That is not evidence of a misplaced row, only of an unmeasurable recency, so
         it is bounded rather than dropped: the file supplies the instant, this module
         supplies its spelling and its ceiling.
+
+        `measured` is read at the write, never handed in from a call — see `record`.
         """
 
-        measured = now if now.tzinfo is not None else now.astimezone()
         today = local_usage_day(measured)
         oldest = (today - timedelta(days=self.retention_days - 1)).isoformat()
         newest = today.isoformat()

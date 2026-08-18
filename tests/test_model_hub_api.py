@@ -330,7 +330,10 @@ def _service(tmp_path, adapter=None):
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
-        usage=BoundedUsageLedger(tmp_path / "usage.json"),
+        usage=BoundedUsageLedger(
+            tmp_path / "usage.json",
+            now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        ),
         native_oauth_adapter=adapter,
         oauth_flows=OAuthFlowRegistry(
             tmp_path / "oauth_flows.json",

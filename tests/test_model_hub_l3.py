@@ -1160,7 +1160,7 @@ def _service(
         adapter=ProbeAdapter(outcomes or [], live_handles),
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
-        usage=BoundedUsageLedger(tmp_path / "usage.json"),
+        usage=BoundedUsageLedger(tmp_path / "usage.json", now=lambda: NOW),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: NOW,
         requested_model_override=store.requested_model,
@@ -6287,6 +6287,90 @@ def test_a_buffered_response_cancelled_while_settling_is_still_metered(
         assert metered["output_tokens"] == 21
 
     asyncio.run(exercise())
+
+
+def test_a_cancelled_buffered_turn_is_counted_even_when_it_reported_no_tokens(
+    tmp_path: Path,
+) -> None:
+    """Review 4964520496: a request is self-measured, so a silent vendor still owes one.
+
+    Same cancellation as above with the one thing removed that was carrying it —
+    the usage block. `requests` is measured by our own code and must not depend on
+    what upstream chose to report, which is exactly what `token_reports` staying
+    at zero records.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterbuf02", "Cancelled silent turn")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (b'{"output":[{"type":"message","content":[]}]}',),
+                )
+            ],
+        )
+        settling = asyncio.Event()
+        release = asyncio.Event()
+        settle_handle_outcome = service.settle_handle_outcome
+
+        async def blocked_settlement(*args: object, **kwargs: object):
+            settling.set()
+            await release.wait()
+            return await settle_handle_outcome(*args, **kwargs)
+
+        service.settle_handle_outcome = blocked_settlement
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_buffered_silent_cancel",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(settling.wait(), timeout=1)
+        turn.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_no_ending_of_a_turn_decides_for_itself_what_the_call_did() -> None:
+    """The metering facts have one owner, so an ending is a *when*, not a *what*.
+
+    Endings that answered locally answered in the vocabulary of the shape they
+    happened to see, and the boundary — which can see either — got the buffered
+    one wrong. An ending added later is covered by construction if it cannot pass
+    the answer in, so that is what is asserted rather than today's three endings.
+    """
+
+    path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
+    calls = [
+        node
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_record_usage"
+    ]
+
+    assert calls, "the gateway must still meter the calls whose body it forwards"
+    assert all(len(call.args) == 1 and not call.keywords for call in calls)
 
 
 def test_gateway_meters_a_failed_turn_that_upstream_already_billed(
