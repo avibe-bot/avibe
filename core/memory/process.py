@@ -120,9 +120,6 @@ _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
-# Legacy records store wall-clock ``create_time``. Accept a bounded drift only
-# when every other deciding fact still names this installation's child.
-_LEGACY_CREATE_TIME_DRIFT_SECONDS = 300.0
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 _REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
@@ -3136,8 +3133,6 @@ def _legacy_recorded_wall_create_time(identity: _ProcessIdentity) -> float | Non
 def _legacy_create_time_mismatch_verdict(
     record: object,
     identity: _ProcessIdentity,
-    recorded_create_time: float,
-    live_wall_create_time: float | None,
     *,
     socket_path: Path,
     provider_root: Path,
@@ -3145,18 +3140,13 @@ def _legacy_create_time_mismatch_verdict(
 ) -> _RecordedSidecar | None:
     """Resolve a legacy wall-clock ``create_time`` mismatch.
 
-    Returns ``None`` when the mismatch is a bounded clock step of our own
-    child, so the caller continues as if the stamp matched. A disclosed
-    contradiction is ``NOT_OURS``. A withheld deciding fact other than
-    ``EVEROS_ROOT`` is ``UNVERIFIABLE``. ``EVEROS_ROOT`` is required positive
-    proof for the clock-step exception; without it the mismatch stays the
-    historical recycled-pid ``NOT_OURS`` verdict.
+    Legacy wall-clock values can move by any amount after a clock correction,
+    so their magnitude is not identity evidence. Returns ``None`` only when
+    the exact command, uid, and provider root still prove this installation's
+    child. A disclosed contradiction is ``NOT_OURS`` and a withheld deciding
+    fact is ``UNVERIFIABLE``.
     """
 
-    if live_wall_create_time is None:
-        return _RecordedSidecar.UNVERIFIABLE
-    if abs(live_wall_create_time - recorded_create_time) > _LEGACY_CREATE_TIME_DRIFT_SECONDS:
-        return _RecordedSidecar.NOT_OURS
     if _recorded_child_python_missing(record):
         return _RecordedSidecar.UNVERIFIABLE
     command_match = _cmdline_matches_recorded_child(
@@ -3218,8 +3208,6 @@ def _classify_recorded_child(
         drift_verdict = _legacy_create_time_mismatch_verdict(
             record,
             identity,
-            recorded_create_time,
-            live_recorded_stamp,
             socket_path=socket_path,
             provider_root=provider_root,
             role=role,
@@ -3267,8 +3255,8 @@ def _classify_recorded_sidecar(
     the identity stamp, the real uid, and the exact ``-m`` entrypoint plus
     ``--uds`` argument all agree with the record. New records prefer
     ``starttime_ticks``; a legacy wall-clock ``create_time`` mismatch may still
-    be ``OURS`` when cmdline, uid, and ``EVEROS_ROOT`` all match within a
-    bounded drift. Any single disclosed fact that contradicts the record
+    be ``OURS`` when cmdline, uid, and ``EVEROS_ROOT`` all match. Any single
+    disclosed fact that contradicts the record
     settles the matter as ``NOT_OURS`` -- a recycled pid or another user's
     process is safe to stop worrying about. What must not be waved through is
     a live pid whose deciding facts were never disclosed: treating it as gone

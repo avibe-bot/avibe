@@ -306,7 +306,7 @@ async def test_live_parent_keeps_record_when_identity_stamp_is_linux_ticks(
                 cmdline=("avibe",),
                 uid=uid,
                 environment={},
-                wall_create_time=8.25 + 48.0,
+                wall_create_time=8.25 + 86_400.0,
             )
         }
     )
@@ -344,7 +344,7 @@ async def test_legacy_sync_child_with_wall_clock_record_is_not_removed_as_recycl
                 cmdline=tuple(record["argv"]),
                 uid=uid,
                 environment=environment,
-                wall_create_time=10.5 + 48.0,
+                wall_create_time=10.5 + 86_400.0,
             )
         }
     )
@@ -356,6 +356,43 @@ async def test_legacy_sync_child_with_wall_clock_record_is_not_removed_as_recycl
     assert host.signals
     assert host.signals[0][0] == {451: 424_242.0}
     assert not ownership.path.exists()
+
+
+async def test_legacy_sync_child_with_clock_step_still_rejects_mismatched_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    record = _record(root, state="finalized", pid=451)
+    environment = {
+        "EVEROS_ROOT": str(root),
+        "AVIBE_MEMORY_CHILD_ROLE": SYNC_ROLE,
+        SYNC_NONCE_ENV: "a" * 64,
+        SYNC_PARENT_PID_ENV: "99",
+        SYNC_PARENT_CREATE_TIME_ENV: float(8.25).hex(),
+        SYNC_PARENT_UID_ENV: "" if uid is None else str(uid),
+    }
+    host = _Host(
+        {
+            451: _ProcessIdentity(
+                stamp=424_242.0,
+                cmdline=(str(root.parent / "runtime" / "bin" / "python"), "-m", "other"),
+                uid=uid,
+                environment=environment,
+                wall_create_time=10.5 + 86_400.0,
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    await ownership.reconcile()
+
+    assert not ownership.path.exists()
+    assert host.signals == []
 
 
 async def test_legacy_sync_child_without_wall_time_keeps_record(

@@ -1498,11 +1498,11 @@ def test_creation_stamp_falls_back_to_create_time_off_linux(
     assert memory_process._process_creation_stamp(_Proc()) == _ORPHAN_CREATE_TIME
 
 
-def test_legacy_record_accepts_bounded_create_time_drift_when_facts_match(
+def test_legacy_record_accepts_arbitrary_create_time_drift_when_facts_match(
     tmp_path: Path,
 ) -> None:
     ticks = 424_242.0
-    drifted = _ORPHAN_CREATE_TIME + 48.0
+    drifted = _ORPHAN_CREATE_TIME + 86_400.0
     host = _FakeProcessHost(live_processes={_ORPHAN_PID: ticks})
     process = _orphan_process(tmp_path, host=host)
     host.identities[_ORPHAN_PID] = _orphan_identity(
@@ -1528,7 +1528,7 @@ def test_legacy_record_rejects_create_time_drift_when_cmdline_mismatches(
         _orphan_identity(
             process,
             create_time=424_242.0,
-            wall_create_time=_ORPHAN_CREATE_TIME + 48.0,
+            wall_create_time=_ORPHAN_CREATE_TIME + 86_400.0,
             cmdline=(sys.executable, "-m", "http.server"),
             environment={"EVEROS_ROOT": str(process.provider_root)},
         ),
@@ -1546,7 +1546,7 @@ def test_legacy_record_treats_undisclosed_cmdline_as_unverifiable_on_create_time
         _orphan_identity(
             process,
             create_time=424_242.0,
-            wall_create_time=_ORPHAN_CREATE_TIME + 48.0,
+            wall_create_time=_ORPHAN_CREATE_TIME + 86_400.0,
             cmdline=None,
             environment={"EVEROS_ROOT": str(process.provider_root)},
         ),
@@ -1608,12 +1608,12 @@ def test_sidecar_record_omits_wall_create_time_when_undisclosed(
     assert recorded["starttime_ticks"] == 4242.0
 
 
-def test_legacy_linux_ticks_identity_reaps_when_live_wall_drift_is_bounded(
+def test_legacy_linux_ticks_identity_reaps_after_arbitrary_wall_clock_step(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     ticks = 424_242.0
-    drifted_wall = _ORPHAN_CREATE_TIME + 48.0
+    drifted_wall = _ORPHAN_CREATE_TIME + 86_400.0
     helper = {_ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 1}
     host = _FakeProcessHost(
         process_groups={_ORPHAN_PID: _ORPHAN_PID},
@@ -1638,7 +1638,7 @@ def test_legacy_linux_ticks_identity_reaps_when_live_wall_drift_is_bounded(
     assert not record_path.exists()
 
 
-def test_legacy_linux_ticks_identity_rejects_live_wall_drift_beyond_bound(
+def test_legacy_linux_ticks_identity_accepts_large_wall_drift_with_exact_facts(
     tmp_path: Path,
 ) -> None:
     process = _orphan_process(tmp_path)
@@ -1647,12 +1647,12 @@ def test_legacy_linux_ticks_identity_rejects_live_wall_drift_beyond_bound(
         _orphan_identity(
             process,
             stamp=424_242.0,
-            wall_create_time=_ORPHAN_CREATE_TIME + 301.0,
+            wall_create_time=_ORPHAN_CREATE_TIME + 7 * 86_400.0,
             environment={"EVEROS_ROOT": str(process.provider_root)},
         ),
         socket_path=process.socket_path,
         provider_root=process.provider_root,
-    ) is _RecordedSidecar.NOT_OURS
+    ) is _RecordedSidecar.OURS
 
 
 def test_new_sidecar_role_record_reaps_with_exact_role_environment(tmp_path: Path) -> None:
