@@ -696,6 +696,15 @@ def _authorization_revision_file_signature(path: Path) -> tuple[int, int, int, i
     )
 
 
+def _read_authorization_revision_payload(path: Path) -> Any:
+    """Read the watermark payload, treating malformed content as absent."""
+
+    try:
+        return runtime.read_json(path)
+    except (OSError, TypeError, ValueError, UnicodeDecodeError):
+        return None
+
+
 def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float] | None:
     global _AUTHORIZATION_REVISION_CACHE
 
@@ -713,8 +722,17 @@ def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float]
         )
         if cache_matches and cached.file_signature == file_signature:
             return cached.revision, cached.source_updated_at
-        payload = runtime.read_json(state_path)
+        payload = _read_authorization_revision_payload(state_path)
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            if cache_matches and cached is not None:
+                _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+                    state_path=state_path,
+                    instance_id=instance_id,
+                    revision=cached.revision,
+                    source_updated_at=cached.source_updated_at,
+                    file_signature=file_signature,
+                )
+                return cached.revision, cached.source_updated_at
             if cache_matches:
                 _AUTHORIZATION_REVISION_CACHE = None
             return None
@@ -726,6 +744,15 @@ def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float]
             revision = _normalize_authorization_revision(payload.get("authorization_revision"))
             source_updated_at = float(payload["source_updated_at"])
         except (KeyError, TypeError, ValueError):
+            if cache_matches and cached is not None:
+                _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+                    state_path=state_path,
+                    instance_id=instance_id,
+                    revision=cached.revision,
+                    source_updated_at=cached.source_updated_at,
+                    file_signature=file_signature,
+                )
+                return cached.revision, cached.source_updated_at
             if cache_matches:
                 _AUTHORIZATION_REVISION_CACHE = None
             return None
@@ -788,7 +815,7 @@ def _install_authorization_revision(
         try:
             state_path.parent.mkdir(parents=True, exist_ok=True)
             with _authorization_revision_file_lock(state_path):
-                persisted = runtime.read_json(state_path)
+                persisted = _read_authorization_revision_payload(state_path)
                 persisted_revision = None
                 if (
                     isinstance(persisted, dict)

@@ -418,6 +418,59 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(api.updateResourceAccess).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves the draft when a failed PUT is recovered with Retry', async () => {
+    api.getPermissions.mockResolvedValueOnce(permissions()).mockResolvedValueOnce(permissions());
+    api.getResourceAccess
+      .mockResolvedValueOnce({ resource: resource() })
+      .mockResolvedValueOnce({ resource: resource() });
+    api.updateResourceAccess.mockRejectedValueOnce(new PermissionsApiError(503, {
+      error: 'permissions_backend_unavailable',
+    }));
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Design' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(await screen.findByText('Workspace access could not be loaded.')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('checkbox', { name: 'Design' });
+    expect(screen.getByRole('radio', { name: 'Selected groups' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('checkbox', { name: 'Design' }).getAttribute('aria-checked')).toBe('true');
+    expect(api.updateResourceAccess).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the draft when the conflict refresh fails before a Retry', async () => {
+    api.getPermissions
+      .mockResolvedValueOnce(permissions())
+      .mockRejectedValueOnce(new PermissionsApiError(503, {
+        error: 'permissions_backend_unavailable',
+      }))
+      .mockResolvedValueOnce(permissions());
+    api.getResourceAccess
+      .mockResolvedValueOnce({ resource: resource() })
+      .mockResolvedValueOnce({ resource: resource() })
+      .mockResolvedValueOnce({ resource: resource() });
+    api.updateResourceAccess.mockRejectedValueOnce(new PermissionsApiError(409, {
+      error: 'permission_revision_conflict',
+      current_revision: 5,
+    }));
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Design' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(await screen.findByText('Workspace access could not be loaded.')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('checkbox', { name: 'Design' });
+    expect(screen.getByRole('radio', { name: 'Selected groups' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('checkbox', { name: 'Design' }).getAttribute('aria-checked')).toBe('true');
+    expect(api.updateResourceAccess).toHaveBeenCalledOnce();
+  });
+
   it('fails closed for personal, pending, and conflicting ownership without contacting Permissions', () => {
     const personal = renderControl(showPageAccess({
       mode: 'personal',

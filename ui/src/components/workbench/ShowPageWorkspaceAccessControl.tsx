@@ -252,6 +252,10 @@ export function ShowPageWorkspaceAccessControl({
     await commit();
   };
 
+  const retryLoad = useCallback(() => {
+    void load('ready', resource ? draftRef.current : undefined);
+  }, [load, resource]);
+
   return (
     <section className="space-y-2.5" aria-label={t('chat.showPage.workspaceAccess')}>
       <div>
@@ -392,7 +396,7 @@ export function ShowPageWorkspaceAccessControl({
             size="icon"
             variant="ghost"
             className="size-7 shrink-0"
-            onClick={() => void load()}
+            onClick={retryLoad}
             aria-label={t('common.retry')}
           >
             <RefreshCw className="size-3.5" />

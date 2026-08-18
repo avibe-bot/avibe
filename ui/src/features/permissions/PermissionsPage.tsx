@@ -351,12 +351,25 @@ function AccessEntryDialog({
     : normalizePrincipal(kind, value);
   const candidate: AccessEntry = { kind, value: resolvedValue, role };
   const originalKey = originalEntry.current ? accessEntryKey(originalEntry.current) : null;
-  const authoritativeIndex = originalKey === null
+  const candidateKey = accessEntryKey(candidate);
+  const originalIndex = originalKey === null
     ? -1
     : entries.findIndex((entry) => accessEntryKey(entry) === originalKey);
-  const nextEntries = originalKey === null || authoritativeIndex < 0
-    ? [...entries, candidate]
-    : entries.map((entry, index) => (index === authoritativeIndex ? candidate : entry));
+  const candidateIndex = entries.findIndex((entry) => accessEntryKey(entry) === candidateKey);
+  const nextEntries = (() => {
+    const filtered = entries.filter((entry) => {
+      const key = accessEntryKey(entry);
+      return key !== originalKey && key !== candidateKey;
+    });
+    if (candidateIndex >= 0) {
+      filtered.splice(Math.min(candidateIndex, filtered.length), 0, candidate);
+    } else if (originalIndex >= 0) {
+      filtered.splice(Math.min(originalIndex, filtered.length), 0, candidate);
+    } else {
+      filtered.push(candidate);
+    }
+    return filtered;
+  })();
 
   const refreshConflict = async (): Promise<boolean> => {
     const latest = await onRefresh();
@@ -376,11 +389,11 @@ function AccessEntryDialog({
       ? null
       : latestEntries.find((entry) => accessEntryKey(entry) === originalKey) ?? null;
     const latestCandidate = latestEntries.find(
-      (entry) => accessEntryKey(entry) === accessEntryKey(candidate),
+      (entry) => accessEntryKey(entry) === candidateKey,
     );
     if (
       latestCandidate?.role === candidate.role
-      && (originalKey === null || originalKey === accessEntryKey(candidate) || latestOriginal === null)
+      && (originalKey === null || originalKey === candidateKey || latestOriginal === null)
     ) {
       setConflict(false);
       setRefreshRequired(false);

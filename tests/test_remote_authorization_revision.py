@@ -22,6 +22,7 @@ from storage import remote_access_authorization_service
 from storage.lock import MigrationLockTimeout
 from vibe import remote_access, ui_server
 from vibe.authorization import context_from_session_payload
+from vibe.sse_broker import broker
 from vibe.ui_compat import g
 from vibe.ui_server import app
 
@@ -1057,6 +1058,82 @@ def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
         "error": "authorization_revision_sync_failed",
     }
     assert remote_access.current_authorization_revision(config) == 41
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        b"\xff",
+        b"{not-json",
+        b'{"schema_version":1,"instance_id":"inst_123","authorization_revision":"bad","source_updated_at":0}',
+    ),
+)
+def test_authorization_revision_read_treats_malformed_content_as_absent(
+    monkeypatch,
+    tmp_path,
+    malformed,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    remote_access._authorization_revision_state_path().write_bytes(malformed)  # noqa: SLF001
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+
+    assert remote_access.current_authorization_revision(config) is None
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        b"\xff",
+        b"{not-json",
+        b'{"schema_version":1,"instance_id":"inst_123","authorization_revision":"bad","source_updated_at":0}',
+    ),
+)
+def test_authorization_acknowledgement_keeps_memory_revision_when_rewrite_fails(
+    monkeypatch,
+    tmp_path,
+    malformed,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    state_path = remote_access._authorization_revision_state_path()  # noqa: SLF001
+    state_path.write_bytes(malformed)
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    published = []
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+    monkeypatch.setattr(
+        broker,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+
+    assert remote_access.acknowledge_authorization_revision(config, 42) == 42
+    assert remote_access.current_authorization_revision(config) == 42
+    assert published == [
+        ("authorization.changed", {"instance_authorization_revision": 42})
+    ]
+
+
+def test_authorization_revision_sync_keeps_strict_write_after_malformed_read(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    remote_access._authorization_revision_state_path().write_bytes(b"\xff")  # noqa: SLF001
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+
+    with pytest.raises(OSError, match="read-only state"):
+        remote_access._replace_authorization_revision(config, 42)  # noqa: SLF001
 
 
 def test_paired_session_requires_signed_current_revision(monkeypatch, tmp_path):

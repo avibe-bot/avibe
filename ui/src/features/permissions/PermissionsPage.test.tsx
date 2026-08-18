@@ -1215,6 +1215,68 @@ describe('PermissionsPage conflict handling', () => {
     expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { draftRole: 'editor' as const, concurrentRole: 'viewer' as const },
+    { draftRole: 'viewer' as const, concurrentRole: 'editor' as const },
+  ])('rebases a principal replacement collision without duplicating the candidate', async ({
+    draftRole,
+    concurrentRole,
+  }) => {
+    const initial = response();
+    initial.projection.access.entries = [
+      { kind: 'email', value: 'old@example.com', role: 'viewer' },
+    ];
+    const latest = response();
+    latest.projection.instance.authorization_revision = 5;
+    latest.projection.access.entries = [
+      { kind: 'email', value: 'old@example.com', role: 'viewer' },
+      { kind: 'email', value: 'replacement@example.com', role: concurrentRole },
+    ];
+    api.getPermissions
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(latest);
+    api.replaceAuthorizedUsers
+      .mockRejectedValueOnce(new PermissionsApiError(409, {
+        error: 'permission_revision_conflict',
+        current_revision: 5,
+      }))
+      .mockResolvedValueOnce({
+        ok: true,
+        instance_id: 'inst-123',
+        authorization_revision: 6,
+        entries: [{ kind: 'email', value: 'replacement@example.com', role: draftRole }],
+      });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'permissions.actions.editAccess' }));
+    await user.clear(screen.getByLabelText('permissions.fields.principal'));
+    await user.type(screen.getByLabelText('permissions.fields.principal'), 'replacement@example.com');
+    if (draftRole === 'editor') {
+      await user.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    }
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    const firstNarrowing = (await screen.findByText('permissions.access.narrowTitle')).closest('[role="dialog"]');
+    await user.click(within(firstNarrowing as HTMLElement).getByRole('button', {
+      name: 'permissions.actions.save',
+    }));
+
+    expect(await screen.findByText('permissions.states.conflictTitle')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.retrySave' }));
+    const retryNarrowing = (await screen.findByText('permissions.access.narrowTitle')).closest('[role="dialog"]');
+    await user.click(within(retryNarrowing as HTMLElement).getByRole('button', {
+      name: 'permissions.actions.save',
+    }));
+
+    await waitFor(() => expect(api.replaceAuthorizedUsers).toHaveBeenCalledTimes(2));
+    expect(api.replaceAuthorizedUsers.mock.calls[1]).toEqual([
+      [{ kind: 'email', value: 'replacement@example.com', role: draftRole }],
+      5,
+      'inst-123',
+    ]);
+    expect(screen.queryByText('permissions.errors.duplicate_access_principal')).toBeNull();
+  });
+
   it('keeps an access draft mounted when the conflict refresh fails', async () => {
     const initial = response();
     initial.projection.access.entries = [
