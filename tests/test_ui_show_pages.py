@@ -1017,6 +1017,18 @@ def test_limited_guest_lease_survives_rotation_only_for_that_browser(
         environ_base=_remote_peer(),
     )
     assert continuing.status_code == 200
+    rotated_navigation = admitted.get(
+        f"/p/{old_share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={
+            "Accept": "text/html",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        },
+        follow_redirects=False,
+    )
+    assert rotated_navigation.status_code == 404
     fresh_old_link = app.test_client().get(
         f"/p/{old_share_id}/",
         base_url="https://alex.avibe.bot",
@@ -1176,6 +1188,13 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             environ_base=_remote_peer(),
         )
         assert existing_asset.status_code == 200
+        html_subresource = client.get(
+            f"/p/{share_id}/index.html",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+        )
+        assert html_subresource.status_code == 200
 
         stale_limited_navigation = client.get(
             f"/p/{share_id}/",

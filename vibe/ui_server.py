@@ -13092,6 +13092,22 @@ def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIR
     return True
 
 
+def _is_show_page_document_navigation(
+    asset_path: str,
+    starlette_request: FastAPIRequest,
+) -> bool:
+    """Return whether a request carries browser document-navigation evidence."""
+    if starlette_request.method not in {"GET", "HEAD"}:
+        return False
+    fetch_mode = starlette_request.headers.get("sec-fetch-mode", "").lower()
+    fetch_dest = starlette_request.headers.get("sec-fetch-dest", "").lower()
+    if fetch_mode or fetch_dest:
+        return fetch_mode == "navigate" and fetch_dest in {"document", "iframe"}
+    # Clients without Fetch Metadata can only identify the share root safely;
+    # nested paths remain resource requests unless the browser says otherwise.
+    return _decode_show_page_asset_path(asset_path) == ""
+
+
 def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
     relative = _decode_show_page_asset_path(asset_path)
     if not relative:
@@ -15321,7 +15337,11 @@ async def serve_public_show_page(share_id, asset_path):
             asset_path,
             request._request,
         )
-        if limited_guest and is_spa_navigation:
+        is_document_navigation = _is_show_page_document_navigation(
+            asset_path,
+            request._request,
+        )
+        if limited_guest and is_document_navigation:
             # A guest lease keeps an already-open page usable after an access
             # change, but it must not authorize a new page navigation after the
             # current limited-access record no longer admits that guest.
@@ -15333,6 +15353,8 @@ async def serve_public_show_page(share_id, asset_path):
                 or access.share_id != share_id
                 or lease.normalized_email not in access.normalized_emails
             ):
+                if access is not None and access.share_id != share_id:
+                    return _show_page_not_found_response()
                 limited_guest = False
         if page.visibility != "public" and is_spa_navigation:
             editor_context = await asyncio.to_thread(_show_public_editor_context)
