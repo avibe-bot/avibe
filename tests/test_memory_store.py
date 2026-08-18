@@ -2566,6 +2566,35 @@ def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatc
     assert MAX_NONTERMINAL_QUEUE_ROWS == 500
 
 
+def test_store_uses_one_physical_home_through_a_symlinked_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    physical_home = tmp_path / "volume" / "user" / ".avibe"
+    physical_home.mkdir(parents=True, mode=0o700)
+    logical_parent = tmp_path / "home"
+    logical_parent.symlink_to(tmp_path / "volume", target_is_directory=True)
+    logical_home = logical_parent / "user" / ".avibe"
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: logical_home)
+
+    store = MemoryStore()
+
+    assert store.path == physical_home / "state" / "memory" / "memory.sqlite"
+    assert store.ensure_meta().provider_root_id
+
+
+def test_store_rejects_a_path_outside_the_effective_home_without_writing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    outside = tmp_path / "outside" / "memory.sqlite"
+
+    with pytest.raises(OSError, match="within the effective Avibe home"):
+        MemoryStore(outside, effective_home=home)
+
+    assert not outside.parent.exists()
+
+
 def test_store_enforces_owner_only_directory_and_database_modes_under_open_umask(tmp_path: Path) -> None:
     database = _store_path(tmp_path / "memory-private")
     original_umask = os.umask(0o022)

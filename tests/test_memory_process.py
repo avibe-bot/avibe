@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from config import paths
 from config.v2_config import (
     MemoryConfig,
     MemoryEndpointConfig,
@@ -2636,6 +2637,79 @@ async def test_rebuild_normalizes_relative_provider_root_before_launch(
     assert memory_process._provider_rebuild_lock_path(
         provider_root=process._provider_root
     ).parent.parent == provider_parent
+
+
+def test_sidecar_and_rebuild_use_one_physical_identity_for_a_symlinked_home(
+    tmp_path: Path,
+) -> None:
+    physical_home = tmp_path / ".avibe"
+    physical_home.mkdir(mode=0o700)
+    logical_home = tmp_path / ".vibe_remote"
+    logical_home.symlink_to(physical_home, target_is_directory=True)
+    expected_home = paths.physical_home(logical_home)
+
+    sidecar = EverOSProcess(
+        sys.executable,
+        effective_home=logical_home,
+        settings=_settings(),
+    )
+    rebuild = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=logical_home,
+        settings=_settings(),
+    )
+    memory_process._prepare_memory_child_directories(
+        memory_dir=sidecar._memory_dir,
+        provider_root=sidecar.provider_root,
+        settings=sidecar._settings,
+    )
+
+    expected_provider_root = expected_home / "memory" / "everos-root"
+    assert sidecar._effective_home == expected_home
+    assert sidecar.provider_root == expected_provider_root
+    assert sidecar.socket_path == expected_home / "memory" / ".rt" / "everos.sock"
+    assert sidecar._child_environment()["EVEROS_ROOT"] == str(expected_provider_root)
+    assert rebuild._effective_home == expected_home
+    assert rebuild._provider_root == expected_provider_root
+    assert memory_process._provider_rebuild_lock_path(
+        provider_root=sidecar.provider_root,
+    ) == memory_process._provider_rebuild_lock_path(
+        provider_root=rebuild._provider_root,
+    )
+
+    logical_socket = logical_home / "memory" / ".rt" / "everos.sock"
+    logical_provider_root = logical_home / "memory" / "everos-root"
+    legacy_spelling_record = {
+        "pid": _ORPHAN_PID,
+        "create_time": _ORPHAN_CREATE_TIME,
+        "process_group": _ORPHAN_PID,
+        "socket_path": str(logical_socket),
+        "provider_root": str(logical_provider_root),
+        "role": "sidecar",
+        "python": sys.executable,
+    }
+    legacy_spelling_identity = _ProcessIdentity(
+        create_time=_ORPHAN_CREATE_TIME,
+        cmdline=(
+            sys.executable,
+            "-m",
+            _SIDECAR_ENTRYPOINT_MODULE,
+            "--uds",
+            str(logical_socket),
+        ),
+        uid=os.getuid() if hasattr(os, "getuid") else None,
+        environment={
+            "EVEROS_ROOT": str(logical_provider_root),
+            "AVIBE_MEMORY_CHILD_ROLE": "sidecar",
+        },
+    )
+    assert _classify_recorded_child(
+        legacy_spelling_record,
+        legacy_spelling_identity,
+        socket_path=sidecar.socket_path,
+        provider_root=sidecar.provider_root,
+        role=_MemoryChildRole.SIDECAR,
+    ) is _RecordedSidecar.OURS
 
 
 def test_provider_root_aliases_share_lock_identity_without_changing_access_path(

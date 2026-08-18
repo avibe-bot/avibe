@@ -32,6 +32,7 @@ from config import paths
 from core.memory.attachments import attachment_pin_root
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    ConfinedRoot,
     create_confined_file,
     ensure_private_directory,
     open_confined_directory,
@@ -533,14 +534,26 @@ class EverOSProcess:
         effective_home_path = (
             Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
         )
-        self._effective_home = Path(os.path.abspath(os.fspath(effective_home_path)))
+        filesystem_root = ConfinedRoot.from_home(effective_home_path)
+        self._effective_home = filesystem_root.physical_home
         self._memory_dir = self._effective_home / "memory"
         self._attachments_root = attachment_pin_root(self._effective_home)
         provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
-        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
-        self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
+        self._provider_root = (
+            filesystem_root.confine_if_child(provider_root_path)
+            or Path(os.path.abspath(os.fspath(provider_root_path)))
+        )
+        socket_path_value = (
+            Path(socket_path)
+            if socket_path is not None
+            else self._memory_dir / ".rt" / "everos.sock"
+        )
+        self._socket_path = (
+            filesystem_root.confine_if_child(socket_path_value)
+            or Path(os.path.abspath(os.fspath(socket_path_value)))
+        )
         self._settings = settings or EverOSProcessSettings()
         self._host = _SystemProcessHost() if _host is None else _host
         self._ownership = SidecarOwnership(
@@ -1315,13 +1328,17 @@ class EverOSRebuildProcess:
         effective_home_path = (
             Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
         )
-        self._effective_home = Path(os.path.abspath(os.fspath(effective_home_path)))
+        filesystem_root = ConfinedRoot.from_home(effective_home_path)
+        self._effective_home = filesystem_root.physical_home
         self._memory_dir = self._effective_home / "memory"
         self._attachments_root = attachment_pin_root(self._effective_home)
         provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
-        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
+        self._provider_root = (
+            filesystem_root.confine_if_child(provider_root_path)
+            or Path(os.path.abspath(os.fspath(provider_root_path)))
+        )
         self._socket_path = self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._timeout_seconds = _positive_timeout(timeout_seconds, _REBUILD_TIMEOUT_SECONDS)
@@ -1623,7 +1640,7 @@ def _require_provider_root_access_path(provider_root: Path) -> None:
         current = current.parent
 
 
-def _provider_roots_match(value: object, expected: Path) -> bool:
+def _paths_match(value: object, expected: Path) -> bool:
     if not isinstance(value, str) or not value:
         return False
     try:
@@ -1639,6 +1656,10 @@ def _provider_roots_match(value: object, expected: Path) -> bool:
         )
     except (OSError, RuntimeError):
         return False
+
+
+def _provider_roots_match(value: object, expected: Path) -> bool:
+    return _paths_match(value, expected)
 
 
 def sidecar_record_path(memory_dir: Path | str) -> Path:
@@ -2734,7 +2755,7 @@ def _record_for_this_installation(
     if not isinstance(record, dict):
         return None
     if (
-        record.get("socket_path") != str(socket_path)
+        not _paths_match(record.get("socket_path"), socket_path)
         or not _provider_roots_match(record.get("provider_root"), provider_root)
     ):
         return None
@@ -2841,7 +2862,8 @@ def _process_names_owned_runtime(
             return False
         cmdline = _disclosed_identity_field(process.cmdline)
         if role is None and cmdline is not None and (
-            str(socket_path) in cmdline or str(provider_root) in cmdline
+            _cmdline_serves_socket(cmdline, socket_path)
+            or str(provider_root) in cmdline
         ):
             return True
         environment = _disclosed_process_environment(process)
@@ -2875,7 +2897,10 @@ def _disclosed_process_environment(process: psutil.Process) -> Mapping[str, str]
 
 
 def _cmdline_serves_socket(cmdline: tuple[str, ...], socket_path: Path) -> bool:
-    return _SIDECAR_ENTRYPOINT_MODULE in cmdline and "--uds" in cmdline and str(socket_path) in cmdline
+    if _SIDECAR_ENTRYPOINT_MODULE not in cmdline or "--uds" not in cmdline:
+        return False
+    index = cmdline.index("--uds")
+    return index + 1 < len(cmdline) and _paths_match(cmdline[index + 1], socket_path)
 
 
 def _cmdline_is_sidecar(cmdline: tuple[str, ...]) -> bool:
@@ -2898,11 +2923,15 @@ def _cmdline_matches_role(
     if python is not None and cmdline[0] != str(python):
         return False
     if role is _MemoryChildRole.SIDECAR:
-        return cmdline[1:] == (
-            "-m",
-            _SIDECAR_ENTRYPOINT_MODULE,
-            "--uds",
-            str(socket_path),
+        return (
+            cmdline[1:4]
+            == (
+                "-m",
+                _SIDECAR_ENTRYPOINT_MODULE,
+                "--uds",
+            )
+            and len(cmdline) == 5
+            and _paths_match(cmdline[4], socket_path)
         )
     if role is _MemoryChildRole.CASCADE_SYNC:
         return cmdline[1:] == (

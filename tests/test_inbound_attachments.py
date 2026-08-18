@@ -221,13 +221,19 @@ async def test_materializer_preserves_legacy_two_argument_path_clients(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_materializer_rejects_symlinked_attachment_root(tmp_path: Path) -> None:
+@pytest.mark.parametrize("owned_component", ["attachments", "im"])
+async def test_materializer_rejects_symlinked_attachment_root(
+    tmp_path: Path,
+    owned_component: str,
+) -> None:
+    """Every component Avibe owns below the home stays a no-follow boundary."""
+
     home = tmp_path / "avibe-home"
-    attachments = home / "attachments"
     outside = tmp_path / "outside"
-    attachments.mkdir(parents=True)
     outside.mkdir()
-    (attachments / "im").symlink_to(outside, target_is_directory=True)
+    planted = home / "attachments" if owned_component == "attachments" else home / "attachments" / "im"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.symlink_to(outside, target_is_directory=True)
     context = MessageContext(
         user_id="U1",
         channel_id="D1",
@@ -242,6 +248,132 @@ async def test_materializer_rejects_symlinked_attachment_root(tmp_path: Path) ->
         )
 
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_materializer_traverses_a_symlinked_parent_above_the_home(
+    tmp_path: Path,
+) -> None:
+    """A home reached through symlinked parents is a layout, not an escape.
+
+    Installs where ``/home/<user>`` points at another volume, and the legacy
+    ``~/.vibe_remote`` back-symlink, both reach the Avibe home through a
+    symlink the operator owns. Linux answers ``O_NOFOLLOW | O_DIRECTORY`` on a
+    symlink with ``ENOTDIR``, so a walk that starts at ``/`` used to fail on
+    the symlinked component before reaching anything Avibe owns.
+    """
+
+    physical = tmp_path / "volume" / "user"
+    physical.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "volume", target_is_directory=True)
+    home = tmp_path / "home" / "user" / ".avibe"
+    client = _StubClient({"notes.txt": b"notes"})
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    batch = await InboundAttachmentMaterializer(effective_home=home).materialize(
+        context,
+        client,
+    )
+
+    assert batch.errors == ()
+    path = Path(batch.attachments[0].local_path or "")
+    assert path.read_bytes() == b"notes"
+    assert path.is_relative_to(physical / ".avibe" / "attachments" / "im")
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_materializer_traverses_a_symlinked_parent_for_a_declared_root(
+    tmp_path: Path,
+) -> None:
+    """The declared ``attachments_root`` carries the same anchor rule."""
+
+    physical = tmp_path / "volume" / "user"
+    physical.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "volume", target_is_directory=True)
+    attachments_root = tmp_path / "home" / "user" / ".avibe" / "attachments"
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    batch = await InboundAttachmentMaterializer(
+        attachments_root=attachments_root,
+    ).materialize(context, _StubClient({"notes.txt": b"notes"}))
+
+    assert batch.errors == ()
+    path = Path(batch.attachments[0].local_path or "")
+    assert path.is_relative_to(physical / ".avibe" / "attachments" / "im")
+    batch.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_materializer_rejects_symlinked_parent_inside_a_nested_declared_root(
+    tmp_path: Path,
+) -> None:
+    """Intermediate components of a nested declared root stay no-follow.
+
+    A declared root such as ``<home>/custom/downloads`` reaches it through
+    ``custom``, which is Avibe-owned space below the trusted home. Resolving the
+    declared root's parents would follow a symlink planted there before the
+    protected walk starts, redirecting leases outside the declared tree.
+    """
+
+    home = tmp_path / "avibe-home"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home.mkdir()
+    (home / "custom").symlink_to(outside, target_is_directory=True)
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    with pytest.raises(OSError):
+        await InboundAttachmentMaterializer(
+            effective_home=home,
+            attachments_root=home / "custom" / "downloads",
+        ).materialize(context, _StubClient({"notes.txt": b"notes"}))
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_materializer_keeps_a_nested_declared_root_under_the_home(
+    tmp_path: Path,
+) -> None:
+    """A nested declared root still materializes below the resolved home."""
+
+    physical = tmp_path / "volume" / "user"
+    physical.mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "volume", target_is_directory=True)
+    home = tmp_path / "home" / "user" / ".avibe"
+    context = MessageContext(
+        user_id="U1",
+        channel_id="D1",
+        platform="slack",
+        files=[FileAttachment("notes.txt", "text/plain", url="ref", size=5)],
+    )
+
+    batch = await InboundAttachmentMaterializer(
+        effective_home=home,
+        attachments_root=home / "custom" / "downloads",
+    ).materialize(context, _StubClient({"notes.txt": b"notes"}))
+
+    assert batch.errors == ()
+    path = Path(batch.attachments[0].local_path or "")
+    assert path.read_bytes() == b"notes"
+    assert path.is_relative_to(physical / ".avibe" / "custom" / "downloads" / "im")
+    batch.lease.release()
 
 
 @pytest.mark.asyncio

@@ -7222,6 +7222,37 @@ _FOREIGN_UID_GROUP_PID = 424_247
 _ORPHAN_CREATE_TIME = 1_700_000_000.5
 
 
+async def test_runtime_resolves_a_symlinked_home_once_for_all_file_owners(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    physical_home = tmp_path / ".avibe"
+    physical_home.mkdir(mode=0o700)
+    logical_home = tmp_path / ".vibe_remote"
+    logical_home.symlink_to(physical_home, target_is_directory=True)
+    store = MemoryStore(effective_home=logical_home)
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=logical_home,
+    )
+
+    assert runtime.effective_home == physical_home
+    assert store._effective_home == physical_home
+    assert runtime.module._effective_home == physical_home
+    assert runtime.module._attachment_store._effective_home == physical_home
+    assert runtime.module._attachment_store._root == (
+        physical_home / "memory" / "attachments"
+    )
+    assert runtime._provider_root_owner.path == (
+        physical_home / "memory" / "everos-root"
+    )
+    assert runtime._sidecar._effective_home == physical_home
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_runtime_effective_home_owns_the_attachment_pipeline(
     monkeypatch,
     tmp_path: Path,

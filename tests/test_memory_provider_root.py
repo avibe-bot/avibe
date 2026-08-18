@@ -130,23 +130,25 @@ def test_provider_root_refuses_to_harden_an_unowned_effective_home(
     assert not (home / "memory").exists()
 
 
-def test_provider_root_refuses_a_symlinked_effective_home_without_touching_target(
+def test_provider_root_accepts_the_supported_legacy_home_symlink(
     tmp_path: Path,
 ) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir(mode=0o755)
-    outside.chmod(0o755)
-    home = tmp_path / "linked-home"
-    home.symlink_to(outside, target_is_directory=True)
-    root = ProviderRoot(home / "memory" / "everos-root", effective_home=home)
+    physical_home = tmp_path / ".avibe"
+    physical_home.mkdir(mode=0o700)
+    logical_home = tmp_path / ".vibe_remote"
+    logical_home.symlink_to(physical_home, target_is_directory=True)
+    root = ProviderRoot(
+        logical_home / "memory" / "everos-root",
+        effective_home=logical_home,
+    )
     meta = SimpleNamespace(provider_root_id="root-id")
 
-    with pytest.raises(ProviderRootError, match="chain contains a symlink"):
-        root.ensure(meta, _metadata())
+    root.ensure(meta, _metadata())
 
-    assert home.is_symlink()
-    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
-    assert list(outside.iterdir()) == []
+    assert root.path == physical_home / "memory" / "everos-root"
+    assert root.path.is_dir()
+    assert logical_home.is_symlink()
+    assert json.loads((root.path / ROOT_SENTINEL_FILENAME).read_text())["provider_root_id"] == "root-id"
 
 
 def test_provider_root_translates_temporary_ordering_database_failure(
