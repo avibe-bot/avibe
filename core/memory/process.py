@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import inspect
 import json
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Deque, Protocol, TypeVar, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -118,6 +119,9 @@ _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
+# Legacy records store wall-clock ``create_time``. Accept a bounded drift only
+# when every other deciding fact still names this installation's child.
+_LEGACY_CREATE_TIME_DRIFT_SECONDS = 300.0
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 _REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
@@ -1075,7 +1079,22 @@ class EverOSProcess:
         except Exception:
             if not self._desired_running:
                 return
-            logger.warning("EverOS sidecar safety monitor rejected the child tree")
+            recorded_stamp = (
+                self._owned_processes.get(process.pid) if process.pid is not None else None
+            )
+            live_stamp = None
+            if process.pid is not None:
+                try:
+                    live_stamp = _process_creation_stamp(psutil.Process(process.pid))
+                except Exception:
+                    live_stamp = None
+            logger.exception(
+                "EverOS sidecar safety monitor rejected the child tree "
+                "(pid %s recorded_stamp=%s live_stamp=%s)",
+                process.pid,
+                recorded_stamp,
+                live_stamp,
+            )
             async with self._lifecycle_lock:
                 if process is not self._process:
                     return
@@ -1811,6 +1830,14 @@ class SidecarOwnership:
             "socket_path": str(self._socket_path),
             "provider_root": str(self._provider_root),
         }
+        if _uses_linux_starttime_stamp():
+            # In-memory identity is boot-relative starttime ticks. Keep the
+            # historical wall-clock field so older readers still parse the file,
+            # and persist the stamp so a later boot does not depend on CLOCK_REALTIME.
+            record["starttime_ticks"] = created_at
+            wall_create_time = _process_wall_create_time(pid)
+            if wall_create_time is not None:
+                record["create_time"] = wall_create_time
         if role is not None:
             record["role"] = role.value
             record["python"] = str(python) if python is not None else None
@@ -2621,12 +2648,90 @@ class _ProcessIdentity:
     about a process and withhold others: macOS reads ``create_time`` and ``uids``
     for any pid but refuses ``cmdline`` outside the caller's own uid. ``None``
     therefore means "not disclosed", never "does not match".
+
+    ``create_time`` is the identity stamp from ``_process_creation_stamp``:
+    Linux starttime ticks, or ``psutil.Process.create_time()`` elsewhere.
     """
 
     create_time: float | None
     cmdline: tuple[str, ...] | None
     uid: int | None
     environment: Mapping[str, str] | None = None
+
+
+def _uses_linux_starttime_stamp() -> bool:
+    """Whether this host identifies processes by boot-relative starttime ticks."""
+
+    return sys.platform.startswith("linux")
+
+
+def _parse_proc_stat_starttime(stat_text: str) -> float:
+    """Parse ``/proc/<pid>/stat`` field 22 (starttime, clock ticks).
+
+    Field 2 (``comm``) is parenthesized and may contain spaces or parentheses,
+    so tokens after the last ``)`` are field 3 onward.
+    """
+
+    close = stat_text.rfind(")")
+    if close < 0:
+        raise ValueError("proc stat comm field is missing")
+    fields = stat_text[close + 1 :].split()
+    try:
+        return float(fields[19])
+    except (IndexError, ValueError) as exc:
+        raise ValueError("proc stat starttime field is missing") from exc
+
+
+def _read_linux_starttime_ticks(pid: int) -> float:
+    """Read boot-relative starttime ticks for ``pid`` from ``/proc``."""
+
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise psutil.NoSuchProcess(pid=pid) from exc
+    except PermissionError as exc:
+        raise psutil.AccessDenied(pid=pid) from exc
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EPERM}:
+            raise psutil.AccessDenied(pid=pid) from exc
+        if exc.errno in {errno.ENOENT, errno.ESRCH}:
+            raise psutil.NoSuchProcess(pid=pid) from exc
+        raise
+    try:
+        return _parse_proc_stat_starttime(text)
+    except ValueError as exc:
+        raise psutil.AccessDenied(pid=pid) from exc
+
+
+def _process_creation_stamp(process: psutil.Process) -> float:
+    """Stable process-identity stamp.
+
+    On Linux this is ``/proc/<pid>/stat`` starttime ticks, which do not move
+    when CLOCK_REALTIME is stepped. Other platforms keep the spawn-time
+    ``psutil.Process.create_time()`` value, which those kernels record
+    absolutely and do not drift. Missing ``/proc`` falls back to
+    ``create_time()`` so test doubles without a real pid still work.
+    """
+
+    if _uses_linux_starttime_stamp():
+        try:
+            return _read_linux_starttime_ticks(int(process.pid))
+        except psutil.NoSuchProcess:
+            return float(process.create_time())
+    return float(process.create_time())
+
+
+def _process_wall_create_time(pid: int) -> float | None:
+    """Wall-clock ``psutil`` create_time, or ``None`` when the OS withholds it."""
+
+    try:
+        return float(psutil.Process(pid).create_time())
+    except psutil.Error:
+        return None
+
+
+def _is_identity_stamp(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 class _RecordedSidecar(Enum):
@@ -2666,7 +2771,7 @@ def _inspect_process_identity(pid: int) -> _ProcessIdentity | None:
     try:
         cmdline = _disclosed_identity_field(process.cmdline)
         return _ProcessIdentity(
-            create_time=_disclosed_identity_field(process.create_time),
+            create_time=_disclosed_identity_field(lambda: _process_creation_stamp(process)),
             cmdline=None if cmdline is None else tuple(str(value) for value in cmdline),
             uid=_process_real_uid(process),
             environment=_disclosed_process_environment(process),
@@ -2768,19 +2873,33 @@ def _recorded_sidecar_create_time(
     socket_path: Path,
     provider_root: Path,
 ) -> float | None:
-    """The creation time a record can be matched against, or ``None``.
+    """The identity stamp a record can be matched against, or ``None``.
 
-    A malformed creation time can never be matched by any process, so it yields
-    nothing this launch may act on.
+    New Linux records persist ``starttime_ticks`` and that stamp is preferred.
+    Legacy records keep wall-clock ``create_time``. A malformed stamp can never
+    be matched by any process, so it yields nothing this launch may act on.
     """
 
     matched = _record_for_this_installation(record, socket_path=socket_path, provider_root=provider_root)
     if matched is None:
         return None
+    ticks = matched.get("starttime_ticks")
+    if _is_identity_stamp(ticks):
+        return float(ticks)
     created_at = matched.get("create_time")
-    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+    if not _is_identity_stamp(created_at):
         return None
     return float(created_at)
+
+
+def _recorded_sidecar_has_starttime_ticks(
+    record: object,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+) -> bool:
+    matched = _record_for_this_installation(record, socket_path=socket_path, provider_root=provider_root)
+    return matched is not None and _is_identity_stamp(matched.get("starttime_ticks"))
 
 
 def _recorded_sidecar_group(
@@ -2950,6 +3069,61 @@ def _cmdline_matches_role(
     )
 
 
+def _legacy_create_time_mismatch_verdict(
+    record: object,
+    identity: _ProcessIdentity,
+    recorded_create_time: float,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+    role: _MemoryChildRole,
+) -> _RecordedSidecar | None:
+    """Resolve a legacy wall-clock ``create_time`` mismatch.
+
+    Returns ``None`` when the mismatch is a bounded clock step of our own
+    child, so the caller continues as if the stamp matched. A disclosed
+    contradiction is ``NOT_OURS``. A withheld deciding fact other than
+    ``EVEROS_ROOT`` is ``UNVERIFIABLE``. ``EVEROS_ROOT`` is required positive
+    proof for the clock-step exception; without it the mismatch stays the
+    historical recycled-pid ``NOT_OURS`` verdict.
+    """
+
+    if identity.create_time is None:
+        return _RecordedSidecar.UNVERIFIABLE
+    if abs(identity.create_time - recorded_create_time) > _LEGACY_CREATE_TIME_DRIFT_SECONDS:
+        return _RecordedSidecar.NOT_OURS
+    if identity.cmdline is None:
+        return _RecordedSidecar.UNVERIFIABLE
+    legacy_sidecar = isinstance(record, dict) and record.get("role") is None
+    recorded_python = None if legacy_sidecar else _recorded_child_python(record)
+    if not legacy_sidecar and recorded_python is None:
+        return _RecordedSidecar.UNVERIFIABLE
+    matches_command = (
+        _cmdline_serves_socket(identity.cmdline, socket_path)
+        if legacy_sidecar
+        else _cmdline_matches_role(
+            identity.cmdline,
+            role=role,
+            socket_path=socket_path,
+            python=recorded_python,
+        )
+    )
+    if not matches_command:
+        return _RecordedSidecar.NOT_OURS
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if callable(getuid) else None
+    if own_uid is not None:
+        if identity.uid is None:
+            return _RecordedSidecar.UNVERIFIABLE
+        if identity.uid != own_uid:
+            return _RecordedSidecar.NOT_OURS
+    if identity.environment is None:
+        return _RecordedSidecar.NOT_OURS
+    if not _provider_roots_match(identity.environment.get("EVEROS_ROOT"), provider_root):
+        return _RecordedSidecar.NOT_OURS
+    return None
+
+
 def _classify_recorded_child(
     record: object,
     identity: _ProcessIdentity | None,
@@ -2970,7 +3144,22 @@ def _classify_recorded_child(
     if identity.uid is not None and own_uid is not None and identity.uid != own_uid:
         return _RecordedSidecar.NOT_OURS
     if identity.create_time is not None and identity.create_time != recorded_create_time:
-        return _RecordedSidecar.NOT_OURS
+        if _recorded_sidecar_has_starttime_ticks(
+            record,
+            socket_path=socket_path,
+            provider_root=provider_root,
+        ):
+            return _RecordedSidecar.NOT_OURS
+        drift_verdict = _legacy_create_time_mismatch_verdict(
+            record,
+            identity,
+            recorded_create_time,
+            socket_path=socket_path,
+            provider_root=provider_root,
+            role=role,
+        )
+        if drift_verdict is not None:
+            return drift_verdict
     legacy_sidecar = isinstance(record, dict) and record.get("role") is None
     recorded_python = None if legacy_sidecar else _recorded_child_python(record)
     if not legacy_sidecar and recorded_python is None:
@@ -3016,12 +3205,15 @@ def _classify_recorded_sidecar(
     """Decide what a recorded pid is, so the caller knows what it may do.
 
     ``OURS`` is the only verdict that permits a signal, and it still demands that
-    the creation time, the real uid, and the exact ``-m`` entrypoint plus
-    ``--uds`` argument all agree with the record. Any single disclosed fact that
-    contradicts the record settles the matter as ``NOT_OURS`` -- a recycled pid
-    or another user's process is safe to stop worrying about. What must not be
-    waved through is a live pid whose deciding facts were never disclosed:
-    treating it as gone would start a replacement sidecar beside it.
+    the identity stamp, the real uid, and the exact ``-m`` entrypoint plus
+    ``--uds`` argument all agree with the record. New records prefer
+    ``starttime_ticks``; a legacy wall-clock ``create_time`` mismatch may still
+    be ``OURS`` when cmdline, uid, and ``EVEROS_ROOT`` all match within a
+    bounded drift. Any single disclosed fact that contradicts the record
+    settles the matter as ``NOT_OURS`` -- a recycled pid or another user's
+    process is safe to stop worrying about. What must not be waved through is
+    a live pid whose deciding facts were never disclosed: treating it as gone
+    would start a replacement sidecar beside it.
     """
 
     return _classify_recorded_child(
@@ -3089,7 +3281,7 @@ def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
             cmdline = _disclosed_identity_field(candidate.cmdline)
             if cmdline is None or not _cmdline_serves_socket(tuple(str(value) for value in cmdline), socket_path):
                 continue
-            created_at = _disclosed_identity_field(candidate.create_time)
+            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
         except psutil.Error:
             continue
         # A claimed process whose creation time is withheld carries the negative
@@ -3120,7 +3312,7 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
             if not _cmdline_is_sidecar(rendered):
                 continue
             environment = _disclosed_process_environment(candidate)
-            created_at = _disclosed_identity_field(candidate.create_time)
+            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
         except psutil.NoSuchProcess:
             continue
         except psutil.Error:
@@ -3170,7 +3362,7 @@ def _processes_rebuilding_owned_root(
                 python=python,
             ):
                 continue
-            created_at = _disclosed_identity_field(candidate.create_time)
+            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
             environment = _disclosed_process_environment(candidate)
         except psutil.NoSuchProcess:
             continue
@@ -3232,7 +3424,7 @@ def _processes_syncing_owned_root(
         ):
             continue
         try:
-            created_at = _disclosed_identity_field(candidate.create_time)
+            created_at = _disclosed_identity_field(lambda: _process_creation_stamp(candidate))
             environment = _disclosed_process_environment(candidate)
         except psutil.NoSuchProcess:
             continue
@@ -3281,7 +3473,7 @@ async def _wait_for_identities_exit(identities: Mapping[int, float], timeout_sec
 
 
 def _snapshot_owned_processes(pid: int, process_group: int | None) -> dict[int, float]:
-    """Record `(pid, create_time)` identities while the child is still owned."""
+    """Record `(pid, stamp)` identities while the child is still owned."""
 
     identities: dict[int, float] = {}
     try:
@@ -3291,7 +3483,7 @@ def _snapshot_owned_processes(pid: int, process_group: int | None) -> dict[int, 
         candidates = []
     for candidate in candidates:
         try:
-            identities.setdefault(candidate.pid, candidate.create_time())
+            identities.setdefault(candidate.pid, _process_creation_stamp(candidate))
         except psutil.Error:
             continue
     _merge_owned_processes(identities, _snapshot_process_group(process_group))
@@ -3305,7 +3497,7 @@ def _snapshot_process_group(process_group: int | None) -> dict[int, float]:
     for candidate in psutil.process_iter():
         try:
             if os.getpgid(candidate.pid) == process_group:
-                identities[candidate.pid] = candidate.create_time()
+                identities[candidate.pid] = _process_creation_stamp(candidate)
         except psutil.AccessDenied:
             # The member exists but its identity cannot be verified. Keep it with a
             # sentinel so the "all confirmed" check sees an unverifiable member and
@@ -3344,7 +3536,7 @@ def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
     for process_id, created_at in identities.items():
         try:
             candidate = psutil.Process(process_id)
-            if candidate.create_time() != created_at:
+            if _process_creation_stamp(candidate) != created_at:
                 continue
             if candidate.status() == psutil.STATUS_ZOMBIE:
                 continue
@@ -3360,13 +3552,13 @@ def _live_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
 
 
 def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, float]:
-    """Return identities whose current creation time is readable and unchanged."""
+    """Return identities whose current creation stamp is readable and unchanged."""
 
     confirmed: dict[int, float] = {}
     for process_id, created_at in identities.items():
         try:
             candidate = psutil.Process(process_id)
-            if candidate.create_time() != created_at or candidate.status() == psutil.STATUS_ZOMBIE:
+            if _process_creation_stamp(candidate) != created_at or candidate.status() == psutil.STATUS_ZOMBIE:
                 continue
         except psutil.Error:
             # AccessDenied is live-but-unverified: retain it for reaping, but
@@ -3379,6 +3571,8 @@ def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, flo
 def _group_contains_only_confirmed_owned_processes(
     process_group: int | None,
     identities: Mapping[int, float],
+    *,
+    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Whether a group can be signaled without bypassing PID identity checks."""
 
@@ -3386,8 +3580,10 @@ def _group_contains_only_confirmed_owned_processes(
         return False
     group_members = _snapshot_process_group(process_group)
     confirmed = _confirmed_owned_processes(identities)
+    trusted = set() if trusted_pids is None else set(trusted_pids)
     return bool(group_members) and all(
-        confirmed.get(process_id) == created_at for process_id, created_at in group_members.items()
+        process_id in trusted or confirmed.get(process_id) == created_at
+        for process_id, created_at in group_members.items()
     )
 
 
@@ -3395,18 +3591,26 @@ def _signal_owned_group(
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
+    *,
+    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Signal a whole isolated group, but only if every member is confirmed owned.
 
     Returns whether the group signal settled the delivery, so a caller holding a
     direct child handle can fall back to it without widening the blast radius: a
-    group with an unverifiable member is never signaled group-wide.
+    group with an unverifiable member is never signaled group-wide. A live
+    direct child this process spawned may be treated as confirmed without a
+    stamp match; every other member stays fail-closed.
     """
 
     if (
         process_group is None
         or not hasattr(os, "killpg")
-        or not _group_contains_only_confirmed_owned_processes(process_group, identities)
+        or not _group_contains_only_confirmed_owned_processes(
+            process_group,
+            identities,
+            trusted_pids=trusted_pids,
+        )
     ):
         return False
     try:
@@ -3418,19 +3622,46 @@ def _signal_owned_group(
     return True
 
 
+def _live_direct_child_pid(process: asyncio.subprocess.Process) -> int | None:
+    """The pid of an unreaped asyncio child this process spawned, if any.
+
+    ``returncode is None`` on an ``asyncio.subprocess.Process`` means the handle
+    has not been reaped, so the pid cannot have been recycled (the worst case
+    is a zombie). That handle is authoritative for signaling the direct child.
+    """
+
+    if (
+        not isinstance(process, asyncio.subprocess.Process)
+        or process.returncode is not None
+        or process.pid is None
+    ):
+        return None
+    return int(process.pid)
+
+
 def _signal_owned_group_or_process(
     process: asyncio.subprocess.Process,
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
 ) -> None:
-    if _signal_owned_group(process_group, identities, signum):
+    trusted_pid = _live_direct_child_pid(process)
+    trusted = set() if trusted_pid is None else {trusted_pid}
+    if _signal_owned_group(
+        process_group,
+        identities,
+        signum,
+        trusted_pids=trusted,
+    ):
         return
     if process.returncode is not None:
         return
-    created_at = identities.get(process.pid)
-    if created_at is None or process.pid not in _confirmed_owned_processes({process.pid: created_at}):
-        return
+    if trusted_pid is None:
+        created_at = identities.get(process.pid)
+        if created_at is None or process.pid not in _confirmed_owned_processes(
+            {process.pid: created_at}
+        ):
+            return
     try:
         process.send_signal(signum)
     except ProcessLookupError:
@@ -3441,7 +3672,7 @@ def _signal_owned_processes(identities: Mapping[int, float], signum: int) -> Non
     for process_id, created_at in _confirmed_owned_processes(identities).items():
         try:
             candidate = psutil.Process(process_id)
-            if candidate.create_time() != created_at:
+            if _process_creation_stamp(candidate) != created_at:
                 continue
             candidate.send_signal(signum)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -3463,7 +3694,7 @@ async def _wait_for_owned_exit(
     waiter = asyncio.create_task(process.wait(), name="memory-everos-reap")
     try:
         while time.monotonic() < deadline:
-            if _owned_process_identity_is_live(process.pid, identities):
+            if process.returncode is None or _owned_process_identity_is_live(process.pid, identities):
                 _merge_owned_processes(identities, _snapshot_owned_processes(process.pid, process_group))
             if waiter.done() and not _live_owned_processes(identities):
                 await waiter

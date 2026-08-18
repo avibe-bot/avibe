@@ -6684,6 +6684,7 @@ async def test_rebuild_settlement_survives_candidate_activation_failure(
 async def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
     tmp_path: Path,
     memory_runtime_factory,
+    caplog,
 ) -> None:
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
@@ -6695,10 +6696,13 @@ async def test_runtime_restart_stop_failure_retains_old_process_and_paused_claim
     old = FakeEverOSProcess(stop_failure=RuntimeError("still owned"))
     runtime._process = old
 
-    assert await runtime.restart() == {
-        "ok": False,
-        "error": "memory_restart_failed",
-    }
+    with caplog.at_level(logging.ERROR, logger=memory_runtime.logger.name):
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
+    assert "Memory sidecar restart failed" in caplog.text
+    assert "still owned" in caplog.text
     assert runtime._process is old
     assert factory.created == []
     assert runtime.module._worker._claims_paused is True

@@ -2848,6 +2848,7 @@ class MemoryRuntime:
                 except Exception:
                     # Retain the supervisor: only its successful stop proves
                     # that no owned child tree remains.
+                    logger.exception("Memory sidecar restart failed")
                     self._runtime_error = "memory_restart_failed"
                     return {"ok": False, "error": self._runtime_error}
                 self._process = None
