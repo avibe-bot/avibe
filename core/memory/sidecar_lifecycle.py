@@ -28,6 +28,18 @@ class SidecarSnapshot:
     def running(self) -> bool:
         return bool(self.process and self.process.running)
 
+    @property
+    def supervisor_can_restart(self) -> bool:
+        """Whether retained launch authority can still produce a child."""
+
+        return bool(self.process and self.process.restart_authorized)
+
+    @property
+    def retains_active_config(self) -> bool:
+        """Whether this supervisor can still execute under captured settings."""
+
+        return bool(self.process and self.process.retains_active_config)
+
 
 @dataclass(frozen=True, slots=True)
 class RecorderAdmission:

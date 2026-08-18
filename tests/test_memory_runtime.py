@@ -132,6 +132,60 @@ def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
     return FakeMemoryArtifactManager(**defaults)
 
 
+class _FirstInstallArtifact(FakeMemoryArtifactManager):
+    """Commit a fake first-install pointer through the real activation bridge."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            python=None,
+            root_format=None,
+            fingerprint=None,
+            compatible_formats=frozenset(),
+        )
+        self.commits = 0
+        self.rollbacks = 0
+
+    def ensure(self, *, force: bool = False) -> dict:
+        self.ensure_calls.append(force)
+        assert self.activation_coordinator is not None
+
+        def commit() -> None:
+            self.commits += 1
+            self.python = Path(sys.executable)
+            self.root_format = "everos-1.2.3"
+            self.fingerprint = "first-install"
+            self.compatible_formats = frozenset({"everos-1.2.3"})
+            self.status_payload = {
+                "installed": True,
+                "status": "ready",
+                "reason": None,
+            }
+
+        def rollback() -> None:
+            self.rollbacks += 1
+            self.python = None
+            self.root_format = None
+            self.fingerprint = None
+            self.compatible_formats = frozenset()
+            self.status_payload = {
+                "installed": False,
+                "status": "missing",
+                "reason": "memory_runtime_missing",
+            }
+
+        self.activation_coordinator(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="first-install",
+            ),
+            MemoryProviderRootState(exists=False),
+            commit,
+            rollback,
+        )
+        return dict(self.ensure_payload)
+
+
 @pytest.fixture(autouse=True)
 def _preflight_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep runtime lifecycle tests hermetic unless they exercise preflight."""
@@ -2668,6 +2722,573 @@ async def test_runtime_install_artifact_uses_controller_owned_manager(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_runtime_install_activates_config_retained_after_missing_artifact(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first install must not wait for another process to retry reconciliation."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    durable = MemoryConfig(enabled=True, processing=_processing_config())
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+
+    reconcile_result = await runtime.reconcile(MemoryConfig(enabled=False))
+
+    assert reconcile_result == {"ok": False, "error": "memory_runtime_missing"}
+    assert runtime._config == durable
+    assert runtime._restart_config.enabled is False
+    assert process_factory.supervised == []
+
+    install_result = await runtime.install_artifact()
+
+    assert install_result == {"ok": True, "reason": None, "download_error": None}
+    assert artifact.commits == 1
+    assert artifact.rollbacks == 0
+    assert runtime._config == durable
+    assert runtime._restart_config == durable
+    assert len(process_factory.supervised) == 1
+    assert process_factory.supervised[0].starts == 1
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_missing_artifact_defers_config_until_repair_retires_restart_authority(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A childless retained supervisor still owns its previous launch settings."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    candidate = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+    restarting = FakeEverOSProcess(
+        _running=False,
+        _down=False,
+        _desired_running=True,
+        _restart_pending=True,
+    )
+    runtime._process = restarting
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert runtime._config == active
+    assert runtime._restart_config == active
+    assert runtime._process is restarting
+    assert restarting.stopped is False
+
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    assert restarting.stopped is True
+    assert runtime._config == candidate
+    assert runtime._restart_config == candidate
+    assert process_factory.supervised[0].settings is not None
+    assert process_factory.supervised[0].settings.embedding_model == "embed-v2"
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_repair_rechecks_vectors_after_retiring_restart_authority(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed old-model write must block durable embedding adoption."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    restarting = FakeEverOSProcess(
+        _running=False,
+        _down=False,
+        _desired_running=True,
+        _restart_pending=True,
+    )
+    runtime._process = restarting
+    vector_state = {"exists": False}
+    monkeypatch.setattr(
+        runtime,
+        "_provider_data_exists_strict",
+        lambda: vector_state["exists"],
+    )
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert runtime._config == active
+
+    # The retained supervisor can resume and write with the old embedding before
+    # exhausting its restart budget. Repair must inspect that newer state only
+    # after it has retired the supervisor and fenced claims.
+    vector_state["exists"] = True
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_clear_failed",
+        "download_error": None,
+    }
+    assert restarting.stopped is True
+    assert runtime._process is None
+    assert runtime._config == active
+    assert runtime._restart_config == active
+    assert artifact.ensure_calls == []
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_repair_rechecks_vectors_after_retiring_owned_descendants(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreaped old-model tree keeps its config until Stop proves it gone."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    retained_tree = FakeEverOSProcess(
+        _running=False,
+        _down=True,
+        _desired_running=False,
+    )
+    retained_tree._process_tree_retained = True
+    runtime._process = retained_tree
+    vector_state = {"exists": False}
+    monkeypatch.setattr(
+        runtime,
+        "_provider_data_exists_strict",
+        lambda: vector_state["exists"],
+    )
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert retained_tree.restart_authorized is False
+    assert runtime._sidecar.snapshot().retains_active_config is True
+    assert runtime._config == active
+
+    vector_state["exists"] = True
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_clear_failed",
+        "download_error": None,
+    }
+    assert retained_tree.stopped is True
+    assert retained_tree.retains_active_config is False
+    assert runtime._process is None
+    assert runtime._config == active
+    assert runtime._restart_config == active
+    assert artifact.ensure_calls == []
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_missing_artifact_retains_active_config_until_rejected_child_is_gone(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live child keeps its captured config after restart authority is revoked."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+    rejected = FakeEverOSProcess(
+        _running=True,
+        _down=True,
+        _desired_running=False,
+    )
+    runtime._process = rejected
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert rejected.restart_authorized is False
+    assert runtime._sidecar.snapshot().retains_active_config is True
+    assert runtime._config == active
+    assert runtime._restart_config == active
+
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_runtime_install_requires_disabled_memory",
+        "download_error": None,
+    }
+    assert rejected.stopped is False
+
+    rejected._running = False
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    assert rejected.stopped is True
+    assert runtime._config == durable
+    assert runtime._restart_config == durable
+    assert process_factory.supervised[0].settings is not None
+    assert process_factory.supervised[0].settings.embedding_model == "embed-v2"
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_missing_artifact_publishes_config_from_cancelled_supervisor(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained supervisor without launch authority cannot keep stale settings."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = FakeMemoryArtifactManager(
+        python=None,
+        status_payload={
+            "installed": False,
+            "status": "missing",
+            "reason": "memory_runtime_missing",
+        },
+    )
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    cancelled = FakeEverOSProcess(
+        _running=False,
+        _down=False,
+        _desired_running=False,
+    )
+    runtime._process = cancelled
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert cancelled.restart_authorized is False
+    assert runtime._config == durable
+    assert runtime._restart_config == active
+    assert runtime._process is cancelled
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_missing_artifact_publishes_config_from_terminal_supervisor_for_install(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal supervisor cannot retain launch authority over desired config."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+    terminal = FakeEverOSProcess(_running=False, _down=True)
+    runtime._process = terminal
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert runtime._config == durable
+    assert runtime._restart_config == active
+    assert runtime._process is terminal
+
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    assert terminal.stopped is True
+    assert runtime._config == durable
+    assert runtime._restart_config == durable
+    assert process_factory.supervised[0].settings is not None
+    assert process_factory.supervised[0].settings.embedding_model == "embed-v2"
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_first_install_keeps_artifact_when_immediate_config_probe_fails(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Artifact admission and immediate desired-config activation are independent."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    durable = MemoryConfig(enabled=True, processing=_processing_config())
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+    assert await runtime.reconcile(MemoryConfig(enabled=False)) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    monkeypatch.setattr(
+        runtime,
+        "_probe_processing",
+        lambda *_args: asyncio.sleep(0, result=False),
+    )
+
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    assert artifact.commits == 1
+    assert artifact.rollbacks == 0
+    assert artifact.resolve_python() == Path(sys.executable)
+    assert artifact.status()["installed"] is True
+    assert runtime._config == durable
+    assert runtime._restart_config.enabled is False
+    assert runtime._runtime_error == "memory_processing_failed"
+    assert process_factory.supervised == []
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_first_install_admits_retry_from_retained_supervisor(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first launch failure may recover under the retained desired settings."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    durable = MemoryConfig(enabled=True, processing=_processing_config())
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory(
+        template=lambda: FakeEverOSProcess(start_results=deque((False, True)))
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+    assert await runtime.reconcile(MemoryConfig(enabled=False)) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    recovering = process_factory.supervised[0]
+    assert recovering.running is False
+    assert runtime._config == durable
+    assert runtime._restart_config == durable
+    assert runtime.module._worker._claims_paused is True
+
+    assert await recovering.start() is True
+    await asyncio.wait_for(runtime._sidecar._ready_task, timeout=1.0)
+    assert runtime._runtime_error is None
+    assert runtime.module._worker._claims_paused is False
+    assert runtime._worker_task is not None
+    await memory_runtime_factory.close(runtime)
+
+
 @pytest.mark.parametrize("recovery_intent", sorted(MEMORY_RECOVERY_INTENTS))
 async def test_runtime_repairs_artifact_without_activating_pending_recovery(
     tmp_path: Path,
@@ -3177,8 +3798,17 @@ async def test_runtime_repair_stops_retained_down_supervisor_before_replacing_ar
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
+    config = MemoryConfig(enabled=True, processing=processing)
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=config,
+    ).save()
     runtime = memory_runtime_factory(
-        MemoryConfig(enabled=True, processing=processing),
+        config,
         artifact_manager=_Artifact(root_format=None, fingerprint=None),
         effective_home=tmp_path,
     )

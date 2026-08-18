@@ -613,7 +613,9 @@ async def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_pat
     assert await process.start() is False
     assert process.last_error == "memory_sidecar_unavailable"
     assert process.consecutive_failures == 1
+    assert process.restart_authorized is True
     await process.stop()
+    assert process.restart_authorized is False
 
 
 async def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(monkeypatch, tmp_path: Path) -> None:
@@ -2449,6 +2451,83 @@ def _supervising(process: EverOSProcess, child: _ExitedChild) -> None:
     process._owned_processes = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
 
 
+async def test_exited_child_watcher_retains_restart_authority_until_retry_is_scheduled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An exit watcher owns the old settings until it chooses a terminal state."""
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    child = _ExitedChild()
+    _supervising(process, child)
+    process._desired_running = True
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def terminate(*_args, **_kwargs) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    watch_task = asyncio.create_task(process._watch_child(child))
+    process._watch_task = watch_task
+
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    assert process.running is False
+    assert process._restart_task is None
+    assert process.restart_authorized is True
+
+    release_cleanup.set()
+    await asyncio.wait_for(watch_task, timeout=0.5)
+    assert process._restart_task is not None
+    assert process.restart_authorized is True
+    await process.stop()
+    assert process.restart_authorized is False
+
+
+async def test_unreaped_descendants_retain_active_config_until_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Captured settings remain authoritative while any owned tree may survive."""
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    child = _ExitedChild()
+    _supervising(process, child)
+    process._owned_processes[_ORPHAN_DESCENDANT_PID] = _ORPHAN_CREATE_TIME + 1
+    process._desired_running = True
+    cleanup_attempts = 0
+
+    async def terminate(*_args, **_kwargs) -> None:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        if cleanup_attempts == 1:
+            raise RuntimeError("descendant tree still alive")
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    monkeypatch.setattr(process._ownership, "retire_if_group_is_clear", lambda *_args: None)
+
+    await process._watch_child(child)
+
+    assert process.running is False
+    assert process.restart_authorized is False
+    assert process.retains_active_config is True
+    assert process._process is child
+    assert _ORPHAN_DESCENDANT_PID in process._owned_processes
+
+    await process.stop()
+    assert cleanup_attempts == 2
+    assert process.retains_active_config is False
+
+
 def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2567,6 +2646,7 @@ async def test_unplanned_sidecar_signals_still_consume_crash_budget(
     assert process.consecutive_failures == 5
     assert process.down is True
     assert process._restart_task is None
+    assert process.restart_authorized is False
 
 
 async def test_planned_reap_from_exited_issuer_cannot_exempt_same_generation(
@@ -4261,6 +4341,7 @@ async def test_sidecar_stop_and_cancellation_end_a_busy_root_wait(
         assert process.last_error is None
         assert process.down is False
         assert process.starting is False
+        assert process.restart_authorized is False
         assert host.spawn_calls == []
 
         lock_attempted.clear()
@@ -4273,6 +4354,7 @@ async def test_sidecar_stop_and_cancellation_end_a_busy_root_wait(
         assert process.last_error is None
         assert process.down is False
         assert process.starting is False
+        assert process.restart_authorized is False
         assert host.spawn_calls == []
     finally:
         await process.stop()
@@ -4421,6 +4503,7 @@ async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
         assert retention_started.is_set()
         assert process.consecutive_failures == 0
         assert process.starting is False
+        assert process.restart_authorized is False
 
         rebuild_child = _RebuildChild(0, pid=_ORPHAN_DESCENDANT_PID)
         rebuild_identities = {

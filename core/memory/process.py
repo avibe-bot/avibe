@@ -609,6 +609,33 @@ class EverOSProcess:
         return self._down
 
     @property
+    def restart_authorized(self) -> bool:
+        """Whether this supervisor still owns a current or future launch."""
+
+        watch_task = self._watch_task
+        restart_task = self._restart_task
+        return bool(
+            self._desired_running
+            and not self._down
+            and (
+                self.running
+                or self._starting
+                or (watch_task is not None and not watch_task.done())
+                or (restart_task is not None and not restart_task.done())
+            )
+        )
+
+    @property
+    def retains_active_config(self) -> bool:
+        """Whether owned execution can still use this supervisor's settings."""
+
+        return bool(
+            self._process is not None
+            or self._owned_processes
+            or self.restart_authorized
+        )
+
+    @property
     def last_error(self) -> MemoryErrorCode | None:
         return self._last_error
 
@@ -4042,7 +4069,7 @@ class _SystemProcessHost:
 class EverOSProcessPort(Protocol):
     """What the runtime needs from a supervised sidecar, and nothing more.
 
-    Deliberately five members over ``EverOSProcess``'s ~990 lines: the runtime
+    Deliberately seven members over ``EverOSProcess``'s ~990 lines: the runtime
     never inspects the child tree, the generated config, or the signal handling.
     Keeping those out of this interface is what lets tests substitute a fake
     instead of patching ``psutil``, ``os``, and private attributes.
@@ -4053,6 +4080,12 @@ class EverOSProcessPort(Protocol):
 
     @property
     def starting(self) -> bool: ...
+
+    @property
+    def restart_authorized(self) -> bool: ...
+
+    @property
+    def retains_active_config(self) -> bool: ...
 
     async def start(self) -> bool: ...
 
@@ -4110,6 +4143,10 @@ class FakeEverOSProcess:
     stopped: bool = False
     _running: bool = True
     _starting: bool = False
+    _down: bool = False
+    _desired_running: bool = True
+    _restart_pending: bool = False
+    _process_tree_retained: bool = False
 
     @property
     def running(self) -> bool:
@@ -4119,14 +4156,36 @@ class FakeEverOSProcess:
     def starting(self) -> bool:
         return self._starting
 
+    @property
+    def down(self) -> bool:
+        return self._down
+
+    @property
+    def restart_authorized(self) -> bool:
+        return bool(
+            self._desired_running
+            and not self._down
+            and (self._running or self._starting or self._restart_pending)
+        )
+
+    @property
+    def retains_active_config(self) -> bool:
+        return self._running or self._process_tree_retained or self.restart_authorized
+
     async def start(self) -> bool:
         self.starts += 1
+        self._desired_running = True
+        self._down = False
+        self._restart_pending = False
+        self._process_tree_retained = False
         before_start = self.before_start
         if before_start is not None:
             result = before_start()
             if inspect.isawaitable(result):
                 await result
         if self.start_failure is not None:
+            self._desired_running = False
+            self._down = True
             self._running = False
             await self._notify_reaped()
             raise self.start_failure
@@ -4136,16 +4195,22 @@ class FakeEverOSProcess:
         if started:
             await self.ready()
         else:
+            self._restart_pending = True
             await self._notify_reaped()
         return started
 
     async def stop(self) -> None:
         self.stops += 1
         self.stopped = True
+        owned_execution = self._running or self._process_tree_retained
+        self._desired_running = False
+        self._restart_pending = False
         self._running = False
         self._starting = False
         if self.stop_failure is not None:
+            self._process_tree_retained = owned_execution
             raise self.stop_failure
+        self._process_tree_retained = False
         await self._notify_reaped()
 
     async def _notify_reaped(self) -> None:
