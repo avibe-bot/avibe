@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-# The longest model identifier the hub accepts. One constant so the boundaries
-# that admit an identifier (manual add and upstream discovery) and the usage
-# ledger that keys rows by it cannot disagree: a model config accepts is always
-# a model usage can meter, and a persisted row can never grow without limit.
+import hashlib
+
+# The longest model identifier the hub admits at a boundary that can still refuse
+# one: manual add, upstream discovery, and a client-declared model on source
+# creation. It is deliberately not a load rule — per the persisted-shape rule a
+# file an older release wrote must keep loading — so a live, routable identifier
+# is not always within it, and no surface downstream of config may treat this
+# bound as the set of identifiers that exist.
 MODEL_ID_MAX_LENGTH = 200
+
+# The longest key a usage ledger row can carry, so a persisted row cannot grow
+# without limit. Longer than any identifier stored verbatim by construction: the
+# fold below appends a full digest, so a folded key can never collide with a
+# verbatim one and folding a key twice returns it unchanged.
+USAGE_LEDGER_KEY_MAX_LENGTH = MODEL_ID_MAX_LENGTH + 1 + 2 * hashlib.sha256().digest_size
 
 
 def normalized_model_id(value: str) -> str:
@@ -35,12 +45,14 @@ def canonical_model_id(value: object) -> str | None:
     and used as a usage-ledger key. Those uses only agree if every one of them
     means the same thing by "the same model", so admission is decided once here
     and the surfaces that accept a client-declared identifier store what this
-    returns. An identifier past the bound is rejected outright rather than
-    admitted somewhere it cannot be metered.
+    returns. An identifier past the bound is refused here, at the one moment a
+    request can still be answered with an error instead of carried forever.
 
-    Deliberately not applied when loading persisted config: per the
-    persisted-shape rule a legacy value must disable nothing and fail nothing.
-    `normalized_model_id` is the half that does apply there.
+    Deliberately not applied when loading persisted config, and not applied by the
+    usage ledger: per the persisted-shape rule a legacy value must disable nothing
+    and fail nothing, and a call already made under one cannot be un-billed by
+    refusing its identifier afterwards. `normalized_model_id` is the half that
+    applies on load; `usage_ledger_key` is the bound that applies to a row.
     """
 
     if not isinstance(value, str):
@@ -49,6 +61,39 @@ def canonical_model_id(value: object) -> str | None:
     if not canonical.strip() or len(canonical) > MODEL_ID_MAX_LENGTH:
         return None
     return canonical
+
+
+def usage_ledger_key(value: object) -> str | None:
+    """Key one metered call by the identity it ran under, whatever its length.
+
+    Admission and metering ask different questions about the same identifier, and
+    only admission may answer no. A request naming a 4KB model is refused and
+    nothing is lost; a call that already reached an upstream was already billed,
+    and the only identity it can be attributed to is the one config holds. So
+    `canonical_model_id` is the wrong question here — a legacy model that
+    `ModelHubModelConfig.from_payload` deliberately keeps loadable and routable
+    would have every one of its calls dropped, and the tab would report an
+    upgraded install as quieter than it actually is.
+
+    The bound therefore folds instead of refusing. A value that fits is its own
+    key; a longer one is keyed by its readable head plus a digest of the whole
+    value, which is bounded, identical across restarts, and separated from other
+    identities by that digest rather than by a prefix an adversary can pad. The
+    result is longer than any verbatim key, so it cannot collide with one and
+    cannot fold again — which is why the read path and the write path can share
+    this one function.
+
+    Only a value carrying no identity at all — not text, or empty — has no key,
+    and that is exactly the set no config can hold.
+    """
+
+    if not isinstance(value, str) or not value:
+        return None
+    canonical = normalized_model_id(value)
+    if len(canonical) <= USAGE_LEDGER_KEY_MAX_LENGTH:
+        return canonical
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{canonical[:MODEL_ID_MAX_LENGTH]}~{digest}"
 
 # Vendors with native, stable OpenCode provider identifiers. Compatible relays
 # and unrecognized vendors share the frozen contract's single custom/ prefix.

@@ -21,8 +21,13 @@ from pathlib import Path
 
 import pytest
 
+from config.v2_config import ModelHubModelConfig
 from core.handlers.model_hub import state_file
-from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
+from core.handlers.model_hub.identifiers import (
+    MODEL_ID_MAX_LENGTH,
+    USAGE_LEDGER_KEY_MAX_LENGTH,
+    usage_ledger_key,
+)
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
     USAGE_TOKEN_CEILING,
@@ -1070,8 +1075,7 @@ def test_accumulated_counters_stop_at_the_ceiling(tmp_path: Path) -> None:
     "source_id,model_id",
     [
         pytest.param("", "model-x", id="empty-source"),
-        pytest.param("   ", "model-x", id="blank-source"),
-        pytest.param("src_a", "m" * (MODEL_ID_MAX_LENGTH + 1), id="oversized-model"),
+        pytest.param("src_a", "", id="empty-model"),
     ],
 )
 def test_an_unusable_identifier_is_never_persisted(
@@ -1080,7 +1084,13 @@ def test_an_unusable_identifier_is_never_persisted(
     source_id: str,
     model_id: str,
 ) -> None:
-    """Loud, not silent: a dropped turn is lost metering, not a tidy no-op."""
+    """Loud, not silent: a dropped turn is lost metering, not a tidy no-op.
+
+    What reaches here is a caller that invented an identifier, not a config that
+    holds an awkward one — the test below pins that boundary. A length is not a
+    reason to drop a call, so the only refusals left are values carrying no
+    identity at all.
+    """
 
     ledger = _ledger(tmp_path)
 
@@ -1091,15 +1101,101 @@ def test_an_unusable_identifier_is_never_persisted(
     assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
 
-def test_the_longest_admissible_model_id_is_still_metered(tmp_path: Path) -> None:
-    """One constant bounds admission and metering, so neither can drop the other's."""
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        pytest.param("model-x", id="ordinary"),
+        pytest.param("  model-x  ", id="padded"),
+        pytest.param("   ", id="padding-only"),
+        pytest.param("m" * MODEL_ID_MAX_LENGTH, id="at-the-admission-bound"),
+        pytest.param("m" * (MODEL_ID_MAX_LENGTH + 1), id="one-past-it"),
+        pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 4), id="far-past-it"),
+        pytest.param("", id="empty"),
+        pytest.param(None, id="not-text"),
+    ],
+)
+def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: object) -> None:
+    """MH-USAGE-006, review 4965885614: two bounds, and only one of them may refuse.
+
+    The admission bound is not a load rule, so `from_payload` keeps a longer
+    persisted identifier loadable and routable on purpose. Asking the admission
+    question again at the ledger made that population unmeterable — a turn served
+    without a trace in the tab. So the config constructor, not a list written here,
+    decides which identities exist, and this asserts the ledger can key every one
+    of them: the two halves cannot drift apart without failing.
+
+    The last two assertions are the reason one function serves both directions.
+    Keying the loaded value and the raw payload alike stops one model from
+    occupying two rows, and keying a key returns it, so a row read back after a
+    restart is the row that was written.
+    """
+
+    try:
+        loadable = ModelHubModelConfig.from_payload(
+            {"id": identifier, "origin": "manual", "reasoning_efforts": []}
+        ).id
+    except ValueError:
+        loadable = None
+
+    key = usage_ledger_key(identifier)
+
+    assert (key is None) == (loadable is None)
+    if key is None:
+        return
+    assert len(key) <= USAGE_LEDGER_KEY_MAX_LENGTH
+    assert usage_ledger_key(loadable) == key
+    assert usage_ledger_key(key) == key
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        pytest.param("m" * MODEL_ID_MAX_LENGTH, id="at-the-admission-bound"),
+        pytest.param("m" * (MODEL_ID_MAX_LENGTH + 1), id="one-past-it"),
+        pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 4), id="far-past-it"),
+    ],
+)
+def test_a_model_a_legacy_file_still_routes_accumulates_one_row_across_restarts(
+    tmp_path: Path, model_id: str
+) -> None:
+    """MH-USAGE-006: an upgraded install must not look quieter than it is.
+
+    Three separate ledgers over one file, because a key derived per process would
+    give this model a fresh row on every restart — bounded away again by retention
+    before it could ever add up. Two calls, one row, whatever the identifier's
+    length.
+    """
+
+    _ledger(tmp_path).record(source_id="src_a", model_id=model_id, usage=None, at=NOW)
+    _ledger(tmp_path).record(source_id="src_a", model_id=model_id, usage=None, at=NOW)
+
+    rows = _ledger(tmp_path).window(days=30, now=NOW)
+
+    assert [(row["model_id"], row["requests"]) for row in rows] == [
+        (usage_ledger_key(model_id), 2)
+    ]
+    assert len(rows[0]["model_id"]) <= USAGE_LEDGER_KEY_MAX_LENGTH
+
+
+def test_two_identities_sharing_a_bounded_head_are_metered_apart(tmp_path: Path) -> None:
+    """MH-USAGE-006: the bound is a fold, and a fold that loses the tail merges rows.
+
+    Truncation alone is the obvious way to bound a key and the wrong one: these two
+    models differ only past the head a truncated key would keep, so one of them
+    would be billed for the other's calls. What separates them is a digest of the
+    whole identity, which no padding can collide with.
+    """
 
     ledger = _ledger(tmp_path)
-    longest = "m" * MODEL_ID_MAX_LENGTH
+    head = "m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 2)
 
-    ledger.record(source_id="src_a", model_id=longest, usage=None, at=NOW)
+    ledger.record(source_id="src_a", model_id=f"{head}-one", usage=None, at=NOW)
+    ledger.record(source_id="src_a", model_id=f"{head}-two", usage=None, at=NOW)
 
-    assert [row["model_id"] for row in ledger.window(days=30, now=NOW)] == [longest]
+    rows = ledger.window(days=30, now=NOW)
+
+    assert len({row["model_id"] for row in rows}) == 2
+    assert [row["requests"] for row in rows] == [1, 1]
 
 
 def test_the_ledger_file_is_owner_only(tmp_path: Path) -> None:

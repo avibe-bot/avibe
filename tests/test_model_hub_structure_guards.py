@@ -641,9 +641,18 @@ def test_model_identity_is_decided_only_by_its_owner() -> None:
     # what "the same model" is while one function decides it. A module that reaches
     # for the raw bound instead is re-deriving the rule, and the notions drift apart
     # again — that is exactly how one model became two ledger rows.
+    #
+    # Review 4965885614: which function is the right one depends on whether the
+    # module may answer no. The service admits, so it asks the admission question;
+    # the ledger meters a call that already happened, so asking it there dropped
+    # every call made under an identifier a legacy file kept loadable. Neither may
+    # spell the bound, and neither may borrow the other's question.
+    assert "canonical_model_id" in SERVICE.read_text(encoding="utf-8")
+    usage_source = USAGE.read_text(encoding="utf-8")
+    assert "usage_ledger_key" in usage_source
+    assert "canonical_model_id" not in usage_source
     for path in (SERVICE, USAGE):
         source = path.read_text(encoding="utf-8")
-        assert "canonical_model_id" in source
         assert "MODEL_ID_MAX_LENGTH" not in source
     # Review 4960570946: a third admission path had picked up neither half, so
     # the half that is always safe moved to the one validator every path goes

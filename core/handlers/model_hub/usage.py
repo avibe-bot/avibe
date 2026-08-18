@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Final, Optional, Sequence
 
-from .identifiers import canonical_model_id
+from .identifiers import usage_ledger_key
 from .state_file import write_state_document
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
 
@@ -100,8 +100,9 @@ def _text(value: object) -> Optional[str]:
 
     No length bound here: the only text fields this reads are a calendar day and
     an instant, and the parsers below already reject anything that is not one.
-    The key fields go through `canonical_model_id` instead, so a ledger row is
-    keyed by exactly the identity configuration admitted.
+    The key fields go through `usage_ledger_key` instead, which bounds a row by
+    folding a long identity rather than by refusing it — a call the hub served
+    must still be counted, and a row this ledger wrote must still read back.
     """
 
     if not isinstance(value, str):
@@ -165,8 +166,8 @@ def _normalize_row(row: object) -> Optional[dict]:
     if not isinstance(row, dict):
         return None
     day = _text(row.get("day"))
-    source_id = canonical_model_id(row.get("source_id"))
-    model_id = canonical_model_id(row.get("model_id"))
+    source_id = usage_ledger_key(row.get("source_id"))
+    model_id = usage_ledger_key(row.get("model_id"))
     if day is None or source_id is None or model_id is None:
         return None
     # Same rule as the instant above: the file supplies the day, this module
@@ -367,13 +368,14 @@ class BoundedUsageLedger:
                     }
                 )
                 if increment is None:
-                    # Unreachable for anything the hub admits: both boundaries that
-                    # accept a model id store the canonical form this row is keyed by.
-                    # Loud rather than silent so a future boundary that forgets shows
-                    # up as lost metering instead of as a quietly incomplete tab.
+                    # Reachable only for a value no config can hold — not text, or
+                    # empty — because a long identity is folded to a bounded key
+                    # rather than refused. Loud rather than silent so a caller that
+                    # invents an identifier shows up as lost metering instead of as
+                    # a quietly incomplete tab.
                     logger.warning(
                         "Model Hub usage metering skipped a call with an unusable identifier",
-                        extra={"source_id_usable": canonical_model_id(call.source_id) is not None},
+                        extra={"source_id_usable": usage_ledger_key(call.source_id) is not None},
                     )
                     continue
                 existing = rows.get(_row_key(increment))

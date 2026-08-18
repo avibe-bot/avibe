@@ -718,6 +718,52 @@ read-modify-write staying off the event loop, and a report surviving a full prel
 `tests/test_model_hub_l3.py` and `tests/test_model_hub_usage.py` join `canonical_tests` and
 the project index, and each scenario ID is greppable from its test's docstring.
 
+### Round 13 (head `915c3a73b`)
+
+One finding, and it is class C a tenth time — so the circuit breaker applies and the
+scope decision is recorded here before the edit rather than after it.
+
+**Why this one is not another instance of the same fix.** Rounds 7 through 12 were all
+about *when* a fact could be read: an observation existed and some ending, hand-off, or
+buffer stood between it and the ledger. This one is not about reachability at all. The
+call arrives with every fact intact and the ledger throws it away, because it asks
+`canonical_model_id` — the *admission* question — about an identifier admission never
+governed. Two policies, no owner of the question "what may key a usage row".
+
+**The contradiction was written down, not merely implied.** Two tests were shipped side
+by side and both passed: `test_a_persisted_model_id_past_the_bound_still_loads` asserts a
+model ID longer than `MODEL_ID_MAX_LENGTH` stays loadable and keeps its length, because
+per the persisted-shape rule a file an older release wrote must load; and
+`test_an_unusable_identifier_is_never_persisted[oversized-model]` asserted that the same
+shape's usage is dropped. Three comments stated the invariant the pair violates — the
+`MODEL_ID_MAX_LENGTH` header ("a model config accepts is always a model usage can
+meter"), `_text`'s docstring, and `record_many`'s "unreachable for anything the hub
+admits". A false invariant asserted in prose next to a test that proves it false is how
+this survived nine reviews.
+
+**Scope decision: one owner, and it folds instead of refusing.** `usage_ledger_key` joins
+the two existing spellings in `identifiers.py`. Admission may answer no — a request
+naming a 4KB model is refused and nothing is lost — but metering cannot, because the call
+already happened and was already billed. So the ledger's bound became a fold: a value
+that fits is its own key, a longer one is keyed by its readable head plus a digest of the
+whole identity. Both key fields go through it on both the read and the write path, which
+is safe because the fold is idempotent by construction (a folded key is longer than any
+verbatim one, so it is returned unchanged) and injective by digest rather than by a prefix
+padding could collide with. `source_id` gets the same treatment for the same reason: its
+config pattern is `src_[a-z0-9]{8,}`, unbounded above, so it belongs to the same
+population.
+
+**One deliberate behaviour change beyond the finding.** The old rule also dropped an
+identifier that is nothing but padding. That is the same class one probe further on — a
+padding-only ID is loadable too — so the refusal set is now exactly what no config can
+hold: not text, or empty. `usage_ledger_key` returning `None` and
+`ModelHubModelConfig.from_payload` raising are now the same predicate, and
+`MH-USAGE-006` asserts that equivalence against the config constructor itself rather than
+against a list of rejected shapes, so the two halves cannot drift apart again without
+failing. The structure guard keeps each module to its own question: the service admits and
+may not borrow the ledger's, the ledger meters and may not borrow the service's, and
+neither may spell the bound.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

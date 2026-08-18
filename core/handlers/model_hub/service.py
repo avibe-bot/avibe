@@ -2355,9 +2355,10 @@ class ModelHubService:
             if any(
                 model.provenance != "manual"
                 # The same admission rule the manual-add surface applies. A source
-                # may be created with its models inline, so this is the other way
-                # a client-declared identifier enters config, and one the ledger
-                # cannot key by is one whose usage would never be counted.
+                # may be created with its models inline, so this is the other way a
+                # client-declared identifier enters config — and a client can still
+                # be told no, which is the one moment an unbounded identifier is
+                # refusable rather than something every later surface must carry.
                 or canonical_model_id(model.id) is None
                 or contains_credential_material(model.id)
                 or contains_credential_material(model.display_name or "")
