@@ -673,6 +673,22 @@ class ProtocolSSEState:
     def next_sequence_number(self) -> int:
         return self.last_sequence_number + 1
 
+    @property
+    def reached_model(self) -> bool:
+        """Whether this stream got far enough upstream to have been billed.
+
+        Forwarded model output proves the call reached the model even when the
+        stream then ended without a recognized terminal — a connection lost after
+        a text delta is a request that happened, and `token_reports` staying at
+        zero is exactly how the ledger records that nobody reported its tokens.
+
+        Lives on the tracker rather than beside one of its readers, because both
+        sides of the hand-off keep a tracker over the same body and a fact read
+        from only one of them is a fact the other half of the turn cannot use.
+        """
+
+        return self.terminal_outcome == "served" or self.model_output_started
+
     def _observe_frame(self, frame: bytes) -> None:
         if self.terminal_outcome is not None:
             return

@@ -620,6 +620,52 @@ reads every non-schema file in the directory. The four legitimately historical `
 sentences the README already blessed stay untouched, and are now distinguishable
 mechanically rather than by judgment.
 
+### Round 11 (head `d9e19d977`)
+
+One finding, and class C an eighth time — the direct sibling of what round 10 fixed.
+`reached_model` gained the adoption floor; `reported_usage`, which that docstring names
+as its sibling, kept its two branches. Same window (a client leaving inside
+`response.prepare()`), same call, and the row now records `requests == 1` with the token
+counts lost.
+
+**Why round 10's answer does not extend to this fact.** Adoption proves *that* the call
+happened; nothing about adoption reveals *how many tokens* it reported. So the class was
+never about publishing gateway-built facts earlier — it was about where those facts come
+from. Every fact `_TurnExecution` held was built from bytes the gateway had already
+pulled, and pulling starts after the downstream response is prepared. Each round found
+one more ending inside that window, and each fix taught one more fact to survive it. A
+ninth fact would have cost a ninth round.
+
+**The fact already exists on the other side of the hand-off.** `client.py:401` builds a
+`ProtocolSSEState` and `_read_stream_prelude` feeds it: the engine only knows there *is*
+a stream because it read as far as the first model output, which for Anthropic is past
+the `message_start` frame carrying the billed input tokens. `_response_stream` keeps
+observing into that same tracker as it yields, without re-observing the replayed prelude
+— so it is never behind the gateway's copy and never double-counts. `EngineInvokeHandle`
+then handed over `stream`, `outcome`, and `stream_closer`, and dropped it.
+
+`ended()` (`client.py:282`) is the proof this is a property with a missing owner rather
+than a missing line: the *non-adopted* population has owned exactly this since round 7 —
+one exit that attaches the wire's report to the outcome, with a comment naming the same
+Anthropic case. The adopted population is the same property with no owner at all.
+
+**The fix.** `InvokeHandle` gains `observed`, the adapter's own observation of the body
+it hands over, mirrored byte-identically into the contract copy. Both `_TurnExecution`
+facts ask it first and fall back to what the gateway builds itself. `reached_model` also
+moves off a gateway-local `ProtocolSSEState` subclass and onto the shared tracker, which
+deletes `_SSEWireState` entirely: both sides of the hand-off keep a tracker over the same
+body, so a reading available on only one of them is a reading half the turn cannot use.
+
+**Closed as a class, both directions.** `test_every_body_fact_the_turn_reads_can_come_from_the_engine_that_read_it`
+states the property rather than the pair: any `_TurnExecution` property that reads the
+gateway's own tracker is by definition a fact about the forwarded body, so it must also
+read `upstream_observation` — a ninth fact fails a test instead of costing a round. Its
+second half guards the other direction, that every member the contract declares is
+implemented by the one real handle, since a fact that stops at the hand-off leaves the
+reader asking only fakes for it. The behavioural test reuses round 10's enumeration-free
+form, driving the same `FakeStreamResponse` failure points and asserting the prelude's
+1028 input tokens land in the ledger at every one of them.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

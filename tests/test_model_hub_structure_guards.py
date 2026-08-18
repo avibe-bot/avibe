@@ -43,6 +43,7 @@ PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
 CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
+INVOKE_CONTRACT = ROOT / "core/handlers/model_hub/adapter.py"
 FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
 STREAM_TRANSPORT_FIXTURES = json.loads((FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8"))[
     "cases"
@@ -577,6 +578,62 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     ]
     assert handles
     assert all(handle in set(ast.walk(recorder)) for handle in handles)
+
+
+def test_every_body_fact_the_turn_reads_can_come_from_the_engine_that_read_it() -> None:
+    # Review 4965405530: the gateway forwards a body the engine had already begun
+    # reading, and each round of this class was one more fact of that body that
+    # existed only in bytes the gateway itself had pulled — so every ending that
+    # opens before the first pull answered it wrong, one fact at a time. The
+    # property is not which facts those are: it is that a fact read from the
+    # gateway's own tracker is a fact about the forwarded body, and every one of
+    # them can be answered by the observation that saw the body first.
+    execution = next(
+        node
+        for node in ast.walk(_tree(TURN_GATEWAY))
+        if isinstance(node, ast.ClassDef) and node.name == "_TurnExecution"
+    )
+
+    def reads(owner: ast.AST, attribute: str) -> bool:
+        return any(
+            isinstance(node, ast.Attribute)
+            and node.attr == attribute
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            for node in ast.walk(owner)
+        )
+
+    body_facts = [
+        node
+        for node in execution.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(decorator, ast.Name) and decorator.id == "property"
+            for decorator in node.decorator_list
+        )
+        and reads(node, "wire_state")
+    ]
+    assert body_facts
+    assert [fact.name for fact in body_facts if not reads(fact, "upstream_observation")] == []
+
+    # Which the engine can only answer if the whole boundary crosses: a member the
+    # contract declares and the one real implementation drops is a fact that stops
+    # at the hand-off, and the reader above would be asking a fake for it.
+    def members(tree: ast.AST, name: str) -> set[str]:
+        owner = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == name
+        )
+        return {
+            node.name
+            for node in owner.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    declared = members(_tree(INVOKE_CONTRACT), "InvokeHandle")
+    assert "observed" in declared
+    assert declared <= members(_tree(CLIENT), "EngineInvokeHandle")
 
 
 def test_model_identity_is_decided_only_by_its_owner() -> None:

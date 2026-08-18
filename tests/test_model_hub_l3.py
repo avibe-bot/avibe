@@ -69,10 +69,9 @@ from core.handlers.model_hub.service import (
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
     _RenderedTurnOutcome,
-    _SSEWireState,
     render_protocol_terminal_event,
 )
-from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
 from core.handlers.model_hub.usage import BoundedUsageLedger, _ledger_executor
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
@@ -251,7 +250,7 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
 
 
 def test_responses_terminal_event_discards_partial_sequence_before_injection() -> None:
-    wire = _SSEWireState("openai_responses")
+    wire = ProtocolSSEState("openai_responses")
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":7}\n\n')
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":8}')
 
@@ -268,7 +267,7 @@ def test_responses_terminal_event_discards_partial_sequence_before_injection() -
 
 
 def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None:
-    wire = _SSEWireState("openai_responses")
+    wire = ProtocolSSEState("openai_responses")
     wire.observe(
         b'data: {"type":"response.output_text.delta","sequence_number":7}\r\r'
         b'data: {"type":"response.output_text.delta","sequence_number":8}\r\r'
@@ -731,7 +730,23 @@ class MemoryStore:
         return self.requested_models.get(backend, "")
 
 
-class InvokeHandle:
+class _EngineObservation:
+    """The adapter-side half of `InvokeHandle` these fakes all answer the same way.
+
+    Every fake below stands in for an engine that reports nothing about a body
+    until the gateway reads it, which is the state the contract calls `None`.
+    A fake that hands over a real observation sets `_observed` and thereby says
+    so explicitly, instead of being the only one that remembered the member.
+    """
+
+    _observed = None
+
+    @property
+    def observed(self):
+        return self._observed
+
+
+class InvokeHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
 
@@ -750,9 +765,15 @@ class InvokeHandle:
         return self._outcome
 
 
-class LiveInvokeHandle:
-    def __init__(self, outcome: RawCallOutcome, chunks: tuple[bytes, ...]):
+class LiveInvokeHandle(_EngineObservation):
+    def __init__(
+        self,
+        outcome: RawCallOutcome,
+        chunks: tuple[bytes, ...],
+        observed: ProtocolSSEState | None = None,
+    ):
         self._outcome = outcome
+        self._observed = observed
         self._stream = self._iterate(chunks)
 
     @staticmethod
@@ -775,7 +796,7 @@ class LiveInvokeHandle:
         return self._outcome
 
 
-class BlockingLiveInvokeHandle:
+class BlockingLiveInvokeHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self.started = asyncio.Event()
@@ -825,7 +846,7 @@ class MidStreamBlockingInvokeHandle(BlockingLiveInvokeHandle):
         yield b"data: [DONE]\n\n"
 
 
-class BrokenUpstreamInvokeHandle:
+class BrokenUpstreamInvokeHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self._stream = self._iterate()
@@ -911,7 +932,7 @@ class FakeStreamResponse:
         return None
 
 
-class DeferredLifecycleHandle:
+class DeferredLifecycleHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self._available = False
@@ -946,7 +967,7 @@ class DeferredLifecycleHandle:
         return self._outcome
 
 
-class RepeatedCancellationHandle:
+class RepeatedCancellationHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome, blocked_phase: str):
         self._outcome = outcome
         self._blocked_phase = blocked_phase
@@ -989,7 +1010,7 @@ class RepeatedCancellationHandle:
         return self._outcome
 
 
-class NeverResolvingCloseHandle:
+class NeverResolvingCloseHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self.started = asyncio.Event()
@@ -2146,7 +2167,7 @@ def test_gateway_emits_at_most_one_wire_terminal(case: dict[str, object]) -> Non
             response,  # type: ignore[arg-type]
             "openai_responses",
             outcomes[str(case["settlement"])],
-            _SSEWireState("openai_responses"),
+            ProtocolSSEState("openai_responses"),
             forwarded_terminal=cast(str | None, forwarded),  # type: ignore[arg-type]
         )
         assert bool(response.writes) is case["write_terminal"]
@@ -6650,6 +6671,78 @@ def test_no_downstream_ending_after_adoption_can_drop_the_turn_from_the_ledger(
         await gateway.close()
 
         assert _usage_of(service, source.id).get("requests") == 1, point
+
+    for point in failure_points:
+        asyncio.run(exercise(point))
+
+
+def test_the_tokens_the_engine_already_read_survive_every_ending_before_our_first(
+    tmp_path: Path,
+) -> None:
+    """Review 4965405530: the engine read the head of this body before we did.
+
+    The gateway asks the engine for a stream, and the engine only knows there is
+    one because it read far enough to see the first model output — which for
+    Anthropic is past `message_start`, the frame carrying the input tokens the
+    vendor already billed. Those bytes then reach the gateway as a replay it
+    re-tokenizes itself, so every fact it holds about the call starts existing
+    only once forwarding starts. `requests` survived that gap because adoption
+    is a fact of the turn; the token counts had nowhere to come from.
+
+    Same enumeration as the sibling above, for the same reason: the property is
+    that no downstream ending decides what upstream reported, so the endings are
+    read off the response double rather than listed here.
+    """
+
+    failure_points = [
+        name for name in inspect.signature(FakeStreamResponse).parameters if name.endswith("_error")
+    ]
+    assert failure_points
+
+    prelude = (
+        b'event: message_start\ndata: {"type":"message_start","message":'
+        b'{"usage":{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+    )
+
+    async def exercise(point: str) -> None:
+        state = tmp_path / f"prelude_{point}"
+        state.mkdir()
+        source = _source("src_meterprel01", "Prelude-billed body")
+        engine_view = ProtocolSSEState("anthropic")
+        engine_view.observe(prelude)
+        assert engine_view.usage is not None
+        service = _service(
+            state,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (prelude,),
+                    observed=engine_view,
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=f"turn_meter_prelude_{point}",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(**{point: ConnectionResetError("client left")}),
+        ):
+            with pytest.raises(ConnectionError):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=5)
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered.get("requests") == 1, point
+        assert metered.get("token_reports") == 1, point
+        assert metered.get("input_tokens") == 1028, point
 
     for point in failure_points:
         asyncio.run(exercise(point))

@@ -154,16 +154,22 @@ class EngineInvokeHandle:
         stream: AsyncIterator[bytes] | None,
         outcome: asyncio.Future[RawCallOutcome],
         stream_closer: Callable[[], Awaitable[None]] | None = None,
+        observed: ProtocolSSEState | None = None,
     ) -> None:
         self._stream = stream
         self._outcome = outcome
         self._stream_closer = stream_closer
+        self._observed = observed
         self._close_lock = asyncio.Lock()
         self._stream_closed = False
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
         return self._stream
+
+    @property
+    def observed(self) -> ProtocolSSEState | None:
+        return self._observed
 
     @property
     def outcome_available(self) -> bool:
@@ -413,7 +419,7 @@ class EngineClient:
                 response.close()
                 await session.close()
                 if prelude_outcome.kind == RawOutcomeKind.SUCCESS:
-                    handle = buffered_prelude_handle(prelude, prelude_outcome)
+                    handle = buffered_prelude_handle(prelude, prelude_outcome, wire_state)
                     ownership_transferred = True
                     return handle
                 prelude.close()
@@ -441,6 +447,7 @@ class EngineClient:
                 stream=response_stream,
                 outcome=outcome_future,
                 stream_closer=close_response_stream,
+                observed=wire_state,
             )
             ownership_transferred = True
             return handle
@@ -890,6 +897,7 @@ def buffered_handle(payload: bytes, outcome: RawCallOutcome) -> EngineInvokeHand
 def buffered_prelude_handle(
     prelude: _StreamPrelude,
     outcome: RawCallOutcome,
+    observed: ProtocolSSEState,
 ) -> EngineInvokeHandle:
     async def body() -> AsyncIterator[bytes]:
         try:
@@ -903,7 +911,12 @@ def buffered_prelude_handle(
 
     future = asyncio.get_running_loop().create_future()
     future.set_result(outcome)
-    return EngineInvokeHandle(stream=body(), outcome=future, stream_closer=close)
+    return EngineInvokeHandle(
+        stream=body(),
+        outcome=future,
+        stream_closer=close,
+        observed=observed,
+    )
 
 
 def _outcome(

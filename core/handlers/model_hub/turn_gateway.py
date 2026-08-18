@@ -100,7 +100,7 @@ class _TurnExecution:
     # The live stream tracker, published here so a boundary that ends the turn
     # without reaching the end of the chunk loop can still read the tokens the
     # upstream had already reported.
-    wire_state: _SSEWireState | None = None
+    wire_state: ProtocolSSEState | None = None
     # The same two facts for a response the gateway buffered whole, which has no
     # wire tracker to read them from.
     buffered_usage: ProtocolUsageReport | None = None
@@ -111,6 +111,24 @@ class _TurnExecution:
     usage_write: asyncio.Future[None] | None = None
 
     @property
+    def upstream_observation(self) -> ProtocolSSEState | None:
+        """What the engine read of this body, from before it was ours to forward.
+
+        Every other fact this turn holds is built from bytes this gateway has
+        already pulled, and the pulling starts after the downstream response is
+        prepared. The engine read the head of the same body to decide there was
+        one and keeps reading as it yields, so its tracker answers in the window
+        where ours does not exist yet and is never behind it afterwards.
+
+        Which is what makes it the first thing both facts below ask. They used
+        to ask the shapes this gateway builds, and each new ending that opened
+        before those shapes existed cost a review round teaching one more fact
+        to survive it.
+        """
+
+        return self.handle.observed if self.handle is not None else None
+
+    @property
     def reported_usage(self) -> ProtocolUsageReport | None:
         """Tokens upstream reported for this turn, whichever shape it answered in.
 
@@ -119,6 +137,9 @@ class _TurnExecution:
         was billed in both.
         """
 
+        upstream = self.upstream_observation
+        if upstream is not None and upstream.usage is not None:
+            return upstream.usage
         if self.wire_state is not None:
             return self.wire_state.usage
         return self.buffered_usage
@@ -139,21 +160,26 @@ class _TurnExecution:
         reached its terminal was, and an error envelope reached no model exactly as
         a stream that forwarded no output did.
 
-        Both halves are observations *of the body*, and the turn can end before
-        either one exists: the gateway adopts the body first, and only then
-        prepares the downstream response and starts reading. A client that goes
-        away in that gap leaves no wire tracker and no buffered verdict behind,
-        so the last answer is the adoption itself — which is both the earliest
-        moment the question is answerable and the last one that cannot fail.
-        It is an answer, not a guess: the engine hands this gateway a body only
-        after the prelude observed the first model output, or for a call it had
-        already completed upstream, and it keeps every other call to meter in
-        the resolver. An adopted body is therefore a call the vendor billed, and
-        `token_reports` staying at zero is how the ledger says nobody got to
-        read its tokens. Later evidence still overrules this, so it decides only
-        for the endings that collected none.
+        Both halves are observations *of the body* this gateway made itself, and
+        the turn can end before either one exists: the gateway adopts the body
+        first, and only then prepares the downstream response and starts reading.
+        A client that goes away in that gap leaves neither behind — which is why
+        the engine's own observation is asked first, here and in `reported_usage`.
+        It read the same body earlier than we did, so it is the one answer that
+        exists in that window rather than a weaker stand-in for it.
+
+        The adoption itself remains the floor, for a handle that tokenized no
+        stream to hand over. It is an answer, not a guess: the engine hands this
+        gateway a body only after the prelude observed the first model output, or
+        for a call it had already completed upstream, and it keeps every other
+        call to meter in the resolver. An adopted body is therefore a call the
+        vendor billed, and `token_reports` staying at zero is how the ledger says
+        nobody got to read its tokens.
         """
 
+        upstream = self.upstream_observation
+        if upstream is not None and upstream.reached_model:
+            return True
         if self.wire_state is not None:
             return self.wire_state.reached_model
         if self.buffered_outcome is not None:
@@ -165,25 +191,6 @@ class _TurnExecution:
 class _RenderedTurnOutcome:
     key: str | None
     message: str | None
-
-
-class _SSEWireState(ProtocolSSEState):
-    """Gateway-local name for the shared protocol stream tracker."""
-
-    @property
-    def reached_model(self) -> bool:
-        """Whether this stream got far enough upstream to have been billed.
-
-        Forwarded model output proves the call reached the model even when the
-        stream then ended without a recognized terminal — a connection lost after
-        a text delta is a request that happened, and `token_reports` staying at
-        zero is exactly how the ledger records that nobody reported its tokens.
-
-        One owner for the question, because every ending of a stream has to
-        answer it the same way.
-        """
-
-        return self.terminal_outcome == "served" or self.model_output_started
 
 
 class _DownstreamDisconnected(ConnectionError):
@@ -726,7 +733,7 @@ class ModelHubTurnGateway:
             },
         )
         await self._downstream_io(response.prepare(request))
-        wire_state = _SSEWireState(protocol)
+        wire_state = ProtocolSSEState(protocol)
         execution.wire_state = wire_state
         async for chunk in handle.stream:
             output_started_before = wire_state.model_output_started
@@ -819,7 +826,7 @@ class ModelHubTurnGateway:
         response: web.StreamResponse,
         protocol: str,
         rendered: _RenderedTurnOutcome | None,
-        wire_state: _SSEWireState,
+        wire_state: ProtocolSSEState,
         *,
         forwarded_terminal: StreamTerminalOutcome | None,
     ) -> None:
