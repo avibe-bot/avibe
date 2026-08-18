@@ -128,11 +128,30 @@ class InboundAttachmentMaterializer:
     ) -> None:
         home = paths.get_vibe_remote_dir() if effective_home is None else effective_home
         self._home = Path(os.path.abspath(os.path.expanduser(os.fspath(home))))
-        self._root = (
-            self._home / "attachments" / "im"
-            if attachments_root is None
-            else Path(attachments_root) / "im"
-        )
+        # The anchor is trusted and resolved once; every component below it is
+        # Avibe-owned and stays under a per-component no-follow walk.
+        anchor = paths.physical_home(self._home)
+        if attachments_root is None:
+            owned_parts: tuple[str, ...] = ("attachments", "im")
+        else:
+            declared_root = Path(os.path.abspath(os.path.expanduser(os.fspath(attachments_root))))
+            relative_parts = _owned_parts_below(anchor, self._home, declared_root)
+            if relative_parts is None:
+                # A declared root outside the home is its own anchor, on the same
+                # rule as the home: the path reaching it is operator config, and
+                # Avibe only owns what it creates underneath.
+                anchor = paths.physical_home(declared_root)
+                owned_parts = ("im",)
+            else:
+                # Every component between the home and a declared root inside it
+                # is Avibe-owned space, so all of them stay in the no-follow walk
+                # instead of being resolved: a symlink planted at an intermediate
+                # component such as ``<home>/custom`` must not redirect leases out
+                # of the tree.
+                owned_parts = (*relative_parts, "im")
+        self._anchor = anchor
+        self._owned_parts = owned_parts
+        self._root = anchor.joinpath(*owned_parts)
 
     async def materialize(
         self,
@@ -144,7 +163,7 @@ class InboundAttachmentMaterializer:
         max_concurrency: int = 1,
         language: str = "en",
     ) -> MaterializedAttachmentBatch:
-        root_fd = _open_or_create_private_directory(self._root)
+        root_fd = _open_or_create_private_directory(self._anchor, self._owned_parts)
         lease_id = secrets.token_hex(16)
         lease_dir = self._root / lease_id
         lease_fd: int | None = None
@@ -571,14 +590,47 @@ def _remove_lease_directory(state: _LeaseState) -> None:
         os.close(state.root_fd)
 
 
-def _open_or_create_private_directory(directory: Path) -> int:
-    """Create a private root while refusing symlinks in every path component."""
+def _owned_parts_below(
+    anchor: Path,
+    home: Path,
+    declared_root: Path,
+) -> tuple[str, ...] | None:
+    """Components from the home down to ``declared_root``, or ``None`` if outside.
 
-    if not directory.is_absolute():
+    A declared root under the home is accepted in either spelling: as written
+    against the logical home, or already resolved against the physical one. The
+    returned components are relative to the anchor either way, so the caller can
+    keep every one of them inside the ``O_NOFOLLOW`` walk.
+    """
+
+    for base in (home, anchor):
+        if declared_root.is_relative_to(base):
+            return declared_root.relative_to(base).parts
+    return None
+
+
+def _open_or_create_private_directory(anchor: Path, owned_parts: tuple[str, ...]) -> int:
+    """Create a private root while refusing symlinks in every owned component.
+
+    ``anchor`` is the already-resolved trust anchor -- the Avibe home, or a
+    declared root the operator put outside it: the operator owns the path that
+    reaches it, so it is opened in one step and its own symlinked parents stay
+    legal. ``owned_parts`` are every component Avibe creates underneath, and
+    each one is opened with ``O_NOFOLLOW`` so a planted symlink cannot redirect
+    a lease outside Avibe-owned storage.
+    """
+
+    if not anchor.is_absolute():
         raise RuntimeError("attachment lease root must be absolute")
-    descriptor = os.open(directory.anchor, _directory_open_flags())
+    if not owned_parts or any(part in {"", ".", ".."} for part in owned_parts):
+        raise RuntimeError("attachment lease root must name owned components")
     try:
-        for component in directory.parts[1:]:
+        descriptor = os.open(anchor, _directory_open_flags())
+    except FileNotFoundError:
+        os.makedirs(anchor, mode=0o700, exist_ok=True)
+        descriptor = os.open(anchor, _directory_open_flags())
+    try:
+        for component in owned_parts:
             try:
                 next_descriptor = os.open(
                     component,

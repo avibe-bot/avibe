@@ -113,6 +113,25 @@ async def _start_watch_service(service: ManagedWatchService) -> None:
         await startup_task
 
 
+async def _await_fused_watch(
+    service: ManagedWatchService,
+    watch_id: str,
+    timeout: float = 10.0,
+) -> None:
+    """Wait for a watch to be fused instead of sleeping a fixed interval.
+
+    Fusing needs a real waiter subprocess to start and its result to reach the
+    raising store, so the wait covers a process spawn plus interpreter startup.
+    A fixed 0.12s was enough locally and not on a loaded CI runner, where the
+    assertion saw an empty fused set.
+    """
+
+    deadline = time.monotonic() + timeout
+    while watch_id not in service._fused_watch_ids:
+        assert time.monotonic() < deadline, "watch was never fused after the store error"
+        await asyncio.sleep(0.02)
+
+
 def _add_recovery_watch(
     store: ManagedWatchStore,
     *,
@@ -2314,8 +2333,8 @@ def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> 
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.12)
-        assert watch.id in service._fused_watch_ids
+        await _await_fused_watch(service, watch.id)
+        # Settle briefly: a fused store must not let the cycle start again.
         await asyncio.sleep(0.08)
         await service.stop()
 
@@ -2374,8 +2393,8 @@ def test_managed_watch_service_fuses_quiet_cycle_after_store_error(tmp_path: Pat
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.12)
-        assert watch.id in service._fused_watch_ids
+        await _await_fused_watch(service, watch.id)
+        # Settle briefly: a fused store must not let the cycle start again.
         await asyncio.sleep(0.08)
         await service.stop()
 
