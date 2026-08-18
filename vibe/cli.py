@@ -6705,6 +6705,9 @@ def cmd_data_retention(args):
                 # refuse deletion (fail closed), matching the controller:
                 # normalize_retention_days would silently coerce it to 30 or 1.
                 config_recovered = True
+                # The controller refuses automatic retention for this shape;
+                # the status view must show the policy as disabled too.
+                enabled = False
             else:
                 retention_days = days_value
             enabled_value = getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)

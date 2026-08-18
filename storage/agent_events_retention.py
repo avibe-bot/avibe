@@ -389,7 +389,19 @@ def maybe_compact(
 
             def _beat() -> None:
                 while not heartbeat_stop.is_set():
-                    if not lease_heartbeat():
+                    try:
+                        renewed = lease_heartbeat()
+                    except OperationalError:
+                        # VACUUM holds SQLite's sole writer lock, so a renewal
+                        # attempt during the rewrite cannot take it. This is
+                        # expected, not ownership loss: the lease was renewed
+                        # just before VACUUM began (full TTL ahead) and is
+                        # renewed again after it finishes. Definitive loss is
+                        # detected by the token-conditional UPDATE returning
+                        # 0 rows (replacement committed), which raises nothing.
+                        heartbeat_stop.wait(LEASE_HEARTBEAT_SECONDS)
+                        continue
+                    if not renewed:
                         lease_state["lost"] = True
                         return
                     # Wait on the stop event (not time.sleep) so VACUUM's
@@ -498,10 +510,20 @@ def run_once(
         compaction: dict[str, Any] = {"status": "not_attempted"}
         if compact:
             def _lease_heartbeat() -> bool:
+                # Renewal is skipped while VACUUM holds the writer lock (the
+                # heartbeat treats that OperationalError as retry-later); do
+                # one renewal here so the TTL is fresh when VACUUM begins.
                 with engine.begin() as conn:
-                    return renew_lease(conn, token)
+                    if not renew_lease(conn, token):
+                        raise OperationalError("lease replaced before compaction", None, None)
+                return True
 
+            # Refresh the lease, then compact; a final renewal after VACUUM
+            # closes the TTL window for the post-vacuum reporting path.
+            _lease_heartbeat()
             compaction = maybe_compact(engine, db_path=db_path, lease_heartbeat=_lease_heartbeat)
+            with engine.begin() as conn:
+                renew_lease(conn, token)
             if str(compaction.get("reason")) == "lease_lost_during_compaction":
                 # Deletion already completed and its marker is written; only
                 # the compaction was contested. Report that distinctly so the
