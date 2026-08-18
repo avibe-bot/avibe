@@ -291,7 +291,7 @@ async def test_live_parent_keeps_singleton_sync_record_and_child_untouched(tmp_p
     assert host.signals == []
 
 
-async def test_live_parent_keeps_record_when_identity_stamp_is_linux_ticks(
+async def test_legacy_recycled_parent_pid_does_not_block_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -299,7 +299,13 @@ async def test_live_parent_keeps_record_when_identity_stamp_is_linux_ticks(
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
     uid = os.getuid() if hasattr(os, "getuid") else None
-    host = _Host(
+
+    class RecycledParentHost(_Host):
+        def recorded_group_members(self, process_group, *, socket_path, provider_root, role=None):
+            del process_group, socket_path, provider_root, role
+            return {}, []
+
+    host = RecycledParentHost(
         {
             99: _ProcessIdentity(
                 stamp=424_242.0,
@@ -313,10 +319,9 @@ async def test_live_parent_keeps_record_when_identity_stamp_is_linux_ticks(
     ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
     ownership.write(_record(root, state="finalized", pid=451))
 
-    with pytest.raises(SyncOwnershipError, match="live parent"):
-        await ownership.reconcile()
+    await ownership.reconcile()
 
-    assert ownership.path.exists()
+    assert not ownership.path.exists()
     assert host.signals == []
 
 

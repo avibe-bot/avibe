@@ -773,14 +773,21 @@ def _recorded_sync_time_matches(
         if not _is_identity_stamp(live):
             raise SyncOwnershipError(f"sync {subject} creation time is unavailable")
         return float(live) == float(record[stamp_key])
+    if subject == "parent":
+        # A legacy record can only be read by a later process. The writer is
+        # gone, so exact wall equality is the remaining parent identity; uid
+        # alone would treat a recycled same-uid pid as the original owner.
+        wall = identity.wall_create_time
+        if not _is_identity_stamp(wall):
+            raise SyncOwnershipError(f"sync {subject} creation time is unavailable")
+        return float(wall) == float(record[wall_key])
     if _uses_linux_starttime_stamp():
         wall = identity.wall_create_time
         if not _is_identity_stamp(wall):
             raise SyncOwnershipError(f"sync {subject} creation time is unavailable")
-        # Legacy Linux records stored wall-clock create_time, whose value can
-        # shift arbitrarily after a clock correction. Its presence lets the
-        # caller continue to the exact uid/argv/root/role/nonce checks; only a
-        # stable starttime stamp may decide identity by numeric equality.
+        # Legacy child records still have argv/root/role/nonce to authenticate
+        # after a CLOCK_REALTIME step. Presence of a readable wall time is
+        # enough to continue to those facts.
         return True
     live = identity.stamp
     if not _is_identity_stamp(live):
