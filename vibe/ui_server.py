@@ -13052,12 +13052,13 @@ def _show_page_not_found_response():
     return jsonify({"error": "not_found"}), 404
 
 
-def _show_page_access_denied_html_response():
+def _show_page_access_denied_html_response(*, include_back_link: bool = True):
     language = _request_ui_language()
     title = html.escape(t("show.pageAccessDenied.title", language), quote=True)
     heading = html.escape(t("show.pageAccessDenied.heading", language))
     message = html.escape(t("show.pageAccessDenied.message", language))
     back = html.escape(t("show.pageAccessDenied.back", language))
+    back_link = f'<a href="/">{back}</a>' if include_back_link else ""
     html_body = """<!doctype html>
 <html lang="__LANGUAGE__">
   <head>
@@ -13077,21 +13078,21 @@ def _show_page_access_denied_html_response():
     <main>
       <h1>__HEADING__</h1>
       <p>__MESSAGE__</p>
-      <a href="/">__BACK__</a>
+      __BACK_LINK__
     </main>
   </body>
 </html>
-""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message).replace("__BACK__", back)
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message).replace("__BACK_LINK__", back_link)
     response = Response(html_body, status=403, mimetype="text/html; charset=utf-8")
     return _with_limited_show_policy(response)
 
 
-def _show_page_access_denied_response():
+def _show_page_access_denied_response(*, include_back_link: bool = True):
     if (
         request.method in {"GET", "HEAD"}
         and _show_page_accepts_html()
     ):
-        return _show_page_access_denied_html_response()
+        return _show_page_access_denied_html_response(include_back_link=include_back_link)
     response = jsonify({"error": "show_access_forbidden"})
     response.status_code = 403
     return _with_limited_show_policy(response)
@@ -15358,7 +15359,12 @@ def redirect_public_show_page_to_canonical_path(share_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_public_show_page(share_id, asset_path):
-    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
+    from core.show_pages import (
+        ShowPageError,
+        ShowPageStore,
+        ensure_show_page_dir,
+        normalize_show_access_email,
+    )
     from vibe import show_identity
 
     config = _load_remote_access_config()
@@ -15425,7 +15431,24 @@ async def serve_public_show_page(share_id, asset_path):
                     config,
                 )
                 if authenticated_context is not None:
-                    return _show_page_access_denied_response()
+                    access = store.get_access(page.session_id)
+                    allowlisted = False
+                    if authenticated_context.email:
+                        try:
+                            allowlisted = (
+                                access is not None
+                                and normalize_show_access_email(authenticated_context.email)
+                                in access.normalized_emails
+                            )
+                        except (TypeError, ValueError):
+                            allowlisted = False
+                    page_scoped = authenticated_context.can_use_show_page(page.session_id)
+                    if not allowlisted and not page_scoped:
+                        return _show_page_access_denied_response(
+                            include_back_link=(
+                                authenticated_context.instance_access_source != "show_page_email"
+                            )
+                        )
                 if config is None:
                     return _show_identity_error_response("identity_unavailable", 503)
                 return_target = request.full_path if request.query_string else request.path
