@@ -12,7 +12,6 @@ import math
 import os
 import signal
 import stat
-import subprocess
 import sys
 import time
 from collections import deque
@@ -20,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Deque, Protocol, TypeVar, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -3658,8 +3657,6 @@ def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, flo
 def _group_contains_only_confirmed_owned_processes(
     process_group: int | None,
     identities: Mapping[int, float],
-    *,
-    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Whether a group can be signaled without bypassing PID identity checks."""
 
@@ -3667,10 +3664,8 @@ def _group_contains_only_confirmed_owned_processes(
         return False
     group_members = _snapshot_process_group(process_group)
     confirmed = _confirmed_owned_processes(identities)
-    trusted = set() if trusted_pids is None else set(trusted_pids)
     return bool(group_members) and all(
-        process_id in trusted or confirmed.get(process_id) == created_at
-        for process_id, created_at in group_members.items()
+        confirmed.get(process_id) == created_at for process_id, created_at in group_members.items()
     )
 
 
@@ -3678,25 +3673,18 @@ def _signal_owned_group(
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
-    *,
-    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Signal a whole isolated group, but only if every member is confirmed owned.
 
     Returns whether the group signal settled the delivery, so a caller holding a
     direct child handle can fall back to it without widening the blast radius: a
-    group with an unverifiable member is never signaled group-wide. A live
-    spawned Popen child may be treated as confirmed for the direct child only.
+    group with an unverifiable member is never signaled group-wide.
     """
 
     if (
         process_group is None
         or not hasattr(os, "killpg")
-        or not _group_contains_only_confirmed_owned_processes(
-            process_group,
-            identities,
-            trusted_pids=trusted_pids,
-        )
+        or not _group_contains_only_confirmed_owned_processes(process_group, identities)
     ):
         return False
     try:
@@ -3708,47 +3696,21 @@ def _signal_owned_group(
     return True
 
 
-def _live_direct_child_handle(process: asyncio.subprocess.Process) -> bool:
-    """Whether ``process`` is an unreaped child this process actually spawned.
-
-    A constructed ``asyncio.subprocess.Process`` (even one with a fake
-    ``_proc``) is not trusted. Only a live stdlib ``Popen`` whose
-    ``returncode`` is still unset is authoritative for the direct child.
-    """
-
-    if (
-        not isinstance(process, asyncio.subprocess.Process)
-        or process.returncode is not None
-        or process.pid is None
-    ):
-        return False
-    transport = getattr(process, "_transport", None)
-    popen = getattr(transport, "_proc", None)
-    return isinstance(popen, subprocess.Popen) and popen.returncode is None
-
-
 def _signal_owned_group_or_process(
     process: asyncio.subprocess.Process,
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
 ) -> None:
-    trusted = {int(process.pid)} if _live_direct_child_handle(process) else set()
-    if _signal_owned_group(
-        process_group,
-        identities,
-        signum,
-        trusted_pids=trusted,
-    ):
+    if _signal_owned_group(process_group, identities, signum):
         return
     if process.returncode is not None:
         return
-    if not trusted:
-        created_at = identities.get(process.pid)
-        if created_at is None or process.pid not in _confirmed_owned_processes(
-            {process.pid: created_at}
-        ):
-            return
+    created_at = identities.get(process.pid)
+    if created_at is None or process.pid not in _confirmed_owned_processes(
+        {process.pid: created_at}
+    ):
+        return
     try:
         process.send_signal(signum)
     except ProcessLookupError:
