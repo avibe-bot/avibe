@@ -18,12 +18,33 @@ describe('Show Page link routes', () => {
     expect(editorPath(page('unexpected'))).toBeNull();
   });
 
-  it('does not expose Limited as a live link before signed-in guest admission exists', () => {
+  it('keeps Limited share links on the signed-in guest route', () => {
     const limited = {
       ...page('limited'),
-      active_url: 'https://show.example.test/p/shared-link/',
+      public_url: 'https://show.example.test/p/shared-link/',
     };
-    expect(localPath(limited)).toBeNull();
+    expect(localPath(limited)).toBe('/p/shared-link/');
+    expect(liveHref(limited)).toBe('https://show.example.test/p/shared-link/');
+    expect(copyHref(limited)).toBe('https://show.example.test/p/shared-link/');
+  });
+
+  it('prefers the Cloud-qualified Limited URL over the local fallback', () => {
+    const limited = {
+      ...page('limited'),
+      active_url: '/p/shared-link/',
+      public_url: 'https://alice.avibe.bot/p/shared-link/',
+    };
+
+    expect(copyHref(limited)).toBe('https://alice.avibe.bot/p/shared-link/');
+  });
+
+  it('does not expose a Limited link without a Cloud-qualified URL', () => {
+    const limited = {
+      ...page('limited'),
+      active_url: '/p/shared-link/',
+      public_url: null,
+    };
+
     expect(liveHref(limited)).toBeNull();
     expect(copyHref(limited)).toBeNull();
   });
