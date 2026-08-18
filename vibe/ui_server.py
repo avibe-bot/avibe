@@ -12969,7 +12969,40 @@ def _show_page_offline_response():
     return Response(html, status=401, mimetype="text/html; charset=utf-8")
 
 
+def _show_page_not_found_html_response():
+    html = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Show Page unavailable</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>This page is unavailable</h1>
+      <p>The page does not exist or is no longer available.</p>
+    </main>
+  </body>
+</html>
+"""
+    response = Response(html, status=404, mimetype="text/html; charset=utf-8")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _show_page_not_found_response():
+    if (
+        request.method in {"GET", "HEAD"}
+        and "text/html" in request.headers.get("accept", "").lower()
+    ):
+        return _show_page_not_found_html_response()
     return jsonify({"error": "not_found"}), 404
 
 
@@ -14989,6 +15022,17 @@ def _show_identity_error_response(error: str, status: int):
     return response
 
 
+def _show_identity_not_found_response():
+    """Hide whether a share exists when identity admission is denied."""
+    if "text/html" in request.headers.get("accept", "").lower():
+        return _show_page_not_found_html_response()
+    response = jsonify({"error": "not_found"})
+    response.status_code = 404
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _show_identity_error_status(error: str, *, default: int = 400) -> int:
     if error == "identity_unavailable":
         return 503
@@ -15093,6 +15137,8 @@ async def complete_show_identity_login():
         if "error" in fields:
             if fields["error"] not in {"identity_not_verified", "identity_unavailable"}:
                 raise show_identity.ShowIdentityError("invalid_callback")
+            if fields["error"] == "identity_not_verified":
+                return _show_identity_not_found_response()
             return _show_identity_error_response(
                 fields["error"],
                 _show_identity_error_status(fields["error"]),
@@ -15116,13 +15162,15 @@ async def complete_show_identity_login():
     try:
         page = store.get_by_share_id(state.share_id)
         if page is None:
-            return _show_identity_error_response("not_found", 404)
+            return _show_identity_not_found_response()
         if page.visibility == "offline":
-            return _show_identity_error_response("show_access_forbidden", 403)
+            return _show_identity_not_found_response()
         access = store.get_access(page.session_id)
         if access is None:
-            return _show_identity_error_response("not_found", 404)
+            return _show_identity_not_found_response()
         if access.access_mode == "public":
+            if page.visibility != "public":
+                return _show_identity_not_found_response()
             try:
                 show_identity.consume_verified_show_identity(identity)
             except show_identity.ShowIdentityError as exc:
@@ -15133,10 +15181,11 @@ async def complete_show_identity_login():
             return redirect(state.return_target, code=303)
         if (
             access.access_mode != "limited"
+            or page.visibility != "limited"
             or access.share_id != state.share_id
             or identity.normalized_email not in access.normalized_emails
         ):
-            return _show_identity_error_response("show_access_forbidden", 403)
+            return _show_identity_not_found_response()
 
         try:
             show_identity.consume_verified_show_identity(identity)

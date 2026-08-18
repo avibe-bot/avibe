@@ -617,6 +617,25 @@ def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
     assert unavailable.status_code == 503
     assert unavailable.get_json()["error"] == "identity_unavailable"
 
+    not_verified_login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    not_verified_state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(not_verified_login.headers["Location"]).query
+    )["state"][0]
+    not_verified = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": not_verified_state, "error": "identity_not_verified"},
+    )
+    assert not_verified.status_code == 404
+    assert not_verified.get_json() == {"error": "not_found"}
+
     verifier_login = client.get(
         f"/p/{share_id}/",
         base_url="https://alex.avibe.bot",
@@ -683,8 +702,8 @@ def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
         environ_base=_remote_peer(),
         data={"state": next_state, "assertion": "signed-assertion"},
     )
-    assert rotated.status_code == 403
-    assert rotated.get_json()["error"] == "show_access_forbidden"
+    assert rotated.status_code == 404
+    assert rotated.get_json() == {"error": "not_found"}
     assert "Set-Cookie" not in rotated.headers
 
 
@@ -730,8 +749,8 @@ def test_limited_show_callback_rejects_offline_page_and_rate_limits_verification
         environ_base=_remote_peer(),
         data={"state": state, "assertion": "signed-assertion"},
     )
-    assert offline.status_code == 403
-    assert offline.get_json()["error"] == "show_access_forbidden"
+    assert offline.status_code == 404
+    assert offline.get_json() == {"error": "not_found"}
     assert "Set-Cookie" not in offline.headers
 
     monkeypatch.setattr(ui_server, "_auth_rate_limited", lambda: True)
@@ -855,9 +874,23 @@ def test_show_identity_callback_does_not_charge_denied_identity_to_replay_ledger
         data={"state": state, "assertion": "signed-assertion"},
     )
 
-    assert denied.status_code == 403
-    assert denied.get_json()["error"] == "show_access_forbidden"
+    assert denied.status_code == 404
+    assert denied.get_json() == {"error": "not_found"}
     assert "Set-Cookie" not in denied.headers
+
+
+def test_show_identity_not_found_is_a_generic_html_page_for_browsers():
+    with app.test_request_context(
+        show_identity.CALLBACK_PATH,
+        method="POST",
+        headers={"Accept": "text/html"},
+    ):
+        response = ui_server._show_identity_not_found_response()
+
+    assert response.status_code == 404
+    assert response.headers["Content-Type"].startswith("text/html")
+    assert b"This page is unavailable" in response.body
+    assert b"show_access_forbidden" not in response.body
 
 
 def test_show_identity_callback_body_stops_at_the_streaming_limit():
@@ -1141,7 +1174,8 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
                 "assertion": "signed-assertion",
             },
         )
-        assert denied.status_code == 403
+        assert denied.status_code == 404
+        assert denied.get_json() == {"error": "not_found"}
 
         store = ShowPageStore()
         try:
@@ -1171,6 +1205,8 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             headers={"Accept": "text/html"},
         )
         assert new_visit.status_code == 404
+        assert b"This page is unavailable" in new_visit.content
+        assert b"does not exist or is no longer available" in new_visit.content
 
         store = ShowPageStore()
         try:
@@ -7679,6 +7715,19 @@ def test_public_and_private_paths_are_canonical_by_visibility(monkeypatch, tmp_p
     # private page is never reachable there.
     public_response = app.test_client().get(f"/p/{share_id}/", base_url="http://127.0.0.1:5123")
     assert public_response.status_code == 404
+
+
+def test_public_show_not_found_is_a_generic_html_page_for_browsers():
+    response = app.test_client().get(
+        "/p/unknown-share/",
+        base_url="http://127.0.0.1:5123",
+        headers={"Accept": "text/html"},
+    )
+
+    assert response.status_code == 404
+    assert response.headers["Content-Type"].startswith("text/html")
+    assert b"This page is unavailable" in response.content
+    assert b"not_found" not in response.content
 
 
 def test_rotated_public_share_url_stops_working(monkeypatch, tmp_path):
