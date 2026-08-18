@@ -39,6 +39,7 @@ export interface SegmentedRadioProps<T extends string> {
   ariaLabel: string;
   disabled?: boolean;
   tone?: SegmentedTone;
+  className?: string;
 }
 
 export function SegmentedRadio<T extends string>({
@@ -48,6 +49,7 @@ export function SegmentedRadio<T extends string>({
   ariaLabel,
   disabled,
   tone = 'mint',
+  className,
 }: SegmentedRadioProps<T>) {
   return (
     <div
@@ -56,6 +58,7 @@ export function SegmentedRadio<T extends string>({
       aria-disabled={disabled || undefined}
       className={clsx(
         'flex h-9 items-stretch gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5',
+        className,
         disabled && 'opacity-60',
       )}
     >

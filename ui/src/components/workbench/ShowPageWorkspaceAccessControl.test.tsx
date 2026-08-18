@@ -222,7 +222,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(api.getResourceAccess).not.toHaveBeenCalled();
   });
 
-  it('orders Organization access from narrowest to broadest', async () => {
+  it('keeps the requested policy order while narrowing stays owner-aware', async () => {
     renderControl();
 
     const radios = await screen.findAllByRole('radio');

@@ -393,6 +393,7 @@ export function ShowPageWorkspaceAccessControl({
             disabled={!editable}
             ariaLabel={t('chat.showPage.workspaceAccess')}
             tone="muted"
+            className="max-w-full [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:px-1.5 [&>button]:text-center [&>button]:leading-tight"
             options={[
               { id: 'private', label: t('chat.showPage.workspaceModes.private') },
               { id: 'scope', label: t('chat.showPage.workspaceModes.scope') },
