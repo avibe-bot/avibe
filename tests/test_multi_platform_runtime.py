@@ -26,7 +26,10 @@ from modules.agents.base import AgentRequest
 from modules.agents.model_hub import launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
-from modules.agents.opencode.poll_loop import OpenCodePollLoop
+from modules.agents.opencode.poll_loop import (
+    OpenCodePollLoop,
+    _settlement_assistant_message,
+)
 from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
 
 
@@ -1498,6 +1501,60 @@ def test_opencode_poll_aborts_disabled_question_toolcall():
     assert emitted[0][1] == "translated:error.opencodeQuestionToolDisabled"
 
 
+def test_settlement_assistant_message_walks_back_to_the_owning_turn():
+    """Every live snapshot shape settles the same owning assistant.
+
+    Seed the shapes already seen in production: last-is-assistant, a trailing
+    user inject, an empty leftover generation after a completed error, and a
+    follow-up that already has parts. The owner is a property of the snapshot,
+    not of which id happens to sit at messages[-1].
+    """
+
+    error_assistant = {
+        "info": {
+            "id": "msg-err",
+            "role": "assistant",
+            "time": {"completed": 1},
+            "error": {"name": "UnknownError"},
+        },
+        "parts": [],
+    }
+    trailing_user = {
+        "info": {"id": "msg-user", "role": "user", "time": {}},
+        "parts": [{"type": "text", "text": "继续"}],
+    }
+    empty_inflight = {
+        "info": {"id": "msg-empty", "role": "assistant", "time": {}},
+        "parts": [],
+    }
+    live_followup = {
+        "info": {"id": "msg-live", "role": "assistant", "time": {}},
+        "parts": [{"type": "text", "text": "working"}],
+    }
+    completed_ok = {
+        "info": {
+            "id": "msg-ok",
+            "role": "assistant",
+            "time": {"completed": 1},
+            "finish": "stop",
+        },
+        "parts": [{"type": "text", "text": "done"}],
+    }
+
+    cases = (
+        ([error_assistant], "msg-err"),
+        ([error_assistant, trailing_user], "msg-err"),
+        ([error_assistant, trailing_user, empty_inflight], "msg-err"),
+        ([error_assistant, live_followup], "msg-live"),
+        ([completed_ok, trailing_user], "msg-ok"),
+        ([trailing_user], None),
+    )
+    for messages, expected_id in cases:
+        owner = _settlement_assistant_message(messages, set())
+        actual_id = None if owner is None else owner["info"]["id"]
+        assert actual_id == expected_id, (expected_id, actual_id)
+
+
 def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     # A completed assistant message carrying an error, with retries exhausted
     # (error_retry_limit=0) and the auth-recovery path declining (non-auth error),
@@ -1602,6 +1659,279 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     assert emitted[0][1] == "OpenCode error: ProviderError - rate limited"
     assert emitted[1][1:] == ("", True, "silent", "ProviderError - rate limited")
     assert model_hub_failures == [(request.context, "ProviderError - rate limited")]
+
+
+def test_opencode_poll_settles_error_when_trailing_user_is_last():
+    """A watch/steer inject after a completed error is not the turn.
+
+    The live hang was: assistant completed with error, then a user message
+    ("继续" / a watch callback) became messages[-1], so the last-only
+    settlement never ran.
+    """
+
+    emitted = []
+    model_hub_failures = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
+            return f"translated:{key}"
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+            terminal_error=None,
+        ):
+            emitted.append((message_type, text, is_error, level, terminal_error))
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+
+        def _extract_response_text(self, message):
+            return ""
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            model_hub_failures.append(diagnostic)
+            return True
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            return [
+                {
+                    "info": {
+                        "id": "msg-err",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": {
+                            "name": "UnknownError",
+                            "data": {"message": "unknown certificate verification error"},
+                        },
+                    },
+                    "parts": [],
+                },
+                {
+                    "info": {"id": "msg-user", "role": "user", "time": {}},
+                    "parts": [{"type": "text", "text": "继续"}],
+                },
+            ]
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    final_text, should_emit = asyncio.run(
+        OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert (final_text, should_emit) == (None, False)
+    assert [item[0] for item in emitted] == ["notify", "result"]
+    assert "certificate verification" in emitted[0][1]
+    assert model_hub_failures == [
+        "UnknownError - unknown certificate verification error"
+    ]
+
+
+def test_opencode_poll_settles_error_behind_empty_inflight_assistant():
+    """An empty leftover generation after a completed error is not a live turn."""
+
+    emitted = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
+            return f"translated:{key}"
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+            terminal_error=None,
+        ):
+            emitted.append((message_type, text, is_error, level, terminal_error))
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+
+        def _extract_response_text(self, message):
+            return ""
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            return True
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            return [
+                {
+                    "info": {
+                        "id": "msg-err",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": {"name": "UnknownError", "data": {"message": "tls failed"}},
+                    },
+                    "parts": [],
+                },
+                {
+                    "info": {"id": "msg-user", "role": "user", "time": {}},
+                    "parts": [{"type": "text", "text": "继续"}],
+                },
+                {
+                    "info": {
+                        "id": "msg-empty",
+                        "role": "assistant",
+                        "time": {},
+                        "finish": None,
+                    },
+                    "parts": [],
+                },
+            ]
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    final_text, should_emit = asyncio.run(
+        OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert (final_text, should_emit) == (None, False)
+    assert [item[0] for item in emitted] == ["notify", "result"]
+    assert "tls failed" in emitted[0][1]
+
+
+def test_opencode_poll_does_not_settle_error_while_followup_has_parts():
+    """A follow-up assistant that already has parts is still the live turn."""
+
+    emitted = []
+    polls = {"n": 0}
+
+    class _Controller:
+        def _t(self, key, **kwargs):
+            return f"translated:{key}"
+
+        async def emit_agent_message(self, *args, **kwargs):
+            emitted.append((args, kwargs))
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+
+        def _extract_response_text(self, message):
+            return "recovered"
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            raise AssertionError("must not settle the earlier error")
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            polls["n"] += 1
+            followup_completed = polls["n"] >= 2
+            return [
+                {
+                    "info": {
+                        "id": "msg-err",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": {"name": "UnknownError", "data": {"message": "old"}},
+                    },
+                    "parts": [],
+                },
+                {
+                    "info": {
+                        "id": "msg-live",
+                        "role": "assistant",
+                        "time": {"completed": 1} if followup_completed else {},
+                        "finish": "stop" if followup_completed else None,
+                    },
+                    "parts": [{"type": "text", "text": "recovered"}],
+                },
+            ]
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    final_text, should_emit = asyncio.run(
+        OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert (final_text, should_emit) == ("recovered", True)
+    assert polls["n"] == 2
+    assert not any(item[0][1] == "result" for item in emitted)
 
 
 def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():

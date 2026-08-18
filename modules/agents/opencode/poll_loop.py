@@ -46,6 +46,48 @@ def _opencode_error_text(error: object) -> str:
     return f"{error_name} - {error_message[:500]}".strip(" -")
 
 
+def _message_info(message: Dict[str, Any]) -> Dict[str, Any]:
+    info = message.get("info")
+    return info if isinstance(info, dict) else {}
+
+
+def _settlement_assistant_message(
+    messages: list[Dict[str, Any]],
+    baseline_message_ids: set[str],
+) -> Optional[Dict[str, Any]]:
+    """The assistant message that owns this poll's settlement.
+
+    Trailing user injects (steer, watch callbacks, a typed "继续") are not the
+    turn. Walk back to the latest new assistant. An in-flight assistant with
+    parts is still that turn. An empty in-flight assistant after a completed
+    error is leftover generation from a retry or follow-up — the completed
+    error is the terminal evidence.
+    """
+
+    latest_assistant: Optional[Dict[str, Any]] = None
+    latest_completed_error: Optional[Dict[str, Any]] = None
+    for message in reversed(messages):
+        info = _message_info(message)
+        message_id = info.get("id")
+        if not message_id or message_id in baseline_message_ids:
+            continue
+        if info.get("role") != "assistant":
+            continue
+        if latest_assistant is None:
+            latest_assistant = message
+        if info.get("time", {}).get("completed") and info.get("error"):
+            latest_completed_error = message
+            break
+    if latest_assistant is None:
+        return None
+    latest_info = _message_info(latest_assistant)
+    if latest_info.get("time", {}).get("completed"):
+        return latest_assistant
+    if latest_completed_error is not None and not (latest_assistant.get("parts") or []):
+        return latest_completed_error
+    return latest_assistant
+
+
 def restored_platform_from_poll_info(poll_info) -> str:
     snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
     platform = str(snapshot.get("platform") or poll_info.platform or "")
@@ -504,14 +546,13 @@ class OpenCodePollLoop:
                     emitted_assistant_messages.add(message_id)
 
             if messages:
-                last_message = messages[-1]
-                last_info = last_message.get("info", {})
+                last_message = _settlement_assistant_message(messages, baseline_message_ids)
+                last_info = _message_info(last_message) if last_message else {}
                 last_id = last_info.get("id")
 
                 if (
-                    last_id
-                    and last_id not in baseline_message_ids
-                    and last_info.get("role") == "assistant"
+                    last_message is not None
+                    and last_id
                     and last_info.get("time", {}).get("completed")
                 ):
                     msg_error = last_info.get("error")
@@ -801,9 +842,11 @@ class OpenCodePollLoop:
                             await self._agent.controller.emit_agent_message(context, "tool_call", tool_summary)
 
                 if messages:
-                    last_message = messages[-1]
-                    last_info = last_message.get("info", {})
-                    if last_info.get("role") == "assistant":
+                    last_message = _settlement_assistant_message(
+                        messages, baseline_message_ids
+                    )
+                    last_info = _message_info(last_message) if last_message else {}
+                    if last_info.get("id"):
                         time_info = last_info.get("time") or {}
                         if time_info.get("completed"):
                             msg_error = last_info.get("error")
