@@ -123,20 +123,24 @@ def _instant(value: object) -> Optional[datetime]:
 
 
 def _timestamp(value: object) -> Optional[str]:
-    """Read one persisted instant as the canonical text for that instant.
+    """Publish one persisted instant in the one spelling this module writes.
 
-    The read surface promises a date-time with an offset, and `_instant` accepts
-    every spelling `datetime.fromisoformat` does — naive, space-separated, second-
-    less. Publishing the original text would let a hand-edited `2026-08-18T03:14`
-    travel out through the API as something the schema does not describe, so the
-    field carries what the parser understood rather than what the file said. An
-    unparseable value degrades the field to absent.
+    The read surface promises an RFC 3339 date-time, and `datetime.fromisoformat`
+    accepts far more than RFC 3339 describes — naive, space-separated, and, after
+    an offset, even seconds. Publishing the file's text, or re-publishing the
+    parsed value in the file's own offset, both leave the output shape decided by
+    the input: fix one spelling and the next one is still reachable.
+
+    So the file supplies only the instant, and this module supplies the spelling.
+    Normalizing to UTC means the offset is `+00:00` by construction, whatever the
+    file said, and there is no remaining spelling for a hand-edited value to
+    reach. An unparseable value degrades the field to absent.
     """
 
     parsed = _instant(_text(value))
     if parsed is None:
         return None
-    return parsed.isoformat()
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _normalize_row(row: object) -> Optional[dict]:
@@ -149,10 +153,16 @@ def _normalize_row(row: object) -> Optional[dict]:
     model_id = canonical_model_id(row.get("model_id"))
     if day is None or source_id is None or model_id is None:
         return None
-    if _calendar_day(day) is None:
+    # Same rule as the instant above: the file supplies the day, this module
+    # supplies its spelling. `date.fromisoformat` also reads `20260818` and
+    # `2026-W34-2`, and the window bounds are compared as `YYYY-MM-DD` text — so
+    # a row kept in another valid spelling would be silently outside every
+    # window it belongs to, without even counting as dropped.
+    calendar_day = _calendar_day(day)
+    if calendar_day is None:
         return None
     normalized = {
-        "day": day,
+        "day": calendar_day.isoformat(),
         "source_id": source_id,
         "model_id": model_id,
         **{key: _bounded_counter(row.get(key)) for key in _COUNTER_KEYS},
@@ -230,9 +240,15 @@ class BoundedUsageLedger:
         # startup, but the next write replaces that file — so this is the last
         # moment its history is recoverable, and saying nothing would erase it
         # silently.
+        # Every way decoding can fail, by category rather than by the shapes a
+        # particular file happens to hold: invalid UTF-8 and an integer past the
+        # digit limit both raise plain `ValueError`, deep nesting raises
+        # `RecursionError`, and either one escaping here would take down the read
+        # route and then stop metering entirely — the loud-failure outcome this
+        # degradation exists to prevent.
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             logger.warning("Model Hub usage ledger %s is unreadable: %s", self.path, exc)
             return []
         if not isinstance(payload, list):

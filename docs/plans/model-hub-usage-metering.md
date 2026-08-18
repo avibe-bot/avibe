@@ -266,6 +266,47 @@ by another route answered the question with nothing.
   `2026-08-18T03:14` leave through the API as something the schema does not describe.
   The field now carries what the parser understood, not what the file said.
 
+### Round 4 (head `617aefb80`)
+
+Five P2 findings, and the two recurring classes both turned out to have been fixed one
+level too shallow. Round 3's rulings were correct about the sites they named and wrong
+about where the property lived.
+
+- **Class A, a third admission path** (`identifiers.py`, `config/v2_config.py`,
+  `service.py`). Rounds 1–2 put model-ID canonicalization at "the admission boundaries",
+  which made it a duty each boundary had to remember — so `create_source` with inline
+  `models`, a boundary added for a different reason, obeyed neither half. The rule is now
+  split by what each half can safely do. *Spelling* (`normalized_model_id`) moves into
+  `ModelHubModelConfig.from_payload`, the one validator every path goes through,
+  including the one that loads files older releases wrote; it only strips padding, so it
+  cannot reject anything that used to load. The *length bound* stays at the admission
+  surfaces, because that same validator sits under `ModelHubConfig.from_payload`, where
+  raising fails config load outright — rejecting a persisted value there would break the
+  persisted-shape rule. Two owners because there are two properties, not two call sites.
+- **Class B, three findings** (`usage.py`: `_timestamp`, `_normalize_row`, `_read`).
+  Applying the repo lesson about anchoring adversarial-input rulings to self-measured
+  bounds: round 3's `_timestamp` fix still let the *file* decide the output shape, which
+  is the endless narrowing series that lesson names — fix `2026-08-18T03:14` and
+  `+00:00:30` is still reachable. Terminal rule: **the file supplies the instant, this
+  module supplies the spelling.** `_timestamp` normalizes to UTC so the offset is
+  `+00:00` by construction; `_normalize_row` re-emits the day via `date.isoformat()` so a
+  row written as `20260818` still lands in the windows that compare `YYYY-MM-DD` text;
+  `_read` degrades by failure *category* (`OSError, ValueError, RecursionError`) rather
+  than by the shapes one file happens to hold.
+- **Class E, the other half of round 2** (`rpc.py`). Round 2 moved the ledger *write* off
+  the controller loop and left the *read* on it, where it takes the same lock a writer
+  holds across `fsync()` — every turn on the machine waiting on one settings page. The
+  read now goes through `asyncio.to_thread`, and a structure guard asserts every RPC
+  entry into the ledger is enclosed by one, so the next entry cannot quietly be the
+  exception.
+
+Known limitation observed while narrowing
+`test_opencode_identity_computation_stays_in_validator_and_resolver`: its import check
+inspects absolute imports only, so a module inside `core/handlers/model_hub/` can reach
+OpenCode identity helpers by relative import without tripping it. Pre-existing and left
+alone here — closing it requires ruling on `service.py`'s existing relative import of
+`STANDARD_OPENCODE_VENDOR_IDS`, which is a separate question from this stage.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

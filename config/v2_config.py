@@ -2589,8 +2589,15 @@ class ModelHubModelConfig:
             raise ValueError(
                 "Config 'model_hub.sources.models.retired' must be false for manual models"
             )
+        # Spelling is settled here, at the one place a payload becomes a model
+        # config, so no admission path can invent a second spelling for one
+        # model and split its usage across two ledger rows. The length bound
+        # stays with the admission surfaces: this constructor also reads files
+        # older releases wrote, and rejecting one of those would fail config load.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
         return cls(
-            id=model_id,
+            id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
             display_name=display_name,

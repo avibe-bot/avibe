@@ -2350,6 +2350,11 @@ class ModelHubService:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
             if any(
                 model.provenance != "manual"
+                # The same admission rule the manual-add surface applies. A source
+                # may be created with its models inline, so this is the other way
+                # a client-declared identifier enters config, and one the ledger
+                # cannot key by is one whose usage would never be counted.
+                or canonical_model_id(model.id) is None
                 or contains_credential_material(model.id)
                 or contains_credential_material(model.display_name or "")
                 for model in manual_models

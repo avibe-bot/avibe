@@ -37,6 +37,8 @@ DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 TURN_GATEWAY = ROOT / "core/handlers/model_hub/turn_gateway.py"
 SERVICE = ROOT / "core/handlers/model_hub/service.py"
 USAGE = ROOT / "core/handlers/model_hub/usage.py"
+RPC = ROOT / "core/handlers/model_hub/rpc.py"
+V2_CONFIG = ROOT / "config/v2_config.py"
 PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
@@ -562,6 +564,37 @@ def test_model_identity_is_decided_only_by_its_owner() -> None:
         source = path.read_text(encoding="utf-8")
         assert "canonical_model_id" in source
         assert "MODEL_ID_MAX_LENGTH" not in source
+    # Review 4960570946: a third admission path had picked up neither half, so
+    # the half that is always safe moved to the one validator every path goes
+    # through. The bound cannot follow it there — that validator also loads files
+    # older releases wrote — so it stays where a request can be refused.
+    config_source = V2_CONFIG.read_text(encoding="utf-8")
+    assert "normalized_model_id" in config_source
+    assert "MODEL_ID_MAX_LENGTH" not in config_source
+
+
+def test_the_usage_ledger_is_never_touched_from_the_controller_loop() -> None:
+    # Review 4960570946: the read blocks on the same lock the writers hold across
+    # fsync, so "off the loop" is a property of the ledger, not of whichever
+    # caller happened to remember it. Every RPC entry into it is checked here so
+    # the next one cannot quietly be the exception.
+    tree = _tree(RPC)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    touches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in {"usage_summary", "usage"}
+    ]
+    assert touches
+    for touch in touches:
+        enclosing = touch
+        off_loop = False
+        while enclosing in parents:
+            enclosing = parents[enclosing]
+            if _call_name(enclosing) == "to_thread":
+                off_loop = True
+                break
+        assert off_loop, f"{touch.attr} is reached on the controller loop"
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:

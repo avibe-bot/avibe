@@ -755,24 +755,25 @@ def test_a_persisted_report_count_above_its_requests_is_repaired_on_read(
     }
 
 
-def test_a_persisted_instant_is_published_in_the_shape_the_schema_promises(
+def test_a_day_in_another_valid_iso_spelling_still_lands_in_its_window(
     tmp_path: Path,
 ) -> None:
-    """Review 4960016618: the read surface publishes an offset-bearing date-time.
+    """Review 4960570946: the window compares days this module spelled.
 
-    `datetime.fromisoformat` accepts spellings the API schema does not describe —
-    naive, space-separated, minute-less — so the field carries what the parser
-    understood rather than the text the file happened to hold. A naive value is
-    read in the same local calendar the day buckets use.
+    `date.fromisoformat` also reads `20260723` and `2026-W30-4`, and the window
+    bounds are `YYYY-MM-DD` text. A row kept in the file's own spelling would
+    therefore sort outside every window it belongs to and vanish from the tab —
+    without even being counted as dropped, since it parsed perfectly well.
     """
 
     ledger = _ledger(tmp_path)
     ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    day = local_usage_day(NOW)
     ledger.path.write_text(
         json.dumps(
             [
                 {
-                    "day": local_usage_day(NOW).isoformat(),
+                    "day": day.strftime("%Y%m%d"),
                     "source_id": "src_a",
                     "model_id": "model-x",
                     "requests": 1,
@@ -780,17 +781,110 @@ def test_a_persisted_instant_is_published_in_the_shape_the_schema_promises(
                     "input_tokens": 4,
                     "cached_input_tokens": 0,
                     "output_tokens": 2,
-                    "last_metered_at": "2026-07-23 12:00",
+                    "last_metered_at": NOW.isoformat(),
                 }
             ]
         ),
         encoding="utf-8",
     )
 
-    published = ledger.window(days=30, now=NOW)[0]["last_metered_at"]
+    rows = ledger.window(days=30, now=NOW)
 
-    assert published == datetime(2026, 7, 23, 12, 0).astimezone().isoformat()
-    assert datetime.fromisoformat(published).tzinfo is not None
+    assert [row["day"] for row in rows] == [day.isoformat()]
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 4
+
+
+def test_every_decode_failure_degrades_the_ledger_instead_of_raising(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review 4960570946: degradation is by failure category, not by shape.
+
+    `JSONDecodeError` is only one way a file fails to decode. Invalid UTF-8 and
+    an integer past the digit limit both raise a plain `ValueError`, deep nesting
+    raises `RecursionError`, and any of them escaping the ledger would fail the
+    read route and then stop metering for good — the loud failure this
+    degradation exists to prevent.
+    """
+
+    payloads = (
+        b"\xff\xfe not utf-8",
+        ("[" + "9" * 8000 + "]").encode("utf-8"),
+        b"[" * 10_000 + b"0" + b"]" * 10_000,
+    )
+    for payload in payloads:
+        ledger = _ledger(tmp_path)
+        ledger.path.parent.mkdir(parents=True, exist_ok=True)
+        ledger.path.write_bytes(payload)
+
+        with caplog.at_level(logging.WARNING):
+            assert ledger.window(days=30, now=NOW) == []
+
+        assert any("unreadable" in record.message for record in caplog.records)
+        caplog.clear()
+        # Metering keeps working, and the next write replaces the broken file.
+        ledger.record(
+            source_id="src_a",
+            model_id="model-x",
+            usage=ProtocolUsageReport.of(
+                input_tokens=4,
+                cached_input_tokens=0,
+                output_tokens=2,
+            ),
+            at=NOW,
+        )
+        assert ledger.summary(days=30, now=NOW)["totals"]["requests"] == 1
+
+
+def test_a_persisted_instant_is_published_in_the_shape_the_schema_promises(
+    tmp_path: Path,
+) -> None:
+    """Reviews 4960016618 and 4960570946: this module decides the spelling.
+
+    `datetime.fromisoformat` accepts far more than RFC 3339 does — naive,
+    space-separated, and, after an offset, seconds. Republishing the parsed value
+    in the file's own offset only moved the problem, so the file now supplies the
+    instant and the module supplies the spelling: UTC, hence `+00:00`, whatever
+    was written. A naive value is still read in the local calendar the day
+    buckets use.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    written = {
+        "naive": "2026-07-23 12:00",
+        # A valid `fromisoformat` spelling with an offset RFC 3339 cannot express.
+        "second_bearing_offset": "2026-07-23T12:00:00+00:00:30",
+    }
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": f"src_{key}",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": 4,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 2,
+                    "last_metered_at": value,
+                }
+                for key, value in written.items()
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    published = {
+        row["source_id"]: row["last_metered_at"] for row in ledger.window(days=30, now=NOW)
+    }
+
+    assert published["src_naive"] == (
+        datetime(2026, 7, 23, 12, 0).astimezone(timezone.utc).isoformat()
+    )
+    assert published["src_second_bearing_offset"] == "2026-07-23T11:59:30+00:00"
+    assert all(value.endswith("+00:00") for value in published.values())
 
 
 def test_a_written_row_is_validated_the_same_way_a_persisted_one_is(

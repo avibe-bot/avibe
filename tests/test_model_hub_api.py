@@ -7,6 +7,7 @@ import inspect
 import json
 import re
 import textwrap
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import (
     NativeOAuthSourceStatus,
@@ -1816,6 +1818,37 @@ def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path)
 
     assert payload["cli_present"] is True
     assert calls == ["refresh"]
+
+
+def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):
+    """Review 4960570946: the read blocks as hard as the write it mirrors.
+
+    Summarising reads the ledger file and the config store, and takes the same
+    lock a concurrent `record()` holds across `fsync()`. Awaited on the
+    controller loop that is every turn on this machine waiting on one settings
+    page, so it belongs in a worker thread exactly as the two writers already do.
+    """
+
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    summarised_on: list[threading.Thread] = []
+    real_summary = service.usage_summary
+
+    def observed(**kwargs):
+        summarised_on.append(threading.current_thread())
+        return real_summary(**kwargs)
+
+    service.usage_summary = observed
+
+    async def exercise() -> tuple[dict, threading.Thread]:
+        payload = await dispatch_model_hub_rpc(service, "usage_summary", {"days": 7})
+        return payload, threading.current_thread()
+
+    payload, loop_thread = asyncio.run(exercise())
+
+    assert payload["totals"]["requests"] == 0
+    assert summarised_on and loop_thread not in summarised_on
 
 
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
@@ -5710,6 +5743,78 @@ def test_admitted_model_ids_are_stored_in_their_canonical_form(tmp_path):
         "discovered-model",
         "manual-model",
     ]
+
+
+def test_models_declared_inline_at_source_creation_are_admitted_the_same_way(tmp_path):
+    """Review 4960570946: the third admission path obeyed neither half.
+
+    A source may be created with its models inline, so this is the other way a
+    client-declared identifier enters config. Spelling is now settled by the
+    config validator, which every path goes through; the length bound stays with
+    the admission surfaces, because that same validator also loads files older
+    releases wrote and rejecting one of those would fail config load.
+    """
+
+    service, store, _ = _service(tmp_path)
+
+    def creation(models: list[dict]) -> dict:
+        return {
+            "kind": "api_key",
+            "vendor": "custom",
+            "display_name": "Inline models",
+            "base_url": "https://relay.example/v1",
+            "key": "sk-test-transient-only",
+            "models": models,
+        }
+
+    asyncio.run(
+        _create_source(
+            service,
+            creation([{"id": "  inline-model  ", "origin": "manual", "reasoning_efforts": []}]),
+        )
+    )
+
+    stored = [model.id for model in store.config.sources[0].models]
+
+    assert "inline-model" in stored
+    assert "  inline-model  " not in stored
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                creation(
+                    [
+                        {
+                            "id": "m" * (MODEL_ID_MAX_LENGTH + 1),
+                            "origin": "manual",
+                            "reasoning_efforts": [],
+                        }
+                    ]
+                )
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert len(store.config.sources) == 1
+
+
+def test_a_persisted_model_id_past_the_bound_still_loads(tmp_path):
+    """The bound is an admission rule, not a load rule.
+
+    Nothing stops a file written before the bound existed from holding a longer
+    identifier, and per the persisted-shape rule that file must still load. It
+    keeps its length and gains only the canonical spelling.
+    """
+
+    model = ModelHubModelConfig.from_payload(
+        {
+            "id": "  " + "m" * (MODEL_ID_MAX_LENGTH + 1) + "  ",
+            "origin": "manual",
+            "reasoning_efforts": [],
+        }
+    )
+
+    assert model.id == "m" * (MODEL_ID_MAX_LENGTH + 1)
 
 
 def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path):
