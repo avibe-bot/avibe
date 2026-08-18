@@ -3476,8 +3476,13 @@ const Transcript: React.FC<TranscriptProps> = ({
   const [showJump, setShowJump] = useState(false);
   // Whether the transcript is actually scrollable. Measured by the same
   // ResizeObserver that owns the anchor restore, so it needs no observer of its
-  // own and is fresh in the commit that changes the content's height.
+  // own and is fresh in the commit that changes either side of the comparison.
   const [historyOverflows, setHistoryOverflows] = useState(false);
+  // Surfaces a failed older-page fetch. Without it the spinner simply vanishes,
+  // which is indistinguishable from reaching the start of history — and since a
+  // failure adds no content, a reader parked at the top gets no further scroll
+  // event, so the silent retry the re-arm allows would never actually be reached.
+  const [olderLoadFailed, setOlderLoadFailed] = useState(false);
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
   // Load ONE older page per scroll gesture, not a cascade. The top threshold can
@@ -3560,9 +3565,9 @@ const Transcript: React.FC<TranscriptProps> = ({
   // it breaks at the first visible row, so the common case (reading near the top of
   // the loaded window) is a couple of reads. Called from the scroll handler while
   // the user is reading history, so the anchor is always fresh when a resize lands.
-  // ``pickScrollAnchor`` owns which elements qualify — transient chrome such as the
-  // older-page spinner is skipped, because an anchor that disappears in the very
-  // commit it has to survive restores nothing (see the module's own note).
+  // ``pickScrollAnchor`` owns which elements qualify: the chrome rendered above
+  // ``messages.map`` below is disqualified, because a prepended page lands beneath
+  // it and it therefore restores nothing (see the module's own note).
   const captureAnchor = useCallback(() => {
     // A programmatic jump is in flight — don't record an anchor mid-jump (the
     // restore would later snap back to it and undo the jump).
@@ -3621,6 +3626,26 @@ const Transcript: React.FC<TranscriptProps> = ({
     }, 150);
   }, []);
 
+  // The one path that starts an older-page load, so the scroll trigger and the
+  // retry affordance cannot drift apart on how a failure is recorded.
+  const runLoadOlder = useCallback(() => {
+    canLoadOlderRef.current = false;
+    loadFailedRef.current = false;
+    setOlderLoadFailed(false);
+    void Promise.resolve(loadOlderRef.current()).then((ok) => {
+      if (ok === false) {
+        // Fetch failed: no content/restore, viewport parked at top. A slow failure
+        // already missed the in-flight-skipped settle and won't get another scroll,
+        // so schedule the re-arm here too (it ignores position when loadFailedRef)
+        // and offer an explicit retry, since a reader who stays put emits no scroll
+        // for that re-armed loader to fire on.
+        loadFailedRef.current = true;
+        setOlderLoadFailed(true);
+        scheduleReArm();
+      }
+    });
+  }, [scheduleReArm]);
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -3640,17 +3665,7 @@ const Transcript: React.FC<TranscriptProps> = ({
     // anchor-restore scroll + momentum can't cascade more pages.
     scheduleReArm();
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
-      canLoadOlderRef.current = false;
-      loadFailedRef.current = false;
-      void Promise.resolve(loadOlderRef.current()).then((ok) => {
-        if (ok === false) {
-          // Fetch failed: no content/restore, viewport parked at top. A slow failure
-          // already missed the in-flight-skipped settle and won't get another scroll,
-          // so schedule the re-arm here too (it ignores position when loadFailedRef).
-          loadFailedRef.current = true;
-          scheduleReArm();
-        }
-      });
+      runLoadOlder();
     }
   };
 
@@ -3662,6 +3677,13 @@ const Transcript: React.FC<TranscriptProps> = ({
     pinnedRef.current = true;
     anchorRef.current = null;
     setShowJump(false);
+    // Paging state belongs to the session that was open, not to the transcript:
+    // the component stays mounted across a switch, so a load that failed in the
+    // previous session would otherwise greet the next one with a retry line for
+    // a page it never asked for, and a disarmed loader would wait for a settle.
+    canLoadOlderRef.current = true;
+    loadFailedRef.current = false;
+    setOlderLoadFailed(false);
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
   }, [session.id, scrollToBottom]);
@@ -3737,10 +3759,10 @@ const Transcript: React.FC<TranscriptProps> = ({
     const content = contentRef.current;
     if (!el || !content) return;
     const ro = new ResizeObserver(() => {
-      // Recomputed on every content resize, ahead of the anchor branches below so
-      // no early return can leave it stale. Monotone, so it cannot oscillate: the
-      // end-of-history line it gates is only ever ADDED to a transcript that
-      // already overflows, and removing it can only shrink the content further.
+      // Overflow is a comparison between the two boxes, so BOTH are observed: the
+      // content grows as pages load, and the viewport shrinks under a composer that
+      // has expanded, an on-screen keyboard, or a resized window. Recomputed ahead
+      // of the anchor branches below so no early return can leave it stale.
       setHistoryOverflows(el.scrollHeight > el.clientHeight + 1);
       // A programmatic jump owns scrollTop right now — neither pin-to-bottom nor
       // anchor-restore should move it, or it would fight the jump.
@@ -3758,6 +3780,9 @@ const Transcript: React.FC<TranscriptProps> = ({
       if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
     });
     ro.observe(content);
+    // The viewport shrinking under the reader is a resize too: pin-to-bottom has to
+    // re-pin and the anchor has to hold, exactly as when the content itself grew.
+    ro.observe(el);
     return () => ro.disconnect();
   }, [empty]);
 
@@ -3803,25 +3828,27 @@ const Transcript: React.FC<TranscriptProps> = ({
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
           {forkSourceBanner}
-          {/* One slot at the head of the history, so the spinner resolves into the
-              end-of-history line in place instead of the top twitching. Both are
-              transient by construction — they mount and unmount around the very
-              commits that prepend a page — so neither may become the scroll-anchor
-              (see pickScrollAnchor). */}
+          {/* One slot at the head of the history for every way paging can end, so
+              each outcome resolves in place instead of the top twitching: still
+              loading, failed (and retryable), or nothing older left. */}
           {loadingOlder ? (
             <div
-              data-scroll-anchor="skip"
               role="status"
               aria-label={t('chat.loadingOlder')}
               className="flex h-8 items-center justify-center text-muted"
             >
               <Loader2 className="size-4 animate-spin" />
             </div>
-          ) : atHistoryStart ? (
-            <div
-              data-scroll-anchor="skip"
-              className="flex h-8 items-center justify-center text-[12px] text-muted"
+          ) : olderLoadFailed ? (
+            <button
+              type="button"
+              onClick={runLoadOlder}
+              className="flex h-8 items-center justify-center text-[12px] text-muted hover:text-foreground"
             >
+              {t('chat.olderLoadFailed')}
+            </button>
+          ) : atHistoryStart ? (
+            <div className="flex h-8 items-center justify-center text-[12px] text-muted">
               {t('chat.noEarlierMessages')}
             </div>
           ) : null}
