@@ -12,6 +12,7 @@ from typing import Protocol
 
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    ConfinedRoot,
     SpilledDirectoryOrder,
     create_confined_file,
     ensure_private_directory,
@@ -83,8 +84,14 @@ class ProviderRoot:
     """Own all synchronous security, format, and transition policy for one root."""
 
     def __init__(self, path: Path | str, *, effective_home: Path | str) -> None:
-        self.path = Path(path)
-        self._effective_home = Path(effective_home)
+        try:
+            root = ConfinedRoot.from_home(effective_home)
+            self.path = root.confine(path)
+        except ConfinedFilesystemError as error:
+            raise ProviderRootError(
+                "memory provider root must stay within the effective Avibe home"
+            ) from error
+        self._effective_home = root.physical_home
 
     def inspect(self, candidate_metadata: ProviderRootMetadata) -> ProviderRootState:
         """Inspect compatibility without requiring the store-owned root id."""
