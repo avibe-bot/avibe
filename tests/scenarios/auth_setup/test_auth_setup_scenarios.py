@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import jwt
 import pytest
+import yaml
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -58,6 +59,13 @@ from vibe.claude_config import (
 )
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_server import app
+
+
+def test_auth_setup_catalog_priorities_reference_live_scenarios():
+    catalog = yaml.safe_load((ROOT / "tests/scenarios/auth_setup/catalog.yaml").read_text())
+    live_ids = {scenario["id"] for scenario in catalog["scenarios"]}
+
+    assert set(catalog.get("next_priority", [])) <= live_ids
 
 
 class ShowPageEmailAccessScenarioTests(unittest.TestCase):

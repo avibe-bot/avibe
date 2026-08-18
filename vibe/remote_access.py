@@ -80,7 +80,18 @@ _ACTIVE_HOSTNAMES_CACHE: tuple[Path, str, frozenset[str], float | None] | None =
 _AUTHORIZATION_REVISION_KEY = "vibe_instance_authorization_revision"
 _AUTHORIZATION_CHECKED_REVISION_KEY = "_authorization_checked_revision"
 _AUTHORIZATION_REVISION_LOCK = threading.Lock()
-_AUTHORIZATION_REVISION_CACHE: tuple[Path, str, int, float] | None = None
+
+
+@dataclass(frozen=True)
+class _AuthorizationRevisionCache:
+    state_path: Path
+    instance_id: str
+    revision: int
+    source_updated_at: float
+    file_signature: tuple[int, int, int, int] | None
+
+
+_AUTHORIZATION_REVISION_CACHE: _AuthorizationRevisionCache | None = None
 _AUTHORIZATION_REVISION_SYNC_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_STARTED = False
@@ -663,6 +674,19 @@ def _normalize_authorization_revision(value: Any) -> int:
     return value
 
 
+def _authorization_revision_file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        metadata = path.stat()
+    except OSError:
+        return None
+    return (
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_size,
+        metadata.st_ino,
+    )
+
+
 def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float] | None:
     global _AUTHORIZATION_REVISION_CACHE
 
@@ -671,24 +695,40 @@ def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float]
         return None
     state_path = _authorization_revision_state_path()
     with _AUTHORIZATION_REVISION_LOCK:
+        file_signature = _authorization_revision_file_signature(state_path)
         cached = _AUTHORIZATION_REVISION_CACHE
-        if cached is not None and cached[0] == state_path and cached[1] == instance_id:
-            return cached[2], cached[3]
+        cache_matches = (
+            cached is not None
+            and cached.state_path == state_path
+            and cached.instance_id == instance_id
+        )
+        if cache_matches and cached.file_signature == file_signature:
+            return cached.revision, cached.source_updated_at
         payload = runtime.read_json(state_path)
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            if cache_matches:
+                _AUTHORIZATION_REVISION_CACHE = None
             return None
         if str(payload.get("instance_id") or "").strip() != instance_id:
+            if cache_matches:
+                _AUTHORIZATION_REVISION_CACHE = None
             return None
         try:
             revision = _normalize_authorization_revision(payload.get("authorization_revision"))
             source_updated_at = float(payload["source_updated_at"])
         except (KeyError, TypeError, ValueError):
+            if cache_matches:
+                _AUTHORIZATION_REVISION_CACHE = None
             return None
-        _AUTHORIZATION_REVISION_CACHE = (
-            state_path,
-            instance_id,
-            revision,
-            source_updated_at,
+        if cache_matches and cached.revision > revision:
+            revision = cached.revision
+            source_updated_at = cached.source_updated_at
+        _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+            state_path=state_path,
+            instance_id=instance_id,
+            revision=revision,
+            source_updated_at=source_updated_at,
+            file_signature=file_signature,
         )
         return revision, source_updated_at
 
@@ -727,8 +767,12 @@ def _install_authorization_revision(
     source_updated_at = time.time()
     with _AUTHORIZATION_REVISION_LOCK:
         cached = _AUTHORIZATION_REVISION_CACHE
-        if cached is not None and cached[0] == state_path and cached[1] == instance_id:
-            previous_revision = cached[2]
+        if (
+            cached is not None
+            and cached.state_path == state_path
+            and cached.instance_id == instance_id
+        ):
+            previous_revision = cached.revision
         else:
             payload = runtime.read_json(state_path)
             previous_revision = None
@@ -762,11 +806,12 @@ def _install_authorization_revision(
                 "Authorization revision acknowledgement could not be persisted",
                 exc_info=True,
             )
-        _AUTHORIZATION_REVISION_CACHE = (
-            state_path,
-            instance_id,
-            revision,
-            source_updated_at,
+        _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+            state_path=state_path,
+            instance_id=instance_id,
+            revision=revision,
+            source_updated_at=source_updated_at,
+            file_signature=_authorization_revision_file_signature(state_path),
         )
     if changed:
         try:

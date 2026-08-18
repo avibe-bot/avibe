@@ -357,11 +357,24 @@ function AccessEntryDialog({
       setError('permissions_pairing_changed');
       return false;
     }
-    baselineEntry.current = originalKey === null
+    const latestEntries = latest.response.projection.access.entries;
+    const latestOriginal = originalKey === null
       ? null
-      : latest.response.projection.access.entries.find(
-          (entry) => accessEntryKey(entry) === originalKey,
-        ) ?? null;
+      : latestEntries.find((entry) => accessEntryKey(entry) === originalKey) ?? null;
+    const latestCandidate = latestEntries.find(
+      (entry) => accessEntryKey(entry) === accessEntryKey(candidate),
+    );
+    if (
+      latestCandidate?.role === candidate.role
+      && (originalKey === null || originalKey === accessEntryKey(candidate) || latestOriginal === null)
+    ) {
+      setConflict(false);
+      setRefreshRequired(false);
+      setError(undefined);
+      onOpenChange(false);
+      return true;
+    }
+    baselineEntry.current = latestOriginal;
     setRevision(latest.response.projection.instance.authorization_revision);
     setRefreshRequired(false);
     setError(undefined);

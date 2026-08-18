@@ -878,6 +878,40 @@ def test_authorization_revision_device_contract_is_monotonic(monkeypatch, tmp_pa
     assert remote_access.current_authorization_revision(config) == 42
 
 
+def test_authorization_revision_cache_observes_another_process_watermark(
+    monkeypatch,
+    tmp_path,
+):
+    """A controller cache must observe a mutation persisted by the UI server."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, revision=41)
+    claims = _organization_claims(config, revision=41)
+    source_updated_at = time.time()
+
+    assert remote_access.session_authorization_revision_state(
+        config,
+        claims,
+        now=source_updated_at,
+    ) == "current"
+
+    remote_access.runtime.write_json(
+        remote_access._authorization_revision_state_path(),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "instance_id": "inst_123",
+            "authorization_revision": 42,
+            "source_updated_at": source_updated_at,
+        },
+    )
+
+    assert remote_access.session_authorization_revision_state(
+        config,
+        claims,
+        now=source_updated_at,
+    ) == "mismatch"
+
+
 def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
     monkeypatch,
     tmp_path,
