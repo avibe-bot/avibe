@@ -33,7 +33,11 @@ const buildConfigPayload = (
   // finish, recorded in __wizardEditedSections). Omitted sections are
   // left to their owners.
   const sectionFilter = (key: string): boolean => {
-    if (editedSections && editedSections.length > 0) return editedSections.includes(key);
+    // An explicitly-passed list — including an EMPTY one — is the step's
+    // authoritative edit set: a Continue from a non-platform step owns no
+    // platform sections at all. Only Finish (no argument) falls back to
+    // the run-recorded sections.
+    if (editedSections !== undefined) return editedSections.includes(key);
     const recorded = data.__wizardEditedSections;
     return Array.isArray(recorded) && recorded.includes(key);
   };
