@@ -44,9 +44,9 @@ class _Host:
         del socket_path, provider_root
         assert role is _MemoryChildRole.CASCADE_SYNC
         return {
-            pid: float(identity.create_time)
+            pid: float(identity.stamp)
             for pid, identity in self.identities.items()
-            if identity.create_time is not None
+            if identity.stamp is not None
         }, []
 
     def signal(self, identities, signum, *, process_group=None, process=None):
@@ -245,11 +245,12 @@ async def test_recycled_sync_leader_retires_stale_finalized_record(tmp_path: Pat
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
     record = _record(root, state="finalized", pid=451)
+    record["starttime_ticks"] = 10.5
     uid = os.getuid() if hasattr(os, "getuid") else None
     host = _Host(
         {
             451: _ProcessIdentity(
-                create_time=99.5,
+                stamp=99.5,
                 cmdline=tuple(record["argv"]),
                 uid=uid,
                 environment={},
@@ -272,10 +273,11 @@ async def test_live_parent_keeps_singleton_sync_record_and_child_untouched(tmp_p
     host = _Host(
         {
             99: _ProcessIdentity(
-                create_time=8.25,
+                stamp=8.25,
                 cmdline=("avibe",),
                 uid=uid,
                 environment={},
+                wall_create_time=8.25,
             )
         }
     )
@@ -287,6 +289,194 @@ async def test_live_parent_keeps_singleton_sync_record_and_child_untouched(tmp_p
 
     assert ownership.path.exists()
     assert host.signals == []
+
+
+async def test_legacy_recycled_parent_pid_does_not_block_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+
+    class RecycledParentHost(_Host):
+        def recorded_group_members(self, process_group, *, socket_path, provider_root, role=None):
+            del process_group, socket_path, provider_root, role
+            return {}, []
+
+    host = RecycledParentHost(
+        {
+            99: _ProcessIdentity(
+                stamp=424_242.0,
+                cmdline=("avibe",),
+                uid=uid,
+                environment={},
+                wall_create_time=8.25 + 86_400.0,
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(_record(root, state="finalized", pid=451))
+
+    await ownership.reconcile()
+
+    assert not ownership.path.exists()
+    assert host.signals == []
+
+
+async def test_legacy_sync_child_with_wall_clock_record_is_not_removed_as_recycled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    record = _record(root, state="finalized", pid=451)
+    environment = {
+        "EVEROS_ROOT": str(root),
+        "AVIBE_MEMORY_CHILD_ROLE": SYNC_ROLE,
+        SYNC_NONCE_ENV: "a" * 64,
+        SYNC_PARENT_PID_ENV: "99",
+        SYNC_PARENT_CREATE_TIME_ENV: float(8.25).hex(),
+        SYNC_PARENT_UID_ENV: "" if uid is None else str(uid),
+    }
+    host = _Host(
+        {
+            451: _ProcessIdentity(
+                stamp=424_242.0,
+                cmdline=tuple(record["argv"]),
+                uid=uid,
+                environment=environment,
+                wall_create_time=10.5 + 86_400.0,
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    await ownership.reconcile()
+
+    assert host.signals
+    assert host.signals[0][0] == {451: 424_242.0}
+    assert not ownership.path.exists()
+
+
+async def test_legacy_sync_child_with_clock_step_still_rejects_mismatched_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    record = _record(root, state="finalized", pid=451)
+    environment = {
+        "EVEROS_ROOT": str(root),
+        "AVIBE_MEMORY_CHILD_ROLE": SYNC_ROLE,
+        SYNC_NONCE_ENV: "a" * 64,
+        SYNC_PARENT_PID_ENV: "99",
+        SYNC_PARENT_CREATE_TIME_ENV: float(8.25).hex(),
+        SYNC_PARENT_UID_ENV: "" if uid is None else str(uid),
+    }
+    host = _Host(
+        {
+            451: _ProcessIdentity(
+                stamp=424_242.0,
+                cmdline=(str(root.parent / "runtime" / "bin" / "python"), "-m", "other"),
+                uid=uid,
+                environment=environment,
+                wall_create_time=10.5 + 86_400.0,
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    await ownership.reconcile()
+
+    assert not ownership.path.exists()
+    assert host.signals == []
+
+
+async def test_legacy_sync_child_without_wall_time_keeps_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    record = _record(root, state="finalized", pid=451)
+    host = _Host(
+        {
+            451: _ProcessIdentity(
+                stamp=424_242.0,
+                cmdline=tuple(record["argv"]),
+                uid=uid,
+                environment={},
+                wall_create_time=None,
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    with pytest.raises(SyncOwnershipError, match="creation time is unavailable"):
+        await ownership.reconcile()
+
+    assert ownership.path.exists()
+    assert host.signals == []
+
+
+async def test_current_sync_parent_prefers_stable_stamp_over_wall_time(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    record = _record(root, state="finalized", pid=451)
+    record["parent_starttime_ticks"] = 424_242.0
+    host = _Host(
+        {
+            99: _ProcessIdentity(
+                stamp=424_242.0,
+                cmdline=("avibe",),
+                uid=uid,
+                environment={},
+                wall_create_time=record["parent_create_time"] + 1_000.0,
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    with pytest.raises(SyncOwnershipError, match="live parent"):
+        await ownership.reconcile()
+
+    assert ownership.path.exists()
+    assert host.signals == []
+
+
+@pytest.mark.parametrize("field", ["starttime_ticks", "parent_starttime_ticks"])
+@pytest.mark.parametrize("stamp", [-1.0, float("nan")])
+async def test_sync_record_rejects_invalid_stable_stamps(
+    field: str,
+    stamp: float,
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    record = _record(root, state="finalized", pid=451)
+    record[field] = stamp
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=_Host())
+    ownership.write(record)
+
+    with pytest.raises(SyncOwnershipError, match="start-time is invalid"):
+        await ownership.reconcile()
+
+    assert ownership.path.exists()
 
 
 async def test_retained_failed_cleanup_reconciles_while_its_parent_is_live(
@@ -308,10 +498,11 @@ async def test_retained_failed_cleanup_reconciles_while_its_parent_is_live(
     host = RetainedCleanupHost(
         {
             99: _ProcessIdentity(
-                create_time=8.25,
+                stamp=8.25,
                 cmdline=("avibe",),
                 uid=uid,
                 environment={},
+                wall_create_time=8.25,
             )
         }
     )
@@ -356,10 +547,11 @@ async def test_retained_pending_cleanup_reconciles_while_its_parent_is_live(
     host = RetainedPendingHost(
         {
             99: _ProcessIdentity(
-                create_time=8.25,
+                stamp=8.25,
                 cmdline=("avibe",),
                 uid=uid,
                 environment={},
+                wall_create_time=8.25,
             )
         }
     )
@@ -410,10 +602,11 @@ async def test_handleless_spawn_failure_marks_discovered_pending_record_retryabl
     host = HandlelessSpawnHost(
         {
             parent.pid: _ProcessIdentity(
-                create_time=parent.create_time,
+                stamp=parent.create_time,
                 cmdline=("avibe",),
                 uid=uid,
                 environment={},
+                wall_create_time=parent.create_time,
             )
         }
     )
@@ -457,10 +650,11 @@ async def test_handleless_spawn_failure_marks_uncertain_pending_record_retryable
     host = UncertainHandlelessSpawnHost(
         {
             parent.pid: _ProcessIdentity(
-                create_time=parent.create_time,
+                stamp=parent.create_time,
                 cmdline=("avibe",),
                 uid=uid,
                 environment={},
+                wall_create_time=parent.create_time,
             )
         }
     )
@@ -525,7 +719,7 @@ async def test_sync_cleanup_runtime_error_marks_the_finalized_record(
         def inspect_identity(self, pid):
             assert pid == process.pid
             return _ProcessIdentity(
-                create_time=10.5,
+                stamp=10.5,
                 cmdline=(str(python), *SYNC_ARGV),
                 uid=os.getuid() if hasattr(os, "getuid") else None,
                 environment=self.environment,
@@ -701,10 +895,11 @@ async def test_finalized_sync_reconciliation_cleans_exact_recorded_group(tmp_pat
     host = _Host(
         {
             451: _ProcessIdentity(
-                create_time=10.5,
+                stamp=10.5,
                 cmdline=tuple(record["argv"]),
                 uid=uid,
                 environment=environment,
+                wall_create_time=10.5,
             )
         }
     )
@@ -732,7 +927,7 @@ async def test_gone_leader_with_live_helper_is_swept_before_retirement(tmp_path:
         SYNC_PARENT_UID_ENV: "" if uid is None else str(uid),
     }
     helper = _ProcessIdentity(
-        create_time=11.5,
+        stamp=11.5,
         cmdline=("/runtime/bin/python", "-c", "everos-helper"),
         uid=uid,
         environment=helper_env,
@@ -772,7 +967,7 @@ async def test_orphan_reconciliation_rescans_group_before_retiring_record(
             if self.scans == 1:
                 return {777: 11.5}, []
             self.identities[778] = _ProcessIdentity(
-                create_time=12.5,
+                stamp=12.5,
                 cmdline=("/runtime/bin/python", "-c", "replacement-helper"),
                 uid=uid,
                 environment=helper_env,
@@ -881,7 +1076,11 @@ def test_sync_environment_has_no_host_source_path(tmp_path: Path) -> None:
     assert all("SOURCE_ROOT" not in key for key in env)
 
 
-async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(tmp_path: Path) -> None:
+async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(memory_sync_process, "_uses_linux_starttime_stamp", lambda: True)
     python = tmp_path / "runtime" / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.write_bytes(b"python")
@@ -897,6 +1096,9 @@ async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(tmp_path
             assert signum.name == "SIGCONT"
             record = json.loads(record_path.read_text(encoding="utf-8"))
             assert record["state"] == "finalized"
+            assert record["create_time"] == 1_700_000_010.5
+            assert record["starttime_ticks"] == 10.5
+            assert record["parent_starttime_ticks"] is not None
             events.append("continued")
 
         async def wait(self):
@@ -938,10 +1140,11 @@ async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(tmp_path
             assert pid == process.pid
             events.append("validated")
             return _ProcessIdentity(
-                create_time=10.5,
+                stamp=10.5,
                 cmdline=(str(python), *SYNC_ARGV),
                 uid=os.getuid() if hasattr(os, "getuid") else None,
                 environment=self.environment,
+                wall_create_time=1_700_000_010.5,
             )
 
         def live(self, identities):
@@ -1028,7 +1231,7 @@ async def test_sync_spawn_handoff_finishes_before_honoring_cancellation(tmp_path
         def inspect_identity(self, pid):
             assert pid == process.pid
             return _ProcessIdentity(
-                create_time=10.5,
+                stamp=10.5,
                 cmdline=(str(python), *SYNC_ARGV),
                 uid=os.getuid() if hasattr(os, "getuid") else None,
                 environment=self.environment,
@@ -1066,7 +1269,7 @@ async def test_sync_spawn_handoff_finishes_before_honoring_cancellation(tmp_path
 
 async def test_sync_cleanup_rescans_a_group_after_the_leader_exits(tmp_path: Path) -> None:
     helper = _ProcessIdentity(
-        create_time=11.5,
+        stamp=11.5,
         cmdline=("/runtime/bin/python", *SYNC_ARGV),
         uid=os.getuid() if hasattr(os, "getuid") else None,
         environment={},
