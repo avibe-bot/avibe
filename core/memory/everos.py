@@ -67,6 +67,9 @@ _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
 _CHAT_PROBE_MAX_TOKENS = 8
+_CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
+    {"stop", "length", "content_filter", "tool_calls", "function_call"}
+)
 _PREFLIGHT_IMAGE_DATA_URI = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAYElEQVR42u3QAQ0AAAwC"
@@ -1600,8 +1603,17 @@ def _chat_probe_response_issue(value: Any) -> str | None:
         return "provider_response_missing_message"
     if "content" not in message:
         return "provider_response_missing_content"
-    if not isinstance(message["content"], str):
+    content = message["content"]
+    if not isinstance(content, str):
         return "provider_response_invalid_content"
+    if not content:
+        if message.get("role") != "assistant":
+            return "provider_response_invalid_role"
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is None:
+            return "provider_response_missing_finish_reason"
+        if finish_reason not in _CHAT_PROBE_TERMINAL_FINISH_REASONS:
+            return "provider_response_invalid_finish_reason"
     return None
 
 
