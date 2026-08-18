@@ -226,7 +226,7 @@ const HubTabs: React.FC<{ tab: 'sources' | 'usage'; onChange: (tab: 'sources' | 
   return (
     <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
       {(['sources', 'usage'] as const).map((id) => (
-        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[39px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
+        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
           {id === 'sources' ? <Route className="size-3.5" /> : <Gauge className="size-3.5" />}
           {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : 'usage'}`)}
         </button>
@@ -256,7 +256,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
                   <span className="model-hub-direct-backend-copy">
                     <span className="flex min-w-0 items-center gap-1.5">
                       <span className="model-hub-direct-backend-name truncate text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span>
-                      <span className="model-hub-direct-kind-pill shrink-0 rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.direct.pill.direct')}</span>
+                      <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
                     </span>
                     <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>
                   </span>

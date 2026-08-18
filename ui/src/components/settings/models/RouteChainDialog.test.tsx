@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import i18n from "@/i18n";
 import { ApiCallError, modelsApi } from "./modelsApi";
@@ -87,6 +87,38 @@ const mutation = (
   removed_hops: report.removed_hops ?? [],
   interrupted: report.interrupted ?? [],
 });
+/** An Agent whose eligible sources actually carry spare models — the only shape
+ *  that makes the add-hop selector reachable, since `routeCandidates` excludes
+ *  the pairs the draft already holds. */
+const stocked = () => ({
+  agent: {
+    ...agent,
+    sources: {
+      order: ["src_a", "src_b"],
+      eligibility: [
+        { source_id: "src_a", eligible: true },
+        { source_id: "src_b", eligible: true },
+      ],
+    },
+  } satisfies AgentSupply,
+  sources: [
+    {
+      ...sources[0],
+      models: [
+        { id: "claude-opus-5", origin: "discovered", reasoning_efforts: [] },
+        { id: "claude-sonnet-5", origin: "discovered", reasoning_efforts: [] },
+        { id: "claude-haiku-5", origin: "discovered", reasoning_efforts: [] },
+      ],
+    },
+    {
+      ...sources[1],
+      models: [
+        { id: "opus-5", origin: "discovered", reasoning_efforts: [] },
+        { id: "sonnet-5", origin: "discovered", reasoning_efforts: [] },
+      ],
+    },
+  ] satisfies Source[],
+});
 const observation = <T,>(value: T) => ({ value, install: vi.fn() });
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -96,6 +128,26 @@ const deferred = <T,>() => {
     reject = decline;
   });
   return { promise, reject, resolve };
+};
+const renderStockedDialog = () => {
+  const fixture = stocked();
+  vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
+  render(
+    <I18nextProvider i18n={i18n}>
+      <RouteChainDialog
+        selection={{
+          agent: fixture.agent,
+          modelId: "opus-5",
+          read: readyRegion(chain),
+        }}
+        sources={fixture.sources}
+        onClose={vi.fn()}
+        onCommitted={vi.fn()}
+        readAgents={vi.fn().mockResolvedValue(observation([fixture.agent]))}
+        readSources={vi.fn().mockResolvedValue(observation(fixture.sources))}
+      />
+    </I18nextProvider>,
+  );
 };
 const renderDialog = (onCommitted = vi.fn()) => {
   vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
@@ -113,9 +165,24 @@ const renderDialog = (onCommitted = vi.fn()) => {
   );
 };
 
+beforeEach(() => {
+  // cmdk observes its list box and scrolls the active row into view; jsdom
+  // implements neither.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  Element.prototype.scrollIntoView = vi.fn();
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("RouteChainDialog", () => {
@@ -464,31 +531,7 @@ describe("RouteChainDialog", () => {
   it("returns an invalidated pending draft to editing after a named rejection", async () => {
     const user = userEvent.setup();
     const pending = deferred<AgentChainMutation>();
-    const editableAgent: AgentSupply = {
-      ...agent,
-      sources: {
-        order: ["src_a", "src_b"],
-        eligibility: [
-          { source_id: "src_a", eligible: true },
-          { source_id: "src_b", eligible: true },
-        ],
-      },
-    };
-    const editableSources: Source[] = [
-      {
-        ...sources[0],
-        models: [
-          { id: "claude-opus-5", origin: "discovered", reasoning_efforts: [] },
-          { id: "claude-sonnet-5", origin: "discovered", reasoning_efforts: [] },
-        ],
-      },
-      {
-        ...sources[1],
-        models: [
-          { id: "opus-5", origin: "discovered", reasoning_efforts: [] },
-        ],
-      },
-    ];
+    const { agent: editableAgent, sources: editableSources } = stocked();
     vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
     vi.spyOn(modelsApi, "putAgentChain").mockReturnValue(pending.promise);
     const props = {
@@ -536,6 +579,107 @@ describe("RouteChainDialog", () => {
     expect(
       (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
         .disabled,
+    ).toBe(true);
+  });
+
+  it("names both candidate columns and prints each source once per group", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await screen.findAllByRole("button", { name: "Remove hop" });
+
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    expect(screen.getByText("Source")).toBeTruthy();
+    expect(screen.getByText("Model")).toBeTruthy();
+    // Both halves of a candidate are legible: the model id AND which source
+    // supplies it. The source column is what a sizing rework once dropped, so
+    // the assertion is over the rendered row grid, not over the mere presence
+    // of the name somewhere in the panel.
+    const rows = [...document.querySelectorAll(".model-hub-route-candidate")];
+    expect(
+      rows.map((row) => [
+        row.querySelector(".model-hub-route-candidate-source")?.textContent,
+        row.querySelector(".model-hub-route-candidate-model")?.textContent,
+      ]),
+    ).toEqual([
+      ["API key", "claude-haiku-5"],
+      ["", "claude-sonnet-5"],
+      ["Claude subscription", "sonnet-5"],
+    ]);
+  });
+
+  it("narrows the candidates to what was typed without claiming none exist", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    await user.type(
+      screen.getByPlaceholderText("Search sources or models"),
+      "subscription",
+    );
+
+    expect(
+      [...document.querySelectorAll(".model-hub-route-candidate-model")].map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(["sonnet-5"]);
+
+    await user.clear(screen.getByPlaceholderText("Search sources or models"));
+    await user.type(
+      screen.getByPlaceholderText("Search sources or models"),
+      "gpt",
+    );
+
+    expect(screen.getByText("No source or model matches that")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Add" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("keeps the candidate list scrollable while the dialog locks the page", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    // The dialog locks page scrolling through `react-remove-scroll`, which
+    // cancels wheel events outside its own lock and shards. The selector is
+    // portalled to `document.body`, so it is outside both unless it owns a lock
+    // of its own — and when it does not, the panel keeps its `overflow-y: auto`
+    // and its overflowing content while the wheel silently does nothing. Only
+    // the event outcome can see that, so it is measured here rather than
+    // inferred from the CSS. jsdom has no layout, so the scrollability the
+    // browser gets from that CSS is stated explicitly.
+    const list = document.querySelector<HTMLElement>(
+      ".model-hub-route-selector-list",
+    );
+    expect(list).not.toBeNull();
+    (list as HTMLElement).style.overflowY = "auto";
+    Object.defineProperty(list, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    Object.defineProperty(list, "clientHeight", {
+      value: 200,
+      configurable: true,
+    });
+    const wheelPrevented = (node: Element) => {
+      const event = new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaY: 240,
+      });
+      node.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(
+      wheelPrevented(document.querySelector(".model-hub-route-candidate")!),
+    ).toBe(false);
+    expect(
+      wheelPrevented(document.body.appendChild(document.createElement("div"))),
     ).toBe(true);
   });
 

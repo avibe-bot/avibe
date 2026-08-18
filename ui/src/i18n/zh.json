@@ -1017,7 +1017,14 @@
         "section": "这个型号的路由链",
         "removeHop": "移除这一跳",
         "addHop": "添加一跳",
-        "add": { "confirm": "添加", "none": "没有可添加的来源型号" },
+        "add": {
+          "source": "来源",
+          "model": "型号",
+          "search": "搜索来源或型号",
+          "confirm": "添加",
+          "noMatch": "没有匹配的来源型号",
+          "none": "没有可添加的来源型号"
+        },
         "sourceMissing": "来源不存在",
         "invalidAfterRefresh": "这个已编辑的跳在刷新后的来源中不可用。移除它后再保存。",
         "reorder": {
