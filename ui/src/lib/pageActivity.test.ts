@@ -80,14 +80,23 @@ describe('createPageActivityTracker', () => {
 describe('onPageReactivated', () => {
   let frame: HTMLIFrameElement | null = null;
 
-  // jsdom never moves focus into a frame, so drive both halves of the delegated
-  // state directly: `activeElement` is what the sampler reads to decide whether
-  // the parent window can still be told about a focus change, and `hasFocus` is
-  // the system-focus truth it polls for while it cannot.
-  const delegateFocusToFrame = () => {
+  // jsdom never moves focus into a frame, so put it there by hand: `activeElement`
+  // is how the sampler finds the window that now owns focus events, and
+  // `hasFocus` is the system-focus truth those events are read against.
+  const focusFrame = (): Window => {
     frame = document.createElement('iframe');
     document.body.appendChild(frame);
     Object.defineProperty(document, 'activeElement', { value: frame, configurable: true });
+    // The parent window blurs as focus enters the frame; nothing left the page.
+    window.dispatchEvent(new Event('blur'));
+    return frame.contentWindow as Window;
+  };
+
+  const focusParent = () => {
+    Object.defineProperty(document, 'activeElement', {
+      value: document.body,
+      configurable: true,
+    });
   };
 
   afterEach(() => {
@@ -95,46 +104,59 @@ describe('onPageReactivated', () => {
     Reflect.deleteProperty(document, 'hasFocus');
     frame?.remove();
     frame = null;
-    vi.useRealTimers();
   });
 
-  it('reports a system focus loss that happened while an embedded frame held focus', () => {
-    vi.useFakeTimers();
+  it('reports a system focus loss that arrived at the frame holding focus', () => {
     let systemFocus = true;
     document.hasFocus = () => systemFocus;
-    delegateFocusToFrame();
 
     const reactivated = vi.fn();
     const stop = onPageReactivated(reactivated);
-    // The parent window blurs when focus enters the frame; nothing left the page.
-    window.dispatchEvent(new Event('blur'));
+    const frameWindow = focusFrame();
     expect(reactivated).not.toHaveBeenCalled();
 
-    // Switching to another application from there reaches the parent as no event
-    // at all, and switching back only re-focuses the frame.
+    // Switching to another application blurs the frame's window, not ours.
     systemFocus = false;
-    vi.advanceTimersByTime(2000);
+    frameWindow.dispatchEvent(new Event('blur'));
     systemFocus = true;
-    vi.advanceTimersByTime(2000);
+    frameWindow.dispatchEvent(new Event('focus'));
 
     expect(reactivated).toHaveBeenCalledTimes(1);
     stop();
   });
 
-  it('stops polling once focus leaves the frame', () => {
-    vi.useFakeTimers();
+  it('stays silent while focus only moves between the page and its frame', () => {
     document.hasFocus = () => true;
-    delegateFocusToFrame();
 
-    const stop = onPageReactivated(() => {});
-    expect(vi.getTimerCount()).toBe(1);
+    const reactivated = vi.fn();
+    const stop = onPageReactivated(reactivated);
+    const frameWindow = focusFrame();
 
-    Object.defineProperty(document, 'activeElement', {
-      value: document.body,
-      configurable: true,
-    });
+    // Clicking workbench chrome blurs the frame and focuses the parent again.
+    frameWindow.dispatchEvent(new Event('blur'));
+    focusParent();
     window.dispatchEvent(new Event('focus'));
-    expect(vi.getTimerCount()).toBe(0);
+
+    expect(reactivated).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('stops listening to a frame that no longer holds focus', () => {
+    document.hasFocus = () => true;
+
+    const reactivated = vi.fn();
+    const stop = onPageReactivated(reactivated);
+    const frameWindow = focusFrame();
+    focusParent();
+    window.dispatchEvent(new Event('focus'));
+
+    // A stale frame must not be able to report the page inactive from the side.
+    document.hasFocus = () => false;
+    frameWindow.dispatchEvent(new Event('blur'));
+    document.hasFocus = () => true;
+    frameWindow.dispatchEvent(new Event('focus'));
+
+    expect(reactivated).not.toHaveBeenCalled();
     stop();
   });
 });

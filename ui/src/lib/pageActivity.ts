@@ -89,38 +89,48 @@ const notify = (listeners: Set<() => void>) => {
   for (const listener of [...listeners]) listener();
 };
 
-/** Whether the focused element hosts a child browsing context (`<iframe>` & co). */
-const focusIsDelegated = (): boolean => {
-  const focused = document.activeElement as HTMLIFrameElement | null;
-  return focused != null && focused.contentWindow != null;
-};
-
-// Chrome blurs the parent window when focus moves into an embedded frame, and
-// then delivers it nothing more: losing system focus from there fires on the
-// frame's window, not on ours, so the away period would pass unobserved and the
-// user's return would read as `true -> true`. `document.hasFocus()` still
-// reports it, so poll while — and only while — an embedded frame holds focus.
-// Browsers that instead keep the parent window focused report the same gap as an
-// ordinary `blur`, so between them the two focus models are both covered.
-const DELEGATED_FOCUS_POLL_MS = 1000;
-let delegatedFocusPoll: ReturnType<typeof setInterval> | null = null;
-
-const stopDelegatedFocusPoll = () => {
-  if (delegatedFocusPoll === null) return;
-  clearInterval(delegatedFocusPoll);
-  delegatedFocusPoll = null;
-};
-
 const sample = () => {
   if (!tracker) return;
   const wasActive = tracker.isActive();
   const reactivated = tracker.observe(readPageActivity());
   if (tracker.isActive() !== wasActive) notify(activeListeners);
   if (reactivated) notify(reactivationListeners);
+  bindFocusedFrame();
+};
 
-  if (!focusIsDelegated()) stopDelegatedFocusPoll();
-  else if (delegatedFocusPoll === null) {
-    delegatedFocusPoll = setInterval(sample, DELEGATED_FOCUS_POLL_MS);
+// Focus events go to the window that holds focus, and Chrome hands focus to an
+// embedded frame's window while blurring ours: from then on a system focus loss
+// is delivered there and never here. So follow it — listen on whichever child
+// window currently holds focus. `document.hasFocus()` is already false inside a
+// blur that really left the page and still true when focus merely returned to
+// the parent document, so the same edge detector separates the two without
+// having to guess what the gap was.
+const FRAME_FOCUS_EVENTS = ['focus', 'blur', 'pagehide'] as const;
+
+let focusedFrame: Window | null = null;
+
+const unbindFocusedFrame = () => {
+  if (!focusedFrame) return;
+  try {
+    for (const type of FRAME_FOCUS_EVENTS) focusedFrame.removeEventListener(type, sample);
+  } catch {
+    // The frame was torn down together with its document; nothing left to detach.
+  }
+  focusedFrame = null;
+};
+
+const bindFocusedFrame = () => {
+  const focused = document.activeElement as HTMLIFrameElement | null;
+  const frame = focused?.contentWindow ?? null;
+  if (frame === focusedFrame) return;
+  unbindFocusedFrame();
+  if (!frame) return;
+  try {
+    for (const type of FRAME_FOCUS_EVENTS) frame.addEventListener(type, sample);
+    focusedFrame = frame;
+  } catch {
+    // A cross-origin frame refuses listeners, and hides its focus changes from
+    // this document anyway. Leave it unobserved rather than guessing.
   }
 };
 
@@ -139,12 +149,12 @@ const attach = () => {
     window.removeEventListener('blur', sample);
     window.removeEventListener('pageshow', sample);
     window.removeEventListener('pagehide', sample);
-    stopDelegatedFocusPoll();
+    unbindFocusedFrame();
     tracker = null;
     detach = null;
   };
   // Fold the current reading in once, so a page that mounts while an embedded
-  // frame already holds focus starts polling without waiting for an event.
+  // frame already holds focus starts listening to it without waiting for an event.
   sample();
 };
 
