@@ -21,4 +21,8 @@ An unreadable status is treated as live so an accepted steer is not closed.
 `_settlement_assistant_message` walks the snapshot backward. Native liveness
 comes from the same status sample that produced the snapshot when the
 steering wrapper already read it; otherwise from ``/session/status``. A
-successful omission (``None``) is idle. An unread or failed status is live.
+successful omission (``None``) is idle. An unread or failed status is live. After posting auto-retry
+``continue``, the inject stays pending for a short confirmation window
+even if status already reports idle. Restored polls do not take the
+empty-success finish path until the error retry budget is exhausted.
+The status probe is bounded by the remaining turn budget.

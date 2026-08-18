@@ -35,6 +35,9 @@ _TIMEOUT_ABORT_GRACE_SECONDS = 10.0
 # never total duration — drive this settlement, so an intermittent blip that
 # recovers between polls resets the count and never trips it.
 _POLL_FAILURE_SETTLE_LIMIT = 10
+# OpenCode can report idle after accepting ``continue`` / a steer, before the
+# replacement assistant is visible. Keep that inject pending for this window.
+_POST_INJECT_CONFIRMATION_SECONDS = 5.0
 
 
 def _opencode_error_text(error: object) -> str:
@@ -248,7 +251,12 @@ class OpenCodePollLoop:
         server: OpenCodeServerManager,
         session_id: str,
         directory: str,
+        *,
+        remaining: float,
+        pending_inject_until: float = 0.0,
     ) -> bool:
+        if pending_inject_until and time.monotonic() < pending_inject_until:
+            return True
         snapshot_live = getattr(server, "last_list_native_live", None)
         if isinstance(snapshot_live, bool):
             return snapshot_live
@@ -256,7 +264,10 @@ class OpenCodePollLoop:
         if not callable(reader):
             return True
         try:
-            status = await reader(session_id, directory)
+            status = await asyncio.wait_for(
+                reader(session_id, directory),
+                timeout=self._wait_timeout(remaining),
+            )
         except Exception as err:
             logger.debug(
                 "OpenCode session status unavailable for %s: %s",
@@ -447,6 +458,7 @@ class OpenCodePollLoop:
         )
         last_error_message_id: Optional[str] = None
         poll_failures = 0
+        pending_inject_until = 0.0
 
         def _relative_path(path: str) -> str:
             return self._agent._to_relative_path(path, request.working_path)
@@ -592,7 +604,11 @@ class OpenCodePollLoop:
                     messages,
                     baseline_message_ids,
                     native_live=await self._native_session_is_live(
-                        server, session_id, request.working_path
+                        server,
+                        session_id,
+                        request.working_path,
+                        remaining=remaining,
+                        pending_inject_until=pending_inject_until,
                     ),
                 )
                 last_info = _message_info(last_message) if last_message else {}
@@ -634,6 +650,9 @@ class OpenCodePollLoop:
                                     model=model_dict,
                                     reasoning_effort=reasoning_effort,
                                     tools={"question": False},
+                                )
+                                pending_inject_until = (
+                                    time.monotonic() + _POST_INJECT_CONFIRMATION_SECONDS
                                 )
                                 await self._sleep_with_deadline(deadline)
                                 continue
@@ -731,6 +750,7 @@ class OpenCodePollLoop:
             DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
         )
         last_error_message_id: Optional[str] = None
+        pending_inject_until = 0.0
 
         started_at = time.monotonic()
 
@@ -894,7 +914,11 @@ class OpenCodePollLoop:
                         messages,
                         baseline_message_ids,
                         native_live=await self._native_session_is_live(
-                            server, session_id, poll_info.working_path
+                            server,
+                            session_id,
+                            poll_info.working_path,
+                            remaining=remaining,
+                            pending_inject_until=pending_inject_until,
                         ),
                     )
                     last_info = _message_info(last_message) if last_message else {}
@@ -923,6 +947,8 @@ class OpenCodePollLoop:
                                     self._agent.sessions.remove_active_poll(session_id)
                                     await self.remove_restored_ack(poll_info)
                                     return
+                                await self._sleep_with_deadline(deadline)
+                                continue
 
                             if last_info.get("finish") != "tool-calls":
                                 if not msg_error:

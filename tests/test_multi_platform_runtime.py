@@ -2082,6 +2082,145 @@ def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypat
     assert not any(item[0] == "result" for item in emitted)
 
 
+def test_opencode_poll_keeps_continue_pending_through_idle_visibility_gap(monkeypatch):
+    """After posting continue, an idle trailing-user snapshot is still live."""
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POST_INJECT_CONFIRMATION_SECONDS", 1.0
+    )
+    emitted = []
+    polls = {"n": 0}
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
+            return f"translated:{key}"
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+            terminal_error=None,
+        ):
+            emitted.append((message_type, text, is_error, level, terminal_error))
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
+        controller = _Controller()
+
+        def _extract_response_text(self, message):
+            return "recovered"
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            raise AssertionError("must not settle during the continue visibility gap")
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            polls["n"] += 1
+            if polls["n"] == 1:
+                return [
+                    {
+                        "info": {
+                            "id": "msg-err",
+                            "role": "assistant",
+                            "time": {"completed": 1},
+                            "error": {"name": "UnknownError", "data": {"message": "tls"}},
+                        },
+                        "parts": [],
+                    }
+                ]
+            if polls["n"] == 2:
+                return [
+                    {
+                        "info": {
+                            "id": "msg-err",
+                            "role": "assistant",
+                            "time": {"completed": 1},
+                            "error": {"name": "UnknownError", "data": {"message": "tls"}},
+                        },
+                        "parts": [],
+                    },
+                    {
+                        "info": {"id": "msg-continue", "role": "user", "time": {}},
+                        "parts": [{"type": "text", "text": "continue"}],
+                    },
+                ]
+            return [
+                {
+                    "info": {
+                        "id": "msg-err",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": {"name": "UnknownError", "data": {"message": "tls"}},
+                    },
+                    "parts": [],
+                },
+                {
+                    "info": {"id": "msg-continue", "role": "user", "time": {}},
+                    "parts": [{"type": "text", "text": "continue"}],
+                },
+                {
+                    "info": {
+                        "id": "msg-new",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "finish": "stop",
+                    },
+                    "parts": [{"type": "text", "text": "recovered"}],
+                },
+            ]
+
+        async def prompt_async(self, **kwargs):
+            return None
+
+        async def get_session_status(self, session_id, directory):
+            return None
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    final_text, should_emit = asyncio.run(
+        OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert (final_text, should_emit) == ("recovered", True)
+    assert polls["n"] >= 3
+    assert not any(item[0] == "result" for item in emitted)
+
+
 def test_opencode_poll_does_not_settle_error_while_followup_has_parts():
     """A follow-up assistant that already has parts is still the live turn."""
 
@@ -2270,6 +2409,121 @@ def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
     assert final_text is None
     assert should_emit is True
     assert emitted == []
+
+
+def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
+    """A restored poll must emit the backend error, not (No response)."""
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
+    )
+    emitted = []
+    removed = []
+    results = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def __init__(self):
+            self.config = type("Config", (), {"language": "en"})()
+            self.processing_indicator = ProcessingIndicatorService(self)
+
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
+            return f"translated:{key}"
+
+        async def emit_agent_message(
+            self,
+            context,
+            message_type,
+            text,
+            parse_mode=None,
+            *,
+            is_error=False,
+            level="normal",
+            output=None,
+            terminal_error=None,
+        ):
+            emitted.append((message_type, text, is_error, level, terminal_error))
+
+    class _Sessions:
+        def remove_active_poll(self, session_id):
+            removed.append(session_id)
+
+        def update_active_poll_state(self, session_id, **kwargs):
+            return None
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            return [
+                {
+                    "info": {
+                        "id": "msg-err",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "error": {
+                            "name": "UnknownError",
+                            "data": {"message": "certificate failed"},
+                        },
+                    },
+                    "parts": [],
+                },
+                {
+                    "info": {"id": "msg-user", "role": "user", "time": {}},
+                    "parts": [{"type": "text", "text": "继续"}],
+                },
+            ]
+
+        async def get_session_status(self, session_id, directory):
+            return None
+
+    server = _Server()
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
+        controller = _Controller()
+        sessions = _Sessions()
+
+        async def _get_server(self):
+            return server
+
+        def _extract_response_text(self, message):
+            return ""
+
+        async def emit_result_message(self, context, text, **kwargs):
+            results.append(text)
+
+        async def _remove_ack_reaction(self, request):
+            return None
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            return True
+
+    poll = ActivePollInfo(
+        opencode_session_id="oc-session",
+        base_session_id="base",
+        channel_id="c",
+        thread_id="t",
+        settings_key="c",
+        working_path="/tmp/work",
+        baseline_message_ids=[],
+        platform="slack",
+        prompt_started_at=time.time(),
+    )
+
+    asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+
+    assert removed == ["oc-session"]
+    assert any(item[0] == "result" and item[2] is True for item in emitted)
+    assert all("No response from OpenCode" not in str(item) for item in results)
+    assert any("certificate failed" in (item[1] or "") for item in emitted)
 
 
 def test_opencode_restored_poll_keeps_empty_completion_successful():
