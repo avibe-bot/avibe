@@ -647,9 +647,16 @@ def test_model_identity_is_decided_only_by_its_owner() -> None:
     # the ledger meters a call that already happened, so asking it there dropped
     # every call made under an identifier a legacy file kept loadable. Neither may
     # spell the bound, and neither may borrow the other's question.
+    #
+    # Review 4966041599: within the ledger the same split appears again by
+    # direction. Deriving a key for a call cannot refuse it; accepting a key a row
+    # already carries can, and must not re-derive it. One function serving both
+    # forced the fold to start late enough to be idempotent, which is what let a
+    # legacy identifier occupy a folded key and share another model's row.
     assert "canonical_model_id" in SERVICE.read_text(encoding="utf-8")
     usage_source = USAGE.read_text(encoding="utf-8")
     assert "usage_ledger_key" in usage_source
+    assert "persisted_ledger_key" in usage_source
     assert "canonical_model_id" not in usage_source
     for path in (SERVICE, USAGE):
         source = path.read_text(encoding="utf-8")

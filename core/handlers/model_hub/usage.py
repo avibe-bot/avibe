@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Final, Optional, Sequence
 
-from .identifiers import usage_ledger_key
+from .identifiers import persisted_ledger_key, usage_ledger_key
 from .state_file import write_state_document
 from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
 
@@ -100,9 +100,11 @@ def _text(value: object) -> Optional[str]:
 
     No length bound here: the only text fields this reads are a calendar day and
     an instant, and the parsers below already reject anything that is not one.
-    The key fields go through `usage_ledger_key` instead, which bounds a row by
-    folding a long identity rather than by refusing it — a call the hub served
-    must still be counted, and a row this ledger wrote must still read back.
+    The key fields go through the two key functions instead, and which one depends
+    on the direction: a live call is keyed by `usage_ledger_key`, which folds a long
+    identity rather than refusing it because the hub already served that call, while
+    a row read back from the file goes through `persisted_ledger_key`, which
+    recognizes the key a previous write derived instead of deriving it again.
     """
 
     if not isinstance(value, str):
@@ -161,13 +163,17 @@ def _timestamp(value: object) -> Optional[str]:
 
 
 def _normalize_row(row: object) -> Optional[dict]:
-    """Project one persisted row onto the current shape, or drop it."""
+    """Project one persisted row onto the current shape, or drop it.
+
+    Only ever handed keys, never live identities: a caller metering a call derives
+    its key first, so this function asks the one question a row can be asked.
+    """
 
     if not isinstance(row, dict):
         return None
     day = _text(row.get("day"))
-    source_id = usage_ledger_key(row.get("source_id"))
-    model_id = usage_ledger_key(row.get("model_id"))
+    source_id = persisted_ledger_key(row.get("source_id"))
+    model_id = persisted_ledger_key(row.get("model_id"))
     if day is None or source_id is None or model_id is None:
         return None
     # Same rule as the instant above: the file supplies the day, this module
@@ -354,19 +360,27 @@ class BoundedUsageLedger:
             for call in calls:
                 metered_at = min(_aware(call.at), persisted_at)
                 usage = call.usage
-                increment = _normalize_row(
-                    {
-                        "day": local_usage_day(metered_at).isoformat(),
-                        "source_id": call.source_id,
-                        "model_id": call.model_id,
-                        "requests": 1,
-                        "token_reports": 1 if usage is not None else 0,
-                        "input_tokens": usage.input_tokens if usage else 0,
-                        "cached_input_tokens": usage.cached_input_tokens if usage else 0,
-                        "output_tokens": usage.output_tokens if usage else 0,
-                        "last_metered_at": metered_at.isoformat(),
-                    }
-                )
+                # A live call carries identities, not keys, and this is the one place
+                # they become one: derive here and every row downstream — new,
+                # accumulated, or read back next restart — is already a key, so no
+                # later surface can re-derive one that was folded and orphan its row.
+                source_key = usage_ledger_key(call.source_id)
+                model_key = usage_ledger_key(call.model_id)
+                increment = None
+                if source_key is not None and model_key is not None:
+                    increment = _normalize_row(
+                        {
+                            "day": local_usage_day(metered_at).isoformat(),
+                            "source_id": source_key,
+                            "model_id": model_key,
+                            "requests": 1,
+                            "token_reports": 1 if usage is not None else 0,
+                            "input_tokens": usage.input_tokens if usage else 0,
+                            "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+                            "output_tokens": usage.output_tokens if usage else 0,
+                            "last_metered_at": metered_at.isoformat(),
+                        }
+                    )
                 if increment is None:
                     # Reachable only for a value no config can hold — not text, or
                     # empty — because a long identity is folded to a bounded key
@@ -375,7 +389,7 @@ class BoundedUsageLedger:
                     # a quietly incomplete tab.
                     logger.warning(
                         "Model Hub usage metering skipped a call with an unusable identifier",
-                        extra={"source_id_usable": usage_ledger_key(call.source_id) is not None},
+                        extra={"source_id_usable": source_key is not None},
                     )
                     continue
                 existing = rows.get(_row_key(increment))

@@ -155,6 +155,12 @@ scenarios:
     kind: compatibility
     layer: unit
     test: tests/test_model_hub_usage.py::test_metering_can_key_exactly_the_identities_a_config_can_hold
+  - id: MH-USAGE-007
+    name: Two model identifiers a config holds are never metered onto one ledger row
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

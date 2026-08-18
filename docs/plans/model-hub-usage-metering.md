@@ -764,6 +764,53 @@ failing. The structure guard keeps each module to its own question: the service 
 may not borrow the ledger's, the ledger meters and may not borrow the service's, and
 neither may spell the bound.
 
+### Round 14 (head `500fb55af`)
+
+One finding, and it is a defect in round 13's own fix rather than a new instance of
+class C: no call is dropped now, but two calls can be attributed to one identity. The
+breaker still applies — same property, eleventh head — so the decision is recorded
+before the edit.
+
+**The claim that was false.** The sentence "a folded key is longer than any verbatim
+one, so it is returned unchanged" appears twice in round 13's prose and once as the
+reason one function could serve both directions. The code did not implement it: the
+verbatim branch admitted anything up to `USAGE_LEDGER_KEY_MAX_LENGTH`, which is
+*exactly* the length every folded key has. The two populations overlapped at that
+length, and the overlap needs no preimage attack — whoever writes the config picks any
+over-long ID `X`, computes `X[:200] + "~" + sha256(X)` themselves, and stores that
+literal string as a second model's ID. Both models load, both route, and the ledger
+merges them onto one row. The reviewer's phrasing names the real defect: a "string
+namespace that legacy IDs can already occupy".
+
+**Why the obvious fix is not enough on its own.** Folding everything past
+`MODEL_ID_MAX_LENGTH` makes verbatim (≤ 200) and folded (= 265) disjoint by length, and
+then no admissible identifier can occupy the folded form — reaching that length means
+being folded. But it also breaks the idempotence round 13 relied on: a stored folded key
+fed back through the same function folds a second time and orphans its own row, which is
+a mutation the existing `MH-USAGE-006` assertion already catches. Recognizing the folded
+*shape* instead would restore idempotence and reopen the hole, because a legacy
+identifier can carry any shape marker too. No marker closes this; only a length no
+admissible identifier can reach.
+
+**Scope decision: split the direction, not the shape.** Deriving a key for a call that
+already happened and accepting a key a row already carries are different questions, and
+only the second may answer no — a row is not a call, it is what an earlier write claims
+about calls, so a key no write could have produced is a corrupt row and refusing it
+loses a claim rather than a served call. `usage_ledger_key` therefore folds past the
+admission bound and never refuses an identity; `persisted_ledger_key` recognizes what a
+write derived and bounds the row. `record_many` derives once, where a live call becomes
+a row, so `_normalize_row` only ever sees keys — the double duty that function was doing
+is what made a single self-idempotent function look necessary in the first place.
+
+**Evidence.** `MH-USAGE-006` now asserts the disjointness (`len(key)` is within the
+admission bound or exactly a folded key's length, never between) and the pairing between
+the two directions in place of self-idempotence. `MH-USAGE-007` states the property the
+finding violated as injectivity over a closure — every seed plus the key it folds to,
+each one asserted loadable through `ModelHubModelConfig.from_payload` — so the crafted
+pair fails it without being named, and a read-back test fixes which keys a row may
+carry. Four mutations, four distinct failures: the late fold threshold, a re-deriving
+read path, a truncation-only fold, and an unbounded read.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

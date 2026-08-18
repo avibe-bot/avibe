@@ -26,6 +26,7 @@ from core.handlers.model_hub import state_file
 from core.handlers.model_hub.identifiers import (
     MODEL_ID_MAX_LENGTH,
     USAGE_LEDGER_KEY_MAX_LENGTH,
+    persisted_ledger_key,
     usage_ledger_key,
 )
 from core.handlers.model_hub.stream_wire import (
@@ -1124,10 +1125,13 @@ def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: o
     decides which identities exist, and this asserts the ledger can key every one
     of them: the two halves cannot drift apart without failing.
 
-    The last two assertions are the reason one function serves both directions.
-    Keying the loaded value and the raw payload alike stops one model from
-    occupying two rows, and keying a key returns it, so a row read back after a
-    restart is the row that was written.
+    Keying the loaded value and the raw payload alike stops one model from occupying
+    two rows. The length assertion is the review-4966041599 property: a key is either
+    within the admission bound or exactly a folded key's length, never in between, so
+    no identifier a config can hold can occupy the folded form. And the read path
+    returns a derived key unchanged, so a row read back after a restart is the row
+    that was written — the guarantee that used to be spelled as self-idempotence,
+    which is what forced the fold to start too late.
     """
 
     try:
@@ -1142,9 +1146,9 @@ def test_metering_can_key_exactly_the_identities_a_config_can_hold(identifier: o
     assert (key is None) == (loadable is None)
     if key is None:
         return
-    assert len(key) <= USAGE_LEDGER_KEY_MAX_LENGTH
+    assert len(key) <= MODEL_ID_MAX_LENGTH or len(key) == USAGE_LEDGER_KEY_MAX_LENGTH
     assert usage_ledger_key(loadable) == key
-    assert usage_ledger_key(key) == key
+    assert persisted_ledger_key(key) == key
 
 
 @pytest.mark.parametrize(
@@ -1196,6 +1200,87 @@ def test_two_identities_sharing_a_bounded_head_are_metered_apart(tmp_path: Path)
 
     assert len({row["model_id"] for row in rows}) == 2
     assert [row["requests"] for row in rows] == [1, 1]
+
+
+def test_no_two_identities_a_config_holds_can_share_one_row(tmp_path: Path) -> None:
+    """MH-USAGE-007, review 4966041599: a key this ledger derives is itself a legal ID.
+
+    Nothing stops a config from holding, as one model's literal ID, the exact string
+    the ledger derives for another — `from_payload` accepts any non-empty text, and
+    the assertion below checks that rather than assuming it. So the identities under
+    test are closed under keying: every seed, plus the key that seed folds to. If
+    keying is not injective over that closure, two models a user configured
+    separately are one row and one is billed for the other's calls.
+
+    Stated as the closure rather than as the pair that exposed it, because the pair
+    is only reachable while some legal identifier can occupy a derived key's shape —
+    and any rule that leaves such a shape reachable fails here without being named.
+    """
+
+    seeds = (
+        "model-x",
+        "m" * MODEL_ID_MAX_LENGTH,
+        "m" * (MODEL_ID_MAX_LENGTH + 1),
+        "z" * (USAGE_LEDGER_KEY_MAX_LENGTH * 3),
+    )
+    identities = sorted({*seeds, *(usage_ledger_key(seed) for seed in seeds)})
+
+    ledger = _ledger(tmp_path)
+    for identity in identities:
+        assert (
+            ModelHubModelConfig.from_payload(
+                {"id": identity, "origin": "manual", "reasoning_efforts": []}
+            ).id
+            == identity
+        )
+        ledger.record(source_id="src_a", model_id=identity, usage=None, at=NOW)
+
+    rows = ledger.window(days=30, now=NOW)
+
+    assert len({usage_ledger_key(identity) for identity in identities}) == len(identities)
+    assert [row["requests"] for row in rows] == [1] * len(identities)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param("m" * MODEL_ID_MAX_LENGTH, id="a-verbatim-key"),
+        pytest.param(usage_ledger_key("m" * (MODEL_ID_MAX_LENGTH + 1)), id="a-folded-key"),
+        pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH + 1), id="one-past-every-derivable-key"),
+        pytest.param("m" * (USAGE_LEDGER_KEY_MAX_LENGTH * 8), id="far-past-them"),
+    ],
+)
+def test_a_row_is_read_back_exactly_when_its_key_is_one_a_write_could_derive(
+    tmp_path: Path, key: str
+) -> None:
+    """MH-USAGE-007: reading a row is the direction that may refuse.
+
+    A row is not a call — it is what an earlier write claims about calls — so a key
+    no write of this ledger could have produced is a corrupt row, and refusing it
+    loses a claim rather than a served call. That refusal is also what keeps a
+    persisted row bounded, since the read path is where a hand-edited file arrives.
+    """
+
+    derivable = len(key) <= USAGE_LEDGER_KEY_MAX_LENGTH
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": key,
+                    "requests": 1,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    kept = [row["model_id"] for row in ledger.window(days=30, now=NOW)]
+
+    assert kept == ([key] if derivable else [])
 
 
 def test_the_ledger_file_is_owner_only(tmp_path: Path) -> None:
