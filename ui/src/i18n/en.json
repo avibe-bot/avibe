@@ -3575,6 +3575,7 @@
       "workspacePersonal": "This Show Page belongs to a Personal Avibe.",
       "workspaceUnmanaged": "Workspace access is unavailable until this Avibe is paired.",
       "workspacePending": "Organization ownership is known, but its exact binding is temporarily unavailable. Access remains private.",
+      "workspaceConfigurationUnavailable": "Workspace access cannot be verified while Avibe configuration is unavailable. Access remains private.",
       "workspaceOwnershipConflict": "This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.",
       "workspaceModes": {
         "private": "Private",

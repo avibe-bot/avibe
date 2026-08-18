@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from config import paths
+from config.v2_config import V2Config
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore
 from storage import media_service, project_access_service, projects_service, resource_access_service
@@ -90,6 +91,8 @@ def _ownership(
 
 
 def _seed_show_pages_with_policies() -> ShowPageStore:
+    if not paths.get_config_path().exists():
+        V2Config.default().save()
     store = ShowPageStore()
     for session_id in ("ses-private", "ses-public", "ses-scope"):
         store.ensure(session_id)

@@ -170,6 +170,22 @@ export function ShowPageWorkspaceAccessControl({
     return groups.filter((group) => group.archived_at === null || bound.has(group.id));
   }, [groups, resource]);
   const targetGroupIds = level === 'scope' ? uniqueSorted(groupIds) : [];
+  const ownerMember = useMemo(
+    () => permissions?.projection.directory.members.find(
+      (member) => member.id === resource?.owner_user_id,
+    ) ?? null,
+    [permissions, resource],
+  );
+  const ownerContext = useMemo(() => ({
+    isInstanceOwner: resource?.owner_user_id === null
+      || Boolean(
+        ownerMember
+        && permissions?.projection.access.owner.email
+        && ownerMember.email.trim().toLowerCase()
+          === permissions.projection.access.owner.email.trim().toLowerCase(),
+      ),
+    organizationGroupIds: ownerMember?.group_ids ?? null,
+  }), [ownerMember, permissions, resource]);
   const dirty = Boolean(
     resource
     && (
@@ -245,6 +261,7 @@ export function ShowPageWorkspaceAccessControl({
       resource.access.group_ids,
       draft.level,
       draft.level === 'scope' ? uniqueSorted(draft.groupIds) : [],
+      ownerContext,
     )) {
       setConfirmNarrowing(true);
       return;
@@ -265,7 +282,12 @@ export function ShowPageWorkspaceAccessControl({
         </p>
       </div>
 
-      {access?.mode === 'personal' || access?.mode === 'unmanaged' ? (
+      {access?.mode === 'configuration_unavailable' ? (
+        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-gold-ink">
+          <CloudOff className="mt-0.5 size-3.5 shrink-0" />
+          {t('chat.showPage.workspaceConfigurationUnavailable')}
+        </div>
+      ) : access?.mode === 'personal' || access?.mode === 'unmanaged' ? (
         <p className="text-[11px] leading-snug text-muted">
           {t(access.mode === 'personal'
             ? 'chat.showPage.workspacePersonal'

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from config.v2_config import V2Config
 from storage import resource_access_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
+from vibe import permissions
 
 
 def _context(
@@ -80,6 +82,150 @@ def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_
                 resource_access_service.can_use_resource(
                     engineering_member, "future_resource", "future-1", connection=connection
                 )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "load_error",
+    [
+        pytest.param(OSError("config unavailable"), id="io-error"),
+        pytest.param(AttributeError("config shape unavailable"), id="attribute-error"),
+        pytest.param(TypeError("config shape unavailable"), id="type-error"),
+        pytest.param(ValueError("config value unavailable"), id="value-error"),
+    ],
+)
+def test_show_page_config_reload_failure_fails_closed_for_every_runtime_authorizer(
+    monkeypatch,
+    tmp_path,
+    load_error: Exception,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    legacy_owner = _context(
+        "legacy-owner",
+        organization_id=None,
+        role=None,
+        instance_role="editor",
+        access_source="email_invitation",
+    )
+    link_guest = resource_access_service.ResourceUserContext(
+        subject="link-guest",
+        email="link-guest@example.com",
+        instance_role="viewer",
+        instance_access_source="show_page_email",
+        show_page_id="legacy-page",
+        is_remote=True,
+    )
+    local_owner = resource_access_service.instance_owner_context()
+
+    def fail_load(_cls, *_args, **_kwargs):
+        raise load_error
+
+    try:
+        with engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="legacy-page",
+                organization_id=None,
+                owner_user_id="legacy-owner",
+                access_level="private",
+            )
+        monkeypatch.setattr(V2Config, "load", classmethod(fail_load))
+
+        resolved = permissions.resolve_current_instance_ownership()
+        assert resolved["mode"] == (
+            resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
+        )
+
+        with engine.begin() as connection:
+            reconciliation = resource_access_service.reconcile_show_page_resource_policy(
+                connection,
+                resource_id="legacy-page",
+                ownership=resolved,
+                owner_user_id="legacy-owner",
+            )
+        assert reconciliation["status"] == (
+            resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
+        )
+        assert reconciliation["policy"]["organization_id"] is None
+        assert reconciliation["policy"]["owner_user_id"] == "legacy-owner"
+
+        with engine.connect() as connection:
+            ownership = resource_access_service.current_show_page_instance_ownership(
+                connection=connection
+            )
+            assert ownership["mode"] == (
+                resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
+            )
+            assert not resource_access_service.can_use_resource(
+                legacy_owner,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+            assert not resource_access_service.can_manage_resource_acl(
+                legacy_owner,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+            assert not resource_access_service.can_manage_show_page_access(
+                legacy_owner,
+                "legacy-page",
+                connection=connection,
+            )
+            assert not resource_access_service.can_control_resource_sharing(
+                legacy_owner,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+            assert resource_access_service.filter_accessible_resources(
+                legacy_owner,
+                "show_page",
+                [{"session_id": "legacy-page"}],
+                connection=connection,
+            ) == []
+            assert not resource_access_service.can_use_resource(
+                link_guest,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+            assert resource_access_service.can_use_resource(
+                local_owner,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_show_page_unpaired_configuration_remains_explicitly_unmanaged(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    V2Config.default().save()
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.connect() as connection:
+            ownership = resource_access_service.current_show_page_instance_ownership(
+                connection=connection
+            )
+        assert ownership == {
+            "mode": "unmanaged",
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
     finally:
         engine.dispose()
 

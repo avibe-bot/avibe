@@ -54,15 +54,36 @@ def _cache_projection_process(
     original_write = permissions._write_cache  # noqa: SLF001
 
     if entered_write is not None:
-        def delayed_write(instance_id: str, candidate: dict[str, Any]) -> None:
+        def delayed_write(
+            instance_id: str,
+            candidate: dict[str, Any],
+            *,
+            cache_order: int = 0,
+        ) -> None:
             entered_write.set()
             if not release_write.wait(10):
                 raise TimeoutError("cache write was not released")
-            original_write(instance_id, candidate)
+            original_write(instance_id, candidate, cache_order=cache_order)
 
         permissions._write_cache = delayed_write  # noqa: SLF001
 
     permissions._cache_projection("inst-123", projection)  # noqa: SLF001
+
+
+def _delayed_cache_projection_process(
+    projection: dict[str, Any],
+    request_order: int,
+    ready,
+    release,
+) -> None:
+    ready.set()
+    if not release.wait(10):
+        raise TimeoutError("cache response was not released")
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        projection,
+        request_order=request_order,
+    )
 
 
 def _cache_mutation_rebase_process(
@@ -643,6 +664,97 @@ def test_permissions_cache_revision_is_monotonic_across_processes() -> None:
     cached = permissions._read_cache("inst-123")  # noqa: SLF001
     assert cached is not None
     assert cached.projection["instance"]["authorization_revision"] == 4
+
+
+def test_permissions_cache_equal_revision_retains_the_newest_complete_projection() -> None:
+    stale = _complete_projection()
+    stale["directory"]["members"][0]["email"] = "stale-member@example.com"
+    stale["projects"][0]["display_name"] = "Stale Project"
+    stale["projects"][0]["access"]["revision"] = 3
+    stale["projects"][0]["sync"].update(
+        {
+            "status": "pending",
+            "desired_access_revision": 3,
+            "applied_access_revision": 2,
+            "last_synced_at": None,
+        }
+    )
+    stale["policy_sync"] = {
+        "status": "applying",
+        "projects": {"active": 1, "error": 0, "offline": 0, "applying": 1, "in_sync": 0},
+        "resources": {"active": 1, "error": 0, "offline": 0, "applying": 1, "in_sync": 0},
+    }
+    stale_cycle = deepcopy(stale["projects"][0])
+    stale_cycle["project_id"] = "project-cycle"
+    stale_cycle["display_name"] = "Stale Cycle"
+    stale_cycle["access"]["revision"] = 2
+    stale_cycle["sync"].update(
+        {
+            "status": "in_sync",
+            "desired_access_revision": 2,
+            "applied_access_revision": 2,
+            "last_synced_at": "2026-08-18T09:00:00.000Z",
+        }
+    )
+    stale["projects"].append(stale_cycle)
+    fresh = deepcopy(stale)
+    fresh["directory"]["members"][0]["email"] = "fresh-member@example.com"
+    fresh["projects"][0]["display_name"] = "Fresh Project"
+    fresh["projects"][0]["sync"].update(
+        {
+            "status": "in_sync",
+            "applied_access_revision": 3,
+            "last_synced_at": "2026-08-18T10:00:00.000Z",
+        }
+    )
+    fresh_cycle = fresh["projects"][1]
+    fresh_cycle["display_name"] = "Fresh Cycle"
+    fresh_cycle["access"]["revision"] = 3
+    fresh_cycle["sync"].update(
+        {
+            "status": "pending",
+            "desired_access_revision": 3,
+            "applied_access_revision": 2,
+        }
+    )
+    fresh["policy_sync"] = {
+        "status": "in_sync",
+        "projects": {"active": 1, "error": 0, "offline": 0, "applying": 0, "in_sync": 1},
+        "resources": {"active": 1, "error": 0, "offline": 0, "applying": 0, "in_sync": 1},
+    }
+    stale_order = permissions._cache_allocate_order("inst-123")  # noqa: SLF001
+    fresh_order = permissions._cache_allocate_order("inst-123")  # noqa: SLF001
+    context = mp.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    stale_writer = context.Process(
+        target=_delayed_cache_projection_process,
+        args=(stale, stale_order, ready, release),
+    )
+
+    try:
+        stale_writer.start()
+        assert ready.wait(10)
+        permissions._cache_projection(  # noqa: SLF001
+            "inst-123",
+            fresh,
+            request_order=fresh_order,
+        )
+        release.set()
+        stale_writer.join(10)
+        assert stale_writer.exitcode == 0
+    finally:
+        release.set()
+        if stale_writer.is_alive():
+            stale_writer.terminate()
+        stale_writer.join(5)
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.cache_order == fresh_order
+    assert cached.projection["directory"] == fresh["directory"]
+    assert cached.projection["projects"] == fresh["projects"]
+    assert cached.projection["policy_sync"] == fresh["policy_sync"]
 
 
 def test_permissions_cache_mutation_rebase_reads_complete_equal_revision_projection() -> None:

@@ -33,10 +33,18 @@ RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 RESOURCE_ORGANIZATIONS_META_KEY = "resource_access_organizations"
 SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY = "show_page_instance_ownership"
 HARNESS_ACCESS_FORBIDDEN_CODE = "harness_access_forbidden"
+SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE = "configuration_unavailable"
 
 _SHOW_PAGE_OWNERSHIP_MODES = frozenset(
-    {"unmanaged", "personal", "organization", "organization_pending"}
+    {
+        "unmanaged",
+        "personal",
+        "organization",
+        "organization_pending",
+        SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+    }
 )
+_CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE = object()
 
 
 class ResourceAccessError(ValueError):
@@ -316,17 +324,39 @@ def _connection(connection: Connection | None) -> Iterator[Connection]:
         yield active_connection
 
 
-def _configured_show_page_instance() -> tuple[str, str] | None:
+def _configured_show_page_instance() -> tuple[str, str] | None | object:
     try:
         from config.v2_config import V2Config
 
         cloud = V2Config.load().remote_access.vibe_cloud
         credentials = cloud.runtime_credentials()
-    except (FileNotFoundError, OSError, TypeError, ValueError):
-        return None
-    if credentials is None:
-        return None
-    return credentials[1], cloud.instance_kind
+        if credentials is None:
+            return None
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        instance_id = _clean_optional_string(credentials[1])
+        if instance_id is None or cloud.instance_kind not in {"personal", "organization"}:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    except (
+        AttributeError,
+        FileNotFoundError,
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    return instance_id, cloud.instance_kind
+
+
+def _configuration_unavailable_ownership() -> dict[str, Any]:
+    return {
+        "mode": SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+        "instance_id": None,
+        "organization_id": None,
+        "source": "config",
+    }
 
 
 def _stored_show_page_instance_ownership(connection: Connection) -> dict[str, Any] | None:
@@ -365,6 +395,8 @@ def current_show_page_instance_ownership(
     """Return the persisted ownership fence for the exact current pairing."""
 
     configured = _configured_show_page_instance()
+    if configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE:
+        return _configuration_unavailable_ownership()
     if configured is None:
         return {
             "mode": "unmanaged",
@@ -414,6 +446,7 @@ def remember_show_page_instance_ownership(
     organization_id = _clean_optional_string(ownership.get("organization_id"))
     if (
         configured is None
+        or configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
         or instance_id != configured[0]
         or mode not in {"personal", "organization"}
         or (mode == "organization") != bool(organization_id)
@@ -466,6 +499,8 @@ def reconcile_show_page_resource_policy(
         status = "unmanaged"
     elif mode == "organization_pending":
         status = "pending"
+    elif mode == SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE:
+        status = SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
     elif mode == "personal":
         if policy is None:
             policy = ensure_resource_policy(
@@ -530,7 +565,10 @@ def _show_page_policy_matches_instance_ownership(
     mode = ownership.get("mode")
     if mode == "unmanaged":
         return True
-    if mode == "organization_pending":
+    if mode in {
+        "organization_pending",
+        SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+    }:
         return False
     policy_organization = _clean_optional_string(
         policy.get("organization_id") if policy else None
@@ -804,6 +842,13 @@ def _policy_allows(
     if resource_kind in {"skill", "vault_secret"}:
         if context.is_remote and context.is_active_organization_member and context.has_role("editor"):
             return True
+    if (
+        resource_kind == "show_page"
+        and show_page_ownership is not None
+        and show_page_ownership.get("mode")
+        == SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
+    ):
+        return False
     if resource_kind == "show_page" and context.can_use_show_page(resource_id):
         return True
     if (

@@ -36,6 +36,7 @@ const translations: Record<string, string> = {
   'chat.showPage.workspacePersonal': 'This Show Page belongs to a Personal Avibe.',
   'chat.showPage.workspaceUnmanaged': 'Workspace access is unavailable until this Avibe is paired.',
   'chat.showPage.workspacePending': 'Organization ownership is known, but its exact binding is temporarily unavailable. Access remains private.',
+  'chat.showPage.workspaceConfigurationUnavailable': 'Workspace access cannot be verified while Avibe configuration is unavailable. Access remains private.',
   'chat.showPage.workspaceOwnershipConflict': 'This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.',
   'chat.showPage.workspaceModes.private': 'Private',
   'chat.showPage.workspaceModes.organization': 'Organization',
@@ -106,11 +107,18 @@ const showPageAccess = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess
 
 const permissions = ({
   groups = [activeGroup],
+  members = [{
+    id: 'owner-1',
+    email: 'owner@example.com',
+    organization_role: 'owner' as const,
+    group_ids: [],
+  }],
   offline = false,
   permissionAuthority = 'instance',
   localMutationAllowed = true,
 }: {
   groups?: DirectoryGroup[];
+  members?: PermissionsResponse['projection']['directory']['members'];
   offline?: boolean;
   permissionAuthority?: 'instance' | 'cloud';
   localMutationAllowed?: boolean;
@@ -131,7 +139,7 @@ const permissions = ({
     },
     capabilities: ['instance.permissions.read', 'instance.permissions.mutate'],
     access: { owner: { email: 'owner@example.com', role: 'owner' }, entries: [] },
-    directory: { members: [], groups },
+    directory: { members, groups },
     projects: [],
     policy_sync: {
       status: offline ? 'offline' : 'in_sync',
@@ -145,12 +153,14 @@ const resource = ({
   sessionId = 'ses-1',
   level = 'private',
   groupIds = [],
+  ownerUserId = 'owner-1',
   revision = 4,
   status = 'in_sync',
 }: {
   sessionId?: string;
   level?: PermissionResource['access']['access_level'];
   groupIds?: string[];
+  ownerUserId?: string | null;
   revision?: number;
   status?: PermissionResource['sync']['status'];
 } = {}): PermissionResource => ({
@@ -158,7 +168,7 @@ const resource = ({
   resource_kind: 'show_page',
   resource_id: sessionId,
   display_name: sessionId,
-  owner_user_id: 'owner-1',
+  owner_user_id: ownerUserId,
   access: { access_level: level, group_ids: groupIds, revision },
   sync: {
     status,
@@ -214,7 +224,21 @@ describe('ShowPageWorkspaceAccessControl', () => {
     )).toBe(true);
     expect(requiresResourcePolicyNarrowing('scope', ['group-active'], 'public', [])).toBe(false);
     expect(requiresResourcePolicyNarrowing('private', [], 'public', [])).toBe(false);
-    expect(requiresResourcePolicyNarrowing('private', [], 'scope', ['group-active'])).toBe(false);
+    expect(requiresResourcePolicyNarrowing('private', [], 'scope', ['group-active'])).toBe(true);
+    expect(requiresResourcePolicyNarrowing(
+      'private',
+      [],
+      'scope',
+      ['group-active'],
+      { isInstanceOwner: true },
+    )).toBe(false);
+    expect(requiresResourcePolicyNarrowing(
+      'private',
+      [],
+      'scope',
+      ['group-active'],
+      { organizationGroupIds: ['group-active'] },
+    )).toBe(false);
   });
 
   it('confirms a Workspace policy reduction before sending it', async () => {
@@ -308,6 +332,29 @@ describe('ShowPageWorkspaceAccessControl', () => {
       4,
       'inst-1',
     );
+  });
+
+  it('confirms private-to-scope when the resource owner is outside the selected groups', async () => {
+    api.getPermissions.mockResolvedValue(permissions({
+      members: [{
+        id: 'project-owner',
+        email: 'project-owner@example.com',
+        organization_role: 'member',
+        group_ids: ['group-other'],
+      }],
+    }));
+    api.getResourceAccess.mockResolvedValue({
+      resource: resource({ ownerUserId: 'project-owner' }),
+    });
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Design' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect(screen.getByText('Narrow Workspace access?')).toBeTruthy();
+    expect(api.updateResourceAccess).not.toHaveBeenCalled();
   });
 
   it('keeps bound archived groups visible and selected without offering unbound archived groups', async () => {
@@ -471,7 +518,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(api.updateResourceAccess).toHaveBeenCalledOnce();
   });
 
-  it('fails closed for personal, pending, and conflicting ownership without contacting Permissions', () => {
+  it('fails closed for personal, pending, unavailable, and conflicting ownership without contacting Permissions', () => {
     const personal = renderControl(showPageAccess({
       mode: 'personal',
       ownership_status: 'unchanged',
@@ -489,6 +536,16 @@ describe('ShowPageWorkspaceAccessControl', () => {
     }));
     expect(screen.getByText(/temporarily unavailable/)).toBeTruthy();
     pending.unmount();
+
+    const unavailable = renderControl(showPageAccess({
+      mode: 'configuration_unavailable',
+      ownership_status: 'configuration_unavailable',
+      instance_id: null,
+      organization_id: null,
+      policy_organization_id: null,
+    }));
+    expect(screen.getByText(/cannot be verified/)).toBeTruthy();
+    unavailable.unmount();
 
     renderControl(showPageAccess({
       ownership_status: 'conflict',

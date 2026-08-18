@@ -3575,6 +3575,7 @@
       "workspacePersonal": "此 Show Page 属于 Personal Avibe。",
       "workspaceUnmanaged": "此 Avibe 配对后才能使用 Workspace 访问。",
       "workspacePending": "已知此 Avibe 属于 Organization，但暂时无法取得精确绑定；访问保持私有。",
+      "workspaceConfigurationUnavailable": "Avibe 配置暂时不可用，无法验证 Workspace 访问；访问保持私有。",
       "workspaceOwnershipConflict": "此 Show Page 绑定到了其他所有权域；解决冲突前访问保持私有。",
       "workspaceModes": {
         "private": "私有",

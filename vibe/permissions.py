@@ -21,6 +21,7 @@ from config.v2_config import V2Config
 
 CACHE_SCHEMA_VERSION = 1
 CACHE_FILENAME = "permissions_projection.json"
+CACHE_ORDER_FILENAME = "permissions_projection.order"
 DEFAULT_TIMEOUT_SECONDS = 8.0
 _SENSITIVE_KEY_PARTS = ("secret", "token", "credential")
 _CACHE_FALLBACK_HTTP_STATUSES = frozenset({408, 425, 429})
@@ -39,6 +40,20 @@ _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "er
 _SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
 _PROJECT_ID_PATH_SEPARATORS = frozenset({"/", "\\"})
 _PROJECT_ID_DOT_SEGMENTS = frozenset({".", ".."})
+_POLICY_SYNC_PROGRESS = {
+    "none": 0,
+    "offline": 1,
+    "error": 1,
+    "applying": 2,
+    "in_sync": 3,
+}
+_PROJECT_SYNC_PROGRESS = {
+    "offline": 0,
+    "error": 0,
+    "pending": 1,
+    "in_sync": 2,
+    "deleted": 3,
+}
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.RLock()
 
@@ -75,6 +90,7 @@ class PermissionsProjectionResult:
     projection: dict[str, Any]
     source: str
     cached_at: int | None = None
+    cache_order: int = 0
 
     @property
     def offline(self) -> bool:
@@ -530,6 +546,10 @@ def _cache_path() -> Path:
     return paths.get_state_dir() / CACHE_FILENAME
 
 
+def _cache_order_path() -> Path:
+    return paths.get_state_dir() / CACHE_ORDER_FILENAME
+
+
 def _cache_file_lock(path: Path):
     """Return the cross-process lock for projection read-compare-write updates."""
 
@@ -539,27 +559,20 @@ def _cache_file_lock(path: Path):
     return MigrationFileLock(path.with_name(f".{path.stem}.lock"))
 
 
-def _write_cache(instance_id: str, projection: dict[str, Any]) -> None:
-    cache_path = _cache_path()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    envelope = {
-        "cache_schema_version": CACHE_SCHEMA_VERSION,
-        "instance_id": instance_id,
-        "cached_at": int(time.time()),
-        "projection": projection,
-    }
+def _atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
-        dir=cache_path.parent,
-        prefix=f".{cache_path.name}.",
+        dir=path.parent,
+        prefix=f".{path.name}.",
     )
     try:
         # mkstemp creates the file owner-private without relying on Unix-only APIs.
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
-            json.dump(envelope, handle, ensure_ascii=True, separators=(",", ":"))
+            json.dump(value, handle, ensure_ascii=True, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_name, cache_path)
+        os.replace(temporary_name, path)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -567,6 +580,24 @@ def _write_cache(instance_id: str, projection: dict[str, Any]) -> None:
             os.unlink(temporary_name)
         except FileNotFoundError:
             pass
+
+
+def _write_cache(
+    instance_id: str,
+    projection: dict[str, Any],
+    *,
+    cache_order: int = 0,
+) -> None:
+    _atomic_write_json(
+        _cache_path(),
+        {
+            "cache_schema_version": CACHE_SCHEMA_VERSION,
+            "instance_id": instance_id,
+            "cached_at": int(time.time()),
+            "cache_order": cache_order,
+            "projection": projection,
+        },
+    )
 
 
 def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
@@ -583,6 +614,9 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
     cached_at = envelope.get("cached_at")
     if not isinstance(cached_at, int) or isinstance(cached_at, bool) or cached_at < 0:
         return None
+    cache_order = envelope.get("cache_order", 0)
+    if not isinstance(cache_order, int) or isinstance(cache_order, bool) or cache_order < 0:
+        return None
     try:
         projection = _validated_projection(envelope.get("projection"), instance_id)
     except PermissionsInvalidResponseError:
@@ -591,12 +625,141 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
         projection=projection,
         source="cache",
         cached_at=cached_at,
+        cache_order=cache_order,
     )
+
+
+def _read_cache_order() -> int:
+    try:
+        value = json.loads(_cache_order_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return 0
+    return value
+
+
+def _cache_allocate_order(instance_id: str) -> int:
+    """Reserve a request-start order shared by controller and UI processes."""
+
+    with _CACHE_LOCK:
+        try:
+            cache_path = _cache_path()
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with _cache_file_lock(cache_path):
+                cached = _read_cache(instance_id)
+                current = max(
+                    _read_cache_order(),
+                    cached.cache_order if cached is not None else 0,
+                )
+                reserved = current + 1
+                _atomic_write_json(_cache_order_path(), reserved)
+                return reserved
+        except (OSError, TimeoutError):
+            logger.warning(
+                "Unable to reserve the Permissions cache request order",
+                exc_info=True,
+            )
+    # The written cache envelope will make this fallback visible to later writers.
+    return max(time.time_ns(), 1)
+
+
+def _prefer_mapping(
+    preferred: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prefer one mapping while retaining additive fields from the other."""
+
+    merged = dict(fallback)
+    for key, value in preferred.items():
+        previous = merged.get(key)
+        if isinstance(value, Mapping) and isinstance(previous, Mapping):
+            merged[key] = _prefer_mapping(value, previous)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _project_progress(project: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
+    sync = project["sync"]
+    access = project["access"]
+    return (
+        int(access["revision"]),
+        int(sync["desired_access_revision"]),
+        int(sync["applied_access_revision"]),
+        _PROJECT_SYNC_PROGRESS[str(sync["status"])],
+        str(sync.get("last_synced_at") or ""),
+    )
+
+
+def _merge_project_projection(
+    preferred: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = _prefer_mapping(preferred, fallback)
+    advanced, other = (
+        (preferred, fallback)
+        if _project_progress(preferred) >= _project_progress(fallback)
+        else (fallback, preferred)
+    )
+    merged["access"] = _prefer_mapping(advanced["access"], other["access"])
+    merged["sync"] = _prefer_mapping(advanced["sync"], other["sync"])
+    return merged
+
+
+def _merge_projects(
+    preferred: list[Any],
+    fallback: list[Any],
+) -> list[dict[str, Any]]:
+    fallback_by_id = {project["project_id"]: project for project in fallback}
+    return [
+        _merge_project_projection(project, fallback_by_id[project["project_id"]])
+        if project["project_id"] in fallback_by_id
+        else dict(project)
+        for project in preferred
+    ]
+
+
+def _merge_policy_sync(
+    preferred: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    advanced, other = (
+        (preferred, fallback)
+        if _POLICY_SYNC_PROGRESS[str(preferred["status"])]
+        >= _POLICY_SYNC_PROGRESS[str(fallback["status"])]
+        else (fallback, preferred)
+    )
+    return _prefer_mapping(advanced, other)
+
+
+def _merge_equal_revision_projection(
+    cached: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    prefer_candidate: bool,
+) -> dict[str, Any]:
+    preferred, fallback = (
+        (candidate, cached) if prefer_candidate else (cached, candidate)
+    )
+    merged = _prefer_mapping(preferred, fallback)
+    merged["projects"] = _merge_projects(
+        preferred["projects"],
+        fallback["projects"],
+    )
+    merged["policy_sync"] = _merge_policy_sync(
+        preferred["policy_sync"],
+        fallback["policy_sync"],
+    )
+    return merged
 
 
 def _cache_read_merge_write(
     instance_id: str,
     merge: Callable[[dict[str, Any] | None], Any],
+    *,
+    request_order: int,
+    mutation_rebase: bool = False,
 ) -> None:
     """Read, merge, and atomically replace one instance cache under one lock."""
 
@@ -610,19 +773,45 @@ def _cache_read_merge_write(
                 if candidate is None:
                     return
                 validated = _validated_projection(candidate, instance_id)
-                if (
-                    cached is not None
-                    and cached.projection["instance"]["authorization_revision"]
-                    > validated["instance"]["authorization_revision"]
-                ):
-                    return
-                _write_cache(instance_id, validated)
+                cache_order = request_order
+                if cached is not None:
+                    cached_revision = cached.projection["instance"][
+                        "authorization_revision"
+                    ]
+                    candidate_revision = validated["instance"][
+                        "authorization_revision"
+                    ]
+                    if cached_revision > candidate_revision:
+                        return
+                    cache_order = max(cached.cache_order, request_order)
+                    if cached_revision == candidate_revision and not mutation_rebase:
+                        validated = _merge_equal_revision_projection(
+                            cached.projection,
+                            validated,
+                            prefer_candidate=(
+                                request_order >= cached.cache_order
+                                if request_order and cached.cache_order
+                                else request_order > 0
+                            ),
+                        )
+                        validated = _validated_projection(validated, instance_id)
+                _write_cache(instance_id, validated, cache_order=cache_order)
         except (OSError, TimeoutError):
             logger.warning("Unable to cache the current Permissions projection", exc_info=True)
 
 
-def _cache_projection(instance_id: str, projection: Any) -> None:
-    _cache_read_merge_write(instance_id, lambda _cached: projection)
+def _cache_projection(
+    instance_id: str,
+    projection: Any,
+    *,
+    request_order: int | None = None,
+) -> None:
+    order = _cache_allocate_order(instance_id) if request_order is None else request_order
+    _cache_read_merge_write(
+        instance_id,
+        lambda _cached: projection,
+        request_order=order,
+    )
 
 
 def _cache_mutation_result(
@@ -631,6 +820,7 @@ def _cache_mutation_result(
     *,
     access_entries: list[Any] | None = None,
     project: Mapping[str, Any] | None = None,
+    request_order: int | None = None,
 ) -> None:
     def merge(cached: dict[str, Any] | None) -> dict[str, Any] | None:
         if cached is None:
@@ -652,16 +842,35 @@ def _cache_mutation_result(
             }
         if project is not None:
             project_id = project.get("project_id")
+            cached_project = next(
+                (
+                    current
+                    for current in cached["projects"]
+                    if current.get("project_id") == project_id
+                ),
+                None,
+            )
+            merged_project = (
+                _merge_project_projection(project, cached_project)
+                if cached_project is not None
+                else project
+            )
             projects = [
-                project if current.get("project_id") == project_id else current
+                merged_project if current.get("project_id") == project_id else current
                 for current in cached["projects"]
             ]
             if not any(current.get("project_id") == project_id for current in projects):
-                projects.append(project)
+                projects.append(merged_project)
             projection["projects"] = projects
         return projection
 
-    _cache_read_merge_write(instance_id, merge)
+    order = _cache_allocate_order(instance_id) if request_order is None else request_order
+    _cache_read_merge_write(
+        instance_id,
+        merge,
+        request_order=order,
+        mutation_rebase=True,
+    )
 
 
 def _acknowledge_authorization_revision(config: V2Config, revision: int) -> None:
@@ -728,11 +937,16 @@ def _backend_request(
 def get_current_permissions(config: V2Config | None = None) -> PermissionsProjectionResult:
     config, load_current_config = _request_config(config)
     _, instance_id, _ = _runtime_credentials(config)
+    request_order = _cache_allocate_order(instance_id)
     try:
         payload, _ = _backend_request(config, load_current_config, "GET", "")
         projection = _validated_projection(payload, instance_id)
-        _cache_projection(instance_id, projection)
-        return PermissionsProjectionResult(projection=projection, source="live")
+        _cache_projection(instance_id, projection, request_order=request_order)
+        return PermissionsProjectionResult(
+            projection=projection,
+            source="live",
+            cache_order=request_order,
+        )
     except PermissionsUnavailableError:
         cached = _read_cache(instance_id)
         if cached is not None:
@@ -752,6 +966,8 @@ def replace_authorized_users(
 ) -> dict[str, Any]:
     config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
+    _, request_instance_id, _ = _runtime_credentials(config)
+    request_order = _cache_allocate_order(request_instance_id)
     payload_result, instance_id = _backend_request(
         config,
         load_current_config,
@@ -766,6 +982,7 @@ def replace_authorized_users(
         instance_id,
         result["authorization_revision"],
         access_entries=result["entries"],
+        request_order=request_order,
     )
     return {**result, "instance_id": instance_id}
 
@@ -779,6 +996,8 @@ def update_project_access(
         raise PermissionsInvalidResponseError("invalid_project_id")
     config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
+    _, request_instance_id, _ = _runtime_credentials(config)
+    request_order = _cache_allocate_order(request_instance_id)
     payload_result, instance_id = _backend_request(
         config,
         load_current_config,
@@ -793,6 +1012,7 @@ def update_project_access(
         instance_id,
         result["authorization_revision"],
         project=result["project"],
+        request_order=request_order,
     )
     return {**result, "instance_id": instance_id}
 
@@ -855,8 +1075,21 @@ def resolve_current_instance_ownership(
     try:
         config = config or V2Config.load()
         credentials = config.remote_access.vibe_cloud.runtime_credentials()
-    except (FileNotFoundError, OSError, TypeError, ValueError):
-        credentials = None
+    except (
+        AttributeError,
+        FileNotFoundError,
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return {
+            "mode": resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
     if credentials is None:
         return {
             "mode": "unmanaged",
@@ -864,9 +1097,25 @@ def resolve_current_instance_ownership(
             "organization_id": None,
             "source": "config",
         }
+    if (
+        not isinstance(credentials, (tuple, list))
+        or len(credentials) != 3
+        or not isinstance(credentials[1], str)
+        or not credentials[1].strip()
+    ):
+        return {
+            "mode": resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
 
     current = resource_access_service.current_show_page_instance_ownership()
-    if current["mode"] in {"personal", "organization"}:
+    if current["mode"] in {
+        "personal",
+        "organization",
+        resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+    }:
         return current
     try:
         result = get_current_permissions(config)

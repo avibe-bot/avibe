@@ -1,8 +1,8 @@
 import type { ResourceAccessLevel } from '@/features/permissions/types';
 export type ShowPageAccess = {
   ok: true;
-  mode: 'unmanaged' | 'personal' | 'organization' | 'organization_pending';
-  ownership_status: 'unmanaged' | 'created' | 'adopted' | 'unchanged' | 'pending' | 'conflict';
+  mode: 'unmanaged' | 'personal' | 'organization' | 'organization_pending' | 'configuration_unavailable';
+  ownership_status: 'unmanaged' | 'created' | 'adopted' | 'unchanged' | 'pending' | 'conflict' | 'configuration_unavailable';
   instance_id: string | null;
   organization_id: string | null;
   policy_organization_id: string | null;
@@ -93,6 +93,7 @@ function isShowPageAccess(value: unknown): value is ShowPageAccess {
       || candidate.mode === 'personal'
       || candidate.mode === 'organization'
       || candidate.mode === 'organization_pending'
+      || candidate.mode === 'configuration_unavailable'
     )
     && typeof candidate.ownership_status === 'string'
     && typeof candidate.can_use === 'boolean'

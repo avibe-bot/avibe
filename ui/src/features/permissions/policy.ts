@@ -8,6 +8,11 @@ import type {
 
 export type ProjectAccessMode = 'inherit' | 'owner_only' | 'restricted';
 
+export type ResourcePolicyOwnerContext = {
+  isInstanceOwner?: boolean;
+  organizationGroupIds?: string[] | null;
+};
+
 export function normalizePrincipal(kind: PrincipalKind, value: string): string {
   const normalized = value.trim();
   if (kind === 'organization_group') return normalized;
@@ -73,9 +78,15 @@ export function requiresResourcePolicyNarrowing(
   currentGroupIds: string[],
   nextLevel: ResourceAccessLevel,
   nextGroupIds: string[],
+  ownerContext: ResourcePolicyOwnerContext = {},
 ): boolean {
   if (currentLevel === 'public') return nextLevel !== 'public';
-  if (currentLevel === 'private') return false;
+  if (currentLevel === 'private') {
+    if (nextLevel !== 'scope') return false;
+    if (ownerContext.isInstanceOwner === true) return false;
+    const ownerGroups = ownerContext.organizationGroupIds;
+    return !ownerGroups?.some((groupId) => nextGroupIds.includes(groupId));
+  }
   if (nextLevel === 'private') return true;
   if (nextLevel === 'public') return false;
   const nextGroups = new Set(nextGroupIds);
