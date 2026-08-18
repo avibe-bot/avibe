@@ -405,6 +405,41 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     expect(api.setShowPageAvailability).not.toHaveBeenCalled();
   });
 
+  it('shows a Personal ownership conflict through the Workspace control', async () => {
+    const conflict = showPageAccess({
+      mode: 'personal',
+      ownership_status: 'conflict',
+      instance_id: 'inst-1',
+      organization_id: null,
+      policy_organization_id: 'org-other',
+      can_use: true,
+      can_manage: true,
+      can_publish_public: false,
+    });
+    api.getShowPageAccess.mockResolvedValue(conflict);
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: null,
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" initialAccess={conflict} canManageInstance />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByText('This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.')).toBeTruthy();
+    expect(screen.queryByText('This Show Page belongs to a Personal Avibe.')).toBeNull();
+    expect(permissionsApi.getPermissions).not.toHaveBeenCalled();
+    expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
+  });
+
   it('keeps explicit custom-link saving while online and Workspace controls stay out', async () => {
     api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,

@@ -478,6 +478,7 @@ def _validated_resource_result(
     resource_kind: str,
     resource_id: str,
     mutation: bool,
+    pairing_guard: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     result = _require_mapping(_strip_sensitive(payload))
     _require_keys(result, "resource")
@@ -491,6 +492,8 @@ def _validated_resource_result(
         resource_kind=resource_kind,
         resource_id=resource_id,
     )
+    if pairing_guard is not None:
+        pairing_guard()
     return result
 
 
@@ -853,13 +856,15 @@ def _cache_mutation_result(
         if cached is None:
             return None
         current_revision = cached["instance"]["authorization_revision"]
-        if authorization_revision < current_revision:
-            return None
+        # A mutation acknowledgement can arrive after a newer global revision
+        # was cached by another mutation. Keep that newer fence while replaying
+        # the entity that this acknowledgement actually committed.
+        effective_revision = max(current_revision, authorization_revision)
         projection = {
             **cached,
             "instance": {
                 **cached["instance"],
-                "authorization_revision": authorization_revision,
+                "authorization_revision": effective_revision,
             },
         }
         if access_entries is not None:
@@ -927,8 +932,9 @@ def _backend_request(
     *,
     expected_instance_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    credentials: tuple[str, str, str] | None = None,
 ) -> tuple[dict[str, Any], str]:
-    credentials = _runtime_credentials(config)
+    credentials = credentials or _runtime_credentials(config)
     backend_url, instance_id, instance_secret = credentials
     if expected_instance_id is not None and expected_instance_id != instance_id:
         raise PermissionsPairingChangedError("permissions_pairing_changed")
@@ -1086,11 +1092,14 @@ def get_resource_access(
 ) -> dict[str, Any]:
     resource_kind, resource_id = _require_resource_identity(resource_kind, resource_id)
     config, load_current_config = _request_config(config)
+    credentials = _runtime_credentials(config)
+    pairing_guard = lambda: _guard_current_pairing(credentials, load_current_config)
     payload_result, instance_id = _backend_request(
         config,
         load_current_config,
         "GET",
         f"resources/{quote(resource_kind, safe='')}/{quote(resource_id, safe='')}/access",
+        credentials=credentials,
     )
     return _validated_resource_result(
         payload_result,
@@ -1098,6 +1107,7 @@ def get_resource_access(
         resource_kind=resource_kind,
         resource_id=resource_id,
         mutation=False,
+        pairing_guard=pairing_guard,
     )
 
 
@@ -1109,6 +1119,8 @@ def update_resource_access(
 ) -> dict[str, Any]:
     resource_kind, resource_id = _require_resource_identity(resource_kind, resource_id)
     config, load_current_config = _request_config(config)
+    credentials = _runtime_credentials(config)
+    pairing_guard = lambda: _guard_current_pairing(credentials, load_current_config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
     payload_result, instance_id = _backend_request(
         config,
@@ -1117,6 +1129,7 @@ def update_resource_access(
         f"resources/{quote(resource_kind, safe='')}/{quote(resource_id, safe='')}/access",
         backend_payload,
         expected_instance_id=expected_instance_id,
+        credentials=credentials,
     )
     return _validated_resource_result(
         payload_result,
@@ -1124,6 +1137,7 @@ def update_resource_access(
         resource_kind=resource_kind,
         resource_id=resource_id,
         mutation=True,
+        pairing_guard=pairing_guard,
     )
 
 

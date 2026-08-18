@@ -609,7 +609,7 @@ class ShowPageStore:
 
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             row = (
                 conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
                 .mappings()
@@ -625,7 +625,7 @@ class ShowPageStore:
 
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             row = (
                 conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
                 .mappings()
@@ -682,7 +682,7 @@ class ShowPageStore:
                 clauses.append(show_pages.c.offline_at.is_not(None))
             statement = statement.where(or_(*clauses))
         statement = statement.order_by(show_pages.c.updated_at.desc(), show_pages.c.session_id.asc())
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             rows = conn.execute(statement).mappings().all()
             rows = resource_access_service.filter_accessible_resources(
                 context,

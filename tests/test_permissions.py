@@ -514,6 +514,54 @@ def test_resource_access_client_rejects_response_identity_mismatch(
         permissions.get_resource_access("show_page", "page-1", _config())
 
 
+@pytest.mark.parametrize("operation", ["get", "put"])
+def test_resource_access_rechecks_pairing_after_response_validation(
+    monkeypatch,
+    operation: str,
+) -> None:
+    config = _config()
+    original_validate = permissions._validate_resource  # noqa: SLF001
+
+    def validate_and_repair(*args, **kwargs):
+        result = original_validate(*args, **kwargs)
+        replacement = V2Config.load()
+        replacement.remote_access.vibe_cloud.instance_id = "inst-new"
+        replacement.save()
+        return result
+
+    monkeypatch.setattr(permissions, "_validate_resource", validate_and_repair)
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda method, *_args, **_kwargs: _Response(
+            200,
+            {
+                **({"ok": True} if method == "PUT" else {}),
+                "resource": _resource(revision=5 if method == "PUT" else 4),
+            },
+        ),
+    )
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        if operation == "get":
+            permissions.get_resource_access("show_page", "page-1", config)
+        else:
+            permissions.update_resource_access(
+                "show_page",
+                "page-1",
+                {
+                    "access_level": "scope",
+                    "group_ids": ["group-1"],
+                    "if_match_revision": 4,
+                    "if_match_instance_id": "inst-123",
+                },
+                config,
+            )
+
+
 def test_permissions_response_enriches_legacy_display_from_the_exact_pairing() -> None:
     config = _config()
     config.remote_access.vibe_cloud.public_url = "https://max-incus-1-app.avibe.bot"
@@ -890,6 +938,46 @@ def test_permissions_cache_mutation_rebase_preserves_newer_project_sync_state() 
     assert cached is not None
     assert cached.projection["projects"][0]["access"] == mutation_project["access"]
     assert cached.projection["projects"][0]["sync"] == newer_project["sync"]
+
+
+@pytest.mark.parametrize("entity", ["access", "project"])
+def test_permissions_cache_replays_superseded_mutation_entity_without_lowering_revision(
+    entity: str,
+) -> None:
+    newer = _complete_projection()
+    newer["directory"]["members"][0]["email"] = "newer-directory@example.com"
+    newer["policy_sync"]["status"] = "in_sync"
+    newer["instance"]["authorization_revision"] = 4
+    permissions._cache_projection("inst-123", newer, request_order=20)  # noqa: SLF001
+
+    if entity == "access":
+        entries = [{"kind": "email", "value": "delayed@example.com", "role": "editor"}]
+        permissions._cache_mutation_result(  # noqa: SLF001
+            "inst-123",
+            3,
+            access_entries=entries,
+            request_order=19,
+        )
+    else:
+        acknowledged = deepcopy(newer["projects"][0])
+        acknowledged["display_name"] = "Delayed Project"
+        acknowledged["access"]["revision"] = 5
+        permissions._cache_mutation_result(  # noqa: SLF001
+            "inst-123",
+            3,
+            project=acknowledged,
+            request_order=19,
+        )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection["instance"]["authorization_revision"] == 4
+    assert cached.projection["directory"] == newer["directory"]
+    assert cached.projection["policy_sync"] == newer["policy_sync"]
+    if entity == "access":
+        assert cached.projection["access"]["entries"] == entries
+    else:
+        assert cached.projection["projects"][0]["display_name"] == "Delayed Project"
 
 
 @pytest.mark.parametrize(
@@ -1687,7 +1775,7 @@ def test_mutation_result_is_sanitized_before_cache_write(monkeypatch) -> None:
     assert cached.projection["access"]["entries"] == result["entries"]
 
 
-def test_older_mutation_result_cannot_mix_its_payload_into_a_newer_cache(monkeypatch) -> None:
+def test_older_mutation_result_replays_its_entity_without_lowering_cache_revision(monkeypatch) -> None:
     live = _complete_projection()
     live["instance"]["authorization_revision"] = 5
     backend_available = True
@@ -1723,7 +1811,7 @@ def test_older_mutation_result_cannot_mix_its_payload_into_a_newer_cache(monkeyp
     cached = permissions.get_current_permissions(config)
 
     assert cached.projection["instance"]["authorization_revision"] == 5
-    assert cached.projection["access"]["entries"] == live["access"]["entries"]
+    assert cached.projection["access"]["entries"] == stale_entries
 
 
 def test_authorized_users_mutation_refreshes_offline_cache(monkeypatch) -> None:

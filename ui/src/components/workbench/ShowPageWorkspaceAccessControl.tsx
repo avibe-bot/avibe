@@ -29,6 +29,8 @@ type Draft = {
   groupIds: string[];
 };
 
+const RESOURCE_SYNC_POLL_INTERVAL_MS = 2_000;
+
 const uniqueSorted = (values: string[]): string[] => [...new Set(values)].sort();
 
 const resourceIdentityMatches = (
@@ -71,12 +73,16 @@ export function ShowPageWorkspaceAccessControl({
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const generationRef = useRef(0);
   const sessionIdRef = useRef(sessionId);
+  const resourceRef = useRef<PermissionResource | null>(resource);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftRef = useRef<Draft>({ level, groupIds });
   sessionIdRef.current = sessionId;
+  resourceRef.current = resource;
   draftRef.current = { level, groupIds };
 
   const instanceId = access?.instance_id ?? null;
   const organizationId = access?.organization_id ?? null;
+  const resourceSyncStatus = resource?.sync.status;
   const ownershipConflict = access?.ownership_status === 'conflict';
   const organizationReady = access?.mode === 'organization'
     && !ownershipConflict
@@ -166,6 +172,72 @@ export function ShowPageWorkspaceAccessControl({
       generationRef.current += 1;
     };
   }, [active, load, organizationReady, sessionId]);
+
+  useEffect(() => {
+    if (
+      !active
+      || !organizationReady
+      || !instanceId
+      || resourceSyncStatus !== 'pending'
+    ) {
+      return undefined;
+    }
+    let cancelled = false;
+    const generation = generationRef.current;
+    const requestSessionId = sessionId;
+    const requestInstanceId = instanceId;
+
+    const schedule = () => {
+      if (!cancelled) {
+        pollTimerRef.current = setTimeout(() => void poll(), RESOURCE_SYNC_POLL_INTERVAL_MS);
+      }
+    };
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const next = await getResourceAccess({
+          resource_kind: 'show_page',
+          resource_id: requestSessionId,
+        });
+        if (
+          cancelled
+          || generation !== generationRef.current
+          || requestSessionId !== sessionIdRef.current
+          || requestInstanceId !== instanceId
+          || !resourceIdentityMatches(next.resource, requestSessionId, requestInstanceId)
+        ) return;
+        const currentResource = resourceRef.current;
+        const currentDraft = draftRef.current;
+        const draftIsDirty = Boolean(
+          currentResource
+          && (
+            currentResource.access.access_level !== currentDraft.level
+            || uniqueSorted(currentResource.access.group_ids).join('\u0000')
+              !== uniqueSorted(currentDraft.groupIds).join('\u0000')
+          )
+        );
+        setResource(next.resource);
+        if (!draftIsDirty) {
+          setLevel(next.resource.access.access_level);
+          setGroupIds(uniqueSorted(next.resource.access.group_ids));
+        }
+        if (next.resource.sync.status === 'pending') schedule();
+      } catch {
+        // A transient transport failure must not discard the pending resource;
+        // retry while this exact instance remains mounted.
+        schedule();
+      }
+    };
+
+    schedule();
+    return () => {
+      cancelled = true;
+      if (pollTimerRef.current !== null) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [active, instanceId, organizationReady, resourceSyncStatus, sessionId]);
 
   const visibleGroups = useMemo(() => {
     const bound = new Set(resource?.access.group_ids ?? []);
@@ -284,7 +356,12 @@ export function ShowPageWorkspaceAccessControl({
         </p>
       </div>
 
-      {access?.mode === 'configuration_unavailable' ? (
+      {ownershipConflict ? (
+        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-destructive-ink">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          {t('chat.showPage.workspaceOwnershipConflict')}
+        </div>
+      ) : access?.mode === 'configuration_unavailable' ? (
         <div className="flex items-start gap-1.5 text-[11px] leading-snug text-gold-ink">
           <CloudOff className="mt-0.5 size-3.5 shrink-0" />
           {t('chat.showPage.workspaceConfigurationUnavailable')}
@@ -299,11 +376,6 @@ export function ShowPageWorkspaceAccessControl({
         <div className="flex items-start gap-1.5 text-[11px] leading-snug text-gold-ink">
           <CloudOff className="mt-0.5 size-3.5 shrink-0" />
           {t('chat.showPage.workspacePending')}
-        </div>
-      ) : ownershipConflict ? (
-        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-destructive-ink">
-          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-          {t('chat.showPage.workspaceOwnershipConflict')}
         </div>
       ) : gate === 'loading' || gate === 'idle' ? (
         <div className="flex h-9 items-center gap-1.5 text-[11px] text-muted">

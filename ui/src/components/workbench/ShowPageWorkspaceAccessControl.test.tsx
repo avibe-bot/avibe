@@ -213,6 +213,42 @@ afterEach(() => {
 });
 
 describe('ShowPageWorkspaceAccessControl', () => {
+  it('prioritizes an ownership conflict over the Personal mode message', () => {
+    renderControl(showPageAccess({ mode: 'personal', ownership_status: 'conflict' }));
+
+    expect(screen.getByText('This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.')).toBeTruthy();
+    expect(screen.queryByText('This Show Page belongs to a Personal Avibe.')).toBeNull();
+    expect(api.getPermissions).not.toHaveBeenCalled();
+    expect(api.getResourceAccess).not.toHaveBeenCalled();
+  });
+
+  it('polls a pending Resource until the exact instance reports a terminal sync state', async () => {
+    vi.useFakeTimers();
+    try {
+      api.getResourceAccess
+        .mockResolvedValueOnce({ resource: resource({ status: 'pending' }) })
+        .mockResolvedValueOnce({ resource: resource({ status: 'offline' }) });
+      renderControl();
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(api.getResourceAccess).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('The policy is waiting for this Avibe to apply it.')).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(api.getResourceAccess).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('This Avibe has not acknowledged the latest policy.')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('classifies every Workspace policy reduction at the shared boundary', () => {
     expect(requiresResourcePolicyNarrowing('public', [], 'private', [])).toBe(true);
     expect(requiresResourcePolicyNarrowing('public', [], 'scope', ['group-active'])).toBe(true);

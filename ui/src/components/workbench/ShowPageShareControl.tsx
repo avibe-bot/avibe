@@ -299,7 +299,8 @@ export const ShowPageShareControl: React.FC<{
         ) : null}
 
         {access && (
-          access.mode === 'organization'
+          access.ownership_status === 'conflict'
+          || access.mode === 'organization'
           || access.mode === 'organization_pending'
           || access.mode === 'configuration_unavailable'
         ) ? (
