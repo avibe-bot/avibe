@@ -141,6 +141,7 @@ class _SteeringAwareOpenCodeServer:
     ) -> None:
         self._server = server
         self._state = state
+        self.last_list_native_live: bool | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._server, name)
@@ -326,6 +327,7 @@ class _SteeringAwareOpenCodeServer:
         while True:
             wait_for_insert = False
             async with self._state.lock:
+                self.last_list_native_live = None
                 if self._state.terminal_status_failure_messages is not None:
                     return self._state.terminal_status_failure_messages
                 messages = await self._server.list_messages(session_id, directory)
@@ -340,6 +342,9 @@ class _SteeringAwareOpenCodeServer:
                 if reconcile_insert or final_snapshot or reconcile_initial_status:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
+                        from modules.agents.opencode.poll_loop import _native_session_is_live
+
+                        self.last_list_native_live = _native_session_is_live(status)
                     except Exception as exc:
                         self._state.status_reconciliation_failures += 1
                         if (

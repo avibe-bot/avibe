@@ -18,6 +18,7 @@ An unreadable status is treated as live so an accepted steer is not closed.
 
 ## Solution
 
-`_settlement_assistant_message` walks the snapshot backward and takes
-``native_live`` from ``/session/status``. Both prompt and restored poll loops
-use it instead of ``messages[-1]``.
+`_settlement_assistant_message` walks the snapshot backward. Native liveness
+comes from the same status sample that produced the snapshot when the
+steering wrapper already read it; otherwise from ``/session/status``. A
+successful omission (``None``) is idle. An unread or failed status is live.

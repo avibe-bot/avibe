@@ -51,16 +51,24 @@ def _message_info(message: Dict[str, Any]) -> Dict[str, Any]:
     return info if isinstance(info, dict) else {}
 
 
-def _native_session_is_live(status: Optional[Dict[str, Any]]) -> bool:
+def _native_session_is_live(
+    status: Optional[Dict[str, Any]],
+    *,
+    status_known: bool = True,
+) -> bool:
     """True when OpenCode still owns the turn (busy/retry).
 
-    A successful ``/session/status`` that omits this session is idle. A missing
-    or unreadable status is treated as live so an accepted steer is not closed
-    during the window where the user message exists and the assistant does not.
+    A successful ``/session/status`` that omits this session is idle
+    (``get_session_status`` returns ``None``). An unread or failed status
+    (``status_known=False``) is treated as live so an accepted steer is not
+    closed during the window where the user message exists and the assistant
+    does not.
     """
 
-    if not isinstance(status, dict):
+    if not status_known:
         return True
+    if not isinstance(status, dict):
+        return False
     return status.get("type") in {"busy", "retry"}
 
 
@@ -241,6 +249,9 @@ class OpenCodePollLoop:
         session_id: str,
         directory: str,
     ) -> bool:
+        snapshot_live = getattr(server, "last_list_native_live", None)
+        if isinstance(snapshot_live, bool):
+            return snapshot_live
         reader = getattr(server, "get_session_status", None)
         if not callable(reader):
             return True
