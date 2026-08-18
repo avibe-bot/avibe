@@ -89,12 +89,39 @@ const notify = (listeners: Set<() => void>) => {
   for (const listener of [...listeners]) listener();
 };
 
+/** Whether the focused element hosts a child browsing context (`<iframe>` & co). */
+const focusIsDelegated = (): boolean => {
+  const focused = document.activeElement as HTMLIFrameElement | null;
+  return focused != null && focused.contentWindow != null;
+};
+
+// Chrome blurs the parent window when focus moves into an embedded frame, and
+// then delivers it nothing more: losing system focus from there fires on the
+// frame's window, not on ours, so the away period would pass unobserved and the
+// user's return would read as `true -> true`. `document.hasFocus()` still
+// reports it, so poll while — and only while — an embedded frame holds focus.
+// Browsers that instead keep the parent window focused report the same gap as an
+// ordinary `blur`, so between them the two focus models are both covered.
+const DELEGATED_FOCUS_POLL_MS = 1000;
+let delegatedFocusPoll: ReturnType<typeof setInterval> | null = null;
+
+const stopDelegatedFocusPoll = () => {
+  if (delegatedFocusPoll === null) return;
+  clearInterval(delegatedFocusPoll);
+  delegatedFocusPoll = null;
+};
+
 const sample = () => {
   if (!tracker) return;
   const wasActive = tracker.isActive();
   const reactivated = tracker.observe(readPageActivity());
   if (tracker.isActive() !== wasActive) notify(activeListeners);
   if (reactivated) notify(reactivationListeners);
+
+  if (!focusIsDelegated()) stopDelegatedFocusPoll();
+  else if (delegatedFocusPoll === null) {
+    delegatedFocusPoll = setInterval(sample, DELEGATED_FOCUS_POLL_MS);
+  }
 };
 
 const attach = () => {
@@ -112,9 +139,13 @@ const attach = () => {
     window.removeEventListener('blur', sample);
     window.removeEventListener('pageshow', sample);
     window.removeEventListener('pagehide', sample);
+    stopDelegatedFocusPoll();
     tracker = null;
     detach = null;
   };
+  // Fold the current reading in once, so a page that mounts while an embedded
+  // frame already holds focus starts polling without waiting for an event.
+  sample();
 };
 
 const subscribe = (listeners: Set<() => void>, listener: () => void): (() => void) => {

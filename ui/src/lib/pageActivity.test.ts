@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   canMarkConversationRead,
   createPageActivityTracker,
   isPageActive,
+  onPageReactivated,
   type PageActivitySnapshot,
 } from './pageActivity';
 
@@ -71,6 +74,68 @@ describe('createPageActivityTracker', () => {
     const tracker = createPageActivityTracker(false);
     expect(tracker.observe(true)).toBe(true);
     expect(tracker.isActive()).toBe(true);
+  });
+});
+
+describe('onPageReactivated', () => {
+  let frame: HTMLIFrameElement | null = null;
+
+  // jsdom never moves focus into a frame, so drive both halves of the delegated
+  // state directly: `activeElement` is what the sampler reads to decide whether
+  // the parent window can still be told about a focus change, and `hasFocus` is
+  // the system-focus truth it polls for while it cannot.
+  const delegateFocusToFrame = () => {
+    frame = document.createElement('iframe');
+    document.body.appendChild(frame);
+    Object.defineProperty(document, 'activeElement', { value: frame, configurable: true });
+  };
+
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'activeElement');
+    Reflect.deleteProperty(document, 'hasFocus');
+    frame?.remove();
+    frame = null;
+    vi.useRealTimers();
+  });
+
+  it('reports a system focus loss that happened while an embedded frame held focus', () => {
+    vi.useFakeTimers();
+    let systemFocus = true;
+    document.hasFocus = () => systemFocus;
+    delegateFocusToFrame();
+
+    const reactivated = vi.fn();
+    const stop = onPageReactivated(reactivated);
+    // The parent window blurs when focus enters the frame; nothing left the page.
+    window.dispatchEvent(new Event('blur'));
+    expect(reactivated).not.toHaveBeenCalled();
+
+    // Switching to another application from there reaches the parent as no event
+    // at all, and switching back only re-focuses the frame.
+    systemFocus = false;
+    vi.advanceTimersByTime(2000);
+    systemFocus = true;
+    vi.advanceTimersByTime(2000);
+
+    expect(reactivated).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('stops polling once focus leaves the frame', () => {
+    vi.useFakeTimers();
+    document.hasFocus = () => true;
+    delegateFocusToFrame();
+
+    const stop = onPageReactivated(() => {});
+    expect(vi.getTimerCount()).toBe(1);
+
+    Object.defineProperty(document, 'activeElement', {
+      value: document.body,
+      configurable: true,
+    });
+    window.dispatchEvent(new Event('focus'));
+    expect(vi.getTimerCount()).toBe(0);
+    stop();
   });
 });
 
