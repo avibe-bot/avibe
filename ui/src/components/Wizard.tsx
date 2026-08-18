@@ -52,6 +52,10 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
   },
   mode: data.mode || 'self_host',
   version: 'v2',
+  // The wizard explicitly forces duration output off when WeChat is in
+  // the selection (WeChat cannot render it) — a wizard-authored override
+  // that must persist with the wizard's own save.
+  ...(data.show_duration !== undefined ? { show_duration: data.show_duration } : {}),
   slack: {
     // Preserve all existing slack fields
     ...withSecretDrafts(data.slack, {
@@ -228,18 +232,23 @@ export const Wizard: React.FC = () => {
       ...stepData,
     };
     setData(nextData);
-    const persisted = await persistStep(stepData, nextData);
+    await persistStep(stepData, nextData);
     // The intermediate save may have ADDED platforms to the persisted
     // enabled list (add-ops from this step). Fold them into the wizard's
     // deselection baseline so going back and unchecking one of them
     // produces a remove op on the next save — otherwise the adapter
     // stays enabled while the wizard shows it unselected.
-    if (persisted?.platforms?.enabled) {
-      const persistedEnabled: string[] = persisted.platforms.enabled;
+    // Fold ONLY the platforms this wizard step requested to add — the
+    // add-list from the wizard's own payload. The server's full enabled
+    // response can include platforms other processes enabled concurrently;
+    // folding those would misclassify them as wizard deselections on the
+    // next save and silently undo the concurrent enablement.
+    const wizardRequestedAdds = getPersistableWizardPlatforms(nextData);
+    if (wizardRequestedAdds.length > 0) {
       const currentBaseline: string[] = Array.isArray(nextData.__wizardEnabledBaseline)
         ? nextData.__wizardEnabledBaseline
         : [];
-      const mergedBaseline = Array.from(new Set([...currentBaseline, ...persistedEnabled]));
+      const mergedBaseline = Array.from(new Set([...currentBaseline, ...wizardRequestedAdds]));
       nextData.__wizardEnabledBaseline = mergedBaseline;
       setData({ ...nextData });
     }
@@ -281,12 +290,10 @@ export const Wizard: React.FC = () => {
         mergedData.channelConfigsByPlatform
     );
     if (shouldPersistConfig) {
-      const saved = await api.saveConfig(
+      await api.saveConfig(
         buildConfigPayload(mergedData, getPersistableWizardPlatforms(mergedData))
       );
-      return saved;
     }
-    return null;
     const discordGuildAllowlist = stepData?.discordGuildAllowlist;
     if (
       Array.isArray(discordGuildAllowlist) &&
