@@ -102,12 +102,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
         self.assertIn(
-            "Use the `use-avibe` playbook for Avibe configuration, repair, explanation, "
-            "and operations",
-            prompt,
-        )
-        self.assertIn(
-            "Before changing Avibe state or disrupting its running service, consult that playbook",
+            "Before changing Avibe configuration or state, or disrupting its running "
+            "service, consult the `use-avibe` playbook",
             prompt,
         )
         self.assertIn(
@@ -115,6 +111,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "when it is not installed locally",
             prompt,
         )
+        self.assertIn(
+            "load the playbook for explanation only when the answer is not here",
+            prompt,
+        )
+        # The playbook is a mutation gate, not a general Avibe-topic trigger. A
+        # blanket "explanation" trigger made every Avibe question pull in a
+        # 1000-line SKILL.md that this prompt already answers.
+        self.assertNotIn("configuration, repair, explanation, and operations", prompt)
         self.assertIn("skills/use-avibe/SKILL.md", prompt)
         self.assertNotIn("new user turn", prompt)
         self.assertNotIn("active Agent Session context", prompt)
