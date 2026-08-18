@@ -129,6 +129,21 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const flushFeedReadIntent = useCallback(() => {
     if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) return;
+    // Every intent queued here reads the FEED, so the demand gate applies to it
+    // exactly as it applies to a first read: with no feed consumer left, a
+    // 30-row page would be fetched for a document that renders a badge. Dropping
+    // it loses nothing, because activation re-reads unconditionally (page one
+    // when nothing was loaded, reconcile otherwise) — the same argument that
+    // lets ``onConnected`` return early. It matters most right after
+    // ``discardAuthorizedFeed``: invalidating the read in flight is itself what
+    // queues a replacement refresh, which would repopulate the rows that branch
+    // just dropped, off-route and in parallel with the counts-only read.
+    if (!isFeedActive()) {
+      refreshPendingRef.current = false;
+      reconcilePendingRef.current = false;
+      loadMorePendingRef.current = false;
+      return;
+    }
     if (refreshPendingRef.current) {
       refreshPendingRef.current = false;
       // A replacement refresh owns the same top-of-feed recovery as a pending
@@ -146,7 +161,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       loadMorePendingRef.current = false;
       loadMoreRunnerRef.current();
     }
-  }, []);
+  }, [isFeedActive]);
 
   const queueRefreshIntent = useCallback(() => {
     refreshPendingRef.current = true;

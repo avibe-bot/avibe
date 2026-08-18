@@ -19,25 +19,21 @@ export interface ProjectSessionsState {
   error: boolean;
 }
 
-export interface WorkbenchProjectsTree {
-  projects: WorkbenchProject[] | null;
-  projectsError: string | null;
-  refreshProjects: () => Promise<void>;
-  /** Refcounted activation (see ``useConsumerActivation``). The provider is
-   *  mounted above the router, so it only bootstraps the tree while a consumer
-   *  that renders it is mounted — an admin route mounts none. Consumers get
-   *  this for free from ``useWorkbenchProjectsTree``. */
-  activate: () => () => void;
-
-  sessionsOf: (projectId: string) => ProjectSessionsState;
-  expanded: ReadonlySet<string>;
-  isExpanded: (projectId: string) => boolean;
-  toggleExpanded: (projectId: string) => void;
-  loadMore: (projectId: string) => void;
-  /** Re-fetch the first page (mobile retry button / programmatic reload). */
-  reloadSessions: (projectId: string) => void;
-
-  creatingSession: (projectId: string) => boolean;
+/** The WRITE half of the tree, split out so that reading it and writing it are
+ *  different requests to make of this provider.
+ *
+ *  A surface can be permanently mounted and still only ever write: `ChatPage`
+ *  mounts `useSessionActions` on every `/chat/:id` for fork / pin / archive, and
+ *  a session row mounts it for its rename menu. None of them render a project,
+ *  so activating the bootstrap for them would fetch a tree nobody displays —
+ *  the same waste this PR removed from `/admin`, arriving through a consumer
+ *  instead of through a route.
+ *
+ *  Typing the halves apart is what makes that structural rather than a boolean
+ *  each new call site has to remember: a writer reaches for
+ *  ``useWorkbenchProjectsActions`` and *cannot* read `projects`, and a reader
+ *  cannot compile against it and must take the activating hook below. */
+export interface WorkbenchProjectsActions {
   /** Creates a session under a project (optimistic prepend + expand) and RETURNS it;
    *  the caller navigates (this provider is mounted outside the router). null on failure.
    *  `overrides` lets the create surfaces pin an agent/backend; omit for the server default. */
@@ -71,6 +67,27 @@ export interface WorkbenchProjectsTree {
   upsertProjectToTop: (project: WorkbenchProject) => void;
 }
 
+export interface WorkbenchProjectsTree extends WorkbenchProjectsActions {
+  projects: WorkbenchProject[] | null;
+  projectsError: string | null;
+  refreshProjects: () => Promise<void>;
+  /** Refcounted activation (see ``useConsumerActivation``). The provider is
+   *  mounted above the router, so it only bootstraps the tree while a consumer
+   *  that renders it is mounted — an admin route mounts none. Consumers get
+   *  this for free from ``useWorkbenchProjectsTree``. */
+  activate: () => () => void;
+
+  sessionsOf: (projectId: string) => ProjectSessionsState;
+  expanded: ReadonlySet<string>;
+  isExpanded: (projectId: string) => boolean;
+  toggleExpanded: (projectId: string) => void;
+  loadMore: (projectId: string) => void;
+  /** Re-fetch the first page (mobile retry button / programmatic reload). */
+  reloadSessions: (projectId: string) => void;
+
+  creatingSession: (projectId: string) => boolean;
+}
+
 export const WorkbenchProjectsContext = createContext<WorkbenchProjectsTree | null>(null);
 
 /** Read the shared projects/sessions tree.
@@ -89,5 +106,17 @@ export function useWorkbenchProjectsTree(options?: { active?: boolean }): Workbe
     return activate();
   }, [active, activate]);
   if (!ctx) throw new Error('useWorkbenchProjectsTree must be used within a WorkbenchProjectsProvider');
+  return ctx;
+}
+
+/** Write to the shared tree without reading it.
+ *
+ *  Deliberately does NOT activate: a rename, fork, pin or archive needs the
+ *  cache patched if it happens to be loaded, and needs nothing fetched if it is
+ *  not. The writes themselves are unconditional — they patch whatever is
+ *  cached — so a document that only mutates issues no bootstrap at all. */
+export function useWorkbenchProjectsActions(): WorkbenchProjectsActions {
+  const ctx = useContext(WorkbenchProjectsContext);
+  if (!ctx) throw new Error('useWorkbenchProjectsActions must be used within a WorkbenchProjectsProvider');
   return ctx;
 }

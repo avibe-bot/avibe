@@ -6,7 +6,7 @@ import { Archive, EyeOff, GitFork, Hash, Pencil, Pin, PinOff } from 'lucide-reac
 import { useApi } from '../../context/ApiContext';
 import type { WorkbenchSession } from '../../context/ApiContext';
 import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { useToast } from '../../context/ToastContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
@@ -78,7 +78,7 @@ export const useSessionActions = ({
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { forkSession, setSessionPinned, archiveSession } = useWorkbenchProjectsTree();
+  const { forkSession, setSessionPinned, archiveSession } = useWorkbenchProjectsActions();
   // Owned HERE, not passed in per surface: the unsaved-changes blocker is mounted on
   // the ROUTER, so any surface that navigates after a write — sidebar, mobile row,
   // chat header — is prompted only once the fork already exists, and cancelling

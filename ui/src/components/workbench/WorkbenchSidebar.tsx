@@ -27,7 +27,7 @@ import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
@@ -217,7 +217,7 @@ export const SessionRow: React.FC<{
 }> = ({ projectId, session, unread, canChat, canManageMetadata }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { renameSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsActions();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
   const [menuOpen, setMenuOpen] = useState(false);

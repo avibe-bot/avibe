@@ -26,7 +26,7 @@ vi.mock('../../context/ApiContext', () => ({
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mocks.showToast }) }));
 vi.mock('../../context/ComposerBridgeContext', () => ({ useComposerInsertTarget: () => null }));
 vi.mock('../../context/WorkbenchProjectsContext', () => ({
-  useWorkbenchProjectsTree: () => ({
+  useWorkbenchProjectsActions: () => ({
     forkSession: mocks.forkSession,
     setSessionPinned: mocks.setSessionPinned,
     archiveSession: mocks.archiveSession,

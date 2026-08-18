@@ -138,6 +138,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // global resources. Serialize them and retain trailing intents so a later
   // failed recovery cannot invalidate an earlier successful snapshot.
   const bootstrapReadInFlightRef = useRef(false);
+  // Whether this document has ever loaded the tree, which is what decides the
+  // read a returning consumer takes (see the activation effect below).
+  const treeInitialFetched = useRef(false);
   const fetchProjectsPendingRef = useRef<{ cache?: boolean } | null>(null);
   const projectTreePendingRef = useRef(false);
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
@@ -145,6 +148,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   const flushBootstrapReadIntent = useCallback(() => {
     if (bootstrapReadInFlightRef.current) return;
+    // Every intent queued here is revalidation of a cache someone was reading.
+    // If the last reader has detached meanwhile, dropping it loses nothing:
+    // activation re-reads unconditionally (first load or reconcile), which is
+    // the same argument that lets ``onConnected`` return early. Keeping it would
+    // issue a bootstrap on a route that renders no project — and after an
+    // authorization change it would repopulate the tree ``discardAuthorizedTree``
+    // just dropped, because invalidating the read in flight is itself what
+    // queues the retry.
+    if (!isActive()) {
+      fetchProjectsPendingRef.current = null;
+      projectTreePendingRef.current = false;
+      return;
+    }
     const pendingFetch = fetchProjectsPendingRef.current;
     if (pendingFetch) {
       fetchProjectsPendingRef.current = null;
@@ -155,7 +171,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       projectTreePendingRef.current = false;
       projectTreeRunnerRef.current();
     }
-  }, []);
+  }, [isActive]);
 
   const queueFetchProjectsIntent = useCallback((options?: { cache?: boolean }) => {
     const pending = fetchProjectsPendingRef.current;
@@ -235,6 +251,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     sessionProjectRef.current.clear();
     pendingReconcileRef.current.clear();
     pendingCachedRowRefreshRef.current.clear();
+    // Pre-mount state includes "never loaded": the next activation must take the
+    // authoritative first-page bootstrap, not a reconcile onto a dropped window.
+    treeInitialFetched.current = false;
     setProjects(null);
     setProjectsError(null);
     setSessions({});
@@ -333,14 +352,6 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       flushBootstrapReadIntent();
     }
   }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, queueFetchProjectsIntent]);
-
-  // Bootstrap on the first active consumer rather than on mount, and revalidate
-  // whenever the tree goes from unread to read again — the same contract as
-  // ``ShowPagesInventoryStore.activate()``.
-  useEffect(() => {
-    if (!active) return;
-    void fetchProjects();
-  }, [active, fetchProjects]);
 
   // (Re)connect reconcile: rebuild a project's ALREADY-paged-in window (not just
   // page 1) so a transient SSE reconnect / controller restart doesn't truncate an
@@ -507,6 +518,27 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   fetchProjectsRunnerRef.current = (options) => void fetchProjects(options);
   projectTreeRunnerRef.current = () => void reconcileProjectTree();
+
+  // Bootstrap on the first active consumer rather than on mount, and revalidate
+  // whenever the tree goes from unread to read again — the same contract as
+  // ``ShowPagesInventoryStore.activate()``. WHICH read that is depends on what is
+  // already cached, because ``applyBootstrapSessions`` REPLACES each project's
+  // window with page one: a user who paged past the first eight sessions, stepped
+  // onto an admin route (detaching the last reader) and came back would watch
+  // those rows disappear and have to page through them again.
+  // ``reconcileProjectTree`` is the window-preserving read, and it is already the
+  // resumption path for the other signal that can arrive at a loaded tree — a
+  // reconnect — so a returning consumer takes it too. The first-page bootstrap is
+  // reserved for a tree that has none of this to preserve.
+  useEffect(() => {
+    if (!active) return;
+    if (!treeInitialFetched.current) {
+      treeInitialFetched.current = true;
+      void fetchProjects();
+      return;
+    }
+    void reconcileProjectTree();
+  }, [active, fetchProjects, reconcileProjectTree]);
 
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
     if (cachedRowRefreshInFlightRef.current.has(sessionId)) {

@@ -74,6 +74,7 @@ export class ShowPagesInventoryStore {
   private disconnectEvents: (() => void) | null = null;
   private inFlight: Promise<void> | null = null;
   private revision = 0;
+  private retired = false;
 
   constructor(api: ShowPagesInventoryApi) {
     this.api = api;
@@ -122,13 +123,31 @@ export class ShowPagesInventoryStore {
   }
 
   private syncEventSubscription(): void {
-    if (this.shouldWatchEvents()) {
+    if (!this.retired && this.shouldWatchEvents()) {
       this.connectEvents();
       return;
     }
     this.disconnectEvents?.();
     this.disconnectEvents = null;
   }
+
+  // A newer ApiContext identity has superseded this store (see the factory
+  // below). "Temporarily unread" and "unreachable" are different states, and
+  // only the retained-snapshot rule above makes the difference matter: keeping a
+  // subscription alive to protect a snapshot is right while a consumer can still
+  // render it, and a leak once none can — the registration is what keeps the
+  // store, its pages and the old api value alive, so every later identity change
+  // would strand another one.
+  //
+  // The consumers that could reach it are switching to the new store in this same
+  // commit, so there is nothing left to protect now rather than later. Fencing
+  // the read in flight matters as much as the disconnect: without it the response
+  // would repopulate `pages` and resubscribe through the ``finally`` below.
+  retire = (): void => {
+    this.retired = true;
+    this.revision += 1;
+    this.syncEventSubscription();
+  };
 
   reload = (): Promise<void> => {
     if (this.inFlight) return this.inFlight;
@@ -203,6 +222,10 @@ export class ShowPagesInventoryStore {
         const revision = this.revision;
         try {
           const res = (await this.api.getShowPages()) as { pages?: unknown };
+          // Retirement fences the read through the same revision bump a mutation
+          // uses, so it has to be distinguished here: a mutation wants the read
+          // repeated, a disposal wants it abandoned.
+          if (this.retired) return;
           if (revision !== this.revision) continue;
           this.updateSnapshot({
             pages: Array.isArray(res.pages) ? (res.pages as ShowPage[]) : [],
@@ -210,6 +233,7 @@ export class ShowPagesInventoryStore {
           });
           return;
         } catch {
+          if (this.retired) return;
           if (revision !== this.revision) continue;
           this.updateSnapshot({ loaded: true });
           return;
@@ -291,6 +315,12 @@ export class ShowPagesInventoryStore {
 
 const stores = new WeakMap<ApiContextType, ShowPagesInventoryStore>();
 
+// The store the mounted tree has committed to. One slot, because a document has
+// one ``ApiProvider``: a new context identity (its value is memoized on ``t``, so
+// a locale switch rebuilds it) means the previous store became unreachable, not
+// that a second one went live.
+let committed: { api: ApiContextType; store: ShowPagesInventoryStore } | null = null;
+
 export function getShowPagesInventoryStore(api: ApiContextType): ShowPagesInventoryStore {
   let store = stores.get(api);
   if (!store) {
@@ -298,4 +328,27 @@ export function getShowPagesInventoryStore(api: ApiContextType): ShowPagesInvent
     stores.set(api, store);
   }
   return store;
+}
+
+/** Record the identity the tree has committed to, retiring the store a previous
+ *  identity handed out.
+ *
+ *  Disposal belongs to the commit phase, not to the render that creates the new
+ *  store: a re-render can be double-invoked or discarded, and closing the
+ *  subscription of a store the mounted tree is still reading would lose the
+ *  invalidation it is kept open for. Every consumer of a changed context value
+ *  re-renders in one commit, so by the time any of their effects runs, all of
+ *  them hold this store — which makes the call idempotent and its ordering among
+ *  them irrelevant. A document with no inventory consumer never calls it and
+ *  never needs to: nothing was created, so nothing was superseded.
+ */
+export function commitShowPagesInventoryStore(api: ApiContextType): void {
+  if (committed?.api === api) return;
+  if (committed) {
+    // Dropping the WeakMap entry with it keeps the factory from ever handing a
+    // retired store to a consumer, should an identity somehow come back.
+    stores.delete(committed.api);
+    committed.store.retire();
+  }
+  committed = { api, store: getShowPagesInventoryStore(api) };
 }

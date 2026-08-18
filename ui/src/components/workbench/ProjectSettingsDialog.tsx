@@ -6,7 +6,7 @@ import { FileText } from 'lucide-react';
 import { useApi } from '../../context/ApiContext';
 import type { ProjectDefaultAgent, VibeAgentBrief, WorkbenchProject } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { InfoHint } from '../ui/info-hint';
@@ -29,7 +29,7 @@ export const ProjectSettingsDialog: React.FC<{
 }> = ({ project, open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const { setProjectDefaultAgent } = useWorkbenchProjectsTree();
+  const { setProjectDefaultAgent } = useWorkbenchProjectsActions();
   const { capabilities } = useInstanceAuthorization();
   const canManageProjects = capabilities.can_manage_projects;
   const canEditAgentsMd = canManageProjects;

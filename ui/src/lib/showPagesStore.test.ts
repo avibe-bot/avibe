@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { ApiContextType } from '../context/ApiContext';
 import {
+  commitShowPagesInventoryStore,
+  getShowPagesInventoryStore,
   ShowPagesInventoryStore,
   type ShowPage,
   type ShowPagesInventoryApi,
@@ -157,6 +160,73 @@ describe('ShowPagesInventoryStore', () => {
     await flight;
     expect(getShowPages).toHaveBeenCalledTimes(2);
     expect(store.getSnapshot().pages).toEqual([]);
+  });
+
+  it('leaves one live subscription however often the API identity changes', async () => {
+    let connected = 0;
+    let disconnected = 0;
+    const identityCount = 3;
+    const identities = Array.from({ length: identityCount }, () => ({
+      getShowPages: vi.fn().mockResolvedValue({ pages: [page()] }),
+      connectWorkbenchEvents: vi.fn(() => {
+        connected += 1;
+        return () => {
+          disconnected += 1;
+        };
+      }),
+    }) as unknown as ApiContextType);
+
+    // Each identity gets a consumer that reads, retains a snapshot, and leaves:
+    // exactly the state the invalidation-only subscription is kept alive for, and
+    // therefore the state in which a superseded store would strand one.
+    for (const api of identities) {
+      const store = getShowPagesInventoryStore(api);
+      commitShowPagesInventoryStore(api);
+      const close = store.activate();
+      await store.reload();
+      expect(store.getSnapshot().pages).toHaveLength(1);
+      close();
+    }
+
+    // The count is the property: whatever the number of switches, one document
+    // watches once. Asserted as a difference so it cannot be satisfied by never
+    // subscribing in the first place.
+    expect(connected).toBe(identityCount);
+    expect(connected - disconnected).toBe(1);
+
+    // ...and it is the current one that survives, still loaded and still able to
+    // serve the snapshot its consumers render synchronously.
+    const live = getShowPagesInventoryStore(identities[identityCount - 1]);
+    expect(live.getSnapshot().pages).toHaveLength(1);
+    const reopened = live.activate();
+    await live.reload();
+    expect(live.getSnapshot().pages).toHaveLength(1);
+    reopened();
+  });
+
+  it('abandons the read a retired store had in flight', async () => {
+    const stale = deferred<{ pages: ShowPage[] }>();
+    const disconnect = vi.fn();
+    const connectWorkbenchEvents = vi.fn(() => disconnect);
+    const store = new ShowPagesInventoryStore({
+      getShowPages: vi.fn(() => stale.promise),
+      connectWorkbenchEvents,
+    });
+
+    const close = store.activate();
+    const flight = store.reload();
+    close();
+    store.retire();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+
+    // Retirement fences the read with the same revision bump a mutation uses, so
+    // the response must be abandoned rather than retried: repopulating would
+    // restore a snapshot nothing can render, and the settling read would
+    // resubscribe on its way out.
+    stale.resolve({ pages: [page()] });
+    await flight;
+    expect(store.getSnapshot().pages).toEqual([]);
+    expect(connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
 
   it('does not refetch when the initial events connection arrives after the activation read', async () => {

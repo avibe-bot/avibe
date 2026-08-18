@@ -15,7 +15,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkbenchInboxProvider } from './WorkbenchInboxProvider';
 import { useWorkbenchInbox, type InboxState } from './WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './WorkbenchProjectsProvider';
-import { useWorkbenchProjectsTree, type WorkbenchProjectsTree } from './WorkbenchProjectsContext';
+import {
+  useWorkbenchProjectsActions,
+  useWorkbenchProjectsTree,
+  type WorkbenchProjectsActions,
+  type WorkbenchProjectsTree,
+} from './WorkbenchProjectsContext';
 import type { WorkbenchEventHandlers } from './ApiContext';
 
 const project = {
@@ -110,11 +115,29 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const TreeProbe = ({ onState }: { onState?: (tree: WorkbenchProjectsTree) => void } = {}) => {
-  const tree = useWorkbenchProjectsTree();
+// `active={false}` is the real opt-out a tree reader has (a surface that renders
+// from provider state without being the reason it loads). Here it doubles as an
+// observer that can watch provider state across a navigation that removes every
+// activating consumer.
+const TreeProbe = ({
+  active = true,
+  onState,
+}: { active?: boolean; onState?: (tree: WorkbenchProjectsTree) => void } = {}) => {
+  const tree = useWorkbenchProjectsTree({ active });
   useEffect(() => {
     onState?.(tree);
   }, [onState, tree]);
+  return null;
+};
+
+// A write-only surface (new-session dialogs, rename, archive) reaches the
+// provider through the mutation half of the contract, which cannot read
+// `projects` and must not make the document load them.
+const ActionsProbe = ({ onState }: { onState?: (actions: WorkbenchProjectsActions) => void }) => {
+  const actions = useWorkbenchProjectsActions();
+  useEffect(() => {
+    onState?.(actions);
+  }, [actions, onState]);
   return null;
 };
 
@@ -176,6 +199,114 @@ describe('Demand-driven shell bootstrap', () => {
       await settle();
 
       expect(bootstrap).toHaveBeenCalledTimes(1);
+    });
+
+    // Demand is a property of what a consumer ASKS FOR, not of which route it sits
+    // on: a permanently mounted write-only surface (fork, pin, rename, archive)
+    // would otherwise re-eagerize the bootstrap on every route through the back
+    // door. The mutation half of the contract cannot read `projects`, so it has
+    // nothing to load.
+    it('leaves the tree unfetched for a document whose only consumer mutates it', async () => {
+      const bootstrap = vi.fn().mockResolvedValue(bootstrapPayload);
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      };
+      let actions: WorkbenchProjectsActions | null = null;
+      const capture = (next: WorkbenchProjectsActions) => {
+        actions = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <ActionsProbe onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      expect(bootstrap).not.toHaveBeenCalled();
+      // The writes are live regardless — they patch whatever is cached.
+      expect(actions?.createSessionForProject).toBeTypeOf('function');
+
+      // Non-activating is not inert: the same document loads the tree the moment
+      // something actually renders it.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <ActionsProbe onState={capture} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+    });
+
+    // Activation has two cases, and they are not interchangeable: the first load
+    // builds the tree, a return REVALIDATES whatever the tree already holds. A
+    // consumer that paged a project in has a window wider than page one, so
+    // resuming through the first-load path would silently truncate it — the same
+    // defect the reconnect reconcile exists to prevent, arriving through
+    // navigation instead of through the stream.
+    it('revalidates a paged-in window when a consumer returns, instead of truncating it', async () => {
+      const secondSession = { ...session, id: 'ses_b', title: 'Older session' };
+      const bootstrap = vi.fn(async (args?: { projectIds?: string[] }) => ({
+        projects: [project],
+        sessions: {
+          proj_a: args?.projectIds
+            ? { sessions: [session, secondSession], next_before_id: null }
+            : { sessions: [session], next_before_id: session.id },
+        },
+      }));
+      const listSessions = vi
+        .fn()
+        .mockResolvedValue({ sessions: [secondSession], next_before_id: null });
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const capture = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={capture} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(1);
+
+      await act(async () => {
+        tree?.loadMore(project.id);
+      });
+      await settle();
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(2);
+
+      // Navigate away from every surface that renders the tree, then back.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={capture} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      const returningRead = bootstrap.mock.calls.at(-1)?.[0] as
+        | { projectIds?: string[]; limit?: number; cache?: boolean }
+        | undefined;
+      expect(returningRead).toMatchObject({ projectIds: [project.id], cache: false });
+      expect(returningRead?.limit).toBeGreaterThanOrEqual(2);
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(2);
     });
 
     it('does not re-bootstrap on a reconnect while nothing reads the tree', async () => {
@@ -348,6 +479,65 @@ describe('Demand-driven shell bootstrap', () => {
       expect(tree?.isExpanded(project.id)).toBe(false);
     });
 
+    // Invalidating a read that is already in flight is itself what queues its
+    // replacement, so the drop above has a second half: that retry must not
+    // survive the last reader. Otherwise the invalidation repopulates exactly what
+    // it just dropped — off-route, and with a snapshot the server produced BEFORE
+    // the authorization change.
+    it('drops the tree retry the invalidation itself queues', async () => {
+      const stale = deferred<typeof bootstrapPayload>();
+      const bootstrap = vi.fn().mockResolvedValue(bootstrapPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const capture = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={capture} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toHaveLength(1);
+
+      // A reconnect reconcile is in flight when the user navigates away.
+      bootstrap.mockReturnValue(stale.promise);
+      await act(async () => {
+        handlers?.onConnected?.();
+      });
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+      expect(tree?.projects).toBeNull();
+
+      // The pre-change response now arrives and is correctly refused. What it
+      // queues in its place has no reader, so it is dropped rather than issued.
+      await act(async () => {
+        stale.resolve(bootstrapPayload);
+      });
+      await settle();
+
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      expect(tree?.projects).toBeNull();
+    });
+
     it('drops cached inbox rows and makes the next feed read authoritative', async () => {
       const listInbox = vi.fn().mockResolvedValue(inboxPayload);
       let handlers: WorkbenchEventHandlers | null = null;
@@ -401,6 +591,66 @@ describe('Demand-driven shell bootstrap', () => {
       // reconcile() re-reads with cache disabled; page one does not.
       expect(feedRead).not.toHaveProperty('cache');
       expect(state?.inboxSessions).toEqual([]);
+    });
+
+    it('drops the feed retry the invalidation itself queues', async () => {
+      const stale = deferred<typeof inboxPayload>();
+      const countsOnly = { sessions: [], next_cursor: null, unread_by_session: { [session.id]: 3 } };
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const feedReads = () => listInbox.mock.calls.filter(([args]) => args.limit > 1).length;
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(state?.inboxSessions).toHaveLength(1);
+      expect(feedReads()).toBe(1);
+
+      // A resume reconcile is in flight when the user navigates away. The
+      // counts-only read stays live throughout — it is what the remaining route
+      // legitimately reads.
+      listInbox.mockImplementation((args: ListInboxArgs) =>
+        args.limit > 1 ? stale.promise : Promise.resolve(countsOnly),
+      );
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'));
+      });
+      expect(feedReads()).toBe(2);
+
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+      expect(state?.inboxSessions).toEqual([]);
+
+      await act(async () => {
+        stale.resolve(inboxPayload);
+      });
+      await settle();
+
+      expect(feedReads()).toBe(2);
+      expect(state?.inboxSessions).toEqual([]);
+      expect(state?.nextCursor).toBeNull();
     });
 
     it('re-reads the unread map when a mutation invalidates the counts read', async () => {
