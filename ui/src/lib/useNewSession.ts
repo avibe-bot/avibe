@@ -128,7 +128,15 @@ export function createLatestAgentProjectionLoader(
 // in the consumer.
 export function useNewSession({ active = true, loadErrorText, createFailedText }: UseNewSessionOptions): NewSessionState {
   const api = useApi();
-  const { projects: rawProjects, projectsError, createSessionForProject, upsertProjectToTop } = useWorkbenchProjectsTree();
+  // `active` already gates the agent projection below; pass it to the tree too.
+  // NewSessionSheet is mounted shell-wide, so an unconditional read would make
+  // the tree bootstrap on every route again — exactly what activation prevents.
+  const {
+    projects: rawProjects,
+    projectsError,
+    createSessionForProject,
+    upsertProjectToTop,
+  } = useWorkbenchProjectsTree({ active });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);

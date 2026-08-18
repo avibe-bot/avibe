@@ -6,6 +6,7 @@ import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
+import { useConsumerActivation } from '../lib/useConsumerActivation';
 import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
@@ -56,6 +57,12 @@ type TargetedInboxSnapshot = {
  *  depend on context functions don't re-fire on every parent render. */
 export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) => {
   const api = useApi();
+  // Two different appetites behind one provider: the unread map badges the
+  // favicon and the app icon on every route, while the paged feed is rendered
+  // only by the sidebar and the Inbox page. Splitting them is what lets an admin
+  // route keep its badge without paying for 30 rows of feed it never shows.
+  const { active: feedActive, isActive: isFeedActive, activate: activateFeed } =
+    useConsumerActivation();
   const [inboxSessions, setInboxSessions] = useState<InboxSession[]>([]);
   const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>({});
   // Becomes true the first time the server hands us an authoritative whole-account
@@ -110,6 +117,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // windowed feed. Keep their latest committed values so a later whole-feed
   // replacement cannot erase a restored card merely because the row sorts
   // outside the page; a later broad omission revalidates them by exact id.
+  // Counts-only reads own no feed state, so they never join the feed read
+  // intents above. They still serialize against themselves: a resume fires
+  // visibilitychange, focus and online together, and one map is enough.
+  const unreadReadInFlightRef = useRef(false);
+  const unreadReadPendingRef = useRef(false);
   const targetedSnapshotsRef = useRef<Map<string, TargetedInboxSnapshot>>(new Map());
   const targetedReadInFlightRef = useRef<Set<string>>(new Set());
   const targetedReadPendingRef = useRef<Set<string>>(new Set());
@@ -444,6 +456,42 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     }
   }, [acceptFeedRows, api, applyNextCursor, applyWholeUnreadRead, flushFeedReadIntent, mergeTargetedSnapshots, queueReconcileIntent]);
 
+  // Counts-only read for routes that render no feed. Same endpoint and the same
+  // pagination-independent unread map as refresh()/reconcile(), with the row
+  // window collapsed to the smallest the API accepts — it claims only the unread
+  // resource, discards the row it is handed, and never touches the feed or the
+  // cursor, so activating the feed later still starts from a real first page.
+  // (The server clamps `limit` to at least 1; a true zero-row read would need an
+  // API change, deliberately out of scope here.)
+  const refreshUnread = useCallback(async function refreshUnread() {
+    if (unreadReadInFlightRef.current) {
+      unreadReadPendingRef.current = true;
+      return;
+    }
+    unreadReadInFlightRef.current = true;
+    try {
+      do {
+        unreadReadPendingRef.current = false;
+        const read = readOwnershipRef.current.beginRead(['inbox-unread']);
+        try {
+          const result = await api.listInbox({
+            platform: 'avibe',
+            limit: 1,
+            cache: false,
+            handleError: false,
+          });
+          if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
+            applyWholeUnreadRead(read, result.unread_by_session ?? {});
+          }
+        } catch (err) {
+          console.error('[inbox] refreshUnread failed', err);
+        }
+      } while (unreadReadPendingRef.current);
+    } finally {
+      unreadReadInFlightRef.current = false;
+    }
+  }, [api, applyWholeUnreadRead]);
+
   // Targeted reconcile for one session (contract A6 foreground restore): fetch
   // that exact session by id and upsert its card, so a restored session
   // reappears even when its activity sorts past the windowed reconcile()'s
@@ -510,8 +558,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   loadMoreRunnerRef.current = () => void loadMore();
   reconcileSessionRef.current = (sessionId) => void reconcileSession(sessionId);
 
+  // The feed's first read waits for a consumer that renders it. ``feedActive`` is
+  // state, so it flips one render after the activation and this effect is what
+  // runs the read — both for a workbench document's first paint and for a later
+  // /admin → /chat navigation, which finds ``initialFetched`` still false and
+  // loads page one exactly as a direct load would.
   useEffect(() => {
-    // First mount loads page one; every later rerun reconciles the loaded window
+    if (!feedActive) return;
+    // First read loads page one; every later rerun reconciles the loaded window
     // instead when an ``api`` identity change rebuilds the value — so
     // a non-resume rerun never collapses a multi-page feed back to page one. The
     // broker fans events out live with no replay (sse_broker.py ``/api/events``),
@@ -523,9 +577,26 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } else {
       void reconcile();
     }
+  }, [feedActive, reconcile, refresh]);
+
+  // The badges are shell-wide, so the unread map is loaded on every route — but
+  // on a route with no feed consumer, only the map. Read the refcount rather
+  // than ``feedActive`` here: consumers activate in their own effects, which run
+  // before this one, so this is already true on a workbench load and the counts
+  // read is skipped in favour of the feed read that supersedes it. Going the
+  // other way (workbench → admin) re-runs nothing: the map is already current.
+  useEffect(() => {
+    if (isFeedActive()) return;
+    void refreshUnread();
+  }, [isFeedActive, refreshUnread]);
+
+  useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
       onAuthorizationChanged: () => {
-        void refresh();
+        // A permission change invalidates whatever is loaded; re-read exactly
+        // what this route reads.
+        if (isFeedActive()) void refresh();
+        else void refreshUnread();
       },
       onInboxSessionUpdated: (row) => {
         targetedSnapshotsRef.current.delete(row.session_id);
@@ -578,7 +649,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       },
     });
     return disconnect;
-  }, [acceptSessionMutation, acceptUnreadMutation, api, refresh, reconcile, reconcileSession, applyUnreadMap]);
+  }, [
+    acceptSessionMutation,
+    acceptUnreadMutation,
+    api,
+    applyUnreadMap,
+    isFeedActive,
+    reconcileSession,
+    refresh,
+    refreshUnread,
+  ]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
   // frozen and its SSE socket dropped, and the broker never replays the gap;
@@ -587,7 +667,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // reconcile the durable feed here so missed events never gate data freshness.
   useEffect(() => {
     const resync = () => {
-      if (document.visibilityState === 'visible') void reconcile();
+      if (document.visibilityState !== 'visible') return;
+      if (isFeedActive()) void reconcile();
+      else void refreshUnread();
     };
     document.addEventListener('visibilitychange', resync);
     window.addEventListener('online', resync);
@@ -597,7 +679,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       window.removeEventListener('online', resync);
       window.removeEventListener('focus', resync);
     };
-  }, [reconcile]);
+  }, [isFeedActive, reconcile, refreshUnread]);
 
   const totalUnread = useMemo(
     () => Object.values(unreadBySession).reduce((sum, n) => sum + (n || 0), 0),
@@ -649,8 +731,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       refresh,
       loadMore,
       markRead,
+      activateFeed,
     }),
     [
+      activateFeed,
       inboxSessions,
       unreadBySession,
       totalUnread,

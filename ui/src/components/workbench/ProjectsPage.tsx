@@ -382,7 +382,8 @@ export const ProjectsPage: React.FC = () => {
     capabilities,
   } = useInstanceAuthorization();
   const canCreateProject = canCreateLocalProject(capabilities);
-  const { unreadBySession } = useWorkbenchInbox();
+  // Per-session dots only; the feed list itself lives in the sidebar / Inbox.
+  const { unreadBySession } = useWorkbenchInbox({ feed: false });
   const {
     projects,
     projectsError,

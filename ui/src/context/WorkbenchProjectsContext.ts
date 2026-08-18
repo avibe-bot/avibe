@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useEffect } from 'react';
 
 import type { ProjectDefaultAgent, WorkbenchProject, WorkbenchSession, WorkbenchSessionCreate } from './ApiContext';
 
@@ -23,6 +23,11 @@ export interface WorkbenchProjectsTree {
   projects: WorkbenchProject[] | null;
   projectsError: string | null;
   refreshProjects: () => Promise<void>;
+  /** Refcounted activation (see ``useConsumerActivation``). The provider is
+   *  mounted above the router, so it only bootstraps the tree while a consumer
+   *  that renders it is mounted — an admin route mounts none. Consumers get
+   *  this for free from ``useWorkbenchProjectsTree``. */
+  activate: () => () => void;
 
   sessionsOf: (projectId: string) => ProjectSessionsState;
   expanded: ReadonlySet<string>;
@@ -68,8 +73,21 @@ export interface WorkbenchProjectsTree {
 
 export const WorkbenchProjectsContext = createContext<WorkbenchProjectsTree | null>(null);
 
-export function useWorkbenchProjectsTree(): WorkbenchProjectsTree {
+/** Read the shared projects/sessions tree.
+ *
+ *  Reading it is what makes the provider fetch it: every consumer activates by
+ *  default, so the tree loads for whoever renders it and for nobody else. Pass
+ *  ``active: false`` from a surface that is permanently mounted but only reads
+ *  the tree while open (``NewSessionSheet`` via ``useNewSession``) — otherwise
+ *  its mere presence would re-eagerize the bootstrap on every route. */
+export function useWorkbenchProjectsTree(options?: { active?: boolean }): WorkbenchProjectsTree {
   const ctx = useContext(WorkbenchProjectsContext);
+  const active = options?.active ?? true;
+  const activate = ctx?.activate;
+  useEffect(() => {
+    if (!active || !activate) return;
+    return activate();
+  }, [active, activate]);
   if (!ctx) throw new Error('useWorkbenchProjectsTree must be used within a WorkbenchProjectsProvider');
   return ctx;
 }

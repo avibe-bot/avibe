@@ -74,9 +74,17 @@ export const WindowLayer: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { order, pins } = useDock();
-  const { pages } = useShowPageInventory();
   const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
     useWindowManager();
+  // The layer is mounted shell-wide so a window survives navigation, but it only
+  // reads the inventory once a window exists. Every other reader (Dock,
+  // MobileDockDrawer, app search) already gates on its own open state, so an
+  // empty layer is the last thing making /api/show-pages a per-document load.
+  // Both reads self-heal when the inventory lands: `icon_version` comes from a
+  // reactive snapshot, and the ⌘-number title falls back to the dock pin's
+  // `title_snapshot` exactly as it already does while the first fetch is in
+  // flight.
+  const { pages } = useShowPageInventory(windows.length > 0);
   // Any window open and NOT minimized — drives the layer's aria-hidden AND the
   // beforeunload guard (§7.1g).
   const anyShown = shouldGuardUnload(windows);

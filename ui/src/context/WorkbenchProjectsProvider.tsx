@@ -11,6 +11,7 @@ import {
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
 import { errorMessage } from '@/lib/errorMessage';
+import { useConsumerActivation } from '@/lib/useConsumerActivation';
 import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
@@ -104,6 +105,10 @@ const REORDER_ACTIVITY_EVENTS = new Set(['created', 'user_message', 'show_event'
 // WorkbenchInboxContext (both consumers read it directly).
 export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const api = useApi();
+  // The tree is workbench-only data behind an app-level provider. Nothing under
+  // /admin renders a project, so nothing there should pay for the bootstrap —
+  // neither on load nor on an SSE reconnect.
+  const { active, isActive, activate } = useConsumerActivation();
   const [projects, setProjects] = useState<WorkbenchProject[] | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -293,9 +298,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     }
   }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, queueFetchProjectsIntent]);
 
+  // Bootstrap on the first active consumer rather than on mount, and revalidate
+  // whenever the tree goes from unread to read again — the same contract as
+  // ``ShowPagesInventoryStore.activate()``.
   useEffect(() => {
+    if (!active) return;
     void fetchProjects();
-  }, [fetchProjects]);
+  }, [active, fetchProjects]);
 
   // (Re)connect reconcile: rebuild a project's ALREADY-paged-in window (not just
   // page 1) so a transient SSE reconnect / controller restart doesn't truncate an
@@ -585,10 +594,16 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // broadcast to, so listSessions is the authoritative source on reconnect).
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
+      // A reconnect or an authorization change only has a tree to recover when
+      // one was loaded; while no consumer reads it, activation is what fetches
+      // a fresh one. Guarding here keeps a long-lived admin tab from re-issuing
+      // the bootstrap every time the shared stream flaps.
       onConnected: () => {
+        if (!isActive()) return;
         void reconcileProjectTree();
       },
       onAuthorizationChanged: () => {
+        if (!isActive()) return;
         void reconcileProjectTree();
       },
       onSessionActivity: (data) => {
@@ -667,6 +682,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   }, [
     acceptSessionMutation,
     api,
+    isActive,
     projectIdForSession,
     reconcileProjectTree,
     reconcileSessions,
@@ -919,6 +935,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       projects,
       projectsError,
       refreshProjects: fetchProjects,
+      activate,
       sessionsOf,
       expanded,
       isExpanded,
@@ -940,6 +957,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       projects,
       projectsError,
       fetchProjects,
+      activate,
       sessionsOf,
       expanded,
       isExpanded,

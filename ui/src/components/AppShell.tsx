@@ -257,7 +257,8 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
 export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
-  const { totalUnread } = useWorkbenchInbox();
+  // Badge only — the shell is mounted on every route and renders no feed.
+  const { totalUnread } = useWorkbenchInbox({ feed: false });
   const {
     capabilities,
     instanceKind,
