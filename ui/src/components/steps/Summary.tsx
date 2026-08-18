@@ -387,10 +387,11 @@ const buildConfigPayload = (data: any) => {
   const agents = data.agents || {};
   const enabledPlatforms = getEnabledPlatforms(data);
   return {
-    // No user-facing primary platform: the backend derives its internal default
-    // from ``platforms.enabled``.
-    platforms: {
-      enabled: enabledPlatforms,
+    // Patch-write shape (#1458 stage ③): enablement as add-operations
+    // against the persisted list; sections the wizard doesn't own are
+    // left to their owners instead of round-tripped (see Wizard.tsx).
+    __avibe_list_ops: {
+      'platforms.enabled': { add: enabledPlatforms },
     },
     mode: data.mode || 'self_host',
     version: 'v2',
@@ -429,12 +430,10 @@ const buildConfigPayload = (data: any) => {
       require_mention: data.wechat?.require_mention || false,
     },
     runtime: {
-      ...data.runtime,
       default_cwd: data.default_cwd || data.runtime?.default_cwd || '_tmp',
     },
     agents: {
       opencode: {
-        ...agents.opencode,
         enabled: agents.opencode?.enabled ?? true,
         cli_path: agents.opencode?.cli_path || 'opencode',
         default_agent: data.opencode_default_agent ?? agents.opencode?.default_agent ?? null,
@@ -442,31 +441,19 @@ const buildConfigPayload = (data: any) => {
           data.opencode_default_reasoning_effort ?? agents.opencode?.default_reasoning_effort ?? null,
       },
       claude: {
-        ...agents.claude,
         enabled: agents.claude?.enabled ?? true,
         cli_path: agents.claude?.cli_path || 'claude',
       },
       codex: {
-        ...agents.codex,
         enabled: agents.codex?.enabled ?? false,
         cli_path: agents.codex?.cli_path || 'codex',
       },
     },
-    gateway: data.gateway,
-    ui: {
-      ...data.ui,
-      setup_host: data.ui?.setup_host || '127.0.0.1',
-      setup_port: data.ui?.setup_port || 5123,
-    },
     update: data.update
       ? {
-          ...data.update,
           auto_update: data.update.auto_update,
         }
       : undefined,
-    ack_mode: data.ack_mode,
-    show_duration: data.show_duration ?? false,
-    language: data.language,
     // Finishing the wizard is the explicit signal that setup is complete. Set
     // here (Summary's own payload, the one saved on Finish) rather than in
     // Wizard.tsx's intermediate-step payload so the flag is only persisted once

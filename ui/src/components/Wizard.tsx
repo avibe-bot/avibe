@@ -28,10 +28,17 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
   const enabledPlatforms = enabledPlatformOverride ?? getEnabledPlatforms(data);
 
   return {
-  // No user-facing primary platform: the backend derives an internal default
-  // from ``platforms.enabled``, so the wizard sends only the enabled set.
-  platforms: {
-    enabled: enabledPlatforms,
+  // Patch-write shape (#1458 stage ③): the wizard sends only what the
+  // wizard flow owns — the platform sections the user configured, the
+  // wizard-owned agent toggles, mode/version, and its default cwd.
+  // Enablement is expressed as add operations against the persisted
+  // list (list-ops verb) instead of a whole enabled-array snapshot, so
+  // a concurrently enabled platform (e.g. WeChat QR confirmation while
+  // the wizard sits open) is never dropped. Sections the wizard does
+  // not edit (runtime extras, ui, update, gateway, language, ack_mode)
+  // are left to their owners instead of round-tripped.
+  __avibe_list_ops: {
+    'platforms.enabled': { add: enabledPlatforms },
   },
   mode: data.mode || 'self_host',
   version: 'v2',
@@ -73,47 +80,28 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
     require_mention: data.wechat?.require_mention || false,
   },
   runtime: {
-    // Preserve existing runtime config
-    ...data.runtime,
+    // The wizard owns only the default cwd it captured.
     default_cwd: data.default_cwd || data.runtime?.default_cwd || '.',
   },
   agents: {
+    // The wizard owns the enablement toggle and the CLI path chosen in
+    // its Agents step; spreading the loaded section would round-trip
+    // stale sibling fields (e.g. an installer-updated cli_path).
     opencode: {
-      // Preserve existing opencode config
-      ...data.agents?.opencode,
       enabled: data.agents?.opencode?.enabled ?? true,
       cli_path: data.agents?.opencode?.cli_path || 'opencode',
       default_agent: data.opencode_default_agent ?? data.agents?.opencode?.default_agent ?? null,
       default_reasoning_effort: data.opencode_default_reasoning_effort ?? data.agents?.opencode?.default_reasoning_effort ?? null,
     },
     claude: {
-      // Preserve existing claude config
-      ...data.agents?.claude,
       enabled: data.agents?.claude?.enabled ?? true,
       cli_path: data.agents?.claude?.cli_path || 'claude',
     },
     codex: {
-      // Preserve existing codex config
-      ...data.agents?.codex,
       enabled: data.agents?.codex?.enabled ?? false,
       cli_path: data.agents?.codex?.cli_path || 'codex',
     },
   },
-  // Preserve gateway config entirely
-  gateway: data.gateway,
-  ui: {
-    // Preserve existing ui config
-    ...data.ui,
-    setup_host: data.ui?.setup_host || '127.0.0.1',
-    setup_port: data.ui?.setup_port || 5123,
-  },
-  // Preserve existing update config entirely
-  update: data.update,
-  // Preserve ack_mode
-  ack_mode: data.ack_mode,
-  show_duration: data.show_duration ?? false,
-  // Preserve language
-  language: data.language,
   };
 };
 
