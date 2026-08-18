@@ -132,6 +132,50 @@ def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
     return FakeMemoryArtifactManager(**defaults)
 
 
+class _FirstInstallArtifact(FakeMemoryArtifactManager):
+    """Commit a fake first-install pointer through the real activation bridge."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            python=None,
+            root_format=None,
+            fingerprint=None,
+            compatible_formats=frozenset(),
+        )
+        self.commits = 0
+        self.rollbacks = 0
+
+    def ensure(self, *, force: bool = False) -> dict:
+        self.ensure_calls.append(force)
+        assert self.activation_coordinator is not None
+
+        def commit() -> None:
+            self.commits += 1
+            self.python = Path(sys.executable)
+            self.root_format = "everos-1.2.3"
+            self.fingerprint = "first-install"
+            self.compatible_formats = frozenset({"everos-1.2.3"})
+
+        def rollback() -> None:
+            self.rollbacks += 1
+            self.python = None
+            self.root_format = None
+            self.fingerprint = None
+            self.compatible_formats = frozenset()
+
+        self.activation_coordinator(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="first-install",
+            ),
+            MemoryProviderRootState(exists=False),
+            commit,
+            rollback,
+        )
+        return dict(self.ensure_payload)
+
+
 @pytest.fixture(autouse=True)
 def _preflight_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep runtime lifecycle tests hermetic unless they exercise preflight."""
@@ -2665,6 +2709,56 @@ async def test_runtime_install_artifact_uses_controller_owned_manager(
     assert callable(artifact.activation_coordinator)
     assert calls == [True]
     assert runtime._config.enabled is False
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_install_activates_config_retained_after_missing_artifact(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first install must not wait for another process to retry reconciliation."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    durable = MemoryConfig(enabled=True, processing=_processing_config())
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+
+    reconcile_result = await runtime.reconcile(MemoryConfig(enabled=False))
+
+    assert reconcile_result == {"ok": False, "error": "memory_runtime_missing"}
+    assert runtime._config == durable
+    assert runtime._restart_config.enabled is False
+    assert process_factory.supervised == []
+
+    install_result = await runtime.install_artifact()
+
+    assert install_result == {"ok": True, "reason": None, "download_error": None}
+    assert artifact.commits == 1
+    assert artifact.rollbacks == 0
+    assert runtime._config == durable
+    assert runtime._restart_config == durable
+    assert len(process_factory.supervised) == 1
+    assert process_factory.supervised[0].starts == 1
     await memory_runtime_factory.close(runtime)
 
 

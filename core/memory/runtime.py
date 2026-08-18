@@ -1126,6 +1126,10 @@ class MemoryRuntime:
         if python is None:
             error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
             if not (self._process and self._process.running):
+                # No active child can still depend on the prior settings. Retain
+                # the desired config so a first artifact install can activate it
+                # immediately instead of waiting for another reconciliation.
+                self._config = config
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
                 self.module.resume_claims()
