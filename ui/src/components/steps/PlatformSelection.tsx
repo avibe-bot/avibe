@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ArrowLeft, ArrowRight, Check, Circle, CircleCheckBig, ExternalLink, Loader2, Lock, Plus, Smartphone } from 'lucide-react';
@@ -86,6 +86,18 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
     initialPlatforms[0] || defaultCredentialPlatform
   );
   const [credentialDraft, setCredentialDraft] = useState<Record<string, any>>(() => buildInitialCredentialDraft(data));
+  // Mount-time snapshot of the draft: a section differs from it only when
+  // the USER typed into that platform's fields. Sections that match the
+  // initial draft were never edited and must not ride along in the step
+  // payload — resubmitting them would overwrite concurrent updates (e.g.
+  // a WeChat QR token acquired after bootstrap) with stale mount-time
+  // values inside the locked merge.
+  const initialDraftRef = useRef<Record<string, any>>(buildInitialCredentialDraft(data));
+  const dirtySections = Object.keys(credentialDraft).filter(
+    (key) =>
+      JSON.stringify((credentialDraft as Record<string, any>)[key]) !==
+      JSON.stringify(initialDraftRef.current[key])
+  );
   const [validating, setValidating] = useState(false);
   const [validationState, setValidationState] = useState<Record<string, ValidationState>>({});
 
@@ -126,9 +138,17 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
         enabled: normalized,
       },
     };
+    // Only user-dirty credential sections join the step payload; the
+    // untouched ones stay with their owners.
+    const dirtyPayload: Record<string, any> = {};
+    for (const key of dirtySections) {
+      dirtyPayload[key] = credentialDraft[key];
+    }
     const nextData = {
-      ...credentialDraft,
-      discord_client_id: credentialDraft.discord?.client_id || '',
+      ...dirtyPayload,
+      ...(dirtySections.includes('discord')
+        ? { discord_client_id: credentialDraft.discord?.client_id || '' }
+        : {}),
       ...selectionData,
     };
 
