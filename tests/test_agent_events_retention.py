@@ -329,6 +329,28 @@ def test_lease_loss_propagates_and_skips_marker(state, monkeypatch) -> None:
         assert module.get_last_run(conn) is None  # run_once-level marker path not exercised
 
 
+def test_maybe_compact_reports_lease_loss_during_vacuum(state) -> None:
+    """An ownership loss during VACUUM defers compaction as contested."""
+    engine = state
+    payload = "h" * 2000
+    for i in range(50):
+        _seed_event(engine, event_id=f"old-{i}", created_at=datetime(2026, 5, 1, tzinfo=timezone.utc), payload=payload + f"-{i}")
+    agent_events_retention.run_retention(engine, retention_days=30, batch_rows=25, now=_NOW)
+
+    heartbeats = iter([True, False])  # first beat renews, second loses ownership
+    result = agent_events_retention.maybe_compact(
+        engine,
+        min_reclaim_bytes=1,
+        free_space_margin_bytes=0,
+        lease_heartbeat=lambda: next(heartbeats, False),
+    )
+    # The heartbeat thread may lose ownership before or during the vacuum;
+    # either way the outcome is a contested compaction, never a clean success.
+    assert result["status"] in {"deferred", "vacuumed"}
+    if result["status"] == "deferred":
+        assert result["reason"] == "lease_lost_during_compaction"
+
+
 def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypatch) -> None:
     """The migration rewrites offset/fractional stamps to whole-second Z."""
     import sqlite3

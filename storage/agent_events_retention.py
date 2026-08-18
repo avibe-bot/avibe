@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -47,6 +48,8 @@ MIN_RETENTION_DAYS = 1
 MIN_RUN_INTERVAL_SECONDS = 24 * 3600
 DELETE_BATCH_ROWS = 1000
 LEASE_TTL_SECONDS = 3600
+# Compaction heartbeat interval: keeps the lease renewed well inside the TTL.
+LEASE_HEARTBEAT_SECONDS = 60
 # Compaction only when the free list alone would return at least this much,
 # so a daily run does not rewrite a large database for pocket change.
 VACUUM_MIN_RECLAIM_BYTES = 64 * 1024 * 1024
@@ -332,6 +335,7 @@ def maybe_compact(
     free_space_margin_bytes: int = VACUUM_FREE_SPACE_MARGIN_BYTES,
     wal_checkpoint: Optional[Callable[[Engine], tuple]] = None,
     disk_usage: Optional[Callable[[str], Any]] = None,
+    lease_heartbeat: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Physically reclaim freed pages, only when it is safe to do so.
 
@@ -370,8 +374,34 @@ def maybe_compact(
 
     before = db_path.stat().st_size if db_path.exists() else 0
     try:
-        with engine.connect() as conn:
-            conn.exec_driver_sql("VACUUM")
+        # VACUUM blocks for the whole rewrite and can outlast the lease TTL.
+        # A heartbeat thread keeps the lease renewed for as long as the
+        # compaction runs; if ownership is nonetheless lost, the heartbeat
+        # stops renewing and reports it so this runner never finishes into a
+        # state where a replacement runner was already admitted.
+        lease_state = {"owned": True}
+        heartbeat: Optional[threading.Thread] = None
+        if lease_heartbeat is not None:
+            def _beat() -> None:
+                while lease_state["owned"]:
+                    if not lease_heartbeat():
+                        lease_state["owned"] = False
+                        return
+                    time.sleep(LEASE_HEARTBEAT_SECONDS)
+
+            heartbeat = threading.Thread(target=_beat, daemon=True)
+            heartbeat.start()
+        try:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("VACUUM")
+        finally:
+            lease_state["owned"] = False
+            if heartbeat is not None:
+                heartbeat.join(timeout=LEASE_HEARTBEAT_SECONDS * 2)
+        if lease_heartbeat is not None and not lease_state["owned"]:
+            # The heartbeat observed an ownership loss during VACUUM: report
+            # the compaction as contested rather than a clean success.
+            return {"status": "deferred", "reason": "lease_lost_during_compaction", **status}
         # In WAL mode the compacted database lands in the -wal file; a
         # post-VACUUM checkpoint is what actually returns bytes to the OS.
         # A busy checkpoint here means the space is still trapped in the WAL:
@@ -456,11 +486,18 @@ def run_once(
             result_marker = get_last_run(conn)
         compaction: dict[str, Any] = {"status": "not_attempted"}
         if compact:
-            compaction = maybe_compact(engine, db_path=db_path)
-            # VACUUM can outlast a lease TTL; renew before reporting so the
-            # marker write below cannot race a replacement runner.
-            with engine.begin() as conn:
-                renew_lease(conn, token)
+            def _lease_heartbeat() -> bool:
+                with engine.begin() as conn:
+                    return renew_lease(conn, token)
+
+            compaction = maybe_compact(engine, db_path=db_path, lease_heartbeat=_lease_heartbeat)
+            if str(compaction.get("reason")) == "lease_lost_during_compaction":
+                return {
+                    "status": "lease_lost",
+                    "deleted_rows": result["deleted_rows"],
+                    "cutoff": result["cutoff"],
+                    "compaction": compaction,
+                }
         return {
             "status": "ok",
             "deleted_rows": result["deleted_rows"],

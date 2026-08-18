@@ -6697,7 +6697,14 @@ def cmd_data_retention(args):
                 config_recovered = True
             else:
                 retention_days = days_value
-            enabled = bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True))
+            enabled_value = getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)
+            if isinstance(enabled_value, bool):
+                enabled = enabled_value
+            else:
+                # A malformed opt-out must surface as disabled/recovery in the
+                # status view, mirroring the controller's fail-closed behavior.
+                enabled = False
+                config_recovered = True
         except Exception:
             enabled = True
             config_recovered = True
