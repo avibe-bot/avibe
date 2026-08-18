@@ -1083,10 +1083,9 @@ def test_startup_show_page_prewarm_targets_recent_non_offline(monkeypatch, tmp_p
     assert out["pages"][0]["context"] == "private"
     assert out["pages"][1]["visibility"] == "limited"
     assert out["pages"][1]["context"] == "private"
-    assert out["pages"][1]["base_path"] is None
     assert out["pages"][2]["visibility"] == "public"
     assert out["pages"][2]["context"] == "shared"
-    assert out["pages"][2]["base_path"].startswith("/p/")
+    assert all("base_path" not in page for page in out["pages"])
 
 
 def test_startup_show_page_prewarm_limit_env(monkeypatch):

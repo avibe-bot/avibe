@@ -47,13 +47,11 @@ export const ShowPageShareControl: React.FC<{
   const { pages, mergePage, reload } = useShowPageInventory();
   const inventoryPage = pages.find((page) => page.session_id === sessionId);
   const [open, setOpen] = useState(false);
-  const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [localPayload, setLocalPayload] = useState<ShowPagePayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [accessLoading, setAccessLoading] = useState(false);
   const [access, setAccess] = useState<ShowPageAccess | null>(initialAccess);
   const [accessError, setAccessError] = useState(false);
-  const [availabilityBusy, setAvailabilityBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const reqSeq = useRef(0);
   const hasObservedPayloadRef = useRef(false);
@@ -167,26 +165,12 @@ export const ShowPageShareControl: React.FC<{
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
-    if (!next) setConfirmationOpen(false);
     onOpenChange?.(next);
     if (next) refresh();
   };
 
   const handleShowAccessApplied = () => {
     void reloadPayload();
-  };
-
-  const setOffline = (next: boolean) => {
-    if (!payload || availabilityBusy) return;
-    setAvailabilityBusy(true);
-    void api.setShowPageAvailability(sessionId, next)
-      .then((result) => {
-        if (result && result.session_id === sessionId) applyPayload(result as ShowPagePayload);
-        else reload();
-        reqSeq.current += 1;
-      })
-      .catch(() => undefined)
-      .finally(() => setAvailabilityBusy(false));
   };
 
   const copyLink = async () => {
@@ -223,11 +207,8 @@ export const ShowPageShareControl: React.FC<{
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="max-h-[var(--radix-popover-content-available-height)] w-[min(22rem,calc(100vw-1rem))] space-y-3 overflow-y-auto"
+        className="max-h-[var(--radix-popover-content-available-height)] w-[min(27rem,calc(100vw-1rem))] space-y-3 overflow-y-auto"
         data-window-owner-id={ownerWindowId}
-        onInteractOutside={(event) => {
-          if (confirmationOpen) event.preventDefault();
-        }}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
@@ -240,7 +221,7 @@ export const ShowPageShareControl: React.FC<{
           <p className="py-1 text-sm text-muted">{t('chat.showPage.loadError')}</p>
         ) : null}
 
-        {payload && !offline && payload.visibility !== 'limited' ? (
+        {payload && !offline ? (
           <div className="flex items-center gap-1.5">
             <Input
               id="show-share-link"
@@ -276,12 +257,6 @@ export const ShowPageShareControl: React.FC<{
           </div>
         ) : null}
 
-        {payload && !offline && payload.visibility === 'limited' ? (
-          <p className="text-[11px] leading-snug text-muted">
-            {t('chat.showPage.sharingHelp.limited')}
-          </p>
-        ) : null}
-
         {access?.can_publish_public ? (
           <div className="border-t border-border pt-3">
             <ShowPageSharingSettings
@@ -289,8 +264,8 @@ export const ShowPageShareControl: React.FC<{
               canManage
               sessionId={sessionId}
               onApplied={handleShowAccessApplied}
-              onConfirmationOpenChange={setConfirmationOpen}
               ownerWindowId={ownerWindowId}
+              showCustomLink={false}
             />
           </div>
         ) : null}
@@ -306,23 +281,10 @@ export const ShowPageShareControl: React.FC<{
           </div>
         ) : null}
 
-        {payload ? (
-          <div className="border-t border-border pt-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-medium">{t('chat.showPage.availability')}</div>
-                <p className="mt-0.5 text-[11px] leading-snug text-muted">
-                  {t(offline ? 'chat.showPage.availabilityOffline' : 'chat.showPage.availabilityOnline')}
-                </p>
-              </div>
-              <Switch
-                checked={Boolean(offline)}
-                disabled={availabilityBusy || (offline ? !access?.can_publish_public : !access?.can_manage)}
-                onCheckedChange={setOffline}
-                label={t('chat.showPage.offline')}
-              />
-            </div>
-          </div>
+        {accessError ? (
+          <p className="border-t border-border pt-3 text-[11px] leading-snug text-destructive-ink">
+            {t('chat.showPage.accessLoadError')}
+          </p>
         ) : null}
 
         {showAddToHome ? (

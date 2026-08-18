@@ -64,6 +64,13 @@ DEFAULT_WORKTREE_PORT_END = 15399
 ENV_FILE_NAME = ".env.regression"
 ENV_PREFIX = "REGRESSION_"
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
+DAEMON_UNREACHABLE_HINT = (
+    "The daemon did not answer, so whether the environment already exists is unknown and the "
+    "runner will not guess. On macOS the daemon lives in the Lima VM, so plain `incus` cannot "
+    "reach it: set INCUS_CMD, e.g. INCUS_CMD='limactl shell avibe-incus-regression -- sudo incus'. "
+    "A daemon that is up but stalled (\"context deadline exceeded\", \"no available cowsql leader "
+    "server found\") usually means the VM is starved for IO or memory; let it recover, then retry."
+)
 
 
 class RegressionError(RuntimeError):
@@ -108,11 +115,28 @@ class Runner:
             kwargs["input"] = input_text
         return subprocess.run(list(command), **kwargs)
 
-    def exists(self, command: Sequence[str]) -> bool:
+    def names(self, command: Sequence[str], *, what: str) -> list[str]:
+        """Return the names the daemon enumerated, or raise if it could not answer.
+
+        Existence must come from a listing the daemon actually completed, never
+        from a lookup's exit status: `incus` exits non-zero both when an object
+        is genuinely absent and when the daemon is unreachable or its database
+        is stalled. Collapsing the second into the first turns "cannot tell"
+        into "not there", and callers then set out to create what already
+        exists.
+        """
         if self.dry_run:
-            return False
-        result = subprocess.run(list(command), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return result.returncode == 0
+            return []
+        result = subprocess.run(list(command), capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RegressionError(f"Could not list {what}: {daemon_failure_detail(result)}\n{DAEMON_UNREACHABLE_HINT}")
+        try:
+            payload = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RegressionError(f"Could not parse the {what} listing returned by Incus: {exc}") from exc
+        if not isinstance(payload, list):
+            raise RegressionError(f"Unexpected {what} listing returned by Incus: {type(payload).__name__}")
+        return [item["name"] for item in payload if isinstance(item, dict) and isinstance(item.get("name"), str)]
 
 
 def incus(*args: str, project: str | None = None) -> list[str]:
@@ -131,6 +155,25 @@ def remote_ref(remote: str | None, name: str = "") -> str:
 
 def optional_remote_ref(remote: str | None) -> list[str]:
     return [remote_ref(remote)] if remote else []
+
+
+def daemon_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    output = (result.stderr or result.stdout or "").strip().splitlines()
+    return output[0] if output else f"exit status {result.returncode}"
+
+
+def project_exists(runner: Runner, remote: str | None, project: str) -> bool:
+    command = incus("project", "list", *optional_remote_ref(remote), "--format", "json")
+    return project in runner.names(command, what="Incus projects")
+
+
+def instance_exists(runner: Runner, remote: str | None, project: str, instance: str) -> bool:
+    # An instance cannot outlive its project, so an absent project answers the
+    # question without asking Incus to list inside a project it does not have.
+    if not project_exists(runner, remote, project):
+        return False
+    command = incus("list", *optional_remote_ref(remote), "--format", "json", project=project)
+    return instance in runner.names(command, what=f"instances in project {project}")
 
 
 def require_incus() -> None:
@@ -619,7 +662,7 @@ def ensure_project_and_instance(
     processes: str,
     remote: str | None,
 ) -> None:
-    if not runner.exists(incus("project", "show", remote_ref(remote, target.project))):
+    if not project_exists(runner, remote, target.project):
         command = incus("project", "create", remote_ref(remote, target.project))
         for item in project_create_config(target):
             command.extend(["--config", item])
@@ -628,7 +671,7 @@ def ensure_project_and_instance(
             incus("profile", "edit", remote_ref(remote, "default"), project=target.project),
             input_text=profile_yaml(storage_pool, network, cpus, memory, disk, processes),
         )
-    if not runner.exists(incus("info", remote_ref(remote, target.instance), project=target.project)):
+    if not instance_exists(runner, remote, target.project, target.instance):
         runner.run(
             incus(
                 "init",
@@ -1430,24 +1473,12 @@ def cmd_up(args: argparse.Namespace) -> int:
             reserve_worktree_mapping(repo_root, target)
     with target_update_lock(repo_root, target, dry_run=args.dry_run):
         runner = Runner(dry_run=args.dry_run)
-        target_exists = runner.exists(incus("info", remote_ref(args.remote, target.instance), project=target.project))
+        target_exists = instance_exists(runner, args.remote, target.project, target.instance)
         if not args.dry_run and not target_exists and args.remote is None:
-            try:
-                ensure_host_port_available(target.ui_host, target.host_port)
-            except RegressionError as exc:
-                # A reachable incus client would have reported the instance as existing
-                # above and skipped this preflight. The usual macOS cause is that `incus`
-                # can't reach the Lima VM daemon, so `incus info` failed and the instance
-                # only *looks* absent — point the operator at the real fix.
-                raise RegressionError(
-                    f"{exc}\n"
-                    "If this instance already exists, the incus client is probably not "
-                    "reaching the daemon (on macOS incus runs in the Lima VM), so the "
-                    "earlier `incus info` failed and the instance looks absent. Set "
-                    "INCUS_CMD to drive incus through the VM, e.g. "
-                    "INCUS_CMD='limactl shell avibe-incus-regression -- sudo incus', so the "
-                    "runner sees the existing instance and skips this preflight."
-                ) from exc
+            # Reached only once the daemon has enumerated its instances and this one
+            # was absent, so an occupied port is a real conflict with something else
+            # rather than this environment's own proxy device.
+            ensure_host_port_available(target.ui_host, target.host_port)
         seed_requires_env = not args.dry_run and (args.reset_mode != "none" or not target_exists)
         if seed_requires_env:
             require_runtime_seed_env()

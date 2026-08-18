@@ -54,6 +54,7 @@ _PREWARM_MAX_DEPTH = 4
 SHOW_RUNTIME_PROTOCOL_VERSION = 1
 SHOW_RUNTIME_PROTOCOL_HEADER = "X-Avibe-Show-Protocol"
 SHOW_RUNTIME_CONTEXT_HEADER = "X-Avibe-Show-Context"
+SHOW_RUNTIME_BASE_HEADER = "x-vibe-show-base"
 SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
@@ -257,11 +258,18 @@ class ShowRuntimeManager:
         if not ready.available or not ready.base_url:
             raise RuntimeError(ready.reason or "show runtime unavailable")
         await self._negotiate_context_key_capability(ready.base_url)
+        request_headers = {
+            key: value
+            for key, value in envelope.headers(headers).items()
+            if key.lower() != SHOW_RUNTIME_BASE_HEADER
+        }
+        if session_part := _show_runtime_app_session_part(path):
+            request_headers[SHOW_RUNTIME_BASE_HEADER] = f"/show/{session_part}/"
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             return await client.request(
                 method,
                 f"{ready.base_url}{path}",
-                headers=envelope.headers(headers),
+                headers=request_headers,
                 content=body,
             )
 
@@ -277,7 +285,11 @@ class ShowRuntimeManager:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
             raise RuntimeError(ready.reason or "show runtime unavailable")
-        blocked = {SHOW_RUNTIME_PROTOCOL_HEADER.lower(), SHOW_RUNTIME_CONTEXT_HEADER.lower()}
+        blocked = {
+            SHOW_RUNTIME_PROTOCOL_HEADER.lower(),
+            SHOW_RUNTIME_CONTEXT_HEADER.lower(),
+            SHOW_RUNTIME_BASE_HEADER.lower(),
+        }
         forwarded = {
             key: value
             for key, value in (headers or {}).items()
@@ -291,21 +303,19 @@ class ShowRuntimeManager:
         session_id: str,
         *,
         context: ShowRuntimeContext,
-        base_path: str | None = None,
     ) -> ShowRuntimeResult:
         session_part = urllib.parse.quote(session_id, safe="")
         runtime_path = f"/sessions/{session_part}/app/"
-        headers = {"x-vibe-show-base": base_path} if base_path else None
+        base_path = f"/show/{session_part}/"
         envelope = ShowRuntimeProtocolEnvelope(context)
         try:
-            response = await self.request("GET", runtime_path, envelope=envelope, headers=headers)
+            response = await self.request("GET", runtime_path, envelope=envelope)
             if response.status_code >= 500:
                 return ShowRuntimeResult(False, reason=f"session_prewarm_failed:{response.status_code}")
             result = await self._prewarm_session_module_graph(
                 session_id,
                 runtime_path=runtime_path,
                 envelope=envelope,
-                headers=headers,
                 seed_responses=[(runtime_path, response)],
                 base_path=base_path,
             )
@@ -321,7 +331,6 @@ class ShowRuntimeManager:
         *,
         runtime_path: str,
         envelope: ShowRuntimeProtocolEnvelope,
-        headers: dict[str, str] | None,
         seed_responses: list[tuple[str, httpx.Response]],
         base_path: str | None,
     ) -> ShowRuntimeResult:
@@ -343,7 +352,7 @@ class ShowRuntimeManager:
             if path in visited or depth > _PREWARM_MAX_DEPTH:
                 continue
             visited.add(path)
-            response = await self.request("GET", path, envelope=envelope, headers=headers)
+            response = await self.request("GET", path, envelope=envelope)
             if response.status_code >= 500:
                 return ShowRuntimeResult(False, reason=f"session_prewarm_module_failed:{response.status_code}:{path}")
             if response.status_code >= 400:
@@ -1522,13 +1531,16 @@ async def prewarm_show_page_session(
     session_id: str,
     *,
     context: ShowRuntimeContext,
-    base_path: str | None = None,
 ) -> ShowRuntimeResult:
     return await get_show_runtime_manager().prewarm_session(
         session_id,
         context=context,
-        base_path=base_path,
     )
+
+
+def _show_runtime_app_session_part(path: str) -> str | None:
+    match = re.match(r"^/sessions/([^/]+)/app(?:/|$)", path)
+    return match.group(1) if match else None
 
 
 def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> None:

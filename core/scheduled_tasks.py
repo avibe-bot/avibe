@@ -5825,6 +5825,23 @@ class ScheduledTaskService:
         await self._run_runtime_sync(self.store.load)
         self.reconcile_jobs()
 
+    async def _reconcile_rejected_cron_fire(self, task_id: str) -> None:
+        """Re-register the schedule after a cron generation's enqueue was refused."""
+
+        # A refusal is either benign -- an earlier scheduler fire is still queued
+        # -- or the stale-generation case this callback could not see: the mirror
+        # read above may predate a cron -> ``at`` edit committed on another
+        # connection, so the guard let the fire through and the storage CAS was
+        # the layer that caught it. Only the second needs the scheduler, and only
+        # this callback can ask for it: the cron job that keeps firing IS the
+        # stale generation, so nothing else would install the DateTrigger. Force a
+        # fresh mirror, then reconcile only when the definition is no longer the
+        # cron this job was registered for.
+        await self._run_runtime_sync(self.store.load)
+        task = self.store.get_task(task_id)
+        if task is None or task.schedule_type != "cron":
+            self.reconcile_jobs()
+
     async def _run_task(
         self,
         task_id: str,
@@ -5844,14 +5861,32 @@ class ScheduledTaskService:
             if expected_run_at is not None:
                 await self._reconcile_rejected_one_shot_fire(task_id)
             return
-        if expected_run_at is not None and (
-            task.schedule_type != "at"
-            or task.run_at != expected_run_at
-            or task.timezone != expected_timezone
-            or task.updated_at != expected_updated_at
-        ):
-            await self._reconcile_rejected_one_shot_fire(task_id)
+        # The registration's own shape says what this callback fired for, and the
+        # refreshed definition has to still be that thing. A one-shot must match
+        # the exact schedule identity it registered. A cron registration must at
+        # least still find a cron definition: enqueueing against a definition that
+        # became a one-shot would spend a fire its run_at has not reached, and
+        # would not retire it, so that same one-shot would run again later.
+        if expected_run_at is not None:
+            if (
+                task.schedule_type != "at"
+                or task.run_at != expected_run_at
+                or task.timezone != expected_timezone
+                or task.updated_at != expected_updated_at
+            ):
+                await self._reconcile_rejected_one_shot_fire(task_id)
+                return
+        elif expected_job_id is not None and task.schedule_type != "cron":
+            # refresh_task above already consumed any invalidation; hand the
+            # replacement schedule back to the scheduler that owns it.
+            self.reconcile_jobs()
             return
+        # Every registered job carries its APScheduler job id so the callback can
+        # reject a stale generation above. Only a one-shot fire carries it further:
+        # downstream the job id is one field of the schedule identity that retires
+        # the definition, and the store requires that identity whole or absent. A
+        # cron fire has no run_at, so it must not present a partial one.
+        enqueue_job_id = expected_job_id if expected_run_at is not None else None
         try:
             queued = await self._run_runtime_sync(
                 self.request_store.enqueue_task_run,
@@ -5862,7 +5897,7 @@ class ScheduledTaskService:
                 expected_run_at=expected_run_at,
                 expected_timezone=expected_timezone,
                 expected_updated_at=expected_updated_at,
-                expected_job_id=expected_job_id,
+                expected_job_id=enqueue_job_id,
             )
         except Exception as exc:
             if expected_run_at is None or expected_job_id is None:
@@ -5892,6 +5927,8 @@ class ScheduledTaskService:
             self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
         elif expected_run_at is not None:
             await self._reconcile_rejected_one_shot_fire(task_id)
+        elif expected_job_id is not None:
+            await self._reconcile_rejected_cron_fire(task_id)
 
     def _request_partition_key(self, request: TaskExecutionRequest) -> str:
         lock_key = self._execution_lock_key(request)

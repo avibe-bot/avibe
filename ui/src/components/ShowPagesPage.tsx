@@ -221,10 +221,10 @@ function ShowPageRow({
                   </p>
                 </div>
                 <Switch
-                  checked={page.offline}
+                  checked={!page.offline}
                   disabled={busy || (page.offline ? !page.can_publish_public : !page.can_manage)}
-                  onCheckedChange={onSetOffline}
-                  label={t('chat.showPage.offline')}
+                  onCheckedChange={(online) => onSetOffline(!online)}
+                  label={t('chat.showPage.availability')}
                 />
               </div>
 
@@ -241,11 +241,6 @@ function ShowPageRow({
 
               {page.visibility === 'offline' ? (
                 <p className="text-[12px] text-muted">{t('showPages.offlineNoLink')}</p>
-              ) : page.visibility === 'limited' ? (
-                <div className="flex items-start gap-2 text-[12px] text-muted">
-                  <TriangleAlert size={14} className="mt-0.5 shrink-0 text-gold-ink" />
-                  <span>{t('chat.showPage.sharingHelp.limited')}</span>
-                </div>
               ) : (
                 <div className="flex flex-col gap-2">
                   <span className={LABEL}>{t('showPages.liveLink')}</span>

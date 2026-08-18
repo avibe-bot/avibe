@@ -12813,9 +12813,8 @@ def _prewarm_show_page_session_best_effort(
     session_id: str,
     *,
     context: str,
-    base_path: str | None = None,
 ) -> None:
-    if _request_show_page_prewarm_best_effort(session_id, context=context, base_path=base_path) is None:
+    if _request_show_page_prewarm_best_effort(session_id, context=context) is None:
         logger.debug("Show Page session prewarm skipped for %s", session_id)
 
 
@@ -12910,12 +12909,10 @@ def cmd_show_update(args):
                 message = "Show Page has been taken offline. Local files were not deleted."
 
         if updated.visibility != "offline":
-            base_path = f"/p/{updated.share_id}/" if updated.visibility == "public" and updated.share_id else None
-            context = ShowRuntimeContext.SHARED if base_path else ShowRuntimeContext.PRIVATE
+            context = ShowRuntimeContext.SHARED if updated.visibility == "public" else ShowRuntimeContext.PRIVATE
             _prewarm_show_page_session_best_effort(
                 updated.session_id,
                 context=context.value,
-                base_path=base_path,
             )
         payload = _show_page_result(updated, message=message, extra=extra)
         if getattr(args, "json", False):
@@ -13039,7 +13036,6 @@ def _request_show_page_prewarm_best_effort(
     session_id: str,
     *,
     context: str,
-    base_path: str | None = None,
 ) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 
@@ -13047,8 +13043,6 @@ def _request_show_page_prewarm_best_effort(
     if not targets:
         return None
     payload = {"context": context}
-    if base_path:
-        payload["base_path"] = base_path
     body = json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",

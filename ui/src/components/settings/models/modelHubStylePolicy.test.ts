@@ -57,11 +57,25 @@ describe('Model Hub visual token policy', () => {
     const dialog = surfaceCss.match(/\.model-hub-route-dialog\s*\{([^}]*)\}/)?.[1] ?? '';
     const body = surfaceCss.match(/\.model-hub-route-body\s*\{([^}]*)\}/)?.[1] ?? '';
 
-    expect(dialog).toContain('top: min(');
+    expect(dialog).toContain('--model-hub-route-offset: min(');
     expect(dialog).toContain('--model-hub-route-top: 300px');
     expect(dialog).toContain('var(--model-hub-route-top)');
+    expect(dialog).toContain('top: var(--model-hub-route-offset)');
     expect(dialog).toContain('box-shadow: var(--model-hub-dialog-shadow)');
-    expect(dialog).toMatch(/max-height:\s*calc\([\s\S]*100dvh - var\(--model-hub-route-viewport-inset\) -[\s\S]*var\(--model-hub-route-viewport-inset\)/);
+    // The dialog grows with its chain, so what bounds it is the room below the
+    // offset it is anchored at — not the viewport minus two insets.
+    expect(dialog).toMatch(/max-height:\s*calc\([\s\S]*100dvh - var\(--model-hub-route-offset\) -[\s\S]*var\(--model-hub-route-viewport-inset\)/);
+    expect(body).not.toMatch(/^\s*height:/m);
     expect(body).toContain('overflow-y: auto');
+  });
+
+  it('bounds the add-hop picker against the space the popover reports', () => {
+    const selector = surfaceCss.match(/\.model-hub-route-selector\s*\{([^}]*)\}/)?.[1] ?? '';
+    const list = surfaceCss.match(/\.model-hub-route-selector-list\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(selector).toContain('--radix-popover-content-available-height');
+    expect(selector).toContain('max-height: min(');
+    expect(list).toContain('overflow-y: auto');
+    expect(list).toContain('min-height: 0');
   });
 });

@@ -211,7 +211,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    expect(await screen.findByRole('radiogroup', { name: 'Link access' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
     expect(screen.getByText('Loading Workspace access…')).toBeTruthy();
     expect(api.getShowAccessSettings).toHaveBeenCalledWith('ses-1');
     expect(permissionsApi.getPermissions).toHaveBeenCalledOnce();
@@ -290,7 +290,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     });
   });
 
-  it('does not present a Limited shared link before guest admission exists', async () => {
+  it('presents the Limited guest-admission link', async () => {
     api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,
       can_manage: false,
@@ -299,7 +299,8 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     api.ensureShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'limited',
-      active_url: '/p/stable-link/',
+      active_url: null,
+      public_url: 'https://alice.avibe.bot/p/stable-link/',
       share_id: 'stable-link',
       url_available: true,
       offline: false,
@@ -313,11 +314,91 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    expect(await screen.findByText(
-      'Configure the email audience now; the shared link is not active yet.',
-    )).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Copy link' })).toBeNull();
-    expect(screen.queryByDisplayValue('/p/stable-link/')).toBeNull();
+    expect(await screen.findByDisplayValue('https://alice.avibe.bot/p/stable-link/')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
+  });
+
+  it('keeps the Limited share action disabled without Cloud identity', async () => {
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({
+      can_use: true,
+      can_manage: false,
+      can_publish_public: false,
+    }));
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'limited',
+      active_url: null,
+      public_url: null,
+      share_id: 'stable-link',
+      url_available: false,
+      offline: false,
+      title: null,
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => expect(api.ensureShowPage).toHaveBeenCalledWith('ses-1'));
+    expect((screen.getByRole('button', { name: 'Copy link' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.queryByDisplayValue(/\/p\/stable-link\/$/)).toBeNull();
+  });
+
+  it('keeps the online toggle and custom link out while showing Workspace access', async () => {
+    const organizationAccess = showPageAccess({
+      mode: 'organization',
+      ownership_status: 'unchanged',
+      instance_id: 'inst-1',
+      organization_id: 'org-1',
+      policy_organization_id: 'org-1',
+      can_use: true,
+      can_manage: true,
+      can_publish_public: true,
+    });
+    const pending = new Promise(() => undefined);
+    permissionsApi.getPermissions.mockReturnValue(pending);
+    permissionsApi.getResourceAccess.mockReturnValue(pending);
+    api.getShowPageAccess.mockResolvedValue(organizationAccess);
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: 'stable-link',
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: {
+        page_id: 'ses-1',
+        access_mode: 'private',
+        share_id: 'stable-link',
+        revision: 0,
+        normalized_emails: [],
+      },
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={organizationAccess}
+          canManageInstance
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.getByText('Workspace access')).toBeTruthy();
+    expect(screen.queryByText('Page online')).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
+    expect(api.setShowPageAvailability).not.toHaveBeenCalled();
   });
 
   it('shows the loading state while a first access read is pending', async () => {
