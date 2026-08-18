@@ -40,20 +40,6 @@ _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "er
 _SYNC_COUNT_KEYS = ("active", "error", "offline", "applying", "in_sync")
 _PROJECT_ID_PATH_SEPARATORS = frozenset({"/", "\\"})
 _PROJECT_ID_DOT_SEGMENTS = frozenset({".", ".."})
-_POLICY_SYNC_PROGRESS = {
-    "none": 0,
-    "offline": 1,
-    "error": 1,
-    "applying": 2,
-    "in_sync": 3,
-}
-_PROJECT_SYNC_PROGRESS = {
-    "offline": 0,
-    "error": 0,
-    "pending": 1,
-    "in_sync": 2,
-    "deleted": 3,
-}
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.RLock()
 
@@ -680,31 +666,20 @@ def _prefer_mapping(
     return merged
 
 
-def _project_progress(project: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
-    sync = project["sync"]
-    access = project["access"]
-    return (
-        int(access["revision"]),
-        int(sync["desired_access_revision"]),
-        int(sync["applied_access_revision"]),
-        _PROJECT_SYNC_PROGRESS[str(sync["status"])],
-        str(sync.get("last_synced_at") or ""),
-    )
-
-
 def _merge_project_projection(
     preferred: Mapping[str, Any],
     fallback: Mapping[str, Any],
 ) -> dict[str, Any]:
-    merged = _prefer_mapping(preferred, fallback)
-    advanced, other = (
-        (preferred, fallback)
-        if _project_progress(preferred) >= _project_progress(fallback)
-        else (fallback, preferred)
-    )
-    merged["access"] = _prefer_mapping(advanced["access"], other["access"])
-    merged["sync"] = _prefer_mapping(advanced["sync"], other["sync"])
-    return merged
+    """Merge one Project while preserving the caller-selected snapshot winner.
+
+    Equal-revision snapshots are ordered by their request-start epoch at the
+    outer projection boundary. A status ranking here would let an older
+    ``applying``/``pending`` response overwrite a newer terminal failure.
+    Mutation acknowledgements also use this helper so their authoritative
+    Project fields are retained while additive unknown fields survive.
+    """
+
+    return _prefer_mapping(preferred, fallback)
 
 
 def _merge_projects(
@@ -724,13 +699,9 @@ def _merge_policy_sync(
     preferred: Mapping[str, Any],
     fallback: Mapping[str, Any],
 ) -> dict[str, Any]:
-    advanced, other = (
-        (preferred, fallback)
-        if _POLICY_SYNC_PROGRESS[str(preferred["status"])]
-        >= _POLICY_SYNC_PROGRESS[str(fallback["status"])]
-        else (fallback, preferred)
-    )
-    return _prefer_mapping(advanced, other)
+    """Preserve the request-order winner for aggregate sync state."""
+
+    return _prefer_mapping(preferred, fallback)
 
 
 def _merge_equal_revision_projection(
@@ -760,6 +731,7 @@ def _cache_read_merge_write(
     *,
     request_order: int,
     mutation_rebase: bool = False,
+    pairing_guard: Callable[[], None] | None = None,
 ) -> None:
     """Read, merge, and atomically replace one instance cache under one lock."""
 
@@ -768,6 +740,8 @@ def _cache_read_merge_write(
             cache_path = _cache_path()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             with _cache_file_lock(cache_path):
+                if pairing_guard is not None:
+                    pairing_guard()
                 cached = _read_cache(instance_id)
                 candidate = merge(cached.projection if cached is not None else None)
                 if candidate is None:
@@ -795,6 +769,8 @@ def _cache_read_merge_write(
                             ),
                         )
                         validated = _validated_projection(validated, instance_id)
+                if pairing_guard is not None:
+                    pairing_guard()
                 _write_cache(instance_id, validated, cache_order=cache_order)
         except (OSError, TimeoutError):
             logger.warning("Unable to cache the current Permissions projection", exc_info=True)
@@ -805,12 +781,14 @@ def _cache_projection(
     projection: Any,
     *,
     request_order: int | None = None,
+    pairing_guard: Callable[[], None] | None = None,
 ) -> None:
     order = _cache_allocate_order(instance_id) if request_order is None else request_order
     _cache_read_merge_write(
         instance_id,
         lambda _cached: projection,
         request_order=order,
+        pairing_guard=pairing_guard,
     )
 
 
@@ -821,6 +799,7 @@ def _cache_mutation_result(
     access_entries: list[Any] | None = None,
     project: Mapping[str, Any] | None = None,
     request_order: int | None = None,
+    pairing_guard: Callable[[], None] | None = None,
 ) -> None:
     def merge(cached: dict[str, Any] | None) -> dict[str, Any] | None:
         if cached is None:
@@ -870,6 +849,7 @@ def _cache_mutation_result(
         merge,
         request_order=order,
         mutation_rebase=True,
+        pairing_guard=pairing_guard,
     )
 
 
@@ -936,24 +916,33 @@ def _backend_request(
 
 def get_current_permissions(config: V2Config | None = None) -> PermissionsProjectionResult:
     config, load_current_config = _request_config(config)
-    _, instance_id, _ = _runtime_credentials(config)
+    credentials = _runtime_credentials(config)
+    _, instance_id, _ = credentials
     request_order = _cache_allocate_order(instance_id)
+    pairing_guard = lambda: _guard_current_pairing(credentials, load_current_config)
     try:
         payload, _ = _backend_request(config, load_current_config, "GET", "")
         projection = _validated_projection(payload, instance_id)
-        _cache_projection(instance_id, projection, request_order=request_order)
+        _cache_projection(
+            instance_id,
+            projection,
+            request_order=request_order,
+            pairing_guard=pairing_guard,
+        )
         return PermissionsProjectionResult(
             projection=projection,
             source="live",
             cache_order=request_order,
         )
     except PermissionsUnavailableError:
+        pairing_guard()
         cached = _read_cache(instance_id)
         if cached is not None:
             return cached
         raise
     except PermissionsBackendError as exc:
         if _is_backend_unavailable_status(exc.status):
+            pairing_guard()
             cached = _read_cache(instance_id)
             if cached is not None:
                 return cached
@@ -966,8 +955,10 @@ def replace_authorized_users(
 ) -> dict[str, Any]:
     config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
-    _, request_instance_id, _ = _runtime_credentials(config)
+    credentials = _runtime_credentials(config)
+    _, request_instance_id, _ = credentials
     request_order = _cache_allocate_order(request_instance_id)
+    pairing_guard = lambda: _guard_current_pairing(credentials, load_current_config)
     payload_result, instance_id = _backend_request(
         config,
         load_current_config,
@@ -977,12 +968,14 @@ def replace_authorized_users(
         expected_instance_id=expected_instance_id,
     )
     result = _validated_authorized_users_result(payload_result)
+    pairing_guard()
     _acknowledge_authorization_revision(config, result["authorization_revision"])
     _cache_mutation_result(
         instance_id,
         result["authorization_revision"],
         access_entries=result["entries"],
         request_order=request_order,
+        pairing_guard=pairing_guard,
     )
     return {**result, "instance_id": instance_id}
 
@@ -996,8 +989,10 @@ def update_project_access(
         raise PermissionsInvalidResponseError("invalid_project_id")
     config, load_current_config = _request_config(config)
     expected_instance_id, backend_payload = _mutation_payload(payload)
-    _, request_instance_id, _ = _runtime_credentials(config)
+    credentials = _runtime_credentials(config)
+    _, request_instance_id, _ = credentials
     request_order = _cache_allocate_order(request_instance_id)
+    pairing_guard = lambda: _guard_current_pairing(credentials, load_current_config)
     payload_result, instance_id = _backend_request(
         config,
         load_current_config,
@@ -1007,12 +1002,14 @@ def update_project_access(
         expected_instance_id=expected_instance_id,
     )
     result = _validated_project_result(payload_result, project_id)
+    pairing_guard()
     _acknowledge_authorization_revision(config, result["authorization_revision"])
     _cache_mutation_result(
         instance_id,
         result["authorization_revision"],
         project=result["project"],
         request_order=request_order,
+        pairing_guard=pairing_guard,
     )
     return {**result, "instance_id": instance_id}
 

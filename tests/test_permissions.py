@@ -757,6 +757,55 @@ def test_permissions_cache_equal_revision_retains_the_newest_complete_projection
     assert cached.projection["policy_sync"] == fresh["policy_sync"]
 
 
+@pytest.mark.parametrize("terminal_status", ["error", "offline"])
+def test_permissions_cache_equal_revision_preserves_terminal_sync_failures(
+    terminal_status: str,
+) -> None:
+    applying = _complete_projection()
+    applying["policy_sync"]["status"] = "applying"
+    applying["projects"][0]["sync"].update(
+        {
+            "status": "pending",
+            "desired_access_revision": 3,
+            "applied_access_revision": 2,
+        }
+    )
+    terminal = deepcopy(applying)
+    terminal["policy_sync"]["status"] = terminal_status
+    terminal["projects"][0]["sync"].update(
+        {
+            "status": terminal_status,
+            "last_sync_error": f"{terminal_status} while applying",
+        }
+    )
+
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        applying,
+        request_order=10,
+    )
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        terminal,
+        request_order=11,
+    )
+    # A delayed response from the older request must not roll the terminal
+    # state back to the in-progress snapshot.
+    permissions._cache_projection(  # noqa: SLF001
+        "inst-123",
+        applying,
+        request_order=10,
+    )
+
+    cached = permissions._read_cache("inst-123")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection["policy_sync"]["status"] == terminal_status
+    assert cached.projection["projects"][0]["sync"]["status"] == terminal_status
+    assert cached.projection["projects"][0]["sync"]["last_sync_error"] == (
+        f"{terminal_status} while applying"
+    )
+
+
 def test_permissions_cache_mutation_rebase_reads_complete_equal_revision_projection() -> None:
     base = _complete_projection()
     complete = deepcopy(base)
@@ -1106,6 +1155,105 @@ def test_permissions_rejects_cached_fallback_after_inflight_pairing_change(
         match="permissions_pairing_changed",
     ):
         permissions.get_current_permissions(config)
+
+
+@pytest.mark.parametrize("operation", ["get", "authorized_users", "project_access"])
+def test_permissions_cache_write_rechecks_pairing_for_every_projection_writer(
+    monkeypatch,
+    operation: str,
+) -> None:
+    config = _config()
+    old_projection = _complete_projection()
+    new_projection = _complete_projection("inst-new")
+    permissions._cache_projection("inst-123", old_projection)  # noqa: SLF001
+    switched = False
+
+    def switch_pairing() -> None:
+        nonlocal switched
+        if switched:
+            return
+        switched = True
+        replacement = V2Config.load()
+        replacement.remote_access.vibe_cloud.instance_id = "inst-new"
+        replacement.save()
+        permissions._cache_projection(  # noqa: SLF001
+            "inst-new",
+            new_projection,
+        )
+
+    if operation == "get":
+        original_guard = permissions._guard_current_pairing  # noqa: SLF001
+
+        def switch_after_response_guard(credentials, load_current_config):
+            original_guard(credentials, load_current_config)
+            switch_pairing()
+
+        monkeypatch.setattr(
+            permissions,
+            "_guard_current_pairing",
+            switch_after_response_guard,
+        )
+    else:
+        monkeypatch.setattr(
+            permissions,
+            "_acknowledge_authorization_revision",
+            lambda *_args: switch_pairing(),
+        )
+
+    def request(_method, _url, **_kwargs):
+        if operation == "get":
+            return _Response(200, old_projection)
+        if operation == "authorized_users":
+            return _Response(
+                200,
+                {
+                    "ok": True,
+                    "entries": old_projection["access"]["entries"],
+                    "authorization_revision": 3,
+                },
+            )
+        return _Response(
+            200,
+            {
+                "ok": True,
+                "project": old_projection["projects"][0],
+                "authorization_revision": 3,
+            },
+        )
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        if operation == "get":
+            permissions.get_current_permissions(config)
+        elif operation == "authorized_users":
+            permissions.replace_authorized_users(
+                {
+                    "entries": old_projection["access"]["entries"],
+                    "if_match_revision": 3,
+                    "if_match_instance_id": "inst-123",
+                },
+                config,
+            )
+        else:
+            permissions.update_project_access(
+                "project-1",
+                {
+                    "mode": old_projection["projects"][0]["access"]["mode"],
+                    "bindings": old_projection["projects"][0]["access"]["bindings"],
+                    "if_match_revision": 2,
+                    "if_match_instance_id": "inst-123",
+                },
+                config,
+            )
+
+    cached = permissions._read_cache("inst-new")  # noqa: SLF001
+    assert cached is not None
+    assert cached.projection == new_projection
+    assert permissions._read_cache("inst-123") is None  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
