@@ -15163,6 +15163,14 @@ def _with_limited_show_policy(response: Response) -> Response:
     return response
 
 
+def _show_limited_not_found_response():
+    result = _show_page_not_found_response()
+    if isinstance(result, tuple):
+        response, status = result
+        return _with_limited_show_policy(response), status
+    return _with_limited_show_policy(result)
+
+
 @app.route("/auth/show-identity/callback", methods=["POST"])
 async def complete_show_identity_login():
     from core.show_pages import ShowPageStore
@@ -15308,6 +15316,10 @@ async def serve_public_show_page(share_id, asset_path):
         page = store.get_by_share_id(share_id)
         if page is None and lease is not None:
             page = store.get(lease.page_id)
+            if page is not None:
+                access = store.get_access(page.session_id)
+                if access is None or access.share_id != share_id:
+                    return _show_limited_not_found_response()
         if page is None:
             return _show_page_not_found_response()
         limited_guest = (
@@ -15339,6 +15351,19 @@ async def serve_public_show_page(share_id, asset_path):
                     if query:
                         private_target = f"{private_target}?{query}"
                     return redirect(private_target)
+        if limited_guest:
+            # A guest lease does not grant a grace period after access changes.
+            # Already-rendered pages are not proactively closed, but every
+            # subsequent request must match the current local access record.
+            access = store.get_access(page.session_id)
+            if (
+                access is None
+                or page.visibility != "limited"
+                or access.access_mode != "limited"
+                or access.share_id != share_id
+                or lease.normalized_email not in access.normalized_emails
+            ):
+                return _show_limited_not_found_response()
         if page.visibility == "limited":
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
