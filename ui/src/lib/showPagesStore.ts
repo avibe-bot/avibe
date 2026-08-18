@@ -88,7 +88,7 @@ export class ShowPagesInventoryStore {
 
   activate = (): (() => void) => {
     this.activeConsumers += 1;
-    if (this.activeConsumers === 1) this.connectEvents();
+    this.syncEventSubscription();
 
     // Every newly visible projection revalidates, but simultaneous activations
     // share one request. The retained snapshot remains readable while it runs.
@@ -99,12 +99,36 @@ export class ShowPagesInventoryStore {
       if (!active) return;
       active = false;
       this.activeConsumers -= 1;
-      if (this.activeConsumers === 0) {
-        this.disconnectEvents?.();
-        this.disconnectEvents = null;
-      }
+      this.syncEventSubscription();
     };
   };
+
+  // The subscription is keyed on whether there is anything to protect, not on
+  // whether anyone is reading. Those are different questions: a consumer needs
+  // revalidation, but a RETAINED snapshot needs invalidation — and a store that
+  // unsubscribed when its last window closed cannot hear the revocation it would
+  // have to act on. Reopening then renders the retained pages synchronously
+  // (titles, paths, share URLs) while ``activate()``'s reload is still in flight,
+  // and ``fetchCurrentRevision`` keeps them when that reload fails, so revoked
+  // metadata can stay on screen indefinitely.
+  //
+  // A read in flight counts: it will produce a snapshot, so the invalidation
+  // window has to stay open across it. This adds no request on any route — while
+  // no consumer reads the inventory the subscription handles invalidation only
+  // (below), and the shared events stream is already open for the shell-wide
+  // badges wherever a snapshot can exist.
+  private shouldWatchEvents(): boolean {
+    return this.activeConsumers > 0 || this.snapshot.pages.length > 0 || this.inFlight !== null;
+  }
+
+  private syncEventSubscription(): void {
+    if (this.shouldWatchEvents()) {
+      this.connectEvents();
+      return;
+    }
+    this.disconnectEvents?.();
+    this.disconnectEvents = null;
+  }
 
   reload = (): Promise<void> => {
     if (this.inFlight) return this.inFlight;
@@ -145,6 +169,18 @@ export class ShowPagesInventoryStore {
     });
   };
 
+  // Access to Show Pages was revoked or re-granted while nothing reads the
+  // inventory. Advancing the revision fences any read already in flight — the
+  // single-flight loop discards that response and reconciles again — and the
+  // snapshot drops to pre-first-read state, so the next consumer cannot render
+  // revoked titles, paths or share URLs even if its own read is slow or fails.
+  // Stronger than revalidating, which depended on a fetch succeeding.
+  private discardAuthorizedPages(): void {
+    this.revision += 1;
+    this.updateSnapshot({ pages: [], loaded: false });
+    this.syncEventSubscription();
+  }
+
   private updateSnapshot(patch: Partial<ShowPagesInventorySnapshot>): void {
     const next = { ...this.snapshot, ...patch };
     if (
@@ -182,6 +218,9 @@ export class ShowPagesInventoryStore {
     } finally {
       this.inFlight = null;
       this.updateSnapshot({ loading: false });
+      // A consumer may have detached mid-read; now that the snapshot is settled
+      // it is decidable whether anything is left to keep watching for.
+      this.syncEventSubscription();
     }
   }
 
@@ -204,9 +243,15 @@ export class ShowPagesInventoryStore {
           connected = true;
           return;
         }
+        // Revalidation, so it may wait for a consumer: activation re-reads
+        // anyway. Only invalidation has to act with nobody reading.
+        if (this.activeConsumers === 0) return;
         this.invalidateAndReload();
       },
       onSessionActivity: (data) => {
+        // Same rule: keeping a retained snapshot merged is revalidation, and the
+        // reload below would be a request on a route that reads nothing.
+        if (this.activeConsumers === 0) return;
         const hasPage = this.snapshot.pages.some(
           (page) => page.session_id === data.session_id,
         );
@@ -233,7 +278,13 @@ export class ShowPagesInventoryStore {
         // Normal session/user-message events do not change this inventory.
         if (data.event === 'show_event') this.invalidateAndReload();
       },
-      onAuthorizationChanged: () => this.invalidateAndReload(),
+      onAuthorizationChanged: () => {
+        if (this.activeConsumers === 0) {
+          this.discardAuthorizedPages();
+          return;
+        }
+        this.invalidateAndReload();
+      },
     });
   }
 }

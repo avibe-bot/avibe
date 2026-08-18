@@ -7,11 +7,12 @@ import type { ReactNode } from 'react';
 
 import { AppShell } from './AppShell';
 
-vi.hoisted(() => {
+const viewport = vi.hoisted(() => {
+  const state = { isDesktop: false };
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
-      matches: false,
+      matches: state.isDesktop,
       media: query,
       onchange: null,
       addListener: vi.fn(),
@@ -21,6 +22,7 @@ vi.hoisted(() => {
       dispatchEvent: vi.fn(),
     })),
   );
+  return state;
 });
 
 const api = vi.hoisted(() => ({
@@ -80,7 +82,9 @@ vi.mock('./apps/WindowLayer', () => ({ WindowLayer: () => <div data-testid="wind
 vi.mock('./workbench/NewSessionSheet', () => ({
   NewSessionSheet: () => null,
 }));
-vi.mock('./workbench/WorkbenchSidebar', () => ({ WorkbenchSidebar: () => <div /> }));
+vi.mock('./workbench/WorkbenchSidebar', () => ({
+  WorkbenchSidebar: () => <div data-testid="workbench-sidebar" />,
+}));
 vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -94,6 +98,7 @@ vi.mock('react-i18next', () => ({
 }));
 
 beforeEach(() => {
+  viewport.isDesktop = false;
   instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
@@ -126,6 +131,35 @@ describe('AppShell setup recovery', () => {
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe('/admin/dashboard');
     expect(screen.queryByTestId('wizard')).toBeNull();
+  });
+});
+
+describe('AppShell workbench sidebar', () => {
+  // The sidebar's own container is hidden below md by CSS, which does not
+  // unmount it. Its consumers fetch the inbox feed and the project tree on
+  // mount, so a demand gate keyed on mounting is only true if mounting means
+  // visible — the mount site owns that, not the sidebar's callers.
+  it.each([
+    [false, 0],
+    [true, 1],
+  ])('mounts only where it is visible (desktop: %s)', async (isDesktop, expectedMounts) => {
+    viewport.isDesktop = isDesktop;
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
+    expect(screen.queryAllByTestId('workbench-sidebar')).toHaveLength(expectedMounts);
+    // The surrounding chrome is unaffected: only the data-reading member of the
+    // desktop-only container is gated, not the container.
+    expect(screen.getAllByText('appShell.title').length).toBeGreaterThan(0);
   });
 });
 

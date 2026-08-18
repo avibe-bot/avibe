@@ -43,7 +43,7 @@ const deferred = <T,>() => {
 type EventHandlers = Parameters<ShowPagesInventoryApi['connectWorkbenchEvents']>[0];
 
 describe('ShowPagesInventoryStore', () => {
-  it('single-flights simultaneous consumers and owns one events subscription', async () => {
+  it('single-flights simultaneous consumers and keeps one events subscription', async () => {
     const response = deferred<{ pages: ShowPage[] }>();
     const disconnect = vi.fn();
     const api: ShowPagesInventoryApi = {
@@ -66,8 +66,97 @@ describe('ShowPagesInventoryStore', () => {
 
     releaseFirst();
     expect(disconnect).not.toHaveBeenCalled();
+    // The last consumer leaving does not end the subscription: the snapshot it
+    // leaves behind is what an authorization change has to be able to reach.
     releaseSecond();
+    expect(disconnect).not.toHaveBeenCalled();
+    expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a retained snapshot when access changes with nothing reading it', async () => {
+    let handlers: EventHandlers | undefined;
+    const disconnect = vi.fn();
+    const revalidation = deferred<{ pages: ShowPage[] }>();
+    const getShowPages = vi
+      .fn()
+      .mockResolvedValueOnce({ pages: [page({ share_id: 'share-1' })] })
+      .mockImplementationOnce(() => revalidation.promise);
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return disconnect;
+      }),
+    });
+
+    const close = store.activate();
+    await store.reload();
+    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+    expect(store.getSnapshot().pages).toHaveLength(1);
+    close();
+
+    // Still subscribed, but invalidation-only: a reconnect or a session event
+    // with nobody reading must not put a request on a route that renders none.
+    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+    handlers?.onSessionActivity?.({
+      session_id: 'session-1',
+      scope_id: null,
+      event: 'show_event',
+    });
+    await Promise.resolve();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+
+    // Asserted before any re-read resolves: the property must hold for a
+    // revalidation that is slow, failing, or never issued at all, because the
+    // next consumer renders this snapshot synchronously on its first frame.
+    expect(store.getSnapshot().pages).toEqual([]);
+    expect(store.getSnapshot().loaded).toBe(false);
+    // Nothing left to protect and nobody reading, so the subscription ends too.
     expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    const reopened = store.activate();
+    expect(store.getSnapshot().pages).toEqual([]);
+    revalidation.resolve({ pages: [] });
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    reopened();
+  });
+
+  it('fences a read already in flight when access changes with nothing reading it', async () => {
+    let handlers: EventHandlers | undefined;
+    const stale = deferred<{ pages: ShowPage[] }>();
+    const getShowPages = vi
+      .fn()
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValueOnce({ pages: [] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const close = store.activate();
+    const flight = store.reload();
+    close();
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+
+    // The response left the server before the change, so it cannot repopulate
+    // what was just dropped; the same single-flight promise reconciles instead.
+    stale.resolve({ pages: [page({ share_id: 'share-1' })] });
+    await flight;
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages).toEqual([]);
   });
 
   it('does not refetch when the initial events connection arrives after the activation read', async () => {

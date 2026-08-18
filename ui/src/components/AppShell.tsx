@@ -32,6 +32,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { useIsDesktop } from '../lib/useIsDesktop';
 import {
   adminLandingPath,
   isAdvancedSettingsPath,
@@ -259,6 +260,11 @@ export const AppShell: React.FC = () => {
   const { status } = useStatus();
   // Badge only — the shell is mounted on every route and renders no feed.
   const { totalUnread } = useWorkbenchInbox({ feed: false });
+  // The sidebar's own <aside> is hidden below md by CSS, which hides it without
+  // unmounting it — so its inbox-feed and project-tree consumers would still
+  // fetch on a phone. A demand gate keyed on mounting is only honest if mounting
+  // implies visible, so the mount site has to carry the viewport too.
+  const isDesktop = useIsDesktop();
   const {
     capabilities,
     instanceKind,
@@ -620,7 +626,9 @@ export const AppShell: React.FC = () => {
                 </nav>
               </div>
             )}
-            {shellMode === 'workbench' && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
+            {shellMode === 'workbench' && isDesktop && (
+              <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />
+            )}
           </div>
 
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal

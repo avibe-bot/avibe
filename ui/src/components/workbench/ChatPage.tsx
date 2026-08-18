@@ -237,7 +237,8 @@ export const ChatPage: React.FC = () => {
     showPageAccess,
   );
   // This session's own unread state, plus the mark-read write. Neither needs the
-  // feed page, so a mobile chat (no sidebar) never loads one.
+  // feed page, so this component never asks for one; whether the document loads
+  // one at all is decided by the sidebar, which mounts on desktop only.
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
