@@ -883,14 +883,37 @@ def test_show_identity_not_found_is_a_generic_html_page_for_browsers():
     with app.test_request_context(
         show_identity.CALLBACK_PATH,
         method="POST",
-        headers={"Accept": "text/html"},
+        headers={"Accept": "text/html", "Accept-Language": "zh-CN,zh;q=0.9"},
     ):
         response = ui_server._show_identity_not_found_response()
 
     assert response.status_code == 404
     assert response.headers["Content-Type"].startswith("text/html")
-    assert b"This page is unavailable" in response.body
+    body = response.body.decode("utf-8")
+    assert 'lang="zh"' in body
+    assert "此页面暂时不可用" in body
+    assert "页面不存在，或已不再提供访问。" in body
     assert b"show_access_forbidden" not in response.body
+
+
+@pytest.mark.parametrize(
+    "accept",
+    [
+        "application/json, text/html;q=0",
+        "application/json, text/html;q=0.5",
+        "*/*",
+    ],
+)
+def test_show_identity_not_found_prefers_json_when_html_is_not_preferred(accept):
+    with app.test_request_context(
+        show_identity.CALLBACK_PATH,
+        method="POST",
+        headers={"Accept": accept},
+    ):
+        response = ui_server._show_identity_not_found_response()
+
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "not_found"}
 
 
 def test_show_identity_callback_body_stops_at_the_streaming_limit():
@@ -7728,6 +7751,17 @@ def test_public_show_not_found_is_a_generic_html_page_for_browsers():
     assert response.headers["Content-Type"].startswith("text/html")
     assert b"This page is unavailable" in response.content
     assert b"not_found" not in response.content
+
+
+def test_public_show_not_found_respects_html_quality():
+    response = app.test_client().get(
+        "/p/unknown-share/",
+        base_url="http://127.0.0.1:5123",
+        headers={"Accept": "application/json, text/html;q=0"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not_found"}
 
 
 def test_rotated_public_share_url_stops_working(monkeypatch, tmp_path):

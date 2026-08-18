@@ -12969,13 +12969,59 @@ def _show_page_offline_response():
     return Response(html, status=401, mimetype="text/html; charset=utf-8")
 
 
+def _show_page_accept_quality(accept: str, target: str) -> float:
+    """Return the preferred quality for a response media type."""
+    target_type, target_subtype = target.split("/", 1)
+    best_specificity = -1
+    best_quality = 0.0
+    for item in accept.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        media_range = parts[0].lower()
+        if "/" not in media_range:
+            continue
+        range_type, range_subtype = media_range.split("/", 1)
+        if range_type not in {target_type, "*"} or range_subtype not in {target_subtype, "*"}:
+            continue
+        specificity = (range_type != "*") + (range_subtype != "*")
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition("=")
+            if name.strip().lower() != "q" or not separator:
+                continue
+            try:
+                quality = float(value.strip().strip('"'))
+            except ValueError:
+                quality = 0.0
+            break
+        if not 0.0 <= quality <= 1.0:
+            quality = 0.0
+        if specificity > best_specificity:
+            best_specificity = specificity
+            best_quality = quality
+    return best_quality
+
+
+def _show_page_accepts_html() -> bool:
+    """Choose HTML only when it is preferred and explicitly acceptable."""
+    accept = request.headers.get("Accept", "").strip()
+    if not accept:
+        return False
+    html_quality = _show_page_accept_quality(accept, "text/html")
+    json_quality = _show_page_accept_quality(accept, "application/json")
+    return html_quality > 0.0 and html_quality > json_quality
+
+
 def _show_page_not_found_html_response():
-    html = """<!doctype html>
-<html lang="en">
+    language = _request_ui_language()
+    title = html.escape(t("show.pageUnavailable.title", language), quote=True)
+    heading = html.escape(t("show.pageUnavailable.heading", language))
+    message = html.escape(t("show.pageUnavailable.message", language))
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Show Page unavailable</title>
+    <title>__TITLE__</title>
     <style>
       body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
       main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
@@ -12985,13 +13031,13 @@ def _show_page_not_found_html_response():
   </head>
   <body>
     <main>
-      <h1>This page is unavailable</h1>
-      <p>The page does not exist or is no longer available.</p>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
     </main>
   </body>
 </html>
-"""
-    response = Response(html, status=404, mimetype="text/html; charset=utf-8")
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message)
+    response = Response(html_body, status=404, mimetype="text/html; charset=utf-8")
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -13000,7 +13046,7 @@ def _show_page_not_found_html_response():
 def _show_page_not_found_response():
     if (
         request.method in {"GET", "HEAD"}
-        and "text/html" in request.headers.get("accept", "").lower()
+        and _show_page_accepts_html()
     ):
         return _show_page_not_found_html_response()
     return jsonify({"error": "not_found"}), 404
@@ -15024,7 +15070,7 @@ def _show_identity_error_response(error: str, status: int):
 
 def _show_identity_not_found_response():
     """Hide whether a share exists when identity admission is denied."""
-    if "text/html" in request.headers.get("accept", "").lower():
+    if _show_page_accepts_html():
         return _show_page_not_found_html_response()
     response = jsonify({"error": "not_found"})
     response.status_code = 404
