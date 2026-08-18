@@ -66,6 +66,10 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
 _PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
+_CHAT_PROBE_MAX_TOKENS = 8
+_CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
+    {"stop", "length", "content_filter", "tool_calls", "function_call"}
+)
 _PREFLIGHT_IMAGE_DATA_URI = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAYElEQVR42u3QAQ0AAAwC"
@@ -629,7 +633,7 @@ class EverOSPort:
                     payload={
                         "model": self._llm_model,
                         "messages": [{"role": "user", "content": "Reply with OK."}],
-                        "max_tokens": 1,
+                        "max_tokens": _CHAT_PROBE_MAX_TOKENS,
                         "temperature": 0,
                     },
                     validator=_valid_chat_probe_response,
@@ -677,9 +681,19 @@ class EverOSPort:
     async def preflight(self) -> MemoryPreflightResult:
         """Run one bounded request for each configured processing endpoint."""
         checks = [
-            ("llm", self._llm_base_url, self._llm_api_key, "chat/completions", {
-                "model": self._llm_model, "messages": [{"role": "user", "content": "OK"}], "max_tokens": 1, "temperature": 0,
-            }, _valid_chat_probe_response),
+            (
+                "llm",
+                self._llm_base_url,
+                self._llm_api_key,
+                "chat/completions",
+                {
+                    "model": self._llm_model,
+                    "messages": [{"role": "user", "content": "OK"}],
+                    "max_tokens": _CHAT_PROBE_MAX_TOKENS,
+                    "temperature": 0,
+                },
+                _valid_chat_probe_response,
+            ),
             ("embedding", self._embedding_base_url, self._embedding_api_key, "embeddings", {
                 "model": self._embedding_model, "input": "OK",
             }, _valid_embedding_probe_response),
@@ -1037,7 +1051,10 @@ class EverOSPort:
                 )
                 return None
             code = None
-            message = f"HTTP {status_code}"
+            if 200 <= status_code < 300:
+                message = _probe_response_issue(side, value) or "provider_response_invalid"
+            else:
+                message = f"HTTP {status_code}"
             if isinstance(value, dict) and isinstance(value.get("error"), dict):
                 error = value["error"]
                 code = _bounded_opaque_string(
@@ -1570,14 +1587,42 @@ def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
 
 
 def _valid_chat_probe_response(value: Any) -> bool:
+    return _chat_probe_response_issue(value) is None
+
+
+def _chat_probe_response_issue(value: Any) -> str | None:
     if not isinstance(value, dict):
-        return False
+        return "provider_response_not_object"
     choices = value.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        return False
+    if not isinstance(choices, list) or not choices:
+        return "provider_response_missing_choices"
+    if not isinstance(choices[0], dict):
+        return "provider_response_invalid_choice"
     message = choices[0].get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    return isinstance(content, str) and bool(content.strip())
+    if not isinstance(message, dict):
+        return "provider_response_missing_message"
+    if "content" not in message:
+        return "provider_response_missing_content"
+    content = message["content"]
+    if content is not None and not isinstance(content, str):
+        return "provider_response_invalid_content"
+    if content is None or not content.strip():
+        if message.get("role") != "assistant":
+            return "provider_response_invalid_role"
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is None:
+            return "provider_response_missing_finish_reason"
+        if not isinstance(finish_reason, str):
+            return "provider_response_invalid_finish_reason"
+        if finish_reason not in _CHAT_PROBE_TERMINAL_FINISH_REASONS:
+            return "provider_response_invalid_finish_reason"
+    return None
+
+
+def _probe_response_issue(side: str, value: Any) -> str | None:
+    if side in {"llm", "multimodal"}:
+        return _chat_probe_response_issue(value)
+    return f"provider_{side}_response_invalid"
 
 
 def _valid_embedding_probe_response(value: Any) -> bool:
@@ -1627,7 +1672,7 @@ def _multimodal_preflight_payload(model: str | None) -> dict[str, Any]:
                 ],
             }
         ],
-        "max_tokens": 1,
+        "max_tokens": _CHAT_PROBE_MAX_TOKENS,
         "temperature": 0,
     }
 

@@ -152,24 +152,30 @@ export function ShowPageSharingSettings({
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  const adopt = useCallback((showAccess: ShowAccess) => {
-    if (showAccess.page_id !== sessionId) throw new Error('ShowAccess page identity mismatch');
-    savedRef.current = showAccess;
-    setSaved(showAccess);
-    setMode(showAccess.access_mode);
-    setShareId(showAccess.share_id ?? '');
-    setEmails(showAccess.normalized_emails);
-    setEmailDraft('');
-    setEmailInvalid(false);
-  }, [sessionId]);
+  const adopt = useCallback(
+    (showAccess: ShowAccess, preserveShareIdDraft = false) => {
+      if (showAccess.page_id !== sessionId) throw new Error('ShowAccess page identity mismatch');
+      savedRef.current = showAccess;
+      setSaved(showAccess);
+      setMode(showAccess.access_mode);
+      if (!preserveShareIdDraft) setShareId(showAccess.share_id ?? '');
+      setEmails(showAccess.normalized_emails);
+      setEmailDraft('');
+      setEmailInvalid(false);
+    },
+    [sessionId],
+  );
 
-  const load = useCallback(async (settledGate: Gate = 'ready') => {
+  const load = useCallback(async (
+    settledGate: Gate = 'ready',
+    preserveShareIdDraft = false,
+  ) => {
     const generation = ++generationRef.current;
     setGate('loading');
     try {
       const result = await api.getShowAccessSettings(sessionId);
       if (generation !== generationRef.current) return;
-      adopt(result.show_access);
+      adopt(result.show_access, preserveShareIdDraft);
       setGate(settledGate);
     } catch {
       if (generation !== generationRef.current) return;
@@ -199,9 +205,10 @@ export function ShowPageSharingSettings({
   const normalizedShareId = shareId.trim() || null;
   const sharedMode = mode === 'limited' || mode === 'public';
   const shareIdInvalid = sharedMode && (!normalizedShareId || !isValidShareId(normalizedShareId));
-  const dirty = Boolean(
-    saved && showAccessDraftChanged(saved, mode, normalizedShareId, emails),
+  const accessDirty = Boolean(
+    saved && showAccessDraftChanged(saved, mode, saved.share_id, emails),
   );
+  const shareIdDirty = Boolean(saved && normalizedShareId !== saved.share_id);
   const emailLimitReached = emails.length >= SHOW_ACCESS_EMAIL_MAX_COUNT;
   const editable = canManage && gate !== 'loading' && !saving;
 
@@ -209,11 +216,14 @@ export function ShowPageSharingSettings({
     nextMode: ShowAccessMode,
     nextShareId: string,
     nextEmails: string[],
+    preserveShareIdDraftOnConflict = false,
+    preserveShareIdDraftOnSuccess = preserveShareIdDraftOnConflict,
   ) => {
     const current = savedRef.current;
     const targetShareId = nextShareId.trim() || null;
     const nextTargetEmails = showAccessTargetEmails(nextMode, nextEmails);
-    const nextInvalid = (nextMode !== 'private' && (!targetShareId || !isValidShareId(targetShareId)))
+    const nextInvalid =
+      (nextMode !== 'private' && (!targetShareId || !isValidShareId(targetShareId)))
       || (nextMode === 'limited' && nextTargetEmails.length === 0);
     if (
       !current
@@ -222,12 +232,13 @@ export function ShowPageSharingSettings({
       || !canManage
       || gate === 'loading'
       || !showAccessDraftChanged(current, nextMode, targetShareId, nextEmails)
-    ) return;
+    ) {
+      return;
+    }
     const generation = generationRef.current;
     const requestSessionId = sessionId;
-    const isCurrent = () => (
-      generation === generationRef.current && requestSessionId === sessionIdRef.current
-    );
+    const isCurrent = () =>
+      generation === generationRef.current && requestSessionId === sessionIdRef.current;
     savingRef.current = true;
     setSaving(true);
     try {
@@ -237,7 +248,9 @@ export function ShowPageSharingSettings({
         target_share_id: targetShareId,
         target_emails: nextTargetEmails,
       });
-      if (result.show_access.page_id !== requestSessionId) throw new Error('ShowAccess page identity mismatch');
+      if (result.show_access.page_id !== requestSessionId) {
+        throw new Error('ShowAccess page identity mismatch');
+      }
       if (!isCurrent()) {
         // Collapsing the row unmounts this editor, but the successful write still
         // has to reconcile the shared inventory so its copied link is not stale.
@@ -250,14 +263,14 @@ export function ShowPageSharingSettings({
       if (result.status === 'conflict') {
         savingRef.current = false;
         setSaving(false);
-        await load('conflict');
+        await load('conflict', preserveShareIdDraftOnConflict);
         return;
       }
       if (result.status === 'share_id_taken' || result.status === 'invalid') {
         setGate(result.status);
         return;
       }
-      adopt(result.show_access);
+      adopt(result.show_access, preserveShareIdDraftOnSuccess);
       setGate('ready');
       onApplied?.(result.show_access);
     } catch {
@@ -276,7 +289,7 @@ export function ShowPageSharingSettings({
     setMode(nextMode);
     setEmailInvalid(false);
     if (nextMode === 'limited' && emails.length === 0) return;
-    void commit(nextMode, shareId, emails);
+    void commit(nextMode, savedRef.current?.share_id ?? shareId, emails, shareIdDirty);
   };
 
   const addEmail = () => {
@@ -290,25 +303,29 @@ export function ShowPageSharingSettings({
     setEmails(nextEmails);
     setEmailDraft('');
     setEmailInvalid(false);
-    if (mode === 'limited') void commit(mode, shareId, nextEmails);
+    if (mode === 'limited') {
+      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, shareIdDirty);
+    }
   };
 
   const removeEmail = (email: string) => {
     if (!editable || (mode === 'limited' && emails.length <= 1)) return;
     const nextEmails = emails.filter((value) => value !== email);
     setEmails(nextEmails);
-    if (mode === 'limited') void commit(mode, shareId, nextEmails);
+    if (mode === 'limited') {
+      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, shareIdDirty);
+    }
   };
 
   const saveShareId = () => {
     if (!editable || shareIdInvalid) return;
-    void commit(mode, shareId, emails);
+    void commit(mode, shareId, emails, true, false);
   };
 
   if (!canManage) return null;
 
   return (
-    <section className="space-y-2.5" aria-label={t('chat.showPage.sharingAccess')}>
+    <div className="space-y-2.5">
       {gate === 'loading' || gate === 'idle' ? (
         <div className="flex min-h-9 items-center justify-between gap-3">
           <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
@@ -319,124 +336,13 @@ export function ShowPageSharingSettings({
         </div>
       ) : saved ? (
         <>
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
-              <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted" role="status">
-                {saving ? (
-                  <>
-                    <Loader2 className="size-3 animate-spin" />
-                    {t('common.saving')}
-                  </>
-                ) : (
-                  <>
-                    <Check className="size-3 text-mint-ink" />
-                    {t('chat.showPage.sharingAutoSave')}
-                  </>
-                )}
-              </div>
-            </div>
-            <AccessModeSelect
-              value={mode}
-              disabled={!editable}
-              onChange={changeMode}
-              ownerWindowId={ownerWindowId}
-            />
-          </div>
-
-          {mode === 'limited' ? (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-medium text-foreground">
-                  {t('chat.showPage.limitedEmails')}
-                </span>
-                {saved.access_mode === 'limited' && !dirty && !saving ? (
-                  <span className="flex items-center gap-1 text-[11px] text-mint-ink">
-                    <Check className="size-3" />
-                    {t('common.saved')}
-                  </span>
-                ) : null}
-              </div>
-              <div className="flex items-start gap-1.5">
-                <div className="min-w-0 flex-1">
-                  <Input
-                    type="email"
-                    value={emailDraft}
-                    disabled={!editable || emailLimitReached}
-                    onChange={(event) => {
-                      setEmailDraft(event.target.value);
-                      setEmailInvalid(false);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== 'Enter') return;
-                      event.preventDefault();
-                      addEmail();
-                    }}
-                    placeholder={t('chat.showPage.emailPlaceholder')}
-                    aria-label={t('chat.showPage.limitedEmails')}
-                    aria-invalid={emailInvalid || undefined}
-                    className={clsx('h-8 text-xs', emailInvalid && 'border-destructive')}
-                  />
-                  {emailInvalid ? (
-                    <p className="mt-1 text-[11px] text-destructive-ink">
-                      {t('chat.showPage.emailInvalid')}
-                    </p>
-                  ) : null}
-                </div>
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="outline"
-                  className="size-8 shrink-0"
-                  disabled={!editable || !emailDraft || emailLimitReached}
-                  onClick={addEmail}
-                  aria-label={t('chat.showPage.addEmail')}
-                >
-                  <Plus className="size-3.5" />
-                </Button>
-              </div>
-              {emails.length ? (
-                <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-                  {emails.map((email) => {
-                    const lastLimitedEmail = mode === 'limited' && emails.length === 1;
-                    return (
-                      <span
-                        key={email}
-                        className="inline-flex h-7 max-w-full items-center gap-1 rounded-md border border-border bg-foreground/[0.04] pl-2.5 pr-1 text-[11px] text-foreground"
-                      >
-                        <span className="min-w-0 truncate font-mono">{email}</span>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="size-5 shrink-0"
-                          disabled={!editable || lastLimitedEmail}
-                          onClick={() => removeEmail(email)}
-                          aria-label={t('chat.showPage.removeEmail', { email })}
-                          title={lastLimitedEmail
-                            ? t('chat.showPage.keepOneLimitedEmail')
-                            : t('chat.showPage.removeEmail', { email })}
-                        >
-                          <X className="size-3" />
-                        </Button>
-                      </span>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-[11px] text-destructive-ink">
-                  {t('chat.showPage.limitedEmailRequired')}
-                </p>
-              )}
-              <p className="text-[11px] text-muted">
-                {t('chat.showPage.limitedEmailHint', { count: SHOW_ACCESS_EMAIL_MAX_COUNT })}
-              </p>
-            </div>
-          ) : null}
-
           {showCustomLink && sharedMode ? (
-            <div className="space-y-1">
-              <div className="flex items-center gap-1.5">
+            <section
+              className="space-y-1.5"
+              aria-label={t('showPages.shareId.label')}
+            >
+              <div className="text-sm font-medium">{t('showPages.shareId.label')}</div>
+              <div className="grid w-full max-w-[17.5rem] grid-cols-[auto_minmax(0,1fr)_2rem] items-center gap-1.5">
                 <span className="shrink-0 font-mono text-xs text-muted">/p/</span>
                 <Input
                   value={shareId}
@@ -449,19 +355,33 @@ export function ShowPageSharingSettings({
                     setShareId(event.target.value);
                     if (gate === 'share_id_taken') setGate('ready');
                   }}
-                  onBlur={saveShareId}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return;
-                    event.preventDefault();
-                    event.currentTarget.blur();
-                  }}
                   aria-label={t('showPages.shareId.label')}
                   aria-invalid={shareIdInvalid || gate === 'share_id_taken' || undefined}
                   className={clsx(
-                    'h-8 min-w-0 flex-1 font-mono text-xs',
+                    'h-8 min-w-0 w-full font-mono text-xs',
                     (shareIdInvalid || gate === 'share_id_taken') && 'border-destructive',
                   )}
                 />
+                <div className="size-8 shrink-0">
+                  {shareIdDirty ? (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="outline"
+                      className="size-8"
+                      disabled={
+                        !editable
+                        || shareIdInvalid
+                        || (mode === 'limited' && emails.length === 0)
+                      }
+                      onClick={saveShareId}
+                      aria-label={t('common.save')}
+                      title={t('common.save')}
+                    >
+                      <Check className="size-3.5" />
+                    </Button>
+                  ) : null}
+                </div>
               </div>
               {shareIdInvalid || gate === 'share_id_taken' ? (
                 <p className="text-[11px] text-destructive-ink">
@@ -469,11 +389,132 @@ export function ShowPageSharingSettings({
                     ? t('showPages.shareId.errors.taken')
                     : t('showPages.shareId.errors.invalid')}
                 </p>
-              ) : (
-                <p className="text-[11px] text-muted">{t('chat.showPage.shareIdAutoSaveHint')}</p>
-              )}
-            </div>
+              ) : null}
+            </section>
           ) : null}
+
+          <section
+            aria-label={t('chat.showPage.sharingAccess')}
+            className={clsx(
+              'space-y-2.5',
+              showCustomLink && sharedMode && 'border-t border-border pt-3',
+            )}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{t('chat.showPage.sharingAccess')}</div>
+                <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted" role="status">
+                  {saving ? (
+                    <>
+                      <Loader2 className="size-3 animate-spin" />
+                      {t('common.saving')}
+                    </>
+                  ) : (
+                    <>
+                      <Check className="size-3 text-mint-ink" />
+                      {t('chat.showPage.sharingAutoSave')}
+                    </>
+                  )}
+                </div>
+              </div>
+              <AccessModeSelect
+                value={mode}
+                disabled={!editable}
+                onChange={changeMode}
+                ownerWindowId={ownerWindowId}
+              />
+            </div>
+
+            {mode === 'limited' ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium text-foreground">
+                    {t('chat.showPage.limitedEmails')}
+                  </span>
+                  {saved.access_mode === 'limited' && !accessDirty && !saving ? (
+                    <span className="flex items-center gap-1 text-[11px] text-mint-ink">
+                      <Check className="size-3" />
+                      {t('common.saved')}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex w-full max-w-[17.5rem] items-start gap-1.5">
+                  <div className="min-w-0 flex-1">
+                    <Input
+                      type="email"
+                      value={emailDraft}
+                      disabled={!editable || emailLimitReached}
+                      onChange={(event) => {
+                        setEmailDraft(event.target.value);
+                        setEmailInvalid(false);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter') return;
+                        event.preventDefault();
+                        addEmail();
+                      }}
+                      placeholder={t('chat.showPage.emailPlaceholder')}
+                      aria-label={t('chat.showPage.limitedEmails')}
+                      aria-invalid={emailInvalid || undefined}
+                      className={clsx('h-8 text-xs', emailInvalid && 'border-destructive')}
+                    />
+                    {emailInvalid ? (
+                      <p className="mt-1 text-[11px] text-destructive-ink">
+                        {t('chat.showPage.emailInvalid')}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    className="size-8 shrink-0"
+                    disabled={!editable || !emailDraft || emailLimitReached}
+                    onClick={addEmail}
+                    aria-label={t('chat.showPage.addEmail')}
+                  >
+                    <Plus className="size-3.5" />
+                  </Button>
+                </div>
+                {emails.length ? (
+                  <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
+                    {emails.map((email) => {
+                      const lastLimitedEmail = mode === 'limited' && emails.length === 1;
+                      return (
+                        <span
+                          key={email}
+                          className="inline-flex h-7 max-w-full items-center gap-1 rounded-md border border-border bg-foreground/[0.04] pl-2.5 pr-1 text-[11px] text-foreground"
+                        >
+                          <span className="min-w-0 truncate font-mono">{email}</span>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="size-5 shrink-0"
+                            disabled={!editable || lastLimitedEmail}
+                            onClick={() => removeEmail(email)}
+                            aria-label={t('chat.showPage.removeEmail', { email })}
+                            title={lastLimitedEmail
+                              ? t('chat.showPage.keepOneLimitedEmail')
+                              : t('chat.showPage.removeEmail', { email })}
+                          >
+                            <X className="size-3" />
+                          </Button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-destructive-ink">
+                    {t('chat.showPage.limitedEmailRequired')}
+                  </p>
+                )}
+                <p className="text-[11px] text-muted">
+                  {t('chat.showPage.limitedEmailHint', { count: SHOW_ACCESS_EMAIL_MAX_COUNT })}
+                </p>
+              </div>
+            ) : null}
+          </section>
 
           {['conflict', 'invalid', 'error'].includes(gate) ? (
             <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
@@ -485,7 +526,7 @@ export function ShowPageSharingSettings({
                 size="icon"
                 variant="ghost"
                 className="size-7 shrink-0"
-                onClick={() => void load()}
+                onClick={() => void load('ready', shareIdDirty)}
                 aria-label={t('common.retry')}
               >
                 <RefreshCw className="size-3.5" />
@@ -503,13 +544,13 @@ export function ShowPageSharingSettings({
             size="icon"
             variant="ghost"
             className="size-7"
-            onClick={() => void load()}
+            onClick={() => void load('ready', shareIdDirty)}
             aria-label={t('common.retry')}
           >
             <RefreshCw className="size-3.5" />
           </Button>
         </div>
       )}
-    </section>
+    </div>
   );
 }
