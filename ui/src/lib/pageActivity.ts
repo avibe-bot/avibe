@@ -92,46 +92,137 @@ const notify = (listeners: Set<() => void>) => {
 const sample = () => {
   if (!tracker) return;
   const wasActive = tracker.isActive();
-  const reactivated = tracker.observe(readPageActivity());
+  const wasOutOfSight = focusOutOfSight;
+  const active = readPageActivity();
+  // Either edge is a return: one this document watched happen, or one it could
+  // only have missed because focus sat where it cannot observe.
+  const reactivated = tracker.observe(active) || (active && wasOutOfSight);
   if (tracker.isActive() !== wasActive) notify(activeListeners);
   if (reactivated) notify(reactivationListeners);
-  bindFocusedFrame();
+  syncFocusChain();
 };
 
 // Focus events go to the window that holds focus, and Chrome hands focus to an
-// embedded frame's window while blurring ours: from then on a system focus loss
-// is delivered there and never here. So follow it — listen on whichever child
-// window currently holds focus. `document.hasFocus()` is already false inside a
-// blur that really left the page and still true when focus merely returned to
-// the parent document, so the same edge detector separates the two without
-// having to guess what the gap was.
+// embedded browsing context while blurring ours: from then on a system focus
+// loss is delivered there and never here. Following focus one level down is not
+// enough, because a frame can navigate, nest another frame, sit behind a shadow
+// root, or be cross-origin — each a separate way for the page to lose focus out
+// of this document's sight, and the list of embedding shapes has no end.
+//
+// So partition rather than enumerate. Walk the focus chain as far as this
+// document is allowed to see and listen on every window in it; a chain that
+// ends somewhere it cannot enter means the page went out of sight, and coming
+// back from an unobservable context counts as a return by definition. Every
+// topology is then either walkable, where the edge detector stays exact, or
+// not, where it fails toward one redundant revalidation instead of toward
+// silently stale data.
 const FRAME_FOCUS_EVENTS = ['focus', 'blur', 'pagehide'] as const;
 
-let focusedFrame: Window | null = null;
+// A focus chain deeper than this is pathological. Stopping counts as losing
+// sight, so the cap fails toward revalidating rather than toward silence.
+const MAX_FOCUS_DEPTH = 10;
 
-const unbindFocusedFrame = () => {
-  if (!focusedFrame) return;
-  try {
-    for (const type of FRAME_FOCUS_EVENTS) focusedFrame.removeEventListener(type, sample);
-  } catch {
-    // The frame was torn down together with its document; nothing left to detach.
-  }
-  focusedFrame = null;
+type FocusChain = {
+  /** Same-origin windows along the chain, innermost last. */
+  windows: Window[];
+  /** The frame elements that own them, watched for navigation. */
+  frames: Element[];
+  /** The chain ended at a context this document cannot look into. */
+  outOfSight: boolean;
 };
 
-const bindFocusedFrame = () => {
-  const focused = document.activeElement as HTMLIFrameElement | null;
-  const frame = focused?.contentWindow ?? null;
-  if (frame === focusedFrame) return;
-  unbindFocusedFrame();
-  if (!frame) return;
-  try {
-    for (const type of FRAME_FOCUS_EVENTS) frame.addEventListener(type, sample);
-    focusedFrame = frame;
-  } catch {
-    // A cross-origin frame refuses listeners, and hides its focus changes from
-    // this document anyway. Leave it unobserved rather than guessing.
+const isFrameElement = (element: Element): boolean =>
+  // Cross-realm elements fail `instanceof`, so compare the tag instead.
+  element.tagName === 'IFRAME' || element.tagName === 'FRAME';
+
+const walkFocusChain = (): FocusChain => {
+  const windows: Window[] = [];
+  const frames: Element[] = [];
+  let root: Document | ShadowRoot = document;
+  for (let depth = 0; depth < MAX_FOCUS_DEPTH; depth += 1) {
+    // Annotated because the loop feeds `root` from this value, and inference
+    // would otherwise chase its own tail through the narrowing of `root`.
+    const focused: Element | null = root.activeElement;
+    // No delegation left: focus rests on an element of this document.
+    if (!focused) return { windows, frames, outOfSight: false };
+    if (focused.shadowRoot) {
+      root = focused.shadowRoot;
+      continue;
+    }
+    if (!isFrameElement(focused)) return { windows, frames, outOfSight: false };
+    frames.push(focused);
+    let frameDocument: Document | null = null;
+    let frameWindow: Window | null = null;
+    try {
+      frameDocument = (focused as HTMLIFrameElement).contentDocument;
+      frameWindow = (focused as HTMLIFrameElement).contentWindow;
+    } catch {
+      // A cross-origin frame refuses both, which is the out-of-sight case.
+    }
+    if (!frameDocument || !frameWindow) return { windows, frames, outOfSight: true };
+    windows.push(frameWindow);
+    root = frameDocument;
   }
+  return { windows, frames, outOfSight: true };
+};
+
+const boundWindows = new Set<Window>();
+const boundFrames = new Set<Element>();
+let focusOutOfSight = false;
+
+const releaseFocusChain = () => {
+  for (const frameWindow of boundWindows) {
+    try {
+      for (const type of FRAME_FOCUS_EVENTS) frameWindow.removeEventListener(type, sample);
+    } catch {
+      // The window was torn down with its frame; nothing left to detach.
+    }
+  }
+  boundWindows.clear();
+  for (const frame of boundFrames) frame.removeEventListener('load', sample);
+  boundFrames.clear();
+  focusOutOfSight = false;
+};
+
+const syncFocusChain = () => {
+  const chain = walkFocusChain();
+  const nextWindows = new Set(chain.windows);
+  const nextFrames = new Set(chain.frames);
+
+  for (const frameWindow of boundWindows) {
+    if (nextWindows.has(frameWindow)) continue;
+    try {
+      for (const type of FRAME_FOCUS_EVENTS) frameWindow.removeEventListener(type, sample);
+    } catch {
+      // Same as above: a discarded window needs no detaching.
+    }
+    boundWindows.delete(frameWindow);
+  }
+  for (const frame of boundFrames) {
+    if (nextFrames.has(frame)) continue;
+    frame.removeEventListener('load', sample);
+    boundFrames.delete(frame);
+  }
+
+  // Re-registering an identical listener is a no-op, so one pass both binds new
+  // windows and reinstalls on a window whose document a navigation replaced —
+  // navigation keeps the `WindowProxy` identity but empties its listener table.
+  for (const frameWindow of nextWindows) {
+    try {
+      for (const type of FRAME_FOCUS_EVENTS) frameWindow.addEventListener(type, sample);
+      boundWindows.add(frameWindow);
+    } catch {
+      // Lost same-origin access mid-walk; the chain reading below covers it.
+    }
+  }
+  // `load` fires on the element for same-origin and cross-origin frames alike,
+  // which is what makes a navigated frame rebind before it can be focused again.
+  for (const frame of nextFrames) {
+    frame.addEventListener('load', sample);
+    boundFrames.add(frame);
+  }
+
+  focusOutOfSight = chain.outOfSight;
 };
 
 const attach = () => {
@@ -149,12 +240,13 @@ const attach = () => {
     window.removeEventListener('blur', sample);
     window.removeEventListener('pageshow', sample);
     window.removeEventListener('pagehide', sample);
-    unbindFocusedFrame();
+    releaseFocusChain();
     tracker = null;
     detach = null;
   };
   // Fold the current reading in once, so a page that mounts while an embedded
-  // frame already holds focus starts listening to it without waiting for an event.
+  // frame already holds focus starts watching that chain without waiting for an
+  // event it would never receive.
   sample();
 };
 
