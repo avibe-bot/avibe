@@ -248,19 +248,38 @@ describe('onPageReactivated', () => {
     expect(reactivated).toHaveBeenCalledTimes(1);
   });
 
-  it('treats coming back from a cross-origin frame as coming back', () => {
-    document.hasFocus = () => true;
-
-    const reactivated = listen();
+  const focusCrossOriginFrame = (): HTMLIFrameElement => {
     const frame = addFrame();
     const refuse = () => {
       throw new Error('cross-origin');
     };
     Object.defineProperty(frame, 'contentDocument', { get: refuse, configurable: true });
     Object.defineProperty(frame, 'contentWindow', { get: refuse, configurable: true });
-
     focusIn(document, frame);
     window.dispatchEvent(new Event('blur'));
+    return frame;
+  };
+
+  it('stays silent while an out-of-sight frame reloads without giving focus back', () => {
+    document.hasFocus = () => true;
+
+    const reactivated = listen();
+    const frame = focusCrossOriginFrame();
+
+    // The sandboxed preview, Vault surface, or Show Page reloads itself while it
+    // still owns focus. Being unable to see the page is what the sampler has
+    // been told; only seeing it again is news.
+    frame.dispatchEvent(new Event('load'));
+    frame.dispatchEvent(new Event('load'));
+
+    expect(reactivated).not.toHaveBeenCalled();
+  });
+
+  it('treats coming back from a cross-origin frame as coming back', () => {
+    document.hasFocus = () => true;
+
+    const reactivated = listen();
+    focusCrossOriginFrame();
     expect(reactivated).not.toHaveBeenCalled();
 
     // A switch away and back while the frame owns focus reaches neither window.

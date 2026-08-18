@@ -94,12 +94,16 @@ const sample = () => {
   const wasActive = tracker.isActive();
   const wasOutOfSight = focusOutOfSight;
   const active = readPageActivity();
+  // Re-walk before deciding: what makes an unobservable gap a return is
+  // regaining sight of the page, not merely having lost it. An out-of-sight
+  // frame reloading itself samples too, and it never left.
+  syncFocusChain();
+  const regainedSight = wasOutOfSight && !focusOutOfSight;
   // Either edge is a return: one this document watched happen, or one it could
-  // only have missed because focus sat where it cannot observe.
-  const reactivated = tracker.observe(active) || (active && wasOutOfSight);
+  // only have missed while focus sat where it cannot look.
+  const reactivated = tracker.observe(active) || (active && regainedSight);
   if (tracker.isActive() !== wasActive) notify(activeListeners);
   if (reactivated) notify(reactivationListeners);
-  syncFocusChain();
 };
 
 // Focus events go to the window that holds focus, and Chrome hands focus to an
