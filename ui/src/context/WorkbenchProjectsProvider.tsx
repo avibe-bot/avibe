@@ -329,6 +329,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // ``windowTarget``. A refused request leaves the debt outstanding, which is what
   // makes the next activation rebuild the width the restore asked for instead of
   // the width the cache happens to hold.
+  //
+  // That makes it a LEVEL, so it is also the wrong thing for the reconcile loop to
+  // re-enter on: it says work is owed, never that another attempt could pay it, and
+  // a read that keeps failing would keep re-reading the same unpayable debt. The
+  // loop re-enters on the ordering fence instead — see the tail of ``reconcileSessions``.
   const queueReconcile = useCallback((projectId: string, minCount = 0) => {
     const pending = pendingReconcileRef.current.get(projectId) ?? 0;
     pendingReconcileRef.current.set(projectId, Math.max(pending, minCount));
@@ -455,6 +460,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // below) rather than on the way in, because it is a LOOP: an entry gate that
       // has already passed keeps rebuilding a multi-page window across the
       // navigation that removed its last reader.
+      // Only the width is carried here. Whether the in-flight read must run again
+      // is the fence's answer, not this guard's: every trigger that can arrive
+      // mid-read accepts its mutation first (``acceptSessionMutation`` fences
+      // ``project:<id>``), so the read in flight is already stale and its own tail
+      // re-enters. A second record of that decision would be a second owner.
       if (inFlightRef.current.has(projectId)) {
         queueReconcile(projectId, opts?.minCount ?? 0);
         return;
@@ -512,7 +522,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         } finally {
           inFlightRef.current.delete(projectId);
         }
-        if (!stale && !pendingReconcileRef.current.has(projectId)) return;
+        // Re-enter on evidence THIS pass produced, and nothing else: a mutation
+        // arrived that its response can no longer describe. A failed request is not
+        // that evidence — it says the attempt could not be made, so retrying it here
+        // is an unbounded retry of whatever just failed. The width it could not pay
+        // stays outstanding for the next activation or event to pay instead, which
+        // is exactly what a debt is for. Testing the debt here is what would spin.
+        if (!stale) return;
         // Carry the width forward as the debt itself: ``setSessions`` has not
         // rendered yet, so the next pass cannot read it back off the cache.
         queueReconcile(projectId, targetCount);

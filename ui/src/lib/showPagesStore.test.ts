@@ -410,6 +410,30 @@ describe('ShowPagesInventoryStore', () => {
     release();
   });
 
+  // Same rule as the workbench providers' looping reads: this one goes round again
+  // only on evidence its own pass produced — a mutation that bumped the revision
+  // under it. A failed request produced none, so it settles and waits for the next
+  // trigger instead of retrying itself against a failing API.
+  it('stops a read whose request failed instead of reading again', async () => {
+    let attempts = 0;
+    const getShowPages = vi.fn(async () => {
+      attempts += 1;
+      if (attempts <= 20) throw new Error('read failed');
+      return { pages: [page()] };
+    });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    });
+
+    const release = store.activate();
+    await store.reload();
+
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().loaded).toBe(true);
+    release();
+  });
+
   it('reconciles after a mutation instead of letting an older read overwrite it', async () => {
     const stale = deferred<{ pages: ShowPage[] }>();
     const reconciled = deferred<{ pages: ShowPage[] }>();

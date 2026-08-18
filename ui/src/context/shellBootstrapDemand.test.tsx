@@ -1767,4 +1767,210 @@ describe('Demand-driven shell bootstrap', () => {
       logged.mockRestore();
     });
   });
+
+  // Every read in this shell that loops in place re-enters on evidence its own
+  // pass produced: a mutation that invalidated the response, or a trigger the
+  // in-flight guard turned away and now owes a pass. An outstanding obligation is
+  // not that evidence — it is the reason the work exists, and it says nothing
+  // about whether another attempt can discharge it. A loop that re-enters on the
+  // obligation alone spins for as long as it keeps being refused.
+  //
+  // Each loop asserts it here rather than being correct by construction, so the
+  // next change to any of them fails a test instead of costing a review round.
+  describe('a read loop retries only on evidence its own pass produced', () => {
+    // Twenty rejections then a success: an escape hatch turns a retry loop into a
+    // countable assertion instead of a test that hangs on its own microtasks.
+    function failingReads<T>(value: T) {
+      let attempts = 0;
+      return vi.fn(async () => {
+        attempts += 1;
+        if (attempts <= 20) throw new Error('read failed');
+        return value;
+      });
+    }
+
+    it('honours a trigger the in-flight guard turned away, exactly once', async () => {
+      // The positive half of the rule. This trigger has no other payer: the guard
+      // sent its caller home, so unless the read in flight goes round again the
+      // event is simply lost — and it must go round ONCE, not for as long as the
+      // record of it survives.
+      const windowPage = { sessions: [session], next_before_id: null };
+      const bootstrap = vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { [project.id]: windowPage },
+      });
+      const inFlight = deferred<typeof windowPage>();
+      let laterReads = 0;
+      const listSessions = vi.fn().mockReturnValueOnce(inFlight.promise).mockImplementation(async () => {
+        laterReads += 1;
+        // An escape hatch again: an empty window has nothing left to reconcile, so
+        // a loop that never consumes the trigger it honoured is a count rather
+        // than a hung suite.
+        return laterReads >= 20 ? { sessions: [], next_before_id: null } : windowPage;
+      });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: project.scope_id,
+          event: 'user_message',
+        });
+      });
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // A second event lands while that read is in flight and is turned away.
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: project.scope_id,
+          event: 'user_message',
+        });
+      });
+      await act(async () => {
+        inFlight.resolve(windowPage);
+      });
+      await settle();
+      expect(listSessions).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves the debt its own failed window read could not pay to the next trigger', async () => {
+      const wideWindow = Array.from({ length: 10 }, (_, index) => ({
+        ...session,
+        id: `ses_wide_${index}`,
+      }));
+      const bootstrap = vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { [project.id]: { sessions: wideWindow, next_before_id: null } },
+      });
+      const listSessions = failingReads({ sessions: wideWindow, next_before_id: null });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+
+      // Undo restores a session ranked just past the window, so this reconcile
+      // carries a minimum of eleven — and its first request fails.
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: 'ses_restored',
+          scope_id: project.scope_id,
+          event: 'created',
+          restored: true,
+        });
+      });
+      await settle();
+      // A failed request is not evidence that another one would land. Demand is
+      // still here and the debt is still owed, and neither says this pass can pay
+      // it: retrying on the debt alone is an unbounded loop against a failing API.
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // The debt is untouched, so the next trigger asks for eleven rows: the
+      // failure declined to pay it, exactly as a refusal does.
+      await act(async () => {
+        handlers?.onConnected?.({ sub_id: 1 });
+      });
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      expect(bootstrap.mock.calls[1][0]).toMatchObject({ projectIds: [project.id], limit: 11 });
+    });
+
+    it('stops a row refresh whose read failed instead of reading the row again', async () => {
+      const unbound = { ...session, native_session_id: null };
+      const bootstrap = vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { proj_a: { sessions: [unbound], next_before_id: null } },
+      });
+      const getSession = failingReads(unbound);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        getSession,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        handlers?.onTurnEnd?.({ session_id: session.id });
+      });
+      await settle();
+      // The next turn-end re-reads this row anyway; a failed one has no reason of
+      // its own to go round again.
+      expect(getSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops a targeted card read whose request failed', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const feedPage = { sessions: [inboxRow], next_cursor: null, unread_by_session: {} };
+      const listInbox = vi.fn(async (args: ListInboxArgs) => {
+        if (!args.onlySession) return feedPage;
+        throw new Error('targeted read failed');
+      });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      const targetedReads = () => listInbox.mock.calls.filter(([args]) => args.onlySession).length;
+
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'updated',
+          visibility: 'foreground',
+        });
+      });
+      await settle();
+      expect(targetedReads()).toBe(1);
+      logged.mockRestore();
+    });
+  });
 });
