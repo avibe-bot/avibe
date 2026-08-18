@@ -4374,9 +4374,13 @@ scenarios:
     backend: shared
     # A cron registration carries no schedule identity, so a fire that races an
     # edit to at could spend a run_at the definition has not reached and leave it
-    # armed. The callback rejects on a fresh mirror and hands the replacement back
-    # to the scheduler; the storage CAS is the authority when the mirror lags. An
-    # edit that keeps the definition recurring still runs, at its refreshed value.
+    # armed. The callback rejects on a fresh mirror; the storage CAS is the
+    # authority when the mirror lags. Either way the replacement schedule is
+    # handed back to the scheduler, because the cron job that keeps firing is
+    # itself the stale generation and nothing else would register the one-shot.
+    # That reconcile is gated on the schedule having actually changed, so a fire
+    # refused for a merely backlogged predecessor leaves its registration alone.
+    # An edit that keeps the definition recurring still runs, at its refreshed value.
     test: tests/test_scheduled_tasks.py::test_hfr_484_in_flight_cron_fire_cannot_spend_a_replacement_one_shot
 manual_evidence:
   - local Incus backend process death after prompt acceptance

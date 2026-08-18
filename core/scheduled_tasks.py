@@ -5825,6 +5825,23 @@ class ScheduledTaskService:
         await self._run_runtime_sync(self.store.load)
         self.reconcile_jobs()
 
+    async def _reconcile_rejected_cron_fire(self, task_id: str) -> None:
+        """Re-register the schedule after a cron generation's enqueue was refused."""
+
+        # A refusal is either benign -- an earlier scheduler fire is still queued
+        # -- or the stale-generation case this callback could not see: the mirror
+        # read above may predate a cron -> ``at`` edit committed on another
+        # connection, so the guard let the fire through and the storage CAS was
+        # the layer that caught it. Only the second needs the scheduler, and only
+        # this callback can ask for it: the cron job that keeps firing IS the
+        # stale generation, so nothing else would install the DateTrigger. Force a
+        # fresh mirror, then reconcile only when the definition is no longer the
+        # cron this job was registered for.
+        await self._run_runtime_sync(self.store.load)
+        task = self.store.get_task(task_id)
+        if task is None or task.schedule_type != "cron":
+            self.reconcile_jobs()
+
     async def _run_task(
         self,
         task_id: str,
@@ -5910,6 +5927,8 @@ class ScheduledTaskService:
             self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
         elif expected_run_at is not None:
             await self._reconcile_rejected_one_shot_fire(task_id)
+        elif expected_job_id is not None:
+            await self._reconcile_rejected_cron_fire(task_id)
 
     def _request_partition_key(self, request: TaskExecutionRequest) -> str:
         lock_key = self._execution_lock_key(request)
