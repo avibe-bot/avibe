@@ -203,6 +203,83 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   });
 
+  it('keeps an explicitly submitted custom-link draft after a CAS conflict', async () => {
+    api.getShowAccessSettings
+      .mockResolvedValueOnce({ show_access: showAccess({ access_mode: 'public' }) })
+      .mockResolvedValueOnce({
+        show_access: showAccess({ access_mode: 'public', revision: 2, share_id: 'server-link' }),
+      });
+    api.applyShowAccess.mockResolvedValue({
+      status: 'conflict',
+      show_access: showAccess({ access_mode: 'public', revision: 1, share_id: 'other-link' }),
+    });
+    renderSettings();
+
+    const customLink = await screen.findByRole('textbox', { name: 'Custom link' });
+    fireEvent.change(customLink, { target: { value: 'submitted-link' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2));
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'submitted-link',
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+  });
+
+  it('adopts a concurrent custom link when an access autosave had no link draft', async () => {
+    api.getShowAccessSettings
+      .mockResolvedValueOnce({
+        show_access: showAccess({
+          access_mode: 'limited',
+          normalized_emails: ['guest@example.com'],
+        }),
+      })
+      .mockResolvedValueOnce({
+        show_access: showAccess({ access_mode: 'public', revision: 2, share_id: 'server-link' }),
+      });
+    api.applyShowAccess.mockResolvedValue({
+      status: 'conflict',
+      show_access: showAccess({ access_mode: 'limited', revision: 1 }),
+    });
+    renderSettings();
+
+    await chooseMode('Fully public');
+
+    await waitFor(() => expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2));
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'server-link',
+    );
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+  });
+
+  it('keeps a custom-link draft when retrying a failed access autosave', async () => {
+    api.getShowAccessSettings
+      .mockResolvedValueOnce({
+        show_access: showAccess({
+          access_mode: 'limited',
+          normalized_emails: ['guest@example.com'],
+        }),
+      })
+      .mockResolvedValueOnce({
+        show_access: showAccess({ access_mode: 'public', revision: 2, share_id: 'server-link' }),
+      });
+    api.applyShowAccess.mockRejectedValueOnce(new Error('network unavailable'));
+    renderSettings();
+
+    const customLink = await screen.findByRole('textbox', { name: 'Custom link' });
+    fireEvent.change(customLink, { target: { value: 'retry-link' } });
+    await chooseMode('Fully public');
+    await waitFor(() => expect(screen.getByText('Link access could not be loaded.')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2));
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'retry-link',
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+  });
+
   it('shows an explicit custom-link save action only after editing', async () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({ access_mode: 'public' }),

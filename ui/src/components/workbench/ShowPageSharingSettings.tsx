@@ -288,7 +288,7 @@ export function ShowPageSharingSettings({
     setMode(nextMode);
     setEmailInvalid(false);
     if (nextMode === 'limited' && emails.length === 0) return;
-    void commit(nextMode, savedRef.current?.share_id ?? shareId, emails, true);
+    void commit(nextMode, savedRef.current?.share_id ?? shareId, emails, shareIdDirty);
   };
 
   const addEmail = () => {
@@ -303,7 +303,7 @@ export function ShowPageSharingSettings({
     setEmailDraft('');
     setEmailInvalid(false);
     if (mode === 'limited') {
-      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, true);
+      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, shareIdDirty);
     }
   };
 
@@ -312,13 +312,13 @@ export function ShowPageSharingSettings({
     const nextEmails = emails.filter((value) => value !== email);
     setEmails(nextEmails);
     if (mode === 'limited') {
-      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, true);
+      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, shareIdDirty);
     }
   };
 
   const saveShareId = () => {
     if (!editable || shareIdInvalid) return;
-    void commit(mode, shareId, emails);
+    void commit(mode, shareId, emails, true);
   };
 
   if (!canManage) return null;
@@ -525,7 +525,7 @@ export function ShowPageSharingSettings({
                 size="icon"
                 variant="ghost"
                 className="size-7 shrink-0"
-                onClick={() => void load()}
+                onClick={() => void load('ready', shareIdDirty)}
                 aria-label={t('common.retry')}
               >
                 <RefreshCw className="size-3.5" />
@@ -543,7 +543,7 @@ export function ShowPageSharingSettings({
             size="icon"
             variant="ghost"
             className="size-7"
-            onClick={() => void load()}
+            onClick={() => void load('ready', shareIdDirty)}
             aria-label={t('common.retry')}
           >
             <RefreshCw className="size-3.5" />
