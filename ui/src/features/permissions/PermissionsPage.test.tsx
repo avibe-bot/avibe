@@ -124,6 +124,18 @@ afterEach(() => {
 });
 
 describe('PermissionsPage state model', () => {
+  it('uses the full settings content width instead of a page-specific max width', async () => {
+    renderPage();
+
+    const heading = await screen.findByRole('heading', { name: 'permissions.title' });
+    const page = heading.closest('header')?.parentElement;
+
+    expect(page).not.toBeNull();
+    expect(page?.classList.contains('w-full')).toBe(true);
+    expect(page?.classList.contains('mx-auto')).toBe(false);
+    expect(Array.from(page?.classList ?? []).some((className) => className.startsWith('max-w-'))).toBe(false);
+  });
+
   it('renders the current Avibe identity and Cloud handoff from the design contract', async () => {
     renderPage();
 
