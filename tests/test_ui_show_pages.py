@@ -975,6 +975,54 @@ def test_public_show_ignores_an_existing_limited_guest_lease(monkeypatch, tmp_pa
     assert "Cookie" not in response.headers.get("Vary", "")
 
 
+def test_rotated_public_share_rejects_an_old_guest_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    old_share_id = _create_show_page("ses123", "limited")
+    lease = show_identity.make_show_guest_lease(
+        config,
+        page_id="ses123",
+        share_id=old_share_id,
+        normalized_email="viewer@example.com",
+    )
+    client = app.test_client()
+    client.set_cookie(
+        show_identity.show_guest_cookie_name(old_share_id),
+        lease,
+        domain="alex.avibe.bot",
+        path=show_identity.show_guest_cookie_path(old_share_id),
+    )
+
+    store = ShowPageStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        result = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="public",
+            target_share_id="rotated-public-share",
+            target_emails=[],
+        )
+        assert result.status == "applied"
+    finally:
+        store.close()
+
+    old_response = client.get(
+        f"/p/{old_share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    new_response = app.test_client().get(
+        "/p/rotated-public-share/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert old_response.status_code == 404
+    assert new_response.status_code == 200
+
+
 def test_limited_guest_lease_is_rejected_after_rotation(
     monkeypatch,
     tmp_path,

@@ -15308,6 +15308,10 @@ async def serve_public_show_page(share_id, asset_path):
         page = store.get_by_share_id(share_id)
         if page is None and lease is not None:
             page = store.get(lease.page_id)
+            if page is not None:
+                access = store.get_access(page.session_id)
+                if access is None or access.share_id != share_id:
+                    return _show_page_not_found_response()
         if page is None:
             return _show_page_not_found_response()
         limited_guest = (
