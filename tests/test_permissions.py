@@ -1203,6 +1203,41 @@ def test_permissions_rejects_cached_fallback_after_inflight_pairing_change(
         permissions.get_current_permissions(config)
 
 
+def test_permissions_rechecks_pairing_after_loading_cached_fallback(
+    monkeypatch,
+) -> None:
+    config = _config()
+    cached_projection = _complete_projection()
+    permissions._write_cache("inst-123", cached_projection)  # noqa: SLF001
+    original_read = permissions._read_cache  # noqa: SLF001
+    read_count = 0
+
+    def read_cache(instance_id: str):
+        nonlocal read_count
+        read_count += 1
+        cached = original_read(instance_id)
+        if read_count == 2:
+            replacement = V2Config.load()
+            replacement.remote_access.vibe_cloud.instance_id = "inst-new"
+            replacement.save()
+        return cached
+
+    monkeypatch.setattr(permissions, "_read_cache", read_cache)
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError()),
+    )
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.get_current_permissions(config)
+
+    assert read_count >= 2
+
+
 @pytest.mark.parametrize("operation", ["get", "authorized_users", "project_access"])
 def test_permissions_cache_write_rechecks_pairing_for_every_projection_writer(
     monkeypatch,

@@ -615,6 +615,18 @@ def _read_cache(instance_id: str) -> PermissionsProjectionResult | None:
     )
 
 
+def _read_pairing_bound_cache(
+    instance_id: str,
+    pairing_guard: Callable[[], None],
+) -> PermissionsProjectionResult | None:
+    """Read a fallback projection only while the captured pairing remains current."""
+
+    pairing_guard()
+    cached = _read_cache(instance_id)
+    pairing_guard()
+    return cached
+
+
 def _read_cache_order() -> int:
     try:
         value = json.loads(_cache_order_path().read_text(encoding="utf-8"))
@@ -982,15 +994,13 @@ def get_current_permissions(config: V2Config | None = None) -> PermissionsProjec
             cache_order=request_order,
         )
     except PermissionsUnavailableError:
-        pairing_guard()
-        cached = _read_cache(instance_id)
+        cached = _read_pairing_bound_cache(instance_id, pairing_guard)
         if cached is not None:
             return cached
         raise
     except PermissionsBackendError as exc:
         if _is_backend_unavailable_status(exc.status):
-            pairing_guard()
-            cached = _read_cache(instance_id)
+            cached = _read_pairing_bound_cache(instance_id, pairing_guard)
             if cached is not None:
                 return cached
         raise
