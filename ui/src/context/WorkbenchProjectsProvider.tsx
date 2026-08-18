@@ -148,26 +148,28 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   const flushBootstrapReadIntent = useCallback(() => {
     if (bootstrapReadInFlightRef.current) return;
-    // Every intent queued here is revalidation of a cache someone was reading.
-    // If the last reader has detached meanwhile, dropping it loses nothing:
-    // activation re-reads unconditionally (first load or reconcile), which is
-    // the same argument that lets ``onConnected`` return early. Keeping it would
-    // issue a bootstrap on a route that renders no project — and after an
-    // authorization change it would repopulate the tree ``discardAuthorizedTree``
-    // just dropped, because invalidating the read in flight is itself what
-    // queues the retry.
-    if (!isActive()) {
-      fetchProjectsPendingRef.current = null;
-      projectTreePendingRef.current = false;
-      return;
-    }
     const pendingFetch = fetchProjectsPendingRef.current;
     if (pendingFetch) {
       fetchProjectsPendingRef.current = null;
-      fetchProjectsRunnerRef.current(pendingFetch);
-      return;
+      // ``fetchProjects`` is a POPULATING read and therefore exempt from the gate
+      // the reads apply to themselves (see ``fetchSessions``) — a window a write
+      // just expanded must not stay empty. A retry queued because a mutation
+      // invalidated the read in flight has no such window to fill once the last
+      // reader has detached, because activation re-reads unconditionally. So the
+      // one read that cannot state demand for itself states it here, where its
+      // retry is spent: keeping it would issue a bootstrap on a route that
+      // renders no project, and after an authorization change it would repopulate
+      // the tree ``discardAuthorizedTree`` just dropped, since invalidating the
+      // read in flight is itself what queues the retry.
+      if (isActive()) {
+        fetchProjectsRunnerRef.current(pendingFetch);
+        return;
+      }
     }
     if (projectTreePendingRef.current) {
+      // Ungated on purpose: this retry runs ``reconcileProjectTree``, a
+      // revalidation that declines itself while nothing reads the tree — and
+      // takes the window-preserving path if demand returned in the meantime.
       projectTreePendingRef.current = false;
       projectTreeRunnerRef.current();
     }
@@ -360,6 +362,17 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // windows >200 rows. Silent (no loading flag) so visible rows don't flicker.
   const reconcileSessions = useCallback(
     async (projectId: string, opts?: { minCount?: number }) => {
+      // The demand gate belongs to the READS, not to the events that trigger them.
+      // Guarding the paths this provider happened to know about — activation, a
+      // reconnect, a queued retry — left every other trigger of a request-backed
+      // revalidation to remember it, and there are more triggers than guards:
+      // session activity, a pin re-order, a status or turn-end row refresh, a
+      // trailing reconcile from a failed bootstrap. Stated here it becomes a
+      // property of the read instead: a revalidation is by definition a read the
+      // next activation would redo, so with nothing rendering the tree it is
+      // dropped and a long-lived admin tab stops paging in a window it never shows.
+      // The two POPULATING reads are deliberately exempt — see ``fetchSessions``.
+      if (!isActive()) return;
       if (inFlightRef.current.has(projectId)) {
         queueReconcile(projectId, opts?.minCount ?? 0);
         return;
@@ -416,10 +429,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         minCount = Math.max(targetCount, pendingMinCount ?? 0);
       }
     },
-    [acceptProjectRows, api, queueReconcile, takePendingReconcile],
+    [acceptProjectRows, api, isActive, queueReconcile, takePendingReconcile],
   );
 
   const reconcileProjectTree = useCallback(async function reconcileProjectTree() {
+    // Revalidation: dropped while nothing reads the tree (see ``reconcileSessions``).
+    if (!isActive()) return;
     if (bootstrapReadInFlightRef.current) {
       queueProjectTreeIntent();
       return;
@@ -514,7 +529,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       bootstrapReadInFlightRef.current = false;
       flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, queueProjectTreeIntent, queueReconcile, reconcileSessions]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, isActive, queueProjectTreeIntent, queueReconcile, reconcileSessions]);
 
   fetchProjectsRunnerRef.current = (options) => void fetchProjects(options);
   projectTreeRunnerRef.current = () => void reconcileProjectTree();
@@ -541,6 +556,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   }, [active, fetchProjects, reconcileProjectTree]);
 
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
+    // Revalidation: dropped while nothing reads the tree (see ``reconcileSessions``).
+    // The binding this refreshes gates an action on a row nobody is rendering, and
+    // the reconcile on the next activation re-reads the row anyway.
+    if (!isActive()) return;
     if (cachedRowRefreshInFlightRef.current.has(sessionId)) {
       pendingCachedRowRefreshRef.current.add(sessionId);
       return;
@@ -577,10 +596,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         queueMicrotask(() => void refreshCachedSessionRow(sessionId));
       }
     }
-  }, [api]);
+  }, [api, isActive]);
 
   // Load the first page (append=false) or the next page (append=true) of a
   // project's sessions, with dedupe + per-project serialisation.
+  //
+  // Deliberately NOT demand-gated, unlike the reconciles above: this read POPULATES
+  // a window, so nothing else will produce what it fetches. Its readers reach it
+  // only while they render the tree (``toggleExpanded`` / ``loadMore`` /
+  // ``reloadSessions``), and its remaining callers are writes that just created a
+  // session or a project and expanded it — dropping those would leave the group the
+  // user opened rendering empty until they collapsed it, which is a worse trade than
+  // the one request. Same for ``fetchProjects``: the authoritative first load, whose
+  // only droppable path is the queued retry ``flushBootstrapReadIntent`` already gates.
   const fetchSessions = useCallback(
     async function fetchSessions(projectId: string, opts?: { append?: boolean }) {
       const append = opts?.append ?? false;
@@ -663,11 +691,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
       // A reconnect only has a tree to recover when one was being read; while no
-      // consumer reads it, activation is what fetches a fresh one. Guarding here
-      // keeps a long-lived admin tab from re-issuing the bootstrap every time the
-      // shared stream flaps.
+      // consumer reads it, activation is what fetches a fresh one. That is the
+      // read's own rule now (``reconcileSessions``), so this handler — like every
+      // other trigger below — states the intent and lets the read decide.
       onConnected: () => {
-        if (!isActive()) return;
         void reconcileProjectTree();
       },
       // An authorization change is invalidation rather than revalidation, so the

@@ -80,12 +80,14 @@ const inboxPayload = {
   unread_by_session: { [session.id]: 3 },
 };
 
-type ListInboxArgs = { platform: string; limit: number; before?: string };
+type ListInboxArgs = { platform: string; limit: number; before?: string; onlySession?: string };
 
 type FakeApi = {
   getWorkbenchProjectsBootstrap?: () => Promise<unknown>;
   listSessions?: () => Promise<unknown>;
   getSession?: () => Promise<unknown>;
+  updateSession?: () => Promise<unknown>;
+  createSession?: () => Promise<unknown>;
   listInbox?: (args: ListInboxArgs) => Promise<unknown>;
   markSessionRead?: () => Promise<unknown>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
@@ -867,5 +869,379 @@ describe('Demand-driven shell bootstrap', () => {
       expect(state?.unreadBySession).toEqual({ ses_b: 5 });
       expect(state?.totalUnread).toBe(5);
     });
+  });
+
+  // The gate is a property of the READ, not of the events that trigger it. Written
+  // at call sites it has to be remembered by each of them, and these providers have
+  // more triggers than any list of guards would cover — a reconnect, session
+  // activity, a pin re-order, a status or turn-end row refresh, a foreground
+  // restore. So these seed one of every request-issuing shape and assert the
+  // property (a revalidation the next activation would redo costs nothing while
+  // nothing reads it) rather than enumerating the triggers that were remembered.
+  describe('the demand gate belongs to the reads, not to their triggers', () => {
+    it('drops every revalidation a stream event or a write triggers while nothing reads the tree', async () => {
+      const bootstrap = vi.fn().mockResolvedValue(bootstrapPayload);
+      const listSessions = vi.fn().mockResolvedValue({ sessions: [session], next_before_id: null });
+      const getSession = vi.fn().mockResolvedValue(session);
+      const updateSession = vi.fn().mockResolvedValue({ ...session, pinned: true });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        getSession,
+        updateSession,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      let actions: WorkbenchProjectsActions | null = null;
+      const captureTree = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+      const captureActions = (next: WorkbenchProjectsActions) => {
+        actions = next;
+      };
+      const reads = () =>
+        bootstrap.mock.calls.length + listSessions.mock.calls.length + getSession.mock.calls.length;
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <ActionsProbe onState={captureActions} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+      expect(tree?.sessionsOf(project.id).sessions).toHaveLength(1);
+
+      // Workbench → /admin/settings/messaging. The write-only surface stays mounted
+      // (a settings page can still rename or pin), so the provider keeps its cache
+      // and its stream — it simply has no reader left.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <ActionsProbe onState={captureActions} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      const before = reads();
+
+      await act(async () => {
+        handlers?.onConnected?.({ sub_id: 1 });
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'created',
+          restored: true,
+        });
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'updated',
+          pinned: true,
+        });
+        handlers?.onSessionStatus?.({ session_id: session.id, agent_status: 'idle' });
+        handlers?.onTurnEnd?.({ session_id: session.id });
+        await actions?.setSessionPinned(project.id, session.id, true);
+      });
+      await settle();
+
+      // The gate drops revalidations, never mutations: the write still reaches the
+      // server and still patches the cache the way back will render.
+      expect(updateSession).toHaveBeenCalledTimes(1);
+      expect(tree?.sessionsOf(project.id).sessions?.[0]?.pinned).toBe(true);
+      expect(reads()).toBe(before);
+
+      // And nothing is lost by dropping them, which is what makes it a revalidation:
+      // the returning consumer re-reads the window once.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <ActionsProbe onState={captureActions} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+    });
+
+    // The boundary that scopes the rule: a revalidation is a read the next activation
+    // would redo, so dropping it costs nothing. A POPULATING read produces something
+    // nothing else will produce — gating it would leave the group the write just
+    // expanded rendering empty on the way back, because the reconcile skips projects
+    // whose window was never loaded. So the exemption is a property of the read too,
+    // not a call site that forgot the gate.
+    it('still populates a window a write just created, with nothing reading the tree', async () => {
+      const projectB = { ...project, id: 'proj_b', scope_id: 'scope_b', display_name: 'Project B' };
+      const createdSession = { ...session, id: 'ses_new', project_id: projectB.id, scope_id: projectB.scope_id };
+      const bootstrap = vi.fn().mockResolvedValue({
+        projects: [project, projectB],
+        sessions: { proj_a: { sessions: [session], next_before_id: null } },
+      });
+      const listSessions = vi
+        .fn()
+        .mockResolvedValue({ sessions: [createdSession], next_before_id: null });
+      const createSession = vi.fn().mockResolvedValue(createdSession);
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        createSession,
+        connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      let actions: WorkbenchProjectsActions | null = null;
+      const captureTree = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+      const captureActions = (next: WorkbenchProjectsActions) => {
+        actions = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <ActionsProbe onState={captureActions} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.sessionsOf(projectB.id).sessions).toBeNull();
+
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <ActionsProbe onState={captureActions} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        await actions?.createSessionForProject(projectB.id);
+      });
+      await settle();
+
+      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(listSessions.mock.calls[0][0]).toMatchObject({ projectId: projectB.id });
+      expect(tree?.sessionsOf(projectB.id).sessions).toEqual([createdSession]);
+    });
+
+    // Exempting the populating reads at the read leaves exactly one demand
+    // decision the reads cannot make for themselves: a populating read whose
+    // response was refused re-queues ITSELF, and that retry is a revalidation
+    // wearing the populating read's name. So the intent flush keeps the gate for
+    // that one case and no other — the queued tree reconcile below it is gated by
+    // the read it runs, and double-gating it would give one property two owners.
+    it('drops the first load a mutation refused once its reader is gone', async () => {
+      const firstLoad = deferred<typeof bootstrapPayload>();
+      const bootstrap = vi.fn().mockReturnValue(firstLoad.promise);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const captureTree = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+
+      // A turn ends while the first load is still in flight, which invalidates it.
+      await act(async () => {
+        handlers?.onTurnEnd?.({ session_id: session.id });
+      });
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+
+      await act(async () => {
+        firstLoad.resolve(bootstrapPayload);
+      });
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+
+      // Dropping it lost nothing: a returning consumer re-reads unconditionally.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} onState={captureTree} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      expect(tree?.projects).toHaveLength(1);
+    });
+
+    // The inbox's targeted restore read is the one revalidation that is only HALF
+    // droppable: the card it upserts is not rendered, but the same response owns that
+    // session's unread count, and `unreadBySession` holds only foreground sessions —
+    // so a restore genuinely moves the badge total. Declining the request therefore
+    // has to hand the obligation to the whole-account map instead of dropping it.
+    it('owes the whole map for a foreground restore instead of reading one session', async () => {
+      const beforeRestore = { sessions: [], next_cursor: null, unread_by_session: {} };
+      const afterRestore = {
+        sessions: [],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 3, ses_b: 5 },
+      };
+      const listInbox = vi.fn().mockResolvedValueOnce(beforeRestore).mockResolvedValue(afterRestore);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+      const wholeCountsReads = () =>
+        listInbox.mock.calls.filter(([args]) => args.limit === 1 && !args.onlySession).length;
+      const targetedReads = () => listInbox.mock.calls.filter(([args]) => args.onlySession).length;
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(wholeCountsReads()).toBe(1);
+      expect(state?.totalUnread).toBe(0);
+
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: session.id,
+          scope_id: session.scope_id,
+          event: 'updated',
+          visibility: 'foreground',
+        });
+      });
+      await settle();
+
+      // No card work for a document that renders no card...
+      expect(targetedReads()).toBe(0);
+      // ...and the badge still learns the count the restore brought back, which a
+      // plain skip would have left out until some later focus or reconnect.
+      expect(wholeCountsReads()).toBe(2);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 3, ses_b: 5 });
+      expect(state?.totalUnread).toBe(8);
+    });
+
+    it('coalesces a burst of restores into one counts read', async () => {
+      const listInbox = vi.fn().mockResolvedValue({
+        sessions: [],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 1, ses_b: 2, ses_c: 3 },
+      });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+
+      // Restoring a scope restores its sessions together. Owing one map is what
+      // makes that cost one read rather than one read per session — the reason the
+      // obligation is state and not a per-event request.
+      await act(async () => {
+        for (const sessionId of [session.id, 'ses_b', 'ses_c']) {
+          handlers?.onSessionActivity?.({
+            session_id: sessionId,
+            scope_id: session.scope_id,
+            event: 'updated',
+            visibility: 'foreground',
+          });
+        }
+      });
+      await settle();
+
+      expect(listInbox).toHaveBeenCalledTimes(2);
+      expect(listInbox.mock.calls[1][0]).toMatchObject({ platform: 'avibe', limit: 1 });
+      expect(state?.totalUnread).toBe(6);
+    });
+
+    // Owing the map and fencing the reads that could pay it are one act. A read that
+    // left the server before the change cannot describe the counts it is about to
+    // commit, and committing it would pay the debt without satisfying it — the case a
+    // bare `setWholeUnreadOwed(true)` cannot even schedule work for, because the debt
+    // was already outstanding. Stated over every edge that voids the current map
+    // rather than for one of them, because the property belongs to owing the map.
+    const mapVoidingEdges: Array<[string, (handlers: WorkbenchEventHandlers | null) => void]> = [
+      ['an authorization change', (handlers) => handlers?.onAuthorizationChanged?.({})],
+      ['unread counts moving without a map', (handlers) => handlers?.onInboxUnreadChanged?.({ unread_counts: {} })],
+    ];
+    for (const [edge, fire] of mapVoidingEdges) {
+      it(`invalidates the counts read ${edge} left unable to describe the account`, async () => {
+        const preChange = deferred<typeof inboxPayload>();
+        const listInbox = vi
+          .fn()
+          .mockReturnValueOnce(preChange.promise)
+          .mockResolvedValue({ sessions: [], next_cursor: null, unread_by_session: { ses_b: 5 } });
+        let handlers: WorkbenchEventHandlers | null = null;
+        apiRef.current = {
+          listInbox,
+          connectWorkbenchEvents: vi.fn((next) => {
+            handlers = next;
+            return vi.fn();
+          }),
+        };
+        let state: InboxState | null = null;
+        const capture = (next: InboxState) => {
+          state = next;
+        };
+
+        render(
+          <WorkbenchInboxProvider>
+            <InboxProbe feed={false} onState={capture} />
+          </WorkbenchInboxProvider>,
+        );
+        await settle();
+        expect(listInbox).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          fire(handlers);
+        });
+        await act(async () => {
+          preChange.resolve({ ...inboxPayload, unread_by_session: { [session.id]: 3 } });
+        });
+        await settle();
+
+        expect(listInbox).toHaveBeenCalledTimes(2);
+        expect(state?.unreadBySession).toEqual({ ses_b: 5 });
+        expect(state?.totalUnread).toBe(5);
+      });
+    }
   });
 });

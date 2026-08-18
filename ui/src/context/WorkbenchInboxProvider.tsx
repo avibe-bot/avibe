@@ -76,8 +76,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // "No whole-account map currently describes this account." The unread map is the
   // one thing here with no demand gate at all — every route badges it — so this is
   // the debt that keeps it live independently of which read was supposed to pay it:
-  // true until one arrives, true again when an authorization change voids the scope
-  // it described. Every read that can deliver a whole map is allowed to fail, be
+  // true until one arrives, true again whenever something voids the scope the current
+  // map described or moves counts it cannot describe (see ``oweWholeUnread`` for the
+  // edges). Every read that can deliver a whole map is allowed to fail, be
   // invalidated, or be dropped by the demand gate; what must not happen is the debt
   // being forgotten with it. Distinct from ``unreadLoaded``, which is one-way and
   // answers a different question (may this document touch the OS badge at all).
@@ -204,6 +205,19 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const acceptUnreadMutation = useCallback(() => {
     readOwnershipRef.current.acceptMutation(['inbox-unread', 'inbox-unread-all']);
   }, []);
+
+  // The mirror of ``applyUnreadMap``: one home for "no whole map describes this
+  // account any more". Recording the debt alone is not enough, because a whole-map
+  // read that left the server BEFORE this moment cannot describe the counts it is
+  // about to commit — and committing it would PAY the debt without satisfying it.
+  // So the fence and the debt have one owner, which also covers the case a state
+  // update cannot: when the debt is already outstanding, ``setWholeUnreadOwed(true)``
+  // schedules nothing, and it is the fence that makes ``refreshUnread`` re-read its
+  // own invalidated response.
+  const oweWholeUnread = useCallback(() => {
+    acceptUnreadMutation();
+    setWholeUnreadOwed(true);
+  }, [acceptUnreadMutation]);
 
   // One home for "an authoritative unread map arrived": set the map and flip
   // ``unreadLoaded`` together so the two can never drift apart. Every whole-account
@@ -579,6 +593,20 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Never touches the cursor or replaces unrelated unread state.
   const reconcileSession = useCallback(
     async (sessionId: string) => {
+      // The demand gate belongs HERE rather than at the events that call this:
+      // every trigger of a request-backed revalidation would otherwise have to
+      // remember it, and this provider has more triggers than guards. With no feed
+      // consumer the card this upserts is not rendered and the next activation
+      // reconciles the window anyway — the same argument that lets a queued feed
+      // intent be dropped. What is NOT droppable is the other half of this read:
+      // it owns this session's unread count, which every route badges. So declining
+      // hands the whole-account map the debt instead of dropping the obligation with
+      // the request, and a burst of foreground restores costs one coalesced counts
+      // read instead of one targeted read each.
+      if (!isFeedActive()) {
+        oweWholeUnread();
+        return;
+      }
       if (targetedReadInFlightRef.current.has(sessionId)) {
         targetedReadPendingRef.current.add(sessionId);
         return;
@@ -630,7 +658,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         targetedReadInFlightRef.current.delete(sessionId);
       }
     },
-    [api, applySessionUnread],
+    [api, applySessionUnread, isFeedActive, oweWholeUnread],
   );
   refreshRunnerRef.current = () => void refresh();
   reconcileRunnerRef.current = () => void reconcile();
@@ -693,8 +721,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // naming the read that pays it: with a feed consumer the refresh below
         // carries it, without one the counts effect runs on this very state
         // change, and if the refresh is later dropped or fails the debt is still
-        // outstanding when the last consumer leaves.
-        setWholeUnreadOwed(true);
+        // outstanding when the last consumer leaves. Owing also fences the
+        // pre-change counts read that may be in flight — which is the whole reason
+        // that fence lives with the debt and not at this call site.
+        oweWholeUnread();
         if (isFeedActive()) {
           void refresh();
           return;
@@ -714,15 +744,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         });
       },
       onInboxUnreadChanged: (data) => {
-        acceptUnreadMutation();
         if (data?.unread_by_session) {
+          // The event IS the newest whole map: fence the reads in flight, then adopt it.
+          acceptUnreadMutation();
           applyUnreadMap(data.unread_by_session);
           return;
         }
-        // The counts changed and the event did not say how. The mutation above
-        // already invalidated every read in flight, so nothing is left to adopt a
-        // map: owe one.
-        setWholeUnreadOwed(true);
+        // The counts changed and the event did not say how, so nothing here can
+        // adopt a map: owe one, which invalidates the reads that started before the
+        // change and would otherwise settle the debt with pre-change counts.
+        oweWholeUnread();
       },
       onSessionActivity: (data) => {
         // Contract A6: react to visibility/scope changes carried on the event.
@@ -764,6 +795,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     applyUnreadMap,
     discardAuthorizedFeed,
     isFeedActive,
+    oweWholeUnread,
     reconcileSession,
     refresh,
   ]);
