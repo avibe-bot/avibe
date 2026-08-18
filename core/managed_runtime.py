@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
-from typing import Any
+from typing import Any, Iterator
 
 from core.dependency_network import (
     dependency_error_details,
@@ -426,6 +426,34 @@ class ManagedRuntimeManager:
         finally:
             self._install_lock.release()
 
+    def _rglob_install_metadata(self, versions_dir: Path) -> Iterator[Path]:
+        """rglob metadata files with error-preserving traversal.
+
+        ``Path.rglob`` suppresses subtree traversal errors and silently
+        returns an incomplete candidate set; raise instead so the caller's
+        inspection handling reports it (a misleading empty preview must not
+        hide an unreadable versions tree).
+        """
+        stack: list[Path] = [versions_dir]
+        while stack:
+            parent = stack.pop()
+            try:
+                iterator = os.scandir(parent)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise OSError(f"versions traversal failed: {parent}") from exc
+            try:
+                for entry in iterator:
+                    if entry.name == self.spec.metadata_filename:
+                        yield parent / entry.name
+                    elif entry.is_dir(follow_symlinks=False):
+                        stack.append(parent / entry.name)
+            except OSError as exc:
+                raise OSError(f"versions traversal failed: {parent}") from exc
+            finally:
+                iterator.close()
+
     def _clean_locked(self, *, keep_previous: int, dry_run: bool = False) -> dict[str, Any]:
         removed: list[str] = []
         for staging_dir in self.runtime_dir.glob("install-*"):
@@ -448,7 +476,7 @@ class ManagedRuntimeManager:
 
         install_dirs = {
             metadata_path.parent
-            for metadata_path in versions_dir.rglob(self.spec.metadata_filename)
+            for metadata_path in self._rglob_install_metadata(versions_dir)
             if metadata_path.parent.is_dir()
         }
         current = self._current_install_dir(versions_dir)

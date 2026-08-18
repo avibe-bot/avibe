@@ -623,11 +623,26 @@ class ShowRuntimeManager:
         return command
 
     def _clean_after_managed_install(self, command: list[str]) -> None:
-        if (
-            self.runtime_source != _RUNTIME_SOURCE_MANIFEST
-            or self.manifest_path is not None
-            or self.manifest_url is not None
-        ):
+        managed_packaged_install = (
+            self.runtime_source == _RUNTIME_SOURCE_MANIFEST
+            and self.manifest_path is None
+            and self.manifest_url is None
+        )
+        if not managed_packaged_install:
+            # Custom-manifest installs populate the same content-addressed
+            # downloads cache, so still prune archives; only the install-dir
+            # pruning stays packaged-manifest-specific (its metadata filter
+            # assumes the packaged manifest source).
+            try:
+                archives = self._clean_downloaded_archives()
+                if archives.get("removed_count"):
+                    logger.info(
+                        "Removed %d stale Show Runtime archive(s), reclaimed %d byte(s)",
+                        archives["removed_count"],
+                        archives["removed_bytes"],
+                    )
+            except Exception:
+                logger.warning("Failed to clean stale Show Runtime archives", exc_info=True)
             return
         try:
             protected_install_dirs = self._manifest_install_dirs_for_command(command)
@@ -770,6 +785,37 @@ class ShowRuntimeManager:
             result["reason"] = "runtime_archive_download_failed"
         return result
 
+    @contextlib.contextmanager
+    def _preview_guard(self):
+        """Hold a read-only install guard for the whole preview planning.
+
+        The probe lock stays held while staging loops enumerate candidates, so
+        an install starting after the check cannot slip a live ``manifest-*``
+        directory into the preview. Yields the busy reason (or ``None`` when
+        the preview may proceed).
+        """
+        busy = self._preview_busy_reason_locked()
+        try:
+            yield busy
+        finally:
+            self._release_preview_guard()
+
+    def _preview_busy_reason_locked(self) -> str | None:
+        """Take the read-only busy probe and keep it for the preview scope."""
+        reason = self._preview_busy_reason()
+        if reason is None:
+            self._preview_guard_fd = getattr(self, "_preview_guard_fd", None)
+        return reason
+
+    def _release_preview_guard(self) -> None:
+        fd = getattr(self, "_preview_guard_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._preview_guard_fd = None
+
     def _preview_busy_reason(self) -> str | None:
         """Read-only busy probe for previews: never creates or locks files.
 
@@ -780,6 +826,10 @@ class ShowRuntimeManager:
         inspection problem); where flock does not exist (native Windows) a
         staging sentinel — a fresh ``manifest-*``/``prebuilt-*`` directory
         modified within the install guard window — is used instead.
+
+        On POSIX success the probe fd is kept open with the shared lock held
+        (stored on the instance) so the caller can hold the guard through
+        planning; ``_release_preview_guard`` closes it.
         """
         if self._install_guard_depth > 0:
             return "runtime_install_already_running"
@@ -799,13 +849,14 @@ class ShowRuntimeManager:
         except OSError:
             return "runtime_install_guard_unavailable"
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            # Held (shared) until the preview scope ends: an installer's
+            # exclusive-lock acquisition now blocks on us and vice versa.
+            self._preview_guard_fd = fd
             return None
         except OSError:
-            return "runtime_install_already_running"
-        finally:
             os.close(fd)
+            return "runtime_install_already_running"
 
     def _staging_sentinel_reason(self) -> str | None:
         """Treat freshly-modified staging dirs as busy (flock-less platforms)."""
@@ -839,9 +890,9 @@ class ShowRuntimeManager:
 
     def _clean_locked(self, *, keep_previous: int, dry_run: bool) -> dict[str, Any]:
         removed: list[str] = []
-        if dry_run:
-            busy_reason = self._preview_busy_reason()
-            if busy_reason:
+        preview_guard = self._preview_guard() if dry_run else contextlib.nullcontext(None)
+        with preview_guard as busy_reason:
+            if dry_run and busy_reason:
                 # Map both contention and guard-unavailability through the
                 # same skip-reason taxonomy the real cleanup uses, so the CLI
                 # renders reason-specific guidance either way.
@@ -856,13 +907,13 @@ class ShowRuntimeManager:
                     "removed": [],
                     "archives": self._skipped_archive_report(skip_reason),
                 }
-        for pattern in ("prebuilt-*", "manifest-*"):
-            for path in self.runtime_dir.glob(pattern):
-                if path.is_dir():
-                    if not dry_run:
-                        shutil.rmtree(path, ignore_errors=True)
-                    removed.append(str(path))
-        removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=dry_run))
+            for pattern in ("prebuilt-*", "manifest-*"):
+                for path in self.runtime_dir.glob(pattern):
+                    if path.is_dir():
+                        if not dry_run:
+                            shutil.rmtree(path, ignore_errors=True)
+                        removed.append(str(path))
+            removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=dry_run))
         # A dry run leaves stale install dirs in place, so their metadata would
         # still read as "protected" below. Skip metadata under the dirs a real
         # run would remove, so the archive preview matches the real outcome.
@@ -1089,9 +1140,14 @@ class ShowRuntimeManager:
                 if name[: -len(".tgz")] in protected:
                     continue
                 candidates.append((path, stat_result.st_size, name, 0))
-        finally:
+            # Keep the enumeration descriptor open: the removal phase unlinks
+            # through it, so a path swap between phases cannot redirect
+            # deletion. The caller closes it when done.
+            self._downloads_dir_fd = dir_fd
+            return candidates
+        except BaseException:
             os.close(dir_fd)
-        return candidates
+            raise
 
     def _clean_downloaded_archives(
         self,
@@ -1143,31 +1199,36 @@ class ShowRuntimeManager:
                 if candidates:
                     if os.name == "nt":
                         for path, size, name, inode in candidates:
+                            claimed = path.with_name(f"{name}.avibe-removing")
                             try:
                                 pre_stat = os.stat(path, follow_symlinks=False)
                                 if inode and pre_stat.st_ino != inode:
                                     raise OSError("entry was replaced after enumeration")
                                 if not stat.S_ISREG(pre_stat.st_mode):
                                     raise OSError("entry replaced by a non-regular file")
-                                os.unlink(path)
-                                # Re-stat the name: if a replacement appeared
-                                # at the same instant, do not count it removed.
-                                try:
-                                    os.stat(path, follow_symlinks=False)
-                                    raise OSError("entry replaced during removal")
-                                except FileNotFoundError:
-                                    pass
+                                # Atomically claim the entry: a rename moves
+                                # exactly this inode to a private name, so any
+                                # later same-name replacement survives and the
+                                # unlink cannot delete a replacement.
+                                os.rename(path, claimed)
+                                post_stat = os.stat(claimed, follow_symlinks=False)
+                                if inode and post_stat.st_ino != inode:
+                                    os.rename(claimed, path)  # put it back; not ours
+                                    raise OSError("rename claimed a different entry")
+                                os.unlink(claimed)
                             except OSError:
                                 logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
                                 failed_count += 1
+                                try:
+                                    if claimed.exists():
+                                        os.rename(claimed, path)
+                                except OSError:
+                                    pass
                                 continue
                             removed_count += 1
                             removed_bytes += size
                     else:
-                        dir_fd = os.open(
-                            self.runtime_dir / "downloads",
-                            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
-                        )
+                        dir_fd = getattr(self, "_downloads_dir_fd", None)
                         try:
                             for path, size, name, _inode in candidates:
                                 try:
@@ -1179,7 +1240,9 @@ class ShowRuntimeManager:
                                 removed_count += 1
                                 removed_bytes += size
                         finally:
-                            os.close(dir_fd)
+                            if dir_fd is not None:
+                                os.close(dir_fd)
+                                self._downloads_dir_fd = None
                 report = {
                     "protected_count": len(protected),
                     "candidate_count": len(candidates),
