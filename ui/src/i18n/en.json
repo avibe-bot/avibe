@@ -4599,7 +4599,7 @@
       "cloud": "Managed by Avibe Cloud"
     },
     "actions": {
-      "openCloud": "Open in Cloud",
+      "openCloud": "Open Avibe Cloud",
       "addAccess": "Add access",
       "editAccess": "Edit access",
       "removeAccess": "Remove access",

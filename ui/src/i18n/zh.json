@@ -4599,7 +4599,7 @@
       "cloud": "由 Avibe Cloud 管理"
     },
     "actions": {
-      "openCloud": "在 Cloud 中打开",
+      "openCloud": "打开 Avibe Cloud",
       "addAccess": "添加访问权限",
       "editAccess": "编辑访问权限",
       "removeAccess": "移除访问权限",
@@ -4612,7 +4612,7 @@
     },
     "tabs": {
       "label": "权限视图",
-      "access": "实例访问",
+      "access": "Avibe 访问",
       "projects": "项目"
     },
     "states": {
@@ -4658,7 +4658,7 @@
       "role": "角色"
     },
     "principals": {
-      "organization_group": "组织组",
+      "organization_group": "群组",
       "email": "邮箱",
       "email_domain": "邮箱域名"
     },
@@ -4676,8 +4676,8 @@
       "too_many_entries": "此策略包含过多条目。",
       "duplicate_access_principal": "每个访问主体只能出现一次。",
       "duplicate_project_access_principal": "每个项目主体只能出现一次。",
-      "organization_group_not_found": "此组织组已不可用。",
-      "organization_group_archived": "不能把已归档的组加入新策略。",
+      "organization_group_not_found": "此群组已不可用。",
+      "organization_group_archived": "不能把已归档的群组加入新策略。",
       "invalid_project_access_intent": "请选择有效的项目访问规则。",
       "invalid_project_access_principal": "某个项目访问主体无效。",
       "invalid_project_access_role": "某个项目访问角色无效。",
@@ -4723,7 +4723,7 @@
       },
       "modeHelp": {
         "inherit": "所有能使用此 Avibe 的用户都能使用该项目。",
-        "restricted": "只有选中的用户、域名和组可以使用该项目。",
+        "restricted": "只有选中的用户、域名和群组可以使用该项目。",
         "owner_only": "只有 Avibe 所有者可以使用该项目。"
       },
       "audience": {

@@ -67,6 +67,13 @@ def _projection(instance_id: str = "inst-123") -> dict:
 
 def _complete_projection(instance_id: str = "inst-123") -> dict:
     projection = _projection(instance_id)
+    projection["instance"].update(
+        {
+            "name": "max-incus-1",
+            "public_url": "https://max-incus-1-app.avibe.bot",
+            "organization": {"id": "org-1", "name": "CoinSummer"},
+        }
+    )
     projection["access"]["entries"] = [
         {"kind": "email", "value": "viewer@example.com", "role": "viewer"}
     ]
@@ -169,6 +176,23 @@ MALFORMED_PROJECTION_CASES = [
     pytest.param(("instance", "permission_authority"), "local", id="permission-authority"),
     pytest.param(("instance", "local_mutation_allowed"), 1, id="local-mutation-flag"),
     pytest.param(("instance", "authorization_revision"), True, id="authorization-revision"),
+    pytest.param(("instance", "name"), "", id="instance-name"),
+    pytest.param(
+        ("instance", "public_url"),
+        "http://max-incus-1-app.avibe.bot",
+        id="instance-public-url",
+    ),
+    pytest.param(("instance", "organization"), {}, id="instance-organization"),
+    pytest.param(
+        ("instance", "organization", "id"),
+        "",
+        id="instance-organization-id",
+    ),
+    pytest.param(
+        ("instance", "organization", "name"),
+        123,
+        id="instance-organization-name",
+    ),
     pytest.param(("capabilities",), None, id="capabilities-container"),
     pytest.param(("capabilities", 0), 123, id="capability-type"),
     pytest.param(("capabilities", 0), "", id="capability-empty"),
@@ -306,6 +330,52 @@ def test_permissions_client_binds_requests_to_paired_instance(monkeypatch) -> No
             },
         )
     ]
+
+
+def test_permissions_response_enriches_legacy_display_from_the_exact_pairing() -> None:
+    config = _config()
+    config.remote_access.vibe_cloud.public_url = "https://max-incus-1-app.avibe.bot"
+    projection = _projection()
+
+    payload = permissions.response_payload(
+        permissions.PermissionsProjectionResult(projection=projection, source="live"),
+        config,
+    )
+
+    assert payload["projection"]["instance"] == {
+        **projection["instance"],
+        "name": "max-incus-1",
+        "public_url": "https://max-incus-1-app.avibe.bot",
+    }
+    assert "organization" not in payload["projection"]["instance"]
+    assert "name" not in projection["instance"]
+
+
+def test_permissions_response_does_not_mix_display_metadata_across_pairings() -> None:
+    config = _config("inst-other")
+    config.remote_access.vibe_cloud.public_url = "https://other-app.avibe.bot"
+    projection = _projection()
+
+    payload = permissions.response_payload(
+        permissions.PermissionsProjectionResult(projection=projection, source="cache"),
+        config,
+    )
+
+    assert payload["projection"] is projection
+    assert "name" not in payload["projection"]["instance"]
+
+
+def test_permissions_preserves_authoritative_instance_display_metadata() -> None:
+    projection = _complete_projection()
+    config = _config()
+    config.remote_access.vibe_cloud.public_url = "https://stale-local-app.avibe.bot"
+
+    payload = permissions.response_payload(
+        permissions.PermissionsProjectionResult(projection=projection, source="live"),
+        config,
+    )
+
+    assert payload["projection"]["instance"] == projection["instance"]
 
 
 def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeypatch) -> None:

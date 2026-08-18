@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Building2,
   CheckCircle2,
   Cloud,
   CloudOff,
@@ -174,6 +175,15 @@ const displayPrincipal = (kind: PrincipalKind, value: string, groups: DirectoryG
   }
   if (kind === 'email_domain') return `@${value.replace(/^@/, '')}`;
   return value;
+};
+
+const publicUrlLabel = (publicUrl: string | undefined): string | null => {
+  if (!publicUrl) return null;
+  try {
+    return new URL(publicUrl).host;
+  } catch {
+    return null;
+  }
 };
 
 const accessEntryKey = (entry: AccessEntry): string => (
@@ -761,7 +771,7 @@ function ProjectAccessDialog({
 
 export function PermissionsPage() {
   const { t } = useTranslation();
-  const { capabilities, instanceRole } = useInstanceAuthorization();
+  const { capabilities } = useInstanceAuthorization();
   const [state, setState] = useState<PageState>({ kind: 'loading' });
   const [tab, setTab] = useState<'access' | 'projects'>('access');
   const [editingAccess, setEditingAccess] = useState<string | null | undefined>(undefined);
@@ -909,6 +919,9 @@ export function PermissionsPage() {
     && projection.capabilities.includes('instance.permissions.mutate')
     && !response.offline;
   const applying = projectionIsApplying(response);
+  const instanceName = projection.instance.name?.trim() || t('permissions.currentInstance');
+  const instanceInitial = Array.from(instanceName)[0]?.toUpperCase() || 'A';
+  const instancePublicUrl = publicUrlLabel(projection.instance.public_url);
   const filteredProjects = projection.projects.filter((project) => (
     project.sync.status !== 'deleted'
     && `${project.display_name} ${project.project_id}`.toLowerCase().includes(search.trim().toLowerCase())
@@ -1000,19 +1013,41 @@ export function PermissionsPage() {
           </div>
           <p className="mt-1.5 max-w-3xl text-[13px] leading-5 text-muted md:text-sm">{t('permissions.description')}</p>
         </div>
-        <Badge variant={projection.instance.permission_authority === 'instance' ? 'success' : 'info'}>
-          {projection.instance.permission_authority === 'instance' ? <ShieldCheck className="size-3" /> : <Cloud className="size-3" />}
-          {t(`permissions.authority.${projection.instance.permission_authority}`)}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+          <Badge variant={projection.instance.permission_authority === 'instance' ? 'success' : 'info'}>
+            {projection.instance.permission_authority === 'instance' ? <ShieldCheck className="size-3" /> : <Cloud className="size-3" />}
+            {t(`permissions.authority.${projection.instance.permission_authority}`)}
+          </Badge>
+          <Button asChild size="sm" variant="outline">
+            <a href="https://avibe.bot" target="_blank" rel="noreferrer">
+              {t('permissions.actions.openCloud')}
+              <ExternalLink className="size-3.5" />
+            </a>
+          </Button>
+        </div>
       </header>
 
-      <div className="flex min-w-0 items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
-        <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-mint/10 text-mint-ink"><ShieldCheck className="size-5" /></span>
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold">{t('permissions.currentInstance')}</div>
-          <div className="truncate font-mono text-[11px] text-muted">{projection.instance.id}</div>
+      <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card px-4 py-4 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-mint/10 text-sm font-semibold text-mint-ink" aria-hidden="true">
+            {instanceInitial}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="truncate text-[13px] font-semibold">{instanceName}</span>
+              <Badge variant="secondary" className="text-[10px] font-semibold uppercase">
+                {t('permissions.currentInstance')}
+              </Badge>
+            </div>
+            {instancePublicUrl ? <div className="mt-0.5 truncate text-[11px] text-muted">{instancePublicUrl}</div> : null}
+          </div>
         </div>
-        <Badge variant="secondary">{t(`permissions.roles.${instanceRole ?? 'viewer'}`)}</Badge>
+        {projection.instance.organization?.name ? (
+          <Badge variant="outline" className="w-fit max-w-full shrink-0">
+            <Building2 className="size-3" />
+            <span className="truncate">{projection.instance.organization.name}</span>
+          </Badge>
+        ) : null}
       </div>
 
       {response.offline ? (
@@ -1034,7 +1069,6 @@ export function PermissionsPage() {
           icon={Cloud}
           title={t('permissions.states.cloudTitle')}
           body={t('permissions.states.cloudBody')}
-          action={<Button asChild size="sm" variant="outline"><a href="https://avibe.bot" target="_blank" rel="noreferrer">{t('permissions.actions.openCloud')}<ExternalLink className="size-3.5" /></a></Button>}
         />
       ) : !editable ? (
         <Notice tone="neutral" icon={Eye} title={t('permissions.states.readOnlyTitle')} body={t('permissions.states.readOnlyBody')} />

@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable, Mapping, NoReturn
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -138,6 +138,29 @@ def _require_nonempty_string(value: Any, *, nullable: bool = False) -> None:
         _invalid_response()
 
 
+def _require_https_public_url(value: Any) -> None:
+    _require_nonempty_string(value)
+    if value != value.strip():
+        _invalid_response()
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        _invalid_response()
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        _invalid_response()
+
+
 def _is_valid_project_id(value: Any) -> bool:
     return (
         isinstance(value, str)
@@ -258,6 +281,15 @@ def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
     if not isinstance(instance["local_mutation_allowed"], bool):
         _invalid_response()
     _require_nonnegative_integer(instance["authorization_revision"])
+    if "name" in instance:
+        _require_nonempty_string(instance["name"])
+    if "public_url" in instance:
+        _require_https_public_url(instance["public_url"])
+    if "organization" in instance and instance["organization"] is not None:
+        organization = _require_mapping(instance["organization"])
+        _require_keys(organization, "id", "name")
+        _require_nonempty_string(organization["id"])
+        _require_nonempty_string(organization["name"])
 
     capabilities = _require_list(projection["capabilities"])
     for capability in capabilities:
@@ -610,11 +642,49 @@ def update_project_access(
     return {**result, "instance_id": instance_id}
 
 
-def response_payload(result: PermissionsProjectionResult) -> dict[str, Any]:
+def _local_instance_display(
+    config: V2Config,
+    instance_id: str,
+) -> dict[str, str]:
+    cloud = config.remote_access.vibe_cloud
+    if str(cloud.instance_id or "").strip() != instance_id:
+        return {}
+    public_url = str(cloud.public_url or "").strip()
+    try:
+        _require_https_public_url(public_url)
+        parsed = urlsplit(public_url)
+    except PermissionsInvalidResponseError:
+        return {}
+    hostname = parsed.hostname or ""
+    name = hostname.split(".", 1)[0]
+    if name.endswith("-app"):
+        name = name[:-4]
+    if not name:
+        return {}
+    return {
+        "name": name,
+        "public_url": f"https://{parsed.netloc.lower().rstrip('.')}",
+    }
+
+
+def response_payload(
+    result: PermissionsProjectionResult,
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    projection = result.projection
+    instance = projection["instance"]
+    if "name" not in instance or "public_url" not in instance:
+        try:
+            local_display = _local_instance_display(config or V2Config.load(), instance["id"])
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            local_display = {}
+        if local_display:
+            instance = {**local_display, **instance}
+            projection = {**projection, "instance": instance}
     return {
         "ok": True,
         "source": result.source,
         "offline": result.offline,
         "cached_at": result.cached_at,
-        "projection": result.projection,
+        "projection": projection,
     }

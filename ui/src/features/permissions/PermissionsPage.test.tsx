@@ -44,6 +44,9 @@ const response = (overrides: Partial<PermissionsResponse> = {}): PermissionsResp
     schema_version: 1,
     instance: {
       id: 'inst-123',
+      name: 'max-incus-1',
+      public_url: 'https://max-incus-1-app.avibe.bot',
+      organization: { id: 'org-1', name: 'CoinSummer' },
       access_mode: 'allowlist',
       permission_authority: 'instance',
       local_mutation_allowed: true,
@@ -121,6 +124,33 @@ afterEach(() => {
 });
 
 describe('PermissionsPage state model', () => {
+  it('renders the current Avibe identity and Cloud handoff from the design contract', async () => {
+    renderPage();
+
+    expect(await screen.findByText('max-incus-1')).toBeTruthy();
+    expect(screen.getByText('max-incus-1-app.avibe.bot')).toBeTruthy();
+    expect(screen.getByText('CoinSummer')).toBeTruthy();
+    expect(screen.getByText('permissions.currentInstance')).toBeTruthy();
+    const cloudLink = screen.getByRole('link', { name: /permissions.actions.openCloud/ });
+    expect(cloudLink.getAttribute('href')).toBe('https://avibe.bot');
+    expect(cloudLink.getAttribute('target')).toBe('_blank');
+    expect(screen.queryByText('inst-123')).toBeNull();
+  });
+
+  it('keeps legacy projections usable without inventing an Organization name', async () => {
+    const legacy = response();
+    delete legacy.projection.instance.name;
+    delete legacy.projection.instance.public_url;
+    delete legacy.projection.instance.organization;
+    api.getPermissions.mockResolvedValue(legacy);
+
+    renderPage();
+
+    expect(await screen.findAllByText('permissions.currentInstance')).toHaveLength(2);
+    expect(screen.queryByText('CoinSummer')).toBeNull();
+    expect(screen.queryByText('inst-123')).toBeNull();
+  });
+
   it('renders Cloud-owned policy as a visible read-only state', async () => {
     const cloud = response();
     cloud.projection.instance.permission_authority = 'cloud';
@@ -350,6 +380,7 @@ describe('PermissionsPage state model', () => {
     }];
     const instanceB = response();
     instanceB.projection.instance.id = 'inst-b';
+    instanceB.projection.instance.name = 'instance-b';
     instanceB.projection.instance.authorization_revision = 1;
     instanceB.projection.access.entries = [{
       kind: 'email',
@@ -401,7 +432,7 @@ describe('PermissionsPage state model', () => {
     await act(async () => { await Promise.resolve(); });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
-    expect(screen.getByText('inst-b')).toBeTruthy();
+    expect(screen.getByText('instance-b')).toBeTruthy();
 
     await act(async () => {
       if (flow === 'Project edit') {
@@ -429,7 +460,7 @@ describe('PermissionsPage state model', () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByText('inst-b')).toBeTruthy();
+    expect(screen.getByText('instance-b')).toBeTruthy();
     if (flow === 'Project edit') {
       expect(screen.getByText('Instance B Project')).toBeTruthy();
       expect(screen.queryByText('Instance A Acknowledgement')).toBeNull();

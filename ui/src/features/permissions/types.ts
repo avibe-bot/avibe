@@ -58,6 +58,9 @@ export type PermissionsProjection = {
   schema_version: 1;
   instance: {
     id: string;
+    name?: string;
+    public_url?: string;
+    organization?: { id: string; name: string } | null;
     access_mode: 'allowlist' | 'public';
     permission_authority: 'instance' | 'cloud';
     local_mutation_allowed: boolean;
