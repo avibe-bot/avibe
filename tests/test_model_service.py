@@ -32,6 +32,8 @@ def _status(
     *,
     scope: str = "platform",
     chat: bool = True,
+    memory_llm: bool | None = None,
+    memory_llm_source: str = "chat_fallback",
     embedding: bool = True,
     multimodal: bool = False,
     identity: str | None = "emb-v1",
@@ -44,7 +46,9 @@ def _status(
             "chat": chat,
             "embedding": embedding,
             "multimodal": multimodal,
+            "memory_llm": chat if memory_llm is None else memory_llm,
         },
+        "memory_llm_source": memory_llm_source,
         "embedding_identity": identity,
         "quota": {"enforced": False},
         "revision": revision,
@@ -170,6 +174,8 @@ def test_fresh_paired_install_gets_zero_config_cloud_memory_with_write_only_key(
     assert memory.enabled is True
     assert memory.cloud.model_access_key == "mak_first"
     assert memory.cloud.embedding_identity == "emb-v1"
+    assert memory.cloud.memory_llm_source == "chat_fallback"
+    assert memory.cloud.capabilities.memory_llm is True
     assert runtime.llm.base_url == "https://backend.example.test/v1/model"
     assert runtime.llm.model == "avibe-cloud-chat"
     assert runtime.embedding.model == "avibe-cloud-embedding-emb-v1"
@@ -180,6 +186,111 @@ def test_fresh_paired_install_gets_zero_config_cloud_memory_with_write_only_key(
     projected = memory_config_to_payload(memory)
     assert projected["cloud"]["model_access_key"] is None
     assert projected["cloud"]["has_model_access_key"] is True
+
+
+def test_dedicated_memory_llm_can_activate_without_chat_capability() -> None:
+    status = _status(
+        chat=False,
+        memory_llm=True,
+        memory_llm_source="dedicated",
+    )
+
+    parsed = model_service._status_from_payload(status)  # noqa: SLF001
+    assert parsed.memory_available() is True
+
+    activated = _resolved(MemoryConfig(), status, minted=_mint())
+
+    assert activated.enabled is True
+    assert activated.cloud.memory_llm_source == "dedicated"
+    assert activated.cloud.capabilities.memory_llm is True
+    assert activated.runtime_source() == "cloud"
+
+
+def test_chat_fallback_without_chat_capability_is_not_advertised_as_available() -> None:
+    status = _status(
+        chat=False,
+        memory_llm=False,
+        memory_llm_source="chat_fallback",
+    )
+
+    parsed = model_service._status_from_payload(status)  # noqa: SLF001
+    assert parsed.memory_available() is False
+
+    waiting = _resolved(MemoryConfig(), status)
+
+    assert waiting.enabled is False
+    assert waiting.cloud.memory_llm_source == "chat_fallback"
+    assert waiting.cloud.memory_capability_available() is False
+    assert waiting.runtime_source() == "unavailable"
+
+
+def test_dedicated_memory_llm_pause_and_resume_does_not_require_chat() -> None:
+    attached = MemoryConfig(
+        enabled=True,
+        mode="platform",
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(
+                chat=False,
+                embedding=True,
+                memory_llm=True,
+            ),
+            memory_llm_source="dedicated",
+            embedding_identity="emb-v1",
+            applied_embedding_identity="emb-v1",
+            model_access_key="mak_first",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+
+    paused = _resolved(
+        attached,
+        _status(
+            chat=False,
+            memory_llm=False,
+            memory_llm_source="chat_fallback",
+            embedding=True,
+            identity="emb-v1",
+            revision=2,
+        ),
+    )
+    assert paused.runtime_source() == "unavailable"
+    assert paused.enabled is True
+    assert paused.cloud.memory_llm_source == "chat_fallback"
+
+    resumed = _resolved(
+        paused,
+        _status(
+            chat=False,
+            memory_llm=True,
+            memory_llm_source="dedicated",
+            embedding=True,
+            identity="emb-v1",
+            revision=3,
+        ),
+    )
+    assert resumed.runtime_source() == "cloud"
+    assert resumed.enabled is True
+    assert resumed.cloud.memory_llm_source == "dedicated"
+
+
+@pytest.mark.parametrize(
+    ("memory_llm", "chat", "source"),
+    [
+        (False, True, "dedicated"),
+        (True, False, "chat_fallback"),
+    ],
+)
+def test_memory_llm_source_must_match_effective_capability(
+    memory_llm: bool,
+    chat: bool,
+    source: str,
+) -> None:
+    with pytest.raises(model_service.ModelServiceResolutionError, match="model_service_invalid_response"):
+        model_service._status_from_payload(  # noqa: SLF001
+            _status(chat=chat, memory_llm=memory_llm, memory_llm_source=source)
+        )
 
 
 def test_unpairing_clears_cloud_runtime_and_reconciles_the_running_sidecar(

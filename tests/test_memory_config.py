@@ -483,7 +483,9 @@ def _acknowledged_organization_cloud() -> dict:
             "chat": True,
             "embedding": True,
             "multimodal": False,
+            "memory_llm": True,
         },
+        "memory_llm_source": "chat_fallback",
         "embedding_identity": "emb-org",
         "revision": 4,
         "quota_enforced": False,
@@ -498,10 +500,38 @@ def _acknowledged_organization_cloud() -> dict:
     }
 
 
+def test_memory_cloud_persists_effective_memory_llm_source() -> None:
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "cloud": {
+                    "capabilities": {
+                        "asr": False,
+                        "chat": False,
+                        "embedding": True,
+                        "multimodal": False,
+                        "memory_llm": True,
+                    },
+                    "memory_llm_source": "dedicated",
+                    "embedding_identity": "emb-dedicated",
+                }
+            }
+        )
+    )
+
+    assert config.memory.cloud.memory_llm_source == "dedicated"
+    assert config.memory.cloud.capabilities.memory_available() is True
+
+    payload = config_to_payload(config)
+    assert payload["memory"]["cloud"]["memory_llm_source"] == "dedicated"
+    assert payload["memory"]["cloud"]["capabilities"]["memory_llm"] is True
+
+
 @pytest.mark.parametrize(
     ("field", "invalid"),
     [
         ("scope", "unsupported"),
+        ("memory_llm_source", "unsupported"),
         ("capabilities", []),
         ("embedding_identity", 7),
         ("revision", "four"),

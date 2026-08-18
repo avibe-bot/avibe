@@ -1850,6 +1850,7 @@ _MEMORY_CLOUD_MULTIMODAL_ALIAS = "avibe-cloud-multimodal"
 
 MemoryMode = Literal["platform", "custom"]
 MemoryCloudScope = Literal["organization", "platform"]
+MemoryCloudLlmSource = Literal["dedicated", "chat_fallback"]
 
 
 @dataclass
@@ -1919,16 +1920,26 @@ class MemoryCloudCapabilities:
     chat: bool = False
     embedding: bool = False
     multimodal: bool = False
+    # Older persisted cloud caches did not have the effective Memory LLM
+    # capability. ``None`` keeps that shape distinguishable while the helper
+    # methods treat it as Chat fallback until the next status sync.
+    memory_llm: bool | None = None
 
     def validate(self) -> None:
         if any(
             not isinstance(value, bool)
-            for value in (self.asr, self.chat, self.embedding, self.multimodal)
-        ):
+            for value in (
+                self.asr,
+                self.chat,
+                self.embedding,
+                self.multimodal,
+            )
+        ) or (self.memory_llm is not None and not isinstance(self.memory_llm, bool)):
             raise ValueError("Config 'memory.cloud.capabilities' values must be booleans")
 
     def memory_available(self) -> bool:
-        return self.chat and self.embedding
+        effective_memory_llm = self.chat if self.memory_llm is None else self.memory_llm
+        return effective_memory_llm and self.embedding
 
 
 @dataclass
@@ -1937,6 +1948,7 @@ class MemoryCloudConfig:
 
     scope: MemoryCloudScope | None = None
     capabilities: MemoryCloudCapabilities = field(default_factory=MemoryCloudCapabilities)
+    memory_llm_source: MemoryCloudLlmSource | None = None
     embedding_identity: str | None = None
     revision: int | None = None
     quota_enforced: bool = False
@@ -1952,7 +1964,25 @@ class MemoryCloudConfig:
     def validate(self) -> None:
         if self.scope is not None and self.scope not in get_args(MemoryCloudScope):
             raise ValueError("Config 'memory.cloud.scope' must be 'organization', 'platform', or null")
+        if self.memory_llm_source is not None and self.memory_llm_source not in get_args(
+            MemoryCloudLlmSource
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' must be 'dedicated', 'chat_fallback', or null"
+            )
         self.capabilities.validate()
+        if self.memory_llm_source == "dedicated" and self.capabilities.memory_llm is False:
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' dedicated requires memory_llm"
+            )
+        if (
+            self.memory_llm_source == "chat_fallback"
+            and self.capabilities.memory_llm is not None
+            and self.capabilities.memory_llm != self.capabilities.chat
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' chat_fallback requires chat"
+            )
         if self.embedding_identity is not None:
             self.embedding_identity = _validate_memory_text(
                 self.embedding_identity,
@@ -2274,7 +2304,9 @@ def memory_config_to_payload(
                 "chat": memory.cloud.capabilities.chat,
                 "embedding": memory.cloud.capabilities.embedding,
                 "multimodal": memory.cloud.capabilities.multimodal,
+                "memory_llm": memory.cloud.capabilities.memory_llm,
             },
+            "memory_llm_source": memory.cloud.memory_llm_source,
             "embedding_identity": memory.cloud.embedding_identity,
             "revision": memory.cloud.revision,
             "quota_enforced": memory.cloud.quota_enforced,
