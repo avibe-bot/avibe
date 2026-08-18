@@ -453,6 +453,59 @@ in `test_model_hub_l3.py` would have started failing once the wall clock drifted
 the retention horizon from it. Ledger construction now carries the same fake clock as
 its service.
 
+### Round 8 (head `a481bc864`)
+
+One P2 finding, and class C a fifth time: a forwarded call permanently omitted.
+`usage_recorded` was set before the cancellable `asyncio.to_thread()` await, so a
+downstream disconnect while that write sat queued behind a saturated executor
+cancelled the write *and* left the flag saying it was done. Cleanup could not retry,
+and the buffered path had already recorded settlement, so the boundary's own
+`_settle_boundary_termination` never ran either.
+
+Breaker diagnosis, as orchestrator. The four earlier instances were all "an ending
+decides something about metering", and round 7 closed the *what* — no ending is asked
+what the call did. This one is a different seam of the same class: the write's
+**lifetime** was still bound to the turn. `_record_usage`'s docstring already claimed
+metering is a report and never a control input, while the code made the report's
+existence depend on the turn's control flow. Same shape as round 6's finding — code
+contradicting its own written policy — so the ruling is the same: make the code mean
+what it says, locally and reversibly, and continue.
+
+The gateway already owns the pattern. Its cancellation boundary comment reads *"Only
+the request is canceled. Owned teardown and settlement are shielded and drained before
+this boundary re-raises"* — metering was the one piece of work never given that
+treatment. So:
+
+- `_TurnExecution.usage_recorded: bool` becomes `usage_write: asyncio.Task[None] | None`.
+  The record that a turn was metered *is* the owner of its write, rather than a flag
+  that something whose own death could take the write had started one.
+- `_record_usage` creates that task, registers it in a gateway-held set, and only then
+  awaits — shielded. Nothing suspends between reading the facts and owning the write,
+  so a cancellation lands either before this turn was ever going to be metered or after
+  the write is already someone else's to finish. An ending is now a *when* in one more
+  sense: it decides when a call is metered, never whether the metering survives.
+- Shielded rather than detached, deliberately. The ordinary path should still leave the
+  row on disk before the turn ends, so a caller reading the tab right after its own call
+  sees it. Cancellation is the one ending that ordering cannot survive, and there it is
+  the ledger's read-your-write guarantee that gives way, not the write.
+- `close()` drains the outstanding writes, bounded by the transport timeout like every
+  other owned drain, and warns on overrun. `core/controller.py` already closes the
+  gateway on shutdown, so this is a real drain rather than a decorative one.
+
+`test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it` reproduces the
+window exactly rather than mocking around it: it pins the loop to a one-thread executor
+and occupies that thread, so the ledger write is genuinely queued-not-started, asserts
+the ledger is still empty (the scenario is only the scenario while the write is
+queued), cancels the turn, then releases and drains. Replacing the shield with a plain
+`await write` fails it with `KeyError: 'requests'` — the reviewer's permanent omission,
+verbatim.
+
+The structure guard `test_usage_metering_has_one_owner_per_call_population` now names
+the gateway owner as the pair `_record_usage` + `_persist_usage`, and pays for the
+second name with the constraint that makes it one owner: `_persist_usage` has exactly
+one call site and it is inside `_record_usage`, the same single-caller assertion
+`_meter_call` already carries.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

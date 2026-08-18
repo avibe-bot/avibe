@@ -5,6 +5,7 @@ import asyncio
 import json
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -6347,6 +6348,76 @@ def test_a_cancelled_buffered_turn_is_counted_even_when_it_reported_no_tokens(
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 1
         assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
+    tmp_path: Path,
+) -> None:
+    """Review 4964754924: the gateway owns the write, so no ending can cancel it.
+
+    Occupy the loop's only executor thread and the ledger write is queued but not
+    started — the window where cancelling the awaiting task also cancels the work.
+    The turn dies there, and the row still lands, because what the turn owns is
+    the decision to meter and not the write that carries it out.
+    """
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        occupied = threading.Event()
+        release = threading.Event()
+
+        def occupy() -> None:
+            occupied.set()
+            release.wait(5)
+
+        occupant = loop.run_in_executor(executor, occupy)
+        while not occupied.is_set():
+            await asyncio.sleep(0.01)
+
+        source = _source("src_meterown01", "Owned write")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (b'{"usage":{"input_tokens":512,"output_tokens":16}}',),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_owned_write",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        while not gateway._usage_writes:
+            await asyncio.sleep(0.01)
+        # The scenario is only the scenario while the write is still queued.
+        assert _usage_of(service, source.id) == {}
+
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=5)
+
+        release.set()
+        await occupant
+        await gateway.close()
+        executor.shutdown()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["input_tokens"] == 512
+        assert metered["output_tokens"] == 16
 
     asyncio.run(exercise())
 

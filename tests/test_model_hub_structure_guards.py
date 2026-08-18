@@ -529,10 +529,12 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     # count or silently drop a billed call.
     service_tree = _tree(SERVICE)
     gateway_tree = _tree(TURN_GATEWAY)
-    owners = (
-        _functions(service_tree)["_meter_call"],
-        _functions(gateway_tree)["_record_usage"],
-    )
+    recorder = _functions(gateway_tree)["_record_usage"]
+    # The gateway owner is a pair: `_record_usage` decides, `_persist_usage` carries
+    # the write off the loop so no turn's cancellation can take it. That is still one
+    # owner only while the second half has exactly one caller, asserted below.
+    persister = _functions(gateway_tree)["_persist_usage"]
+    owners = (_functions(service_tree)["_meter_call"], recorder, persister)
     writes = _ledger_writes(service_tree) + _ledger_writes(gateway_tree)
     assert writes
     assert all(any(write in set(ast.walk(owner)) for owner in owners) for write in writes)
@@ -542,17 +544,21 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     ]
     assert len(meter_calls) == 1
     assert meter_calls[0] in set(ast.walk(invoke))
+    persist_calls = [
+        node for node in ast.walk(gateway_tree) if _call_name(node) == "_persist_usage"
+    ]
+    assert len(persist_calls) == 1
+    assert persist_calls[0] in set(ast.walk(recorder))
     # Any of the gateway's endings may report the forwarded call, so exactly-once
-    # rests on its idempotence flag; a caller that pre-checks or clears the flag
-    # would move that decision outside the owner.
-    recorder = _functions(gateway_tree)["_record_usage"]
-    flags = [
+    # rests on the write it owns; a caller that pre-checks or clears that handle
+    # would move the decision outside the owner.
+    handles = [
         node
         for node in ast.walk(gateway_tree)
-        if isinstance(node, ast.Attribute) and node.attr == "usage_recorded"
+        if isinstance(node, ast.Attribute) and node.attr == "usage_write"
     ]
-    assert flags
-    assert all(flag in set(ast.walk(recorder)) for flag in flags)
+    assert handles
+    assert all(handle in set(ast.walk(recorder)) for handle in handles)
 
 
 def test_model_identity_is_decided_only_by_its_owner() -> None:

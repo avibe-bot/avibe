@@ -102,7 +102,10 @@ class _TurnExecution:
     # wire tracker to read them from.
     buffered_usage: ProtocolUsageReport | None = None
     buffered_outcome: StreamTerminalOutcome | None = None
-    usage_recorded: bool = False
+    # The gateway-owned task that persists this turn's row, and by its existence
+    # the record that this turn has already been metered. A flag would only say
+    # the write was started by something whose own death could still take it.
+    usage_write: asyncio.Task[None] | None = None
 
     @property
     def reported_usage(self) -> ProtocolUsageReport | None:
@@ -203,6 +206,9 @@ class ModelHubTurnGateway:
                 now=self._now,
             )
         )
+        # Strong references to the writes in flight, so the gateway outlives the
+        # turns that queued them and shutdown has something to drain.
+        self._usage_writes: set[asyncio.Task[None]] = set()
         self._start_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -273,6 +279,17 @@ class ModelHubTurnGateway:
         self._base_url = None
         if runner is not None:
             await runner.cleanup()
+        # After the runner, so the handlers it cancels have queued their last
+        # writes first. Bounded like every other owned drain: a ledger that
+        # cannot be reached must not hold shutdown open.
+        pending = tuple(self._usage_writes)
+        if pending:
+            _done, unfinished = await asyncio.wait(pending, timeout=self._transport_timeout)
+            if unfinished:
+                logger.warning(
+                    "Model Hub usage metering left %d write(s) unfinished at shutdown",
+                    len(unfinished),
+                )
 
     async def _ensure_started(self) -> None:
         if self._runner is not None:
@@ -747,22 +764,61 @@ class ModelHubTurnGateway:
         The ledger read-modify-write is file I/O, so it runs off the event loop;
         metering is a report, never a control input, and a ledger failure must not
         change the turn the caller sees.
+
+        Which also means the turn cannot own the write. The gateway holds it, and
+        the only await here is shielded, so an ending is a *when* in one more
+        sense: it decides when a call is metered and never whether the metering
+        survives. Nothing suspends between reading the facts and owning the write,
+        so a cancellation lands either before this turn was ever going to be
+        metered or after the write is already someone else's to finish.
+
+        Shielded rather than detached because the ordinary path should still leave
+        the row on disk before the turn ends — a caller reading the tab right after
+        its own call sees it. Cancellation is the one ending that ordering cannot
+        survive, and it is the ledger's guarantee that gives way, not the write.
         """
 
         resolved = execution.resolved
-        if execution.usage_recorded or resolved is None:
+        if execution.usage_write is not None or resolved is None:
             return
         usage = execution.reported_usage
         if not execution.reached_model and usage is None:
             return
-        execution.usage_recorded = True
-        try:
-            await asyncio.to_thread(
-                self.usage.record,
+        write = asyncio.create_task(
+            self._persist_usage(
                 source_id=resolved.source_id,
                 model_id=resolved.model_id,
                 usage=usage,
                 at=self._now(),
+            )
+        )
+        execution.usage_write = write
+        self._usage_writes.add(write)
+        write.add_done_callback(self._usage_writes.discard)
+        await asyncio.shield(write)
+
+    async def _persist_usage(
+        self,
+        *,
+        source_id: str,
+        model_id: str,
+        usage: ProtocolUsageReport | None,
+        at: datetime,
+    ) -> None:
+        """Run one ledger write off the loop, absorbing whatever it costs.
+
+        `at` is captured by the caller when the turn ended, not read here: this
+        coroutine can start well after that, and a queued write is still a report
+        about the moment the call finished.
+        """
+
+        try:
+            await asyncio.to_thread(
+                self.usage.record,
+                source_id=source_id,
+                model_id=model_id,
+                usage=usage,
+                at=at,
             )
         except (OSError, ValueError) as exc:
             logger.debug("Model Hub usage metering skipped one turn: %s", exc)
