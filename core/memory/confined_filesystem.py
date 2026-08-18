@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from config import paths
+
 
 _DIRECTORY_ORDER_INSERT_BATCH_SIZE = 256
 _DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
@@ -35,6 +37,49 @@ class _LinuxOpenHow(ctypes.Structure):
 
 class ConfinedFilesystemError(RuntimeError):
     """A confined filesystem operation refused an unsafe path or entry."""
+
+
+@dataclass(frozen=True, slots=True)
+class ConfinedRoot:
+    """Map one logical trust anchor and its children to one physical spelling."""
+
+    logical_home: Path
+    physical_home: Path
+
+    @classmethod
+    def from_home(cls, home: Path | str) -> "ConfinedRoot":
+        logical_home = Path(
+            os.path.abspath(os.path.expanduser(os.fspath(home)))
+        )
+        return cls(
+            logical_home=logical_home,
+            physical_home=paths.physical_home(logical_home),
+        )
+
+    def confine(self, path: Path | str) -> Path:
+        """Return the same lexical child below the physical root.
+
+        Only the trusted root is resolved. Descendant components remain lexical
+        so a symlink planted below the root is still visible to no-follow opens.
+        """
+
+        candidate = Path(
+            os.path.abspath(os.path.expanduser(os.fspath(path)))
+        )
+        for base in (self.logical_home, self.physical_home):
+            if candidate.is_relative_to(base):
+                return self.physical_home.joinpath(*candidate.relative_to(base).parts)
+        raise ConfinedFilesystemError(
+            "confined path must stay within the confinement root"
+        )
+
+    def confine_if_child(self, path: Path | str) -> Path | None:
+        """Map a child when confined, preserving explicit external paths."""
+
+        try:
+            return self.confine(path)
+        except ConfinedFilesystemError:
+            return None
 
 
 @dataclass(slots=True)

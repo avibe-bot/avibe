@@ -39,7 +39,7 @@ from core.memory.artifact import (
 from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
 from core.memory.clear_intent import ClearSurface
-from core.memory.confined_filesystem import required_no_follow_flag
+from core.memory.confined_filesystem import ConfinedRoot, required_no_follow_flag
 from core.memory.everos import (
     EverOSPort,
     MemoryProviderFailure,
@@ -380,7 +380,10 @@ class MemoryRuntime:
     ) -> None:
         self._config = config
         self._restart_config = deepcopy(config)
-        self._effective_home = effective_home or paths.get_vibe_remote_dir()
+        self._filesystem_root = ConfinedRoot.from_home(
+            effective_home or paths.get_vibe_remote_dir()
+        )
+        self._effective_home = self._filesystem_root.physical_home
         self._maintenance: MemoryMaintenance | None = None
         self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
         self._provider_root_owner = ProviderRoot(
@@ -448,7 +451,7 @@ class MemoryRuntime:
             return True
         try:
             required_no_follow_flag()
-            opened = store or MemoryStore()
+            opened = store or MemoryStore(effective_home=self._effective_home)
             self._artifact_manager.set_provider_root(self._provider_root)
             module = MemoryModule(
                 opened,
