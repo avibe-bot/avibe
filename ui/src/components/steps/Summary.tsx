@@ -386,12 +386,19 @@ const countConfiguredChannels = (channelConfigsByPlatform: Record<string, Record
 const buildConfigPayload = (data: any) => {
   const agents = data.agents || {};
   const enabledPlatforms = getEnabledPlatforms(data);
+  // Deselection encoding — see Wizard.tsx: baseline platforms the wizard
+  // no longer selects become remove operations; concurrent additions by
+  // other processes are preserved by construction.
+  const baseline: string[] = Array.isArray(data.__wizardEnabledBaseline)
+    ? data.__wizardEnabledBaseline
+    : [];
+  const deselected = baseline.filter((p) => !enabledPlatforms.includes(p));
   return {
-    // Patch-write shape (#1458 stage ③): enablement as add-operations
-    // against the persisted list; sections the wizard doesn't own are
-    // left to their owners instead of round-tripped (see Wizard.tsx).
+    // Patch-write shape (#1458 stage ③): enablement as add/remove
+    // operations against the persisted list; sections the wizard
+    // doesn't own are left to their owners (see Wizard.tsx).
     __avibe_list_ops: {
-      'platforms.enabled': { add: enabledPlatforms },
+      'platforms.enabled': { add: enabledPlatforms, remove: deselected },
     },
     mode: data.mode || 'self_host',
     version: 'v2',

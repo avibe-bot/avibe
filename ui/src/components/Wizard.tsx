@@ -26,19 +26,29 @@ const getPersistableWizardPlatforms = (data: any) =>
 
 const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
   const enabledPlatforms = enabledPlatformOverride ?? getEnabledPlatforms(data);
+  // Deselection encoding: baseline = platforms enabled when the wizard
+  // loaded its config. A baseline platform the wizard no longer selects
+  // is an explicit user deselection → remove operation. Platforms added
+  // by other processes after load are not in the baseline and are
+  // preserved by construction.
+  const baseline: string[] = Array.isArray(data.__wizardEnabledBaseline)
+    ? data.__wizardEnabledBaseline
+    : [];
+  const deselected = baseline.filter((p) => !enabledPlatforms.includes(p));
 
   return {
   // Patch-write shape (#1458 stage ③): the wizard sends only what the
   // wizard flow owns — the platform sections the user configured, the
   // wizard-owned agent toggles, mode/version, and its default cwd.
-  // Enablement is expressed as add operations against the persisted
-  // list (list-ops verb) instead of a whole enabled-array snapshot, so
-  // a concurrently enabled platform (e.g. WeChat QR confirmation while
-  // the wizard sits open) is never dropped. Sections the wizard does
-  // not edit (runtime extras, ui, update, gateway, language, ack_mode)
-  // are left to their owners instead of round-tripped.
+  // Enablement is expressed as add/remove operations against the
+  // persisted list (list-ops verb) instead of a whole enabled-array
+  // snapshot, so a concurrently enabled platform (e.g. WeChat QR
+  // confirmation while the wizard sits open) is never dropped, while
+  // explicit wizard deselections still take effect. Sections the wizard
+  // does not edit (runtime extras, ui, update, gateway, language,
+  // ack_mode) are left to their owners instead of round-tripped.
   __avibe_list_ops: {
-    'platforms.enabled': { add: enabledPlatforms },
+    'platforms.enabled': { add: enabledPlatforms, remove: deselected },
   },
   mode: data.mode || 'self_host',
   version: 'v2',
@@ -180,6 +190,13 @@ export const Wizard: React.FC = () => {
             ...configWithCatalog,
             discordGuildAllowlist: discordSettings?.guild_allowlist || [],
             channelConfigsByPlatform,
+            // Baseline for deselection encoding: platforms enabled when
+            // the wizard loaded. A user deselecting one of these must
+            // produce a REMOVE operation on save — an add-only verb
+            // would silently leave the adapter enabled and receiving
+            // messages. Concurrent additions by other processes are NOT
+            // in this baseline and are preserved.
+            __wizardEnabledBaseline: enabledPlatforms,
             agents: {
               opencode: config.agents?.opencode,
               claude: config.agents?.claude,
