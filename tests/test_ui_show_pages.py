@@ -588,6 +588,101 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     assert asset.status_code == 404
 
 
+def test_limited_show_page_shows_access_denied_to_authenticated_viewer(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "other@example.com",
+            "viewer-1",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    def fail_oauth(*_args, **_kwargs):
+        pytest.fail("an authenticated viewer must not be sent through OAuth")
+
+    with monkeypatch.context() as denied_patch:
+        denied_patch.setattr(show_identity, "begin_show_identity_authorization", fail_oauth)
+        html_response = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        json_response = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "application/json"},
+            follow_redirects=False,
+        )
+
+    assert html_response.status_code == 403
+    assert "Location" not in html_response.headers
+    assert "You do not have access to this page" in html_response.text
+    assert "Please contact the page owner" in html_response.text
+    assert html_response.headers["Cache-Control"] == "private, no-store"
+    assert "Cookie" in html_response.headers["Vary"]
+    assert json_response.status_code == 403
+    assert json_response.get_json() == {"error": "show_access_forbidden"}
+
+    allowlisted_client = app.test_client()
+    allowlisted_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "viewer-1",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+    allowlisted = allowlisted_client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert allowlisted.status_code == 302
+    assert (
+        urllib.parse.urlsplit(allowlisted.headers["Location"]).path
+        == "/api/v1/instances/inst_123/show-identity/authorize"
+    )
+
+    page_scoped_client = app.test_client()
+    page_scoped_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _show_page_email_cookie(
+            config,
+            session_id="other-page",
+            email="other@example.com",
+            subject="other-viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+    page_scoped = page_scoped_client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert page_scoped.status_code == 403
+    assert 'href="/"' not in page_scoped.text
+
+
 def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
     monkeypatch,
     tmp_path,

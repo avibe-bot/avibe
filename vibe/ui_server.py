@@ -13052,6 +13052,52 @@ def _show_page_not_found_response():
     return jsonify({"error": "not_found"}), 404
 
 
+def _show_page_access_denied_html_response(*, include_back_link: bool = True):
+    language = _request_ui_language()
+    title = html.escape(t("show.pageAccessDenied.title", language), quote=True)
+    heading = html.escape(t("show.pageAccessDenied.heading", language))
+    message = html.escape(t("show.pageAccessDenied.message", language))
+    back = html.escape(t("show.pageAccessDenied.back", language))
+    back_link = f'<a href="/">{back}</a>' if include_back_link else ""
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+      a { display: inline-block; margin-top: 22px; color: #3157d5; font-weight: 600; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
+      __BACK_LINK__
+    </main>
+  </body>
+</html>
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message).replace("__BACK_LINK__", back_link)
+    response = Response(html_body, status=403, mimetype="text/html; charset=utf-8")
+    return _with_limited_show_policy(response)
+
+
+def _show_page_access_denied_response(*, include_back_link: bool = True):
+    if (
+        request.method in {"GET", "HEAD"}
+        and _show_page_accepts_html()
+    ):
+        return _show_page_access_denied_html_response(include_back_link=include_back_link)
+    response = jsonify({"error": "show_access_forbidden"})
+    response.status_code = 403
+    return _with_limited_show_policy(response)
+
+
 def _show_page_file_not_found_response():
     response = jsonify({"error": "not_found"})
     response.status_code = 404
@@ -13388,6 +13434,13 @@ def _show_public_editor_context():
     if not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
         return None
     return instance_owner_context()
+
+
+def _show_public_authenticated_context(config: V2Config | None):
+    from vibe.authorization import context_from_session_payload
+
+    session = _resolved_remote_session_payload(config) if config is not None else None
+    return context_from_session_payload(session) if session is not None else None
 
 
 async def _show_public_request_author() -> dict[str, str] | None:
@@ -15306,7 +15359,12 @@ def redirect_public_show_page_to_canonical_path(share_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_public_show_page(share_id, asset_path):
-    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
+    from core.show_pages import (
+        ShowPageError,
+        ShowPageStore,
+        ensure_show_page_dir,
+        normalize_show_access_email,
+    )
     from vibe import show_identity
 
     config = _load_remote_access_config()
@@ -15368,6 +15426,29 @@ async def serve_public_show_page(share_id, asset_path):
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
                     return _show_page_not_found_response()
+                authenticated_context = await asyncio.to_thread(
+                    _show_public_authenticated_context,
+                    config,
+                )
+                if authenticated_context is not None:
+                    access = store.get_access(page.session_id)
+                    allowlisted = False
+                    if authenticated_context.email:
+                        try:
+                            allowlisted = (
+                                access is not None
+                                and normalize_show_access_email(authenticated_context.email)
+                                in access.normalized_emails
+                            )
+                        except (TypeError, ValueError):
+                            allowlisted = False
+                    page_scoped = authenticated_context.can_use_show_page(page.session_id)
+                    if not allowlisted and not page_scoped:
+                        return _show_page_access_denied_response(
+                            include_back_link=(
+                                authenticated_context.instance_access_source != "show_page_email"
+                            )
+                        )
                 if config is None:
                     return _show_identity_error_response("identity_unavailable", 503)
                 return_target = request.full_path if request.query_string else request.path
