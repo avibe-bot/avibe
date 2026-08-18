@@ -23,6 +23,12 @@
       "title": "Show Page unavailable",
       "heading": "This page is unavailable",
       "message": "The page does not exist or is no longer available."
+    },
+    "pageAccessDenied": {
+      "title": "Show Page access denied",
+      "heading": "You do not have access to this page",
+      "message": "Please contact the page owner to be added to the allowed list.",
+      "back": "Back to home"
     }
   },
   "harness": {

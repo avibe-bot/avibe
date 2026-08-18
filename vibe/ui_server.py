@@ -13052,6 +13052,51 @@ def _show_page_not_found_response():
     return jsonify({"error": "not_found"}), 404
 
 
+def _show_page_access_denied_html_response():
+    language = _request_ui_language()
+    title = html.escape(t("show.pageAccessDenied.title", language), quote=True)
+    heading = html.escape(t("show.pageAccessDenied.heading", language))
+    message = html.escape(t("show.pageAccessDenied.message", language))
+    back = html.escape(t("show.pageAccessDenied.back", language))
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+      a { display: inline-block; margin-top: 22px; color: #3157d5; font-weight: 600; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
+      <a href="/">__BACK__</a>
+    </main>
+  </body>
+</html>
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message).replace("__BACK__", back)
+    response = Response(html_body, status=403, mimetype="text/html; charset=utf-8")
+    return _with_limited_show_policy(response)
+
+
+def _show_page_access_denied_response():
+    if (
+        request.method in {"GET", "HEAD"}
+        and _show_page_accepts_html()
+    ):
+        return _show_page_access_denied_html_response()
+    response = jsonify({"error": "show_access_forbidden"})
+    response.status_code = 403
+    return _with_limited_show_policy(response)
+
+
 def _show_page_file_not_found_response():
     response = jsonify({"error": "not_found"})
     response.status_code = 404
@@ -13388,6 +13433,13 @@ def _show_public_editor_context():
     if not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
         return None
     return instance_owner_context()
+
+
+def _show_public_authenticated_context(config: V2Config | None):
+    from vibe.authorization import context_from_session_payload
+
+    session = _resolved_remote_session_payload(config) if config is not None else None
+    return context_from_session_payload(session) if session is not None else None
 
 
 async def _show_public_request_author() -> dict[str, str] | None:
@@ -15368,6 +15420,12 @@ async def serve_public_show_page(share_id, asset_path):
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
                     return _show_page_not_found_response()
+                authenticated_context = await asyncio.to_thread(
+                    _show_public_authenticated_context,
+                    config,
+                )
+                if authenticated_context is not None:
+                    return _show_page_access_denied_response()
                 if config is None:
                     return _show_identity_error_response("identity_unavailable", 503)
                 return_target = request.full_path if request.query_string else request.path

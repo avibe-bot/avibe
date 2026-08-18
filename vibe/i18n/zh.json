@@ -23,6 +23,12 @@
       "title": "Show Page 暂时不可用",
       "heading": "此页面暂时不可用",
       "message": "页面不存在，或已不再提供访问。"
+    },
+    "pageAccessDenied": {
+      "title": "无权访问此 Show Page",
+      "heading": "你无权访问此页面",
+      "message": "请联系页面所有者，将你的邮箱加入允许访问名单。",
+      "back": "返回首页"
     }
   },
   "harness": {
