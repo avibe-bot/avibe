@@ -97,6 +97,27 @@ def test_retention_config_ignores_unrelated_warnings(monkeypatch) -> None:
     assert controller._agent_events_retention_config() == {"days": 90}
 
 
+def test_retention_config_ignores_recovered_unrelated_sections(monkeypatch) -> None:
+    """A recovered 'platforms' section leaves the valid runtime policy active."""
+    controller = Controller.__new__(Controller)
+    config = SimpleNamespace(
+        runtime=SimpleNamespace(agent_events_trace_retention_enabled=True, agent_events_trace_retention_days=60),
+        load_warnings=("Recovered invalid config section 'platforms': bad payload",),
+    )
+    monkeypatch.setattr("config.v2_config.V2Config.load", classmethod(lambda cls: config))
+    assert controller._agent_events_retention_config() == {"days": 60}
+
+
+def test_retention_config_disables_on_recovered_runtime_section(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    config = SimpleNamespace(
+        runtime=SimpleNamespace(agent_events_trace_retention_enabled=True, agent_events_trace_retention_days=30),
+        load_warnings=("Recovered invalid config section 'runtime': bad payload",),
+    )
+    monkeypatch.setattr("config.v2_config.V2Config.load", classmethod(lambda cls: config))
+    assert controller._agent_events_retention_config() is None
+
+
 def test_retention_pass_never_vacuums(monkeypatch) -> None:
     controller = Controller.__new__(Controller)
     captured: dict = {}

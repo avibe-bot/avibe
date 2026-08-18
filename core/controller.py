@@ -3115,26 +3115,19 @@ class Controller:
             return None
         warnings = getattr(config, "load_warnings", None) or ()
 
-        def _is_recovery_warning(warning: str) -> bool:
-            return any(
-                marker in warning
-                for marker in (
-                    "could not be recovered",
-                    "recovery defaults",
-                    # v2_config emits this shape when a section (incl. runtime)
-                    # is replaced wholesale: "Recovered invalid config section 'runtime': ..."
-                    "Recovered invalid config section",
-                )
-            )
+        def _retention_policy_unknown(warning: str) -> bool:
+            # Whole-file recovery: the persisted policy is unknowable.
+            if "recovery defaults" in warning or "could not be recovered" in warning:
+                return True
+            # Section recovery: only a replaced 'runtime' section makes the
+            # retention fields substituted; other recovered sections
+            # (platforms, model_hub, ...) leave a valid runtime in force.
+            return "Recovered invalid config section 'runtime'" in warning
 
-        if any(_is_recovery_warning(str(w)) for w in warnings):
-            # Only recovery-substituted sections make the retention policy
-            # unknown. Unrelated warnings (e.g. legacy Model Hub migration
-            # notes) leave a valid runtime section in force — failing closed
-            # on those would disable retention indefinitely.
+        if any(_retention_policy_unknown(str(w)) for w in warnings):
             logger.warning(
-                "Agent trace-event retention: config loaded with recovery defaults; "
-                "retention policy is unknown, disabling automatic pass"
+                "Agent trace-event retention: config recovery replaced the retention policy; "
+                "disabling automatic pass until the config is fixed"
             )
             return None
         runtime_cfg = getattr(config, "runtime", None)

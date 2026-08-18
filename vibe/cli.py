@@ -6686,16 +6686,17 @@ def cmd_data_retention(args):
         config_recovered = False
         try:
             config = V2Config.load()
-            load_warnings = getattr(config, "load_warnings", None) or ()
+            load_warnings = getattr(config, "load_warnings", None) or []
             if any(
-                marker in str(w)
+                ("recovery defaults" in str(w) or "could not be recovered" in str(w))
+                or "Recovered invalid config section 'runtime'" in str(w)
                 for w in load_warnings
-                for marker in ("could not be recovered", "recovery defaults", "Recovered invalid config section")
             ):
                 config_recovered = True
-                # Recovery defaults carry enabled=True, but the controller
-                # fails closed on them; the status view must agree. Unrelated
-                # warnings (legacy Model Hub migration notes) do not apply.
+                # Recovery that replaced the retention policy carries
+                # enabled=True defaults, but the controller fails closed on
+                # them; the status view must agree. Recovered unrelated
+                # sections and migration notes leave a valid policy active.
                 enabled = False
             runtime_cfg = getattr(config, "runtime", None)
             days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
@@ -6735,7 +6736,7 @@ def cmd_data_retention(args):
                 engine,
                 retention_days=retention_days,
                 force=True,
-                compact=not bool(getattr(args, "no_compact", False)),
+                compact=bool(getattr(args, "compact", False)),
             )
             run_status = str(payload.get("status"))
             if run_status in {"busy", "lease_lost"}:
@@ -15445,9 +15446,13 @@ def build_parser():
         help="Retention window override in days (default: the configured value, currently 30).",
     )
     data_retention_parser.add_argument(
-        "--no-compact",
+        "--compact",
         action="store_true",
-        help="Skip the physical compaction preflight/VACUUM step of --run.",
+        help=(
+            "Also physically compact the database (VACUUM) when safe. Off by default: "
+            "VACUUM holds the database's sole writer lock and can stall the running "
+            "service's writes; run it during a maintenance window or with the service stopped."
+        ),
     )
     _add_json_noop(data_retention_parser)
 
