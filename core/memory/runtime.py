@@ -1125,8 +1125,9 @@ class MemoryRuntime:
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
             error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
-            if self._process is None:
-                # No retained supervisor can relaunch with the prior settings.
+            if not self._sidecar.snapshot().supervisor_can_restart:
+                # No retained supervisor can relaunch with the prior settings,
+                # including one that exhausted its restart budget.
                 # Retain the desired config so a first artifact install can
                 # activate it without waiting for another reconciliation.
                 self._config = config
@@ -3488,8 +3489,10 @@ class MemoryRuntime:
                             if previous_python is None:
                                 # First artifact admission is durable even when
                                 # its desired config cannot activate immediately.
-                                # A later reconcile can retry the retained config
-                                # without forcing the user to download it again.
+                                # Publish restart authority only when the failed
+                                # start retained a supervisor carrying that config.
+                                if self._sidecar.snapshot().supervisor_can_restart:
+                                    self._restart_config = deepcopy(self._config)
                                 return
                             raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
                         self._restart_config = deepcopy(self._config)

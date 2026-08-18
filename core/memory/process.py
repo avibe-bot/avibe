@@ -3777,7 +3777,7 @@ class _SystemProcessHost:
 class EverOSProcessPort(Protocol):
     """What the runtime needs from a supervised sidecar, and nothing more.
 
-    Deliberately five members over ``EverOSProcess``'s ~990 lines: the runtime
+    Deliberately six members over ``EverOSProcess``'s ~990 lines: the runtime
     never inspects the child tree, the generated config, or the signal handling.
     Keeping those out of this interface is what lets tests substitute a fake
     instead of patching ``psutil``, ``os``, and private attributes.
@@ -3788,6 +3788,9 @@ class EverOSProcessPort(Protocol):
 
     @property
     def starting(self) -> bool: ...
+
+    @property
+    def down(self) -> bool: ...
 
     async def start(self) -> bool: ...
 
@@ -3845,6 +3848,7 @@ class FakeEverOSProcess:
     stopped: bool = False
     _running: bool = True
     _starting: bool = False
+    _down: bool = False
 
     @property
     def running(self) -> bool:
@@ -3854,8 +3858,13 @@ class FakeEverOSProcess:
     def starting(self) -> bool:
         return self._starting
 
+    @property
+    def down(self) -> bool:
+        return self._down
+
     async def start(self) -> bool:
         self.starts += 1
+        self._down = False
         before_start = self.before_start
         if before_start is not None:
             result = before_start()
