@@ -28,12 +28,19 @@ _CANONICAL_GLOB = (
 
 
 def _canonicalize(bind, column: str) -> None:
+    # Only tool_call/trace rows — the retention scan's subject — are
+    # rewritten. Other event types keep their original precision: e.g.
+    # migrated silent_terminal timestamps act as ordering anchors for
+    # session fork, where truncating sub-second precision could reorder a
+    # terminal against its source message.
     bind.execute(
         sa.text(
             f"""
             update agent_events
             set {column} = strftime('%Y-%m-%dT%H:%M:%SZ', {column})
-            where {column} is not null
+            where event_type = 'tool_call'
+              and visibility = 'trace'
+              and {column} is not null
               and {column} != ''
               and {column} not glob '{_CANONICAL_GLOB}'
               and datetime({column}) is not null

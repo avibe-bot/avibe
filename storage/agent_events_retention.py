@@ -189,20 +189,32 @@ def run_retention(
     cutoff = cutoff_iso(retention_days, now=now)
     deleted_rows = 0
     batches = 0
+    lease_lost = False
     while max_batches is None or batches < max_batches:
+        ownership = True
         with engine.begin() as conn:
             removed = _delete_batch(conn, cutoff, batch_rows)
             if lease_token is not None and not renew_lease(conn, lease_token):
-                # Ownership lost (lease replaced past expiry + contention):
-                # stop rather than keep deleting beside another runner.
-                break
+                ownership = False
         batches += 1
+        if not ownership:
+            # The committed batch is counted, but ownership was lost mid-run:
+            # propagate the loss so run_once skips the marker write and
+            # compaction rather than racing the replacement runner.
+            lease_lost = True
+            deleted_rows += removed
+            break
         if removed == 0:
             break
         deleted_rows += removed
         if between_batches is not None:
             between_batches()
-    return {"cutoff": cutoff, "deleted_rows": deleted_rows, "batches": batches}
+    return {
+        "cutoff": cutoff,
+        "deleted_rows": deleted_rows,
+        "batches": batches,
+        **({"lease_lost": True} if lease_lost else {}),
+    }
 
 
 @dataclass
@@ -419,6 +431,15 @@ def run_once(
     started = time.monotonic()
     try:
         result = run_retention(engine, retention_days=retention_days, now=moment, lease_token=token)
+        if result.get("lease_lost"):
+            # Ownership was lost mid-run: skip the marker write and compaction
+            # so this runner never reports success or VACUUMs beside the
+            # replacement runner.
+            return {
+                "status": "lease_lost",
+                "deleted_rows": result["deleted_rows"],
+                "cutoff": result["cutoff"],
+            }
         finished = moment + timedelta(seconds=round(time.monotonic() - started, 3))
         with engine.begin() as conn:
             _write_meta(

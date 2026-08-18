@@ -6689,10 +6689,17 @@ def cmd_data_retention(args):
             if getattr(config, "load_warnings", None):
                 config_recovered = True
             runtime_cfg = getattr(config, "runtime", None)
-            retention_days = int(
-                getattr(runtime_cfg, "agent_events_trace_retention_days", None)
-                or agent_events_retention.DEFAULT_RETENTION_DAYS
-            )
+            days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
+            if isinstance(days_value, bool) or not isinstance(days_value, int) or days_value < 1:
+                # Booleans are JSON true/false accepted into the int field; a
+                # malformed window must refuse deletion (fail closed), matching
+                # the controller, rather than coercing to a shorter window.
+                if days_value is not None:
+                    retention_days = days_value if not isinstance(days_value, bool) else None
+                    if retention_days is None:
+                        config_recovered = True
+            else:
+                retention_days = days_value
             enabled = bool(getattr(runtime_cfg, "agent_events_trace_retention_enabled", True))
         except Exception:
             enabled = True

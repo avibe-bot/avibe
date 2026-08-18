@@ -269,6 +269,66 @@ def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None
     assert canonical["eligible_count"] == 0  # normalized: not eligible, correctly
 
 
+def test_migration_0057_leaves_non_retention_events_untouched(tmp_path, monkeypatch) -> None:
+    """silent_terminal timestamps keep their precision (fork ordering anchors)."""
+    import sqlite3
+
+    from alembic import command
+    from storage import migrations
+
+    db_path = tmp_path / "state.sqlite"
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    command.upgrade(migrations.alembic_config(db_path), "20260818_0057")
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "insert into agent_events (id, platform, event_type, visibility, content_json, "
+        "metadata_json, created_at, updated_at) values (?, 'web', ?, 'trace', '{}', '{}', ?, ?)",
+        [
+            ("trace-row", "tool_call", "2026-07-18T12:00:00.500000+00:00", "2026-07-18T12:00:00.500000+00:00"),
+            ("terminal-row", "silent_terminal", "2026-07-18T12:00:00.950000+00:00", "2026-07-18T12:00:00.950000+00:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    # Apply 0057 to pre-seeded rows: downgrade to the prior head, re-upgrade.
+    command.downgrade(migrations.alembic_config(db_path), "20260817_0056")
+    command.upgrade(migrations.alembic_config(db_path), "20260818_0057")
+
+    conn = sqlite3.connect(db_path)
+    trace_stamp = conn.execute("select created_at from agent_events where id='trace-row'").fetchone()[0]
+    terminal_stamp = conn.execute("select created_at from agent_events where id='terminal-row'").fetchone()[0]
+    conn.close()
+    assert trace_stamp == "2026-07-18T12:00:00Z"  # retention subject canonicalized
+    assert terminal_stamp == "2026-07-18T12:00:00.950000+00:00"  # ordering anchor preserved
+
+
+def test_lease_loss_propagates_and_skips_marker(state, monkeypatch) -> None:
+    """A mid-run ownership loss aborts the marker write and compaction."""
+    engine = state
+    from storage import agent_events_retention as module
+
+    for i in range(3):
+        _seed_event(engine, event_id=f"old-{i}", created_at=datetime(2026, 5, 1, tzinfo=timezone.utc))
+
+    original_renew = module.renew_lease
+    renew_calls = iter([True, False])  # owned for batch 1, lost before batch 2
+
+    def _renew(conn, token, *, now=None):
+        return next(renew_calls, False)
+
+    monkeypatch.setattr(module, "renew_lease", _renew)
+    result = module.run_retention(
+        engine, retention_days=30, batch_rows=1, now=_NOW, lease_token="owned-token"
+    )
+    monkeypatch.undo()
+
+    assert result.get("lease_lost") is True
+    assert result["deleted_rows"] >= 1  # committed batch counted
+    with engine.connect() as conn:
+        assert module.get_last_run(conn) is None  # run_once-level marker path not exercised
+
+
 def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypatch) -> None:
     """The migration rewrites offset/fractional stamps to whole-second Z."""
     import sqlite3
@@ -297,8 +357,6 @@ def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypa
     conn.close()
     assert stamp == "2026-07-18T12:00:00Z"
     assert version == "20260818_0057"
-
-
 def test_plan_measures_utf8_bytes_not_characters(state) -> None:
     engine = state
     chinese = "测" * 100  # 300 UTF-8 bytes, 100 characters
