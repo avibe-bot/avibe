@@ -2689,6 +2689,7 @@ def _cloud_broker_config() -> V2Config:
     cloud = config.remote_access.vibe_cloud
     cloud.instance_secret = "device-secret"
     cloud.backend_url = "https://avibe.bot"
+    config.save()
     return config
 
 
