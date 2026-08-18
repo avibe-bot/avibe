@@ -196,6 +196,20 @@ def _require_enum(value: Any, allowed: frozenset[str]) -> None:
         _invalid_response()
 
 
+def _principal_identity(kind: str, value: str) -> tuple[str, str]:
+    normalized = value.strip()
+    if kind == "email_domain":
+        normalized = normalized.removeprefix("@")
+    if kind != "organization_group":
+        normalized = normalized.lower()
+    return kind, normalized
+
+
+def _require_unique_identities(identities: list[object]) -> None:
+    if len(identities) != len(set(identities)):
+        _invalid_response()
+
+
 def _require_nonnegative_integer(value: Any) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         _invalid_response()
@@ -207,12 +221,15 @@ def _is_backend_unavailable_status(status: int) -> bool:
 
 def _validate_access_entries(value: Any) -> list[Any]:
     entries = _require_list(value)
+    identities: list[object] = []
     for item in entries:
         entry = _require_mapping(item)
         _require_keys(entry, "kind", "value", "role")
         _require_enum(entry["kind"], _PRINCIPAL_KINDS)
         _require_nonempty_string(entry["value"])
         _require_enum(entry["role"], _ACCESS_ROLES)
+        identities.append(_principal_identity(entry["kind"], entry["value"]))
+    _require_unique_identities(identities)
     return entries
 
 
@@ -227,12 +244,17 @@ def _validate_project(value: Any) -> dict[str, Any]:
     _require_keys(access, "mode", "revision", "bindings")
     _require_enum(access["mode"], _PROJECT_ACCESS_MODES)
     _require_nonnegative_integer(access["revision"])
+    binding_identities: list[object] = []
     for item in _require_list(access["bindings"]):
         binding = _require_mapping(item)
         _require_keys(binding, "principal_kind", "principal_value", "access_role")
         _require_enum(binding["principal_kind"], _PRINCIPAL_KINDS)
         _require_nonempty_string(binding["principal_value"])
         _require_enum(binding["access_role"], _ACCESS_ROLES)
+        binding_identities.append(
+            _principal_identity(binding["principal_kind"], binding["principal_value"])
+        )
+    _require_unique_identities(binding_identities)
 
     sync = _require_mapping(project["sync"])
     _require_keys(
@@ -328,23 +350,35 @@ def _validated_projection(payload: Any, instance_id: str) -> dict[str, Any]:
 
     directory = _require_mapping(projection["directory"])
     _require_keys(directory, "members", "groups")
+    member_ids: list[object] = []
     for item in _require_list(directory["members"]):
         member = _require_mapping(item)
         _require_keys(member, "id", "email", "organization_role", "group_ids")
         _require_nonempty_string(member["id"])
         _require_nonempty_string(member["email"])
         _require_enum(member["organization_role"], _ORGANIZATION_ROLES)
-        for group_id in _require_list(member["group_ids"]):
+        member_group_ids = _require_list(member["group_ids"])
+        for group_id in member_group_ids:
             _require_nonempty_string(group_id)
+        member_ids.append(member["id"])
+        _require_unique_identities(member_group_ids)
+    _require_unique_identities(member_ids)
+
+    directory_group_ids: list[object] = []
     for item in _require_list(directory["groups"]):
         group = _require_mapping(item)
         _require_keys(group, "id", "name", "archived_at")
         _require_nonempty_string(group["id"])
         _require_string(group["name"])
         _require_string(group["archived_at"], nullable=True)
+        directory_group_ids.append(group["id"])
+    _require_unique_identities(directory_group_ids)
 
-    for project in _require_list(projection["projects"]):
-        _validate_project(project)
+    project_ids: list[object] = []
+    for project_value in _require_list(projection["projects"]):
+        project = _validate_project(project_value)
+        project_ids.append(project["project_id"])
+    _require_unique_identities(project_ids)
 
     policy_sync = _require_mapping(projection["policy_sync"])
     _require_keys(policy_sync, "status", "projects", "resources")
@@ -477,7 +511,7 @@ def _guard_current_pairing(
 ) -> None:
     try:
         current_credentials = _runtime_credentials(load_current_config())
-    except (FileNotFoundError, PermissionsNotPairedError) as exc:
+    except (OSError, TypeError, ValueError, PermissionsNotPairedError) as exc:
         raise PermissionsPairingChangedError("permissions_pairing_changed") from exc
     if current_credentials != credentials:
         raise PermissionsPairingChangedError("permissions_pairing_changed")
@@ -824,7 +858,7 @@ def resolve_current_instance_ownership(
         return current
     try:
         result = get_current_permissions(config)
-    except PermissionsError:
+    except (PermissionsError, OSError, TypeError, ValueError):
         return current
     instance = result.projection["instance"]
     organization = instance.get("organization")

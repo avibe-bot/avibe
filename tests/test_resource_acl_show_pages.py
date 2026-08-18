@@ -932,18 +932,29 @@ def test_cross_organization_policy_conflict_fails_closed_without_breaking_link_g
         store.close()
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(
+            permissions.PermissionsUnavailableError("permissions_backend_unavailable"),
+            id="backend-unavailable",
+        ),
+        pytest.param(OSError("config unavailable"), id="config-io-error"),
+        pytest.param(TypeError("config shape changed"), id="config-type-error"),
+        pytest.param(ValueError("config value changed"), id="config-value-error"),
+    ],
+)
 def test_organization_pending_is_stable_private_and_does_not_block_local_creation(
     monkeypatch,
     tmp_path,
+    failure: Exception,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _paired_config(tmp_path, instance_kind="organization")
     monkeypatch.setattr(
         permissions,
         "get_current_permissions",
-        lambda _config=None: (_ for _ in ()).throw(
-            permissions.PermissionsUnavailableError("permissions_backend_unavailable")
-        ),
+        lambda _config=None: (_ for _ in ()).throw(failure),
     )
     store = ShowPageStore()
     try:

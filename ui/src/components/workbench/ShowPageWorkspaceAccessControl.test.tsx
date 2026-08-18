@@ -214,6 +214,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     )).toBe(true);
     expect(requiresResourcePolicyNarrowing('scope', ['group-active'], 'public', [])).toBe(false);
     expect(requiresResourcePolicyNarrowing('private', [], 'public', [])).toBe(false);
+    expect(requiresResourcePolicyNarrowing('private', [], 'scope', ['group-active'])).toBe(false);
   });
 
   it('confirms a Workspace policy reduction before sending it', async () => {
@@ -287,6 +288,28 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(screen.getByRole('checkbox', { name: 'Design' }).getAttribute('aria-checked')).toBe('true');
   });
 
+  it('applies private-to-scope audience expansion without a narrowing confirmation', async () => {
+    api.updateResourceAccess.mockResolvedValue({
+      ok: true,
+      resource: resource({ level: 'scope', groupIds: ['group-active'], revision: 5 }),
+    });
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Design' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect(screen.queryByText('Narrow Workspace access?')).toBeNull();
+    expect(api.updateResourceAccess).toHaveBeenCalledWith(
+      { resource_kind: 'show_page', resource_id: 'ses-1' },
+      'scope',
+      ['group-active'],
+      4,
+      'inst-1',
+    );
+  });
+
   it('keeps bound archived groups visible and selected without offering unbound archived groups', async () => {
     api.getPermissions.mockResolvedValue(permissions({
       groups: [activeGroup, archivedGroup, newArchivedGroup],
@@ -354,8 +377,6 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
-    const narrowingDialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
-    await user.click(within(narrowingDialog as HTMLElement).getByRole('button', { name: 'Apply' }));
 
     expect(await screen.findByText(/Your draft was kept/)).toBeTruthy();
     expect(screen.getByRole('checkbox', { name: 'Design' }).getAttribute('aria-checked')).toBe('true');

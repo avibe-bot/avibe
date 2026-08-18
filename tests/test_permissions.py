@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import multiprocessing as mp
 from typing import Any
@@ -208,6 +209,15 @@ INVALID_PROJECT_ROUTE_IDS = [
     pytest.param(r"project\child", id="backslash-embedded"),
     pytest.param(r"\project", id="backslash-leading"),
     pytest.param("project\\", id="backslash-trailing"),
+]
+
+PROJECTION_IDENTITY_COLLECTION_PATHS = [
+    pytest.param(("access", "entries"), id="access-principals"),
+    pytest.param(("directory", "members"), id="directory-members"),
+    pytest.param(("directory", "members", 0, "group_ids"), id="member-group-ids"),
+    pytest.param(("directory", "groups"), id="directory-groups"),
+    pytest.param(("projects",), id="projects"),
+    pytest.param(("projects", 0, "access", "bindings"), id="project-bindings"),
 ]
 
 
@@ -925,6 +935,39 @@ def test_permissions_rejects_cached_fallback_after_inflight_pairing_change(
         permissions.get_current_permissions(config)
 
 
+@pytest.mark.parametrize(
+    "load_error",
+    [
+        pytest.param(OSError("config unavailable"), id="io-error"),
+        pytest.param(TypeError("config shape changed"), id="type-error"),
+        pytest.param(ValueError("config value changed"), id="value-error"),
+    ],
+)
+def test_permissions_fails_closed_when_pairing_revalidation_cannot_load_config(
+    monkeypatch,
+    load_error: Exception,
+) -> None:
+    config = _config()
+    monkeypatch.setattr(
+        permissions.requests,
+        "request",
+        lambda *_args, **_kwargs: _Response(200, _complete_projection()),
+    )
+
+    def fail_load(_cls, *_args, **_kwargs):
+        raise load_error
+
+    monkeypatch.setattr(V2Config, "load", classmethod(fail_load))
+
+    with pytest.raises(
+        permissions.PermissionsPairingChangedError,
+        match="permissions_pairing_changed",
+    ):
+        permissions.get_current_permissions(config)
+
+    assert not permissions._cache_path().exists()  # noqa: SLF001
+
+
 @pytest.mark.parametrize(("path", "replacement"), MALFORMED_PROJECTION_CASES)
 def test_permissions_rejects_each_malformed_nested_projection_before_caching(
     monkeypatch,
@@ -943,6 +986,41 @@ def test_permissions_rejects_each_malformed_nested_projection_before_caching(
         permissions.get_current_permissions(_config())
 
     assert not permissions._cache_path().exists()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("path", PROJECTION_IDENTITY_COLLECTION_PATHS)
+@pytest.mark.parametrize("source", ["live", "cache"])
+def test_permissions_rejects_duplicate_projection_identities_at_the_shared_boundary(
+    monkeypatch,
+    path: tuple[str | int, ...],
+    source: str,
+) -> None:
+    malformed = _complete_projection()
+    collection: Any = malformed
+    for key in path:
+        collection = collection[key]
+    collection.append(deepcopy(collection[0]))
+
+    if source == "live":
+        monkeypatch.setattr(
+            permissions.requests,
+            "request",
+            lambda *_args, **_kwargs: _Response(200, malformed),
+        )
+        expected_error = permissions.PermissionsInvalidResponseError
+    else:
+        permissions._write_cache("inst-123", malformed)  # noqa: SLF001
+        monkeypatch.setattr(
+            permissions.requests,
+            "request",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError()),
+        )
+        expected_error = permissions.PermissionsUnavailableError
+
+    with pytest.raises(expected_error):
+        permissions.get_current_permissions(_config())
+
+    assert permissions._read_cache("inst-123") is None  # noqa: SLF001
 
 
 @pytest.mark.parametrize("path", NONEMPTY_PROJECTION_STRING_PATHS)

@@ -75,7 +75,7 @@ export function requiresResourcePolicyNarrowing(
   nextGroupIds: string[],
 ): boolean {
   if (currentLevel === 'public') return nextLevel !== 'public';
-  if (currentLevel === 'private') return nextLevel === 'scope';
+  if (currentLevel === 'private') return false;
   if (nextLevel === 'private') return true;
   if (nextLevel === 'public') return false;
   const nextGroups = new Set(nextGroupIds);
