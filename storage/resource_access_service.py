@@ -894,6 +894,12 @@ def _policy_allows(
     if resource_kind in {"skill", "vault_secret"}:
         if context.is_remote and context.is_active_organization_member and context.has_role("editor"):
             return True
+    # A signed Show Page email session carries an exact resource entitlement.
+    # It remains valid even when the local instance pairing cannot be reloaded;
+    # the broader instance/organization policy fence below must not revoke that
+    # independent Limited-link flow.
+    if resource_kind == "show_page" and context.can_use_show_page(resource_id):
+        return True
     if (
         resource_kind == "show_page"
         and show_page_ownership is not None
@@ -901,8 +907,6 @@ def _policy_allows(
         == SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE
     ):
         return False
-    if resource_kind == "show_page" and context.can_use_show_page(resource_id):
-        return True
     if (
         resource_kind == "show_page"
         and show_page_ownership is not None

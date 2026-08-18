@@ -356,6 +356,7 @@ function AccessEntryDialog({
   const [role, setRole] = useState<AccessRole>('viewer');
   const [revision, setRevision] = useState(0);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
   const [refreshRequired, setRefreshRequired] = useState(false);
@@ -363,6 +364,23 @@ function AccessEntryDialog({
   const originalEntry = useRef<AccessEntry | null>(null);
   const baselineEntry = useRef<AccessEntry | null>(null);
   const expectedInstanceId = useRef('');
+
+  const updateSaving = (next: boolean): void => {
+    savingRef.current = next;
+    setSaving(next);
+  };
+  const handleOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen && savingRef.current) return;
+    onOpenChange(nextOpen);
+  };
+  const closeAfterRequest = (): void => {
+    updateSaving(false);
+    handleOpenChange(false);
+  };
+  const handleConfirmOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen && savingRef.current) return;
+    setConfirmNarrowing(nextOpen);
+  };
 
   useEffect(() => {
     if (open && !initialized.current) {
@@ -437,7 +455,7 @@ function AccessEntryDialog({
       setConflict(false);
       setRefreshRequired(false);
       setError(undefined);
-      onOpenChange(false);
+      closeAfterRequest();
       return true;
     }
     if (originalKey === null && latestCandidate) {
@@ -462,7 +480,7 @@ function AccessEntryDialog({
 
   const commit = async () => {
     if (!editable || !validateDraft()) return;
-    setSaving(true);
+    updateSaving(true);
     setError(undefined);
     try {
       const requestInstanceId = expectedInstanceId.current;
@@ -472,7 +490,7 @@ function AccessEntryDialog({
         requestInstanceId,
       );
       onSaved(requestInstanceId, result);
-      onOpenChange(false);
+      closeAfterRequest();
     } catch (caught) {
       if (isRevisionConflict(caught)) {
         await refreshConflict();
@@ -480,7 +498,7 @@ function AccessEntryDialog({
         setError(mutationErrorCode(caught));
       }
     } finally {
-      setSaving(false);
+      updateSaving(false);
       setConfirmNarrowing(false);
     }
   };
@@ -488,11 +506,11 @@ function AccessEntryDialog({
   const save = async () => {
     if (!editable) return;
     if (refreshRequired) {
-      setSaving(true);
+      updateSaving(true);
       try {
         await refreshConflict();
       } finally {
-        setSaving(false);
+        updateSaving(false);
       }
       return;
     }
@@ -507,7 +525,7 @@ function AccessEntryDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent>
         <DialogHeader>
           <DialogTitle>{t(originalKey === null ? 'permissions.access.addTitle' : 'permissions.access.editTitle')}</DialogTitle>
@@ -572,7 +590,7 @@ function AccessEntryDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
+          <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={saving}>{t('common.cancel')}</Button>
           <Button variant="brand" disabled={!editable || saving || !candidate.value} onClick={() => void save()}>
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
             {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
@@ -582,11 +600,11 @@ function AccessEntryDialog({
       </Dialog>
       <ConfirmDialog
         open={confirmNarrowing}
-        onOpenChange={setConfirmNarrowing}
+        onOpenChange={handleConfirmOpenChange}
         title={t('permissions.access.narrowTitle')}
         description={t('permissions.access.narrowBody')}
         confirmLabel={t('permissions.actions.save')}
-        confirmDisabled={!editable}
+        confirmDisabled={!editable || saving}
         onConfirm={commit}
       />
     </>
@@ -619,6 +637,7 @@ function ProjectAccessDialog({
   const [bindings, setBindings] = useState<ProjectBinding[]>([]);
   const [revision, setRevision] = useState(0);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
   const [refreshRequired, setRefreshRequired] = useState(false);
@@ -626,6 +645,23 @@ function ProjectAccessDialog({
   const baseline = useRef<PermissionProject | null>(null);
   const expectedInstanceId = useRef('');
   const open = Boolean(project);
+
+  const updateSaving = (next: boolean): void => {
+    savingRef.current = next;
+    setSaving(next);
+  };
+  const handleOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen && savingRef.current) return;
+    onOpenChange(nextOpen);
+  };
+  const closeAfterRequest = (): void => {
+    updateSaving(false);
+    handleOpenChange(false);
+  };
+  const handleConfirmOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen && savingRef.current) return;
+    setConfirmNarrowing(nextOpen);
+  };
 
   useEffect(() => {
     if (project && !initialized.current) {
@@ -674,7 +710,7 @@ function ProjectAccessDialog({
       (item) => item.project_id === project.project_id && item.sync.status !== 'deleted',
     );
     if (!authoritative) {
-      onOpenChange(false);
+      closeAfterRequest();
       return false;
     }
     baseline.current = authoritative;
@@ -690,7 +726,7 @@ function ProjectAccessDialog({
       setError('duplicate_project_access_principal');
       return;
     }
-    setSaving(true);
+    updateSaving(true);
     setError(undefined);
     try {
       const requestInstanceId = expectedInstanceId.current;
@@ -702,7 +738,7 @@ function ProjectAccessDialog({
         requestInstanceId,
       );
       onSaved(requestInstanceId, result);
-      onOpenChange(false);
+      closeAfterRequest();
     } catch (caught) {
       if (isRevisionConflict(caught)) {
         await refreshConflict();
@@ -710,7 +746,7 @@ function ProjectAccessDialog({
         setError(mutationErrorCode(caught));
       }
     } finally {
-      setSaving(false);
+      updateSaving(false);
       setConfirmNarrowing(false);
     }
   };
@@ -718,11 +754,11 @@ function ProjectAccessDialog({
   const save = async () => {
     if (!editable || !project || invalid) return;
     if (refreshRequired) {
-      setSaving(true);
+      updateSaving(true);
       try {
         await refreshConflict();
       } finally {
-        setSaving(false);
+        updateSaving(false);
       }
       return;
     }
@@ -747,7 +783,7 @@ function ProjectAccessDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{t('permissions.projects.dialogTitle', { name: project?.display_name })}</DialogTitle>
@@ -832,7 +868,7 @@ function ProjectAccessDialog({
             ) : null}
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
+            <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={saving}>{t('common.cancel')}</Button>
             <Button variant="brand" disabled={!editable || saving || invalid} onClick={() => void save()}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : null}
               {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
@@ -842,11 +878,11 @@ function ProjectAccessDialog({
       </Dialog>
       <ConfirmDialog
         open={confirmNarrowing}
-        onOpenChange={setConfirmNarrowing}
+        onOpenChange={handleConfirmOpenChange}
         title={t('permissions.projects.narrowTitle')}
         description={t('permissions.projects.narrowBody')}
         confirmLabel={t('permissions.actions.save')}
-        confirmDisabled={!editable}
+        confirmDisabled={!editable || saving}
         onConfirm={commit}
       />
     </>
@@ -878,13 +914,30 @@ export function PermissionsPage() {
     ? policyRefreshSignature(state.response)
     : null;
 
+  const clearTransientEditors = useCallback((): void => {
+    setEditingAccess(undefined);
+    setEditingProject(null);
+    setRemovingAccess(null);
+    setRemovalInstanceId(null);
+    setRemovalConflict(false);
+    setRemovalRefreshRequired(false);
+    setRemovalError(undefined);
+  }, []);
+
   const installReadyResponse = useCallback((candidate: PermissionsResponse): PermissionsResponse => {
-    const accepted = revisionMonotonicResponse(readyResponseRef.current, candidate);
-    if (accepted === readyResponseRef.current || !mounted.current) return accepted;
+    const previous = readyResponseRef.current;
+    const accepted = revisionMonotonicResponse(previous, candidate);
+    if (accepted === previous || !mounted.current) return accepted;
+    if (
+      previous !== null
+      && previous.projection.instance.id !== accepted.projection.instance.id
+    ) {
+      clearTransientEditors();
+    }
     readyResponseRef.current = accepted;
     setState({ kind: 'ready', response: accepted });
     return accepted;
-  }, []);
+  }, [clearTransientEditors]);
 
   const installMutationAcknowledgement = useCallback((
     requestInstanceId: string,
@@ -906,9 +959,10 @@ export function PermissionsPage() {
       installReadyResponse(result.response);
       return;
     }
+    clearTransientEditors();
     readyResponseRef.current = null;
     setState(result.state);
-  }, [installReadyResponse]);
+  }, [clearTransientEditors, installReadyResponse]);
 
   const requestPermissionsPage = useCallback((
     preserveReady: boolean,

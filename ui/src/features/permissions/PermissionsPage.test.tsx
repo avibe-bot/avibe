@@ -316,6 +316,56 @@ describe('PermissionsPage state model', () => {
     expect(api.getPermissions).toHaveBeenCalledTimes(2);
   });
 
+  it('clears a Project editor before retrying a newly paired instance', async () => {
+    vi.useFakeTimers();
+    const instanceA = response();
+    instanceA.projection.policy_sync.status = 'applying';
+    instanceA.projection.projects[0]!.sync.status = 'pending';
+    const instanceB = response();
+    instanceB.projection.instance.id = 'inst-b';
+    instanceB.projection.instance.name = 'instance-b';
+    instanceB.projection.projects[0] = {
+      ...instanceB.projection.projects[0]!,
+      access: {
+        ...instanceB.projection.projects[0]!.access,
+        bindings: [{
+          principal_kind: 'email',
+          principal_value: 'instance-b@example.com',
+          access_role: 'editor',
+        }],
+      },
+    };
+    api.getPermissions
+      .mockResolvedValueOnce(instanceA)
+      .mockRejectedValueOnce(new PermissionsApiError(409, {
+        error: 'permissions_pairing_changed',
+      }))
+      .mockResolvedValueOnce(instanceB);
+
+    renderPage();
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByText('permissions.states.unavailableTitle')).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      await Promise.resolve();
+    });
+    expect(screen.getByText('instance-b')).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    expect((screen.getByLabelText('permissions.fields.role') as HTMLSelectElement).value).toBe(
+      'editor',
+    );
+  });
+
   it('refreshes a live applying policy until it converges', async () => {
     vi.useFakeTimers();
     const applying = response();
@@ -1480,6 +1530,82 @@ describe('PermissionsPage conflict handling', () => {
     )).toBeTruthy();
     expect(within(dialog).getByText('permissions.states.errorTitle')).toBeTruthy();
     expect(api.replaceAuthorizedUsers).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the access editor open while its mutation is saving', async () => {
+    const initial = response();
+    initial.projection.access.entries = [
+      { kind: 'email', value: 'viewer@example.com', role: 'viewer' },
+    ];
+    api.getPermissions.mockResolvedValueOnce(initial);
+    const acknowledgement = deferred<AuthorizedUsersWriteResponse>();
+    api.replaceAuthorizedUsers.mockReturnValueOnce(acknowledgement.promise);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', {
+      name: 'permissions.actions.editAccess',
+    }));
+    await user.click(screen.getByRole('radio', { name: 'permissions.roles.editor' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    const dialog = screen.getByRole('dialog');
+    const cancel = within(dialog).getByRole('button', { name: 'common.cancel' });
+    expect(cancel.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(cancel);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.getByRole('dialog')).toBe(dialog);
+
+    await act(async () => {
+      acknowledgement.resolve({
+        ok: true,
+        instance_id: 'inst-123',
+        authorization_revision: 5,
+        entries: [{ kind: 'email', value: 'viewer@example.com', role: 'editor' }],
+      });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('keeps the Project editor open while its mutation is saving', async () => {
+    const acknowledgement = deferred<ProjectAccessWriteResponse>();
+    api.updateProjectAccess.mockReturnValueOnce(acknowledgement.promise);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('tab', { name: 'permissions.tabs.projects' }));
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    await user.selectOptions(screen.getByLabelText('permissions.fields.role'), 'editor');
+    await user.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+
+    const dialog = screen.getByRole('dialog');
+    const cancel = within(dialog).getByRole('button', { name: 'common.cancel' });
+    expect(cancel.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(cancel);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.getByRole('dialog')).toBe(dialog);
+
+    await act(async () => {
+      acknowledgement.resolve({
+        ok: true,
+        instance_id: 'inst-123',
+        authorization_revision: 5,
+        project: {
+          ...response().projection.projects[0]!,
+          access: {
+            ...response().projection.projects[0]!.access,
+            bindings: [{
+              principal_kind: 'email',
+              principal_value: 'viewer@example.com',
+              access_role: 'editor',
+            }],
+          },
+        },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('encodes Owner only as restricted with an empty binding set', async () => {

@@ -95,7 +95,7 @@ def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_
         pytest.param(ValueError("config value unavailable"), id="value-error"),
     ],
 )
-def test_show_page_config_reload_failure_fails_closed_for_every_runtime_authorizer(
+def test_show_page_config_reload_failure_preserves_exact_page_access_but_fails_closed_elsewhere(
     monkeypatch,
     tmp_path,
     load_error: Exception,
@@ -190,8 +190,24 @@ def test_show_page_config_reload_failure_fails_closed_for_every_runtime_authoriz
                 [{"session_id": "legacy-page"}],
                 connection=connection,
             ) == []
-            assert not resource_access_service.can_use_resource(
+            # The signed Limited-link session is scoped to this exact page and
+            # does not depend on the instance pairing/configuration reload.
+            assert resource_access_service.can_use_resource(
                 link_guest,
+                "show_page",
+                "legacy-page",
+                connection=connection,
+            )
+            wrong_page_guest = resource_access_service.ResourceUserContext(
+                subject="link-guest",
+                email="link-guest@example.com",
+                instance_role="viewer",
+                instance_access_source="show_page_email",
+                show_page_id="another-page",
+                is_remote=True,
+            )
+            assert not resource_access_service.can_use_resource(
+                wrong_page_guest,
                 "show_page",
                 "legacy-page",
                 connection=connection,
