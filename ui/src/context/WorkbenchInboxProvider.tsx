@@ -73,16 +73,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // session.updated/archived merges adjust a prior map, so they are not themselves
   // a first authoritative load and deliberately do not flip this.)
   const [unreadLoaded, setUnreadLoaded] = useState(false);
-  // "No whole-account map currently describes this account." The unread map is the
-  // one thing here with no demand gate at all — every route badges it — so this is
-  // the debt that keeps it live independently of which read was supposed to pay it:
-  // true until one arrives, true again whenever something voids the scope the current
-  // map described or moves counts it cannot describe (see ``oweWholeUnread`` for the
-  // edges). Every read that can deliver a whole map is allowed to fail, be
-  // invalidated, or be dropped by the demand gate; what must not happen is the debt
-  // being forgotten with it. Distinct from ``unreadLoaded``, which is one-way and
-  // answers a different question (may this document touch the OS badge at all).
-  const [wholeUnreadOwed, setWholeUnreadOwed] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -132,6 +122,22 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // visibilitychange, focus and online together, and one map is enough.
   const unreadReadInFlightRef = useRef(false);
   const unreadReadPendingRef = useRef(false);
+  const unreadReadRunnerRef = useRef<() => void>(() => {});
+  // "No whole-account map currently describes this account." The unread map is the
+  // one thing here with no demand gate at all — every route badges it — so this is
+  // the debt that keeps it live independently of which read was supposed to pay it:
+  // true until one arrives, true again whenever something voids the scope the current
+  // map described or moves counts it cannot describe (see ``oweWholeUnread`` for the
+  // edges). Every read that can deliver a whole map is allowed to fail, be
+  // invalidated, or be dropped by the demand gate; what must not happen is the debt
+  // being forgotten with it. Distinct from ``unreadLoaded``, which is one-way and
+  // answers a different question (may this document touch the OS badge at all).
+  //
+  // A ref and not state, because it is read where it is spent: ``settleWholeUnread``
+  // runs from the producers as well as from an effect, so it cannot wait a render to
+  // learn whether anything is still owed — and once the producers pay it themselves,
+  // a re-render on the same fact would be a second owner of that payment.
+  const wholeUnreadOwedRef = useRef(true);
   const targetedSnapshotsRef = useRef<Map<string, TargetedInboxSnapshot>>(new Map());
   const targetedReadInFlightRef = useRef<Set<string>>(new Set());
   const targetedReadPendingRef = useRef<Set<string>>(new Set());
@@ -151,7 +157,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     //
     // That argument covers the FEED half of the dropped read. The whole-account
     // unread map it was also carrying is a different matter, because no route is
-    // exempt from badging that — the debt is ``wholeUnreadOwed``, and the demand
+    // exempt from badging that — the debt is ``wholeUnreadOwedRef``, and the demand
     // edge that caused this drop is what makes the counts effect pay it.
     if (!isFeedActive()) {
       refreshPendingRef.current = false;
@@ -206,30 +212,51 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     readOwnershipRef.current.acceptMutation(['inbox-unread', 'inbox-unread-all']);
   }, []);
 
+  // One owner of "pay the debt", because recording it does not schedule anything.
+  // Raising a debt that is already outstanding is not an edge at all, and the fence
+  // only re-arms a read that is still in flight — so a counts read that FAILED and
+  // settled leaves a debt no later signal could pay, and the badge would keep
+  // revoked counts until some unrelated focus or reconnect. Every producer of the
+  // debt calls this instead, and it declines whenever a payment is already on the
+  // way:
+  //  * a feed consumer exists, so the feed read carries the whole map;
+  //  * a counts read is in flight, and the fence its producer just applied is what
+  //    makes that read re-read rather than commit pre-change counts.
+  // Deferred by a microtask, because a scope restore raises the debt once per
+  // restored session: paying on the first of them would have the rest fence the
+  // read it just started, turning one burst into a read per event. Same reason
+  // ``queueRefreshIntent`` and its siblings defer.
+  const settleWholeUnread = useCallback(() => {
+    queueMicrotask(() => {
+      if (!wholeUnreadOwedRef.current) return;
+      if (isFeedActive()) return;
+      if (unreadReadInFlightRef.current) return;
+      unreadReadRunnerRef.current();
+    });
+  }, [isFeedActive]);
+
   // The mirror of ``applyUnreadMap``: one home for "no whole map describes this
   // account any more". Recording the debt alone is not enough, because a whole-map
   // read that left the server BEFORE this moment cannot describe the counts it is
   // about to commit — and committing it would PAY the debt without satisfying it.
-  // So the fence and the debt have one owner, which also covers the case a state
-  // update cannot: when the debt is already outstanding, ``setWholeUnreadOwed(true)``
-  // schedules nothing, and it is the fence that makes ``refreshUnread`` re-read its
-  // own invalidated response.
+  // So the fence, the debt, and its payment have one owner.
   const oweWholeUnread = useCallback(() => {
     acceptUnreadMutation();
-    setWholeUnreadOwed(true);
-  }, [acceptUnreadMutation]);
+    wholeUnreadOwedRef.current = true;
+    settleWholeUnread();
+  }, [acceptUnreadMutation, settleWholeUnread]);
 
   // One home for "an authoritative unread map arrived": set the map and flip
   // ``unreadLoaded`` together so the two can never drift apart. Every whole-account
   // write (refresh / reconcile / unread.changed) goes through here; targeted
   // reads and mark-read responses merge one session without claiming completeness.
   // stable identity, so it never churns the memoized context value. Paying the
-  // ``wholeUnreadOwed`` debt belongs here for the same reason: this is the only
+  // ``wholeUnreadOwedRef`` debt belongs here for the same reason: this is the only
   // place a whole map is adopted, so no producer has to remember to clear it.
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
     setUnreadBySession(map);
     setUnreadLoaded(true);
-    setWholeUnreadOwed(false);
+    wholeUnreadOwedRef.current = false;
   }, []);
 
   const applyWholeUnreadRead = useCallback((
@@ -660,6 +687,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     },
     [api, applySessionUnread, isFeedActive, oweWholeUnread],
   );
+  unreadReadRunnerRef.current = () => void refreshUnread();
   refreshRunnerRef.current = () => void refresh();
   reconcileRunnerRef.current = () => void reconcile();
   loadMoreRunnerRef.current = () => void loadMore();
@@ -687,28 +715,22 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, [feedActive, reconcile, refresh]);
 
   // The badges are shell-wide, so the unread map is loaded on every route — but on
-  // a route with no feed consumer, only the map. This is the one place that read is
-  // issued for demand (the resume listeners below issue it for revalidation), and
-  // all three of its conditions are load-bearing:
+  // a route with no feed consumer, only the map. The decision itself belongs to
+  // ``settleWholeUnread``, which every producer of the debt also calls; this effect
+  // only adds the one demand EDGE no producer of the debt can observe: when the last
+  // feed consumer detaches, the gate in ``flushFeedReadIntent`` drops whatever feed
+  // read was queued — and a dropped refresh/reconcile was also going to deliver the
+  // whole-account map. Nothing else would notice, because the refcount function has
+  // stable identity by design. ``isFeedActive()`` is then read synchronously inside
+  // the settle rather than from ``feedActive`` here, because consumers activate in
+  // their own effects, which React runs before this one.
   //
-  //  * ``isFeedActive()`` read synchronously, because consumers activate in their
-  //    own effects and React runs those before this one: the refcount is already up
-  //    on a workbench document's first commit, so the counts read is skipped in
-  //    favour of the feed read that supersedes it.
-  //  * ``feedActive`` as a dependency, because the demand EDGE matters too. When the
-  //    last feed consumer detaches, the gate in ``flushFeedReadIntent`` drops
-  //    whatever feed read was queued — and a dropped refresh/reconcile was also
-  //    going to deliver the whole-account map. Nothing else would notice, because
-  //    the refcount function has stable identity by design.
-  //  * ``wholeUnreadOwed``, because that edge must not cost a request when it is not
-  //    owed: leaving a healthy workbench document re-runs this effect with a map
-  //    that is already whole, and re-reading it there would put back exactly the
-  //    per-navigation traffic this provider exists to avoid.
+  // The debt itself is deliberately NOT a dependency. It is paid by whoever raises
+  // it, so re-running on it would be a second owner of the same payment — and this
+  // effect runs on mount, which is the first time it is owed.
   useEffect(() => {
-    if (isFeedActive()) return;
-    if (!wholeUnreadOwed) return;
-    void refreshUnread();
-  }, [feedActive, isFeedActive, refreshUnread, wholeUnreadOwed]);
+    settleWholeUnread();
+  }, [feedActive, settleWholeUnread]);
 
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({

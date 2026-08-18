@@ -1600,4 +1600,171 @@ describe('Demand-driven shell bootstrap', () => {
       expect(bootstrap).toHaveBeenCalledTimes(2);
     });
   });
+
+  // Gating the reads makes requests refusable, and a refusable request cannot be
+  // where an obligation lives: a debt is a LEVEL, cleared only by the commit that
+  // satisfies it, so whatever discharges it must be driven by the level rather
+  // than by the attempt carrying it or by the state edge that created it. Both
+  // members below record what is owed at one moment and pay it at another, with a
+  // demand gate, a navigation or a failure in between.
+  describe('a debt outlives the read that was carrying it', () => {
+    it('rebuilds the width a restore asked for after the gate declined to pay it', async () => {
+      const wideWindow = Array.from({ length: 10 }, (_, index) => ({
+        ...session,
+        id: `ses_wide_${index}`,
+      }));
+      const treePayload = {
+        projects: [project],
+        sessions: { [project.id]: { sessions: wideWindow, next_before_id: null } },
+      };
+      // The rebuild that honours the debt comes back one row short of it: first
+      // with more rows behind a cursor, then from a source that says there are
+      // none. Only the second can settle a minimum it did not reach.
+      const shortOfTheDebt = {
+        projects: [project],
+        sessions: { [project.id]: { sessions: wideWindow, next_before_id: 'cursor_2' } },
+      };
+      const inFlightPage = deferred<{ sessions: typeof wideWindow; next_before_id: string | null }>();
+      const bootstrap = vi
+        .fn()
+        .mockResolvedValueOnce(treePayload)
+        .mockResolvedValueOnce(shortOfTheDebt)
+        .mockResolvedValue(treePayload);
+      const listSessions = vi
+        .fn()
+        .mockReturnValueOnce(inFlightPage.promise)
+        .mockResolvedValue({ sessions: wideWindow, next_before_id: null });
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        listSessions,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(1);
+
+      // A reconcile of the ten-row window is in flight...
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: wideWindow[0].id,
+          scope_id: project.scope_id,
+          event: 'user_message',
+        });
+      });
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // ...when Undo restores a session ranked just past it. One row more than is
+      // loaded is the only record of that restore: every other path sizes this
+      // project's window from the rows already cached.
+      await act(async () => {
+        handlers?.onSessionActivity?.({
+          session_id: 'ses_restored',
+          scope_id: project.scope_id,
+          event: 'created',
+          restored: true,
+        });
+      });
+
+      // Workbench → /admin, and the page lands with no reader left to widen for.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      await act(async () => {
+        inFlightPage.resolve({ sessions: wideWindow, next_before_id: 'cursor_2' });
+      });
+      await settle();
+      expect(listSessions).toHaveBeenCalledTimes(1);
+
+      // Back on the workbench the rebuild asks for eleven rows, not the ten the
+      // cache holds: refusing a request declines to pay the debt, it does not
+      // discharge it, and no later revalidation would put the restored row back.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe active={false} />
+          <TreeProbe />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(2);
+      expect(bootstrap.mock.calls[1][0]).toMatchObject({ projectIds: [project.id], limit: 11 });
+
+      // That rebuild committed ten rows with a cursor behind them, so it did not
+      // reach the minimum and does not get to clear it either: the reconnect
+      // still asks for eleven. Paying part of a debt is not paying it.
+      await act(async () => {
+        handlers?.onConnected?.({ sub_id: 1 });
+      });
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(3);
+      expect(bootstrap.mock.calls[2][0]).toMatchObject({ projectIds: [project.id], limit: 11 });
+
+      // This one commits the same ten rows with nothing behind them. A source
+      // that says there is no eleventh row settles the debt as surely as one
+      // that produces it — otherwise a restore later undone would widen every
+      // rebuild of this project forever.
+      await act(async () => {
+        handlers?.onConnected?.({ sub_id: 1 });
+      });
+      await settle();
+      expect(bootstrap).toHaveBeenCalledTimes(4);
+      expect(bootstrap.mock.calls[3][0]).toMatchObject({ projectIds: [project.id], limit: 10 });
+    });
+
+    it('re-reads the counts a failed read left owing', async () => {
+      const listInbox = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('counts read failed'))
+        .mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+      expect(state?.unreadBySession).toEqual({});
+
+      // The counts changed and the event did not say how, so all it can do is owe a
+      // whole map — one that is already owed, by a read that failed and is no longer
+      // in flight. There is no state edge for an effect to run on and no in-flight
+      // read for the fence to re-arm, so nothing but the level itself can reach this
+      // debt, and the badge would keep counts nothing describes until some unrelated
+      // focus or reconnect.
+      await act(async () => {
+        handlers?.onInboxUnreadChanged?.({ unread_counts: {} });
+      });
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(2);
+      expect(state?.unreadBySession).toEqual({ [session.id]: 3 });
+      expect(state?.totalUnread).toBe(3);
+      logged.mockRestore();
+    });
+  });
 });

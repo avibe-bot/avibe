@@ -316,17 +316,46 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     setCreating(new Set());
   }, [commitProjects]);
 
+  // ── An outstanding window width is a DEBT, not a queued read ────────────────
+  // A foreground restore asks for one row more than is loaded, because the row it
+  // restored ranks just past the window. That minimum is the only record of it:
+  // every other path sizes a project's window from the rows already cached, so a
+  // read carrying the minimum that is then dropped — by the demand gate, by a
+  // navigation, by a mutation — takes the restored row with it, and no later
+  // revalidation puts it back.
+  //
+  // So the minimum is cleared by the commit that SATISFIES it, never by the attempt
+  // that carries it, and every read that sizes a window takes its target from
+  // ``windowTarget``. A refused request leaves the debt outstanding, which is what
+  // makes the next activation rebuild the width the restore asked for instead of
+  // the width the cache happens to hold.
   const queueReconcile = useCallback((projectId: string, minCount = 0) => {
     const pending = pendingReconcileRef.current.get(projectId) ?? 0;
     pendingReconcileRef.current.set(projectId, Math.max(pending, minCount));
   }, []);
 
-  const takePendingReconcile = useCallback((projectId: string): number | null => {
-    const pending = pendingReconcileRef.current.get(projectId);
-    if (pending === undefined) return null;
-    pendingReconcileRef.current.delete(projectId);
-    return pending;
-  }, []);
+  const windowTarget = useCallback(
+    (projectId: string) =>
+      Math.max(
+        sessionsRef.current[projectId]?.sessions?.length ?? 0,
+        pendingReconcileRef.current.get(projectId) ?? 0,
+      ),
+    [],
+  );
+
+  // Only a read that sized itself to the debt may settle it. ``fetchSessions``
+  // deliberately does not: it pages, it does not widen, so the reconcile it hands
+  // the project to afterwards is what pays.
+  const settlePendingReconcile = useCallback(
+    (projectId: string, committedCount: number, exhausted: boolean) => {
+      const pending = pendingReconcileRef.current.get(projectId);
+      if (pending === undefined) return;
+      // A wider minimum queued while this read was in flight is a different debt,
+      // and it outlives a window that was already sized for the smaller one.
+      if (exhausted || pending <= committedCount) pendingReconcileRef.current.delete(projectId);
+    },
+    [],
+  );
 
   const acceptProjectRows = useCallback(
     (read: WorkbenchSessionReadStamp, projectId: string, rows: WorkbenchSession[]) => {
@@ -430,9 +459,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         queueReconcile(projectId, opts?.minCount ?? 0);
         return;
       }
-      let minCount = opts?.minCount ?? 0;
+      // Recorded before the first request, so a gate refusal on page one loses the
+      // width no more than a refusal between pages does.
+      if (opts?.minCount) queueReconcile(projectId, opts.minCount);
       while (true) {
-        const targetCount = Math.max(sessionsRef.current[projectId]?.sessions?.length ?? 0, minCount);
+        const targetCount = windowTarget(projectId);
         if (targetCount === 0) return; // nothing loaded to reconcile
         inFlightRef.current.add(projectId);
         const read = readOwnershipRef.current.beginRead(`project:${projectId}`);
@@ -473,6 +504,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
               ...prev,
               [projectId]: { sessions: acc, cursor: nextBeforeId, loading: false, loadingMore: false, error: false },
             }));
+            settlePendingReconcile(projectId, acc.length, nextBeforeId === null);
           }
         } catch {
           stale = !readOwnershipRef.current.isCurrent(read, `project:${projectId}`);
@@ -480,12 +512,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         } finally {
           inFlightRef.current.delete(projectId);
         }
-        const pendingMinCount = takePendingReconcile(projectId);
-        if (!stale && pendingMinCount === null) return;
-        minCount = Math.max(targetCount, pendingMinCount ?? 0);
+        if (!stale && !pendingReconcileRef.current.has(projectId)) return;
+        // Carry the width forward as the debt itself: ``setSessions`` has not
+        // rendered yet, so the next pass cannot read it back off the cache.
+        queueReconcile(projectId, targetCount);
       }
     },
-    [acceptProjectRows, api, canIssueRead, projectIsInTree, queueReconcile, takePendingReconcile],
+    [acceptProjectRows, api, canIssueRead, projectIsInTree, queueReconcile, settlePendingReconcile, windowTarget],
   );
 
   const reconcileProjectTree = useCallback(async function reconcileProjectTree() {
@@ -505,12 +538,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     const largeProjectIds: string[] = [];
     for (const [projectId, state] of Object.entries(sessionsRef.current)) {
       if (!state || state.sessions === null) continue;
-      const loadedCount = state.sessions.length;
+      // The width to rebuild is the cached one, or the wider one an undelivered
+      // restore is still owed — this is where a debt the demand gate declined to
+      // pay while nothing read the tree is finally honoured.
+      const loadedCount = windowTarget(projectId);
       if (inFlightRef.current.has(projectId)) {
         queueReconcile(projectId, loadedCount);
         continue;
       }
-      if (state.sessions.length > RECONNECT_SESSIONS_PAGE_SIZE) {
+      if (loadedCount > RECONNECT_SESSIONS_PAGE_SIZE) {
         largeProjectIds.push(projectId);
         continue;
       }
@@ -567,6 +603,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           ),
         );
         applyBootstrapSessions(read, currentPages);
+        for (const [projectId, page] of Object.entries(currentPages)) {
+          settlePendingReconcile(projectId, page.sessions.length, page.next_before_id === null);
+        }
       }
       if (!readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) {
         retryAfterInvalidation(read);
@@ -590,7 +629,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       bootstrapReadInFlightRef.current = false;
       flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions, applyProjectsSnapshot, canIssueRead, flushBootstrapReadIntent, queueProjectTreeIntent, queueReconcile, reconcileSessions]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot, canIssueRead, flushBootstrapReadIntent, queueProjectTreeIntent, queueReconcile, reconcileSessions, settlePendingReconcile, windowTarget]);
 
   fetchProjectsRunnerRef.current = (options) => void fetchProjects(options);
   projectTreeRunnerRef.current = () => void reconcileProjectTree();
@@ -740,9 +779,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         });
       } finally {
         inFlightRef.current.delete(projectId);
-        const pendingMinCount = takePendingReconcile(projectId);
         if (retryAfterInvalidation) {
-          if (pendingMinCount !== null) queueReconcile(projectId, pendingMinCount);
           queueMicrotask(() => {
             // The retry a refused response queues is a REVALIDATION wearing this
             // read's name: with no reader left there is no window to keep filled,
@@ -751,12 +788,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
             if (!canIssueRead('revalidation', projectId)) return;
             if (!inFlightRef.current.has(projectId)) void fetchSessions(projectId, opts);
           });
-        } else if (pendingMinCount !== null) {
-          void reconcileSessions(projectId, { minCount: pendingMinCount });
+        } else if (pendingReconcileRef.current.has(projectId)) {
+          // The debt stays in the map either way; the reconcile reads it back
+          // through ``windowTarget`` instead of being handed a copy.
+          void reconcileSessions(projectId);
         }
       }
     },
-    [acceptProjectRows, api, canIssueRead, projectIsInTree, queueReconcile, reconcileSessions, takePendingReconcile],
+    [acceptProjectRows, api, canIssueRead, projectIsInTree, reconcileSessions],
   );
 
   // Keep the tree live: patch a row's status dot / title from SSE, and refetch
