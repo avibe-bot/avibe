@@ -44,6 +44,7 @@ import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext
 import {
   getPermissions,
   isRevisionConflict,
+  isTransientPermissionsFailure,
   PermissionsApiError,
   replaceAuthorizedUsers,
   updateProjectAccess,
@@ -89,14 +90,6 @@ type AuthoritativeRefresh = () => Promise<AuthoritativeRefreshResult>;
 
 const POLICY_REFRESH_INTERVAL_MS = 2_000;
 const POLICY_REFRESH_MAX_ATTEMPTS = 30;
-const RETRYABLE_PERMISSIONS_STATUSES = new Set([408, 425, 429]);
-
-const isTransientPermissionsFailure = (error: PermissionsApiError | null): boolean => (
-  error === null
-  || error.offline
-  || RETRYABLE_PERMISSIONS_STATUSES.has(error.status)
-  || error.status >= 500
-);
 
 async function fetchPermissionsPage(): Promise<PageLoadResult> {
   try {

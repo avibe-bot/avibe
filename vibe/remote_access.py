@@ -785,6 +785,14 @@ def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float]
             return None
         if str(payload.get("instance_id") or "").strip() != instance_id:
             if cache_matches:
+                # A best-effort acknowledgement may have updated this
+                # instance in memory while the persisted file still belongs
+                # to the previous pairing.  Keep that acknowledgement fenced
+                # to the current instance until a successful write or read
+                # reconciles the artifact; otherwise a stale file erases the
+                # runtime watermark on the very next authorization check.
+                if cached is not None and cached.file_signature is None:
+                    return cached.revision, cached.source_updated_at
                 _AUTHORIZATION_REVISION_CACHE = None
             return None
         try:

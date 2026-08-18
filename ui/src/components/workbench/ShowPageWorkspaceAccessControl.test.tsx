@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -59,6 +59,8 @@ const translations: Record<string, string> = {
   'chat.showPage.workspaceSync.pending': 'The policy is waiting for this Avibe to apply it.',
   'chat.showPage.workspaceSync.offline': 'This Avibe has not acknowledged the latest policy.',
   'chat.showPage.workspaceSync.error': 'The latest policy could not be applied.',
+  'permissions.errors.permissions_pairing_changed': 'The paired Avibe changed after this policy was loaded.',
+  'permissions.errors.instance_access_forbidden': 'Your current Avibe role cannot change Permissions.',
   'common.retry': 'Retry',
 };
 
@@ -490,6 +492,109 @@ describe('ShowPageWorkspaceAccessControl', () => {
       5,
       'inst-1',
     );
+  });
+
+  it('drops a group that becomes archived without an authoritative binding during recovery', async () => {
+    const archivedActiveGroup = { ...activeGroup };
+    api.getPermissions
+      .mockResolvedValueOnce(permissions({ groups: [archivedActiveGroup] }))
+      .mockResolvedValueOnce(permissions({
+        groups: [{ ...archivedActiveGroup, archived_at: '2026-08-18T02:00:00Z' }],
+      }));
+    api.getResourceAccess
+      .mockResolvedValueOnce({ resource: resource() })
+      .mockResolvedValueOnce({ resource: resource({ revision: 5 }) });
+    api.updateResourceAccess.mockRejectedValueOnce(new PermissionsApiError(409, {
+      error: 'permission_revision_conflict',
+      current_revision: 5,
+    }));
+    const user = userEvent.setup();
+    renderControl();
+
+    await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Design' }));
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect(await screen.findByText(/Your draft was kept/)).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: 'Design' })).toBeNull();
+    expect(screen.getByText('Select at least one group.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('marks a dirty draft as conflicted when pending polling observes a newer revision', async () => {
+    vi.useFakeTimers();
+    try {
+      api.getResourceAccess
+        .mockResolvedValueOnce({ resource: resource({ status: 'pending', revision: 4 }) })
+        .mockResolvedValueOnce({ resource: resource({ status: 'pending', revision: 5 }) });
+      api.updateResourceAccess.mockResolvedValue({
+        ok: true,
+        resource: resource({ level: 'scope', groupIds: ['group-active'], revision: 6 }),
+      });
+      renderControl();
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByRole('radio', { name: 'Selected groups' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Design' }));
+
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(screen.getByText(/Your draft was kept/)).toBeTruthy();
+      expect(screen.getByRole('checkbox', { name: 'Design' }).getAttribute('aria-checked')).toBe('true');
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+      expect(api.updateResourceAccess).toHaveBeenCalledWith(
+        { resource_kind: 'show_page', resource_id: 'ses-1' },
+        'scope',
+        ['group-active'],
+        5,
+        'inst-1',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['permissions_pairing_changed', 409],
+    ['instance_access_forbidden', 403],
+  ])('stops polling and clears the editor after %s', async (code, status) => {
+    vi.useFakeTimers();
+    try {
+      api.getResourceAccess
+        .mockResolvedValueOnce({ resource: resource({ status: 'pending' }) })
+        .mockRejectedValueOnce(new PermissionsApiError(status, { error: code }));
+      renderControl();
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText('The policy is waiting for this Avibe to apply it.')).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText(translations[`permissions.errors.${code}`])).toBeTruthy();
+      expect(screen.queryByRole('radio', { name: 'Private' })).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(6_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(api.getResourceAccess).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('disables the mounted editor when the authoritative conflict refresh fails', async () => {

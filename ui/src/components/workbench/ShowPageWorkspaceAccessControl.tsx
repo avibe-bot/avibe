@@ -10,6 +10,7 @@ import {
   getPermissions,
   getResourceAccess,
   isRevisionConflict,
+  isTransientPermissionsFailure,
   PermissionsApiError,
   updateResourceAccess,
 } from '@/features/permissions/api';
@@ -128,19 +129,22 @@ export function ShowPageWorkspaceAccessControl({
       }
       setPermissions(nextPermissions);
       if (preservedDraft) {
-        const archivedIds = new Set(
-          directoryGroups
-            .filter((group) => group.archived_at !== null)
-            .map((group) => group.id),
+        const directoryGroupsById = new Map(
+          directoryGroups.map((group) => [group.id, group]),
         );
+        const authoritativeBoundIds = new Set(nextResource.resource.access.group_ids);
+        const preservedGroupIds = preservedDraft.groupIds.filter((groupId) => {
+          const group = directoryGroupsById.get(groupId);
+          return group?.archived_at === null || authoritativeBoundIds.has(groupId);
+        });
         const newlyBoundArchived = nextResource.resource.access.group_ids.filter(
-          (groupId) => archivedIds.has(groupId),
+          (groupId) => directoryGroupsById.get(groupId)?.archived_at !== null,
         );
         setResource(nextResource.resource);
         setGroups(directoryGroups);
         setLevel(preservedDraft.level);
         setGroupIds(preservedDraft.level === 'scope'
-          ? uniqueSorted([...preservedDraft.groupIds, ...newlyBoundArchived])
+          ? uniqueSorted([...preservedGroupIds, ...newlyBoundArchived])
           : []);
       } else {
         adopt(nextResource.resource, directoryGroups);
@@ -216,16 +220,39 @@ export function ShowPageWorkspaceAccessControl({
               !== uniqueSorted(currentDraft.groupIds).join('\u0000')
           )
         );
+        const revisionChanged = Boolean(
+          currentResource
+          && next.resource.access.revision !== currentResource.access.revision
+        );
         setResource(next.resource);
         if (!draftIsDirty) {
           setLevel(next.resource.access.access_level);
           setGroupIds(uniqueSorted(next.resource.access.group_ids));
         }
+        if (draftIsDirty && revisionChanged) setGate('conflict');
         if (next.resource.sync.status === 'pending') schedule();
-      } catch {
-        // A transient transport failure must not discard the pending resource;
-        // retry while this exact instance remains mounted.
-        schedule();
+      } catch (caught) {
+        if (
+          cancelled
+          || generation !== generationRef.current
+          || requestSessionId !== sessionIdRef.current
+          || requestInstanceId !== instanceId
+        ) return;
+        if (isTransientPermissionsFailure(caught)) {
+          // A transient transport failure must not discard the pending
+          // resource; retry while this exact instance remains mounted.
+          schedule();
+          return;
+        }
+        setResource(null);
+        setPermissions(null);
+        setGroups([]);
+        setLevel('private');
+        setGroupIds([]);
+        setErrorCode(caught instanceof PermissionsApiError
+          ? caught.code
+          : 'permissions_unavailable');
+        setGate('error');
       }
     };
 
@@ -344,8 +371,8 @@ export function ShowPageWorkspaceAccessControl({
   };
 
   const retryLoad = useCallback(() => {
-    void load('ready', resource ? draftRef.current : undefined);
-  }, [load, resource]);
+    void load('ready', resourceRef.current ? draftRef.current : undefined);
+  }, [load]);
 
   return (
     <section className="space-y-2.5" aria-label={t('chat.showPage.workspaceAccess')}>

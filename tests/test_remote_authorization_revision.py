@@ -1192,6 +1192,32 @@ def test_authorization_acknowledgement_keeps_memory_revision_when_rewrite_fails(
     ]
 
 
+def test_authorization_acknowledgement_survives_stale_pairing_file_after_failed_write(
+    monkeypatch,
+    tmp_path,
+):
+    """A failed acknowledgement for pairing B must not be erased by pairing A's file."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_a = _paired_config(tmp_path, revision=41)
+    config_b = V2Config.load()
+    config_b.remote_access.vibe_cloud.instance_id = "inst_b"
+    config_b.save()
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+
+    assert remote_access.acknowledge_authorization_revision(config_b, 42) == 42
+    assert remote_access.current_authorization_revision(config_b) == 42
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()  # noqa: SLF001
+    )
+    assert persisted["instance_id"] == config_a.remote_access.vibe_cloud.instance_id
+    assert persisted["authorization_revision"] == 41
+
+
 def test_authorization_revision_sync_keeps_strict_write_after_malformed_read(
     monkeypatch,
     tmp_path,

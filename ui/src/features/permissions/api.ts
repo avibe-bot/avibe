@@ -30,6 +30,17 @@ export class PermissionsApiError extends Error {
   }
 }
 
+const RETRYABLE_PERMISSIONS_STATUSES = new Set([408, 425, 429]);
+
+/** Whether a failed Permissions read may safely be retried in the background. */
+export const isTransientPermissionsFailure = (error: unknown): boolean => {
+  const apiError = error instanceof PermissionsApiError ? error : null;
+  return apiError === null
+    || apiError.offline
+    || RETRYABLE_PERMISSIONS_STATUSES.has(apiError.status)
+    || apiError.status >= 500;
+};
+
 async function permissionsRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!(path === '/api/permissions' || path.startsWith('/api/permissions/'))) {
     throw new Error('Permissions requests must use the same-origin current-instance API');
