@@ -846,6 +846,63 @@ def test_remote_authorization_failure_serves_spa_shell_but_rejects_api(
     assert protected.get_json()["error"] == error
 
 
+def _delayed_authorization_revision_sync_writer(
+    home: str,
+    entered: Any,
+    release: Any,
+    result_queue: Any,
+) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import V2Config as _V2Config
+    from vibe import remote_access as _remote_access
+
+    config = _V2Config.load()
+    state_path = _remote_access._authorization_revision_state_path()
+    original_read_json = _remote_access.runtime.read_json
+    paused = False
+
+    def delayed_read_json(path):
+        nonlocal paused
+
+        payload = original_read_json(path)
+        if path == state_path and not paused:
+            paused = True
+            entered.set()
+            if not release.wait(timeout=15):
+                raise AssertionError("delayed revision writer was never released")
+        return payload
+
+    _remote_access.runtime.read_json = delayed_read_json
+    try:
+        result_queue.put(("ok", _remote_access._replace_authorization_revision(config, 42)))
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
+
+
+def _authorization_revision_acknowledgement_writer(
+    home: str,
+    attempted: Any,
+    done: Any,
+    result_queue: Any,
+) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import V2Config as _V2Config
+    from vibe import remote_access as _remote_access
+
+    config = _V2Config.load()
+    attempted.set()
+    try:
+        result_queue.put(("ok", _remote_access.acknowledge_authorization_revision(config, 43)))
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
+    finally:
+        done.set()
+
+
 def test_authorization_revision_device_contract_is_monotonic(monkeypatch, tmp_path):
     """I1057-AC2/AC3: one paired-device watermark drives every hostname."""
 
@@ -876,6 +933,60 @@ def test_authorization_revision_device_contract_is_monotonic(monkeypatch, tmp_pa
         "error": "authorization_revision_regressed",
     }
     assert remote_access.current_authorization_revision(config) == 42
+
+
+def test_authorization_revision_writes_are_monotonic_across_processes(
+    monkeypatch,
+    tmp_path,
+):
+    """A delayed synchronization write cannot replace a newer acknowledgement."""
+
+    import multiprocessing as mp
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config(tmp_path, revision=41)
+    ctx = mp.get_context("spawn")
+    sync_entered = ctx.Event()
+    release_sync = ctx.Event()
+    acknowledgement_attempted = ctx.Event()
+    acknowledgement_done = ctx.Event()
+    sync_result = ctx.Queue()
+    acknowledgement_result = ctx.Queue()
+    sync_writer = ctx.Process(
+        target=_delayed_authorization_revision_sync_writer,
+        args=(str(tmp_path), sync_entered, release_sync, sync_result),
+    )
+    acknowledgement_writer = ctx.Process(
+        target=_authorization_revision_acknowledgement_writer,
+        args=(
+            str(tmp_path),
+            acknowledgement_attempted,
+            acknowledgement_done,
+            acknowledgement_result,
+        ),
+    )
+
+    sync_writer.start()
+    assert sync_entered.wait(timeout=15), "sync writer never entered its transaction"
+    acknowledgement_writer.start()
+    assert acknowledgement_attempted.wait(timeout=15), "acknowledgement writer never attempted"
+    assert not acknowledgement_done.wait(timeout=1), (
+        "acknowledgement writer bypassed the synchronization transaction"
+    )
+    release_sync.set()
+    sync_writer.join(timeout=15)
+    acknowledgement_writer.join(timeout=15)
+
+    assert sync_writer.exitcode == 0, f"sync writer failed: {sync_writer.exitcode}"
+    assert acknowledgement_writer.exitcode == 0, (
+        f"acknowledgement writer failed: {acknowledgement_writer.exitcode}"
+    )
+    assert sync_result.get(timeout=5) == ("ok", 42)
+    assert acknowledgement_result.get(timeout=5) == ("ok", 43)
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()
+    )
+    assert persisted["authorization_revision"] == 43
 
 
 def test_authorization_revision_cache_observes_another_process_watermark(

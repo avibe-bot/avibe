@@ -243,6 +243,15 @@ def _authorization_revision_state_path() -> Path:
     return paths.get_state_dir() / "remote-access-authorization-revision.json"
 
 
+def _authorization_revision_file_lock(path: Path):
+    """Return the cross-process lock for the authorization watermark."""
+
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_name(f".{path.name}.lock"))
+
+
 def _quality_state_path() -> Path:
     return paths.get_runtime_dir() / "remote-access-tunnel-quality.json"
 
@@ -767,41 +776,54 @@ def _install_authorization_revision(
     source_updated_at = time.time()
     with _AUTHORIZATION_REVISION_LOCK:
         cached = _AUTHORIZATION_REVISION_CACHE
-        if (
+        cache_matches = (
             cached is not None
             and cached.state_path == state_path
             and cached.instance_id == instance_id
-        ):
-            previous_revision = cached.revision
-        else:
-            payload = runtime.read_json(state_path)
-            previous_revision = None
-            if (
-                isinstance(payload, dict)
-                and payload.get("schema_version") == 1
-                and str(payload.get("instance_id") or "").strip() == instance_id
-            ):
-                try:
-                    previous_revision = _normalize_authorization_revision(
-                        payload.get("authorization_revision")
-                    )
-                except ValueError:
-                    previous_revision = None
-        if previous_revision is not None and revision < previous_revision:
-            raise ValueError("authorization_revision_regressed")
-        changed = previous_revision != revision
-        payload = {
-            "schema_version": 1,
-            "instance_id": instance_id,
-            "authorization_revision": revision,
-            "source_updated_at": source_updated_at,
-        }
+        )
+        cached_revision = cached.revision if cache_matches else None
+        previous_revision = cached_revision
+        changed = cached_revision != revision
+        file_signature = None
         try:
             state_path.parent.mkdir(parents=True, exist_ok=True)
-            runtime.write_json(state_path, payload)
+            with _authorization_revision_file_lock(state_path):
+                persisted = runtime.read_json(state_path)
+                persisted_revision = None
+                if (
+                    isinstance(persisted, dict)
+                    and persisted.get("schema_version") == 1
+                    and str(persisted.get("instance_id") or "").strip() == instance_id
+                ):
+                    try:
+                        persisted_revision = _normalize_authorization_revision(
+                            persisted.get("authorization_revision")
+                        )
+                    except ValueError:
+                        persisted_revision = None
+                if persisted_revision is not None and (
+                    previous_revision is None or persisted_revision > previous_revision
+                ):
+                    previous_revision = persisted_revision
+                if cached_revision is None:
+                    changed = persisted_revision != revision
+                if previous_revision is not None and revision < previous_revision:
+                    raise ValueError("authorization_revision_regressed")
+                runtime.write_json(
+                    state_path,
+                    {
+                        "schema_version": 1,
+                        "instance_id": instance_id,
+                        "authorization_revision": revision,
+                        "source_updated_at": source_updated_at,
+                    },
+                )
+                file_signature = _authorization_revision_file_signature(state_path)
         except OSError:
             if persistence_required:
                 raise
+            if previous_revision is not None and revision < previous_revision:
+                raise ValueError("authorization_revision_regressed") from None
             logger.warning(
                 "Authorization revision acknowledgement could not be persisted",
                 exc_info=True,
@@ -811,7 +833,7 @@ def _install_authorization_revision(
             instance_id=instance_id,
             revision=revision,
             source_updated_at=source_updated_at,
-            file_signature=_authorization_revision_file_signature(state_path),
+            file_signature=file_signature,
         )
     if changed:
         try:
