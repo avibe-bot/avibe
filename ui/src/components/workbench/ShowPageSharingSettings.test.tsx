@@ -307,6 +307,27 @@ describe('ShowPageSharingSettings', () => {
     );
   });
 
+  it('adopts the canonical custom link after a successful save', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({ access_mode: 'public' }),
+    });
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({ access_mode: 'public', revision: 1, share_id: 'canonical-link' }),
+    });
+    renderSettings();
+
+    const input = await screen.findByRole('textbox', { name: 'Custom link' });
+    fireEvent.change(input, { target: { value: ' canonical-link ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'canonical-link',
+    );
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+  });
+
   it('reconciles a successful custom-link save after the editor unmounts', async () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({ access_mode: 'public' }),

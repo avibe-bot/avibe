@@ -216,7 +216,8 @@ export function ShowPageSharingSettings({
     nextMode: ShowAccessMode,
     nextShareId: string,
     nextEmails: string[],
-    preserveShareIdDraft = false,
+    preserveShareIdDraftOnConflict = false,
+    preserveShareIdDraftOnSuccess = preserveShareIdDraftOnConflict,
   ) => {
     const current = savedRef.current;
     const targetShareId = nextShareId.trim() || null;
@@ -262,14 +263,14 @@ export function ShowPageSharingSettings({
       if (result.status === 'conflict') {
         savingRef.current = false;
         setSaving(false);
-        await load('conflict', preserveShareIdDraft);
+        await load('conflict', preserveShareIdDraftOnConflict);
         return;
       }
       if (result.status === 'share_id_taken' || result.status === 'invalid') {
         setGate(result.status);
         return;
       }
-      adopt(result.show_access, preserveShareIdDraft);
+      adopt(result.show_access, preserveShareIdDraftOnSuccess);
       setGate('ready');
       onApplied?.(result.show_access);
     } catch {
@@ -318,7 +319,7 @@ export function ShowPageSharingSettings({
 
   const saveShareId = () => {
     if (!editable || shareIdInvalid) return;
-    void commit(mode, shareId, emails, true);
+    void commit(mode, shareId, emails, true, false);
   };
 
   if (!canManage) return null;
