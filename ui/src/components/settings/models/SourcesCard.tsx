@@ -29,18 +29,22 @@ export const SourcesCard: React.FC<{
     { id: 'native', sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
     { id: 'hub', sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
   ].filter((group) => group.sources.length > 0);
+  // No height floor: the frame sizes this panel to its cards, so a fixture with
+  // fewer sources than the design draws should end below the footer rather than
+  // leave ~100px of void above it. `max-h-full` still hands overflow to the
+  // scroll region when there are more.
   return (
-    <section className="relative z-20 flex max-h-full min-h-[420px] flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="relative z-20 flex max-h-full flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
-          <h2 className="text-[16px] font-bold text-foreground">{t('settings.models.upstream.heading')}</h2>
+          <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
           <ModelHubInfoHint
             label={t('settings.models.shell.gatewayInfo.label')}
             content={t('settings.models.shell.gatewayInfo.body')}
             className="model-hub-upstream-info"
           />
         </span>
-        {sources !== undefined && <span className="model-hub-upstream-count rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.upstream.count', { count: sources.length })}</span>}
+        {sources !== undefined && <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
       <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
         {read.kind === 'loading' && sources === undefined
@@ -50,7 +54,7 @@ export const SourcesCard: React.FC<{
             : <>
                 {read.kind === 'degraded' && read.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive-ink">{readFailureCopy ?? t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
                 {groups.length > 0
-                  ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} />)}</div>)
+                  ? groups.map((group) => <div key={group.id} className="space-y-2.5"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} />)}</div>)
                   : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
               </>}
       </div>
@@ -61,7 +65,7 @@ export const SourcesCard: React.FC<{
           size="xs"
           aria-haspopup="menu"
           aria-expanded={subscriptionPickerOpen}
-          className="model-hub-footer-action shadow-none disabled:opacity-100"
+          className="model-hub-footer-action model-hub-footer-action--filled shadow-none disabled:opacity-100"
           onClick={onAddSubscription}
         >
           <Plus className="size-3" />
@@ -70,7 +74,7 @@ export const SourcesCard: React.FC<{
         <Button
           variant="outline"
           size="xs"
-          className="model-hub-footer-action"
+          className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"
           onClick={onAddApiKey}
         >
           <Plus className="size-3" />

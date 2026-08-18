@@ -105,7 +105,12 @@ export function Combobox({
   )
 
   return (
+    // `modal` unconditionally, matching Radix `Select`: a non-modal popover opened
+    // inside a Dialog has its wheel events cancelled by the Dialog's scroll lock,
+    // so the option list silently stops scrolling. Owning its own lock is a
+    // property of the surface, not something each call site should have to know.
     <Popover
+      modal
       open={open}
       onOpenChange={(next) => {
         // Only opt-in consumers (commitOnClose) commit a typed custom value on

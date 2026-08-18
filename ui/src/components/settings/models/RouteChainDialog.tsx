@@ -12,6 +12,14 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -43,6 +51,10 @@ import type {
 
 const sourceName = (sources: Source[], sourceId: string): string =>
   sources.find((source) => source.id === sourceId)?.display_name ?? sourceId;
+
+/** Stable list-item identity for one candidate pair. Nothing parses it back. */
+const candidateKey = (hop: RouteHop): string =>
+  JSON.stringify([hop.source_id, hop.model_id]);
 
 type GuardState = {
   hops: RouteHopRef[];
@@ -135,6 +147,7 @@ export const RouteChainDialog: React.FC<{
     React.useState<UnknownObservation>("none");
   const [unknownSourceCurrent, setUnknownSourceCurrent] = React.useState(false);
   const [selectorOpen, setSelectorOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
   const [candidate, setCandidate] = React.useState<RouteCandidate | null>(null);
   const [announcement, setAnnouncement] = React.useState<{
     key: string;
@@ -142,7 +155,7 @@ export const RouteChainDialog: React.FC<{
   } | null>(null);
   const gripRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const removeRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
-  const candidateRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
   const addButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const reseedButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
@@ -170,20 +183,28 @@ export const RouteChainDialog: React.FC<{
     [],
   );
   const candidates = agent ? routeCandidates(agent, sources, draft) : [];
-  const candidateGroups = candidates.reduce<
-    Array<{
-      source: Source;
-      items: Array<{ candidate: RouteCandidate; index: number }>;
-    }>
-  >((groups, item, index) => {
+  // The filter narrows the same grouped projection V5 exposes, so an empty
+  // result means "nothing matches what you typed", never "nothing is available"
+  // — that second sentence stays `route.add.none` on the disabled trigger.
+  const term = query.trim().toLowerCase();
+  const matched = term
+    ? candidates.filter((item) =>
+        `${item.source.display_name}\n${item.hop.model_id}`
+          .toLowerCase()
+          .includes(term),
+      )
+    : candidates;
+  const candidateGroups = matched.reduce<
+    Array<{ source: Source; items: RouteCandidate[] }>
+  >((groups, item) => {
     const previous = groups.at(-1);
-    if (previous?.source.id === item.source.id) {
-      previous.items.push({ candidate: item, index });
-    } else {
-      groups.push({ source: item.source, items: [{ candidate: item, index }] });
-    }
+    if (previous?.source.id === item.source.id) previous.items.push(item);
+    else groups.push({ source: item.source, items: [item] });
     return groups;
   }, []);
+  const matchedRef = React.useRef(matched);
+  matchedRef.current = matched;
+  const matchedKeys = matched.map((item) => candidateKey(item.hop)).join("\n");
   const backend = agent
     ? (t(`settings.models.backends.${agent.backend}`, {
         defaultValue: agent.backend,
@@ -244,6 +265,7 @@ export const RouteChainDialog: React.FC<{
     setUnknownObservation("none");
     setUnknownSourceCurrent(false);
     setSelectorOpen(false);
+    setQuery("");
     setCandidate(null);
     advanceInteraction({ type: "reset", draft: [], focusIndex: 0 });
     if (selection) void readChain();
@@ -262,9 +284,18 @@ export const RouteChainDialog: React.FC<{
     onClose();
   }, [onClose, phase, selection]);
 
+  // ET-5a plus its invariant: while the selector is open exactly one candidate is
+  // active, and it is always one of the candidates currently listed. Filtering or
+  // a draft change that drops the active pair re-elects the first listed one
+  // rather than leaving the confirmation pointing at a row nobody can see.
   React.useEffect(() => {
-    if (selectorOpen) candidateRefs.current[0]?.focus();
-  }, [selectorOpen]);
+    if (!selectorOpen) return;
+    setCandidate((current) => {
+      const keys = matchedKeys ? matchedKeys.split("\n") : [];
+      if (current && keys.includes(candidateKey(current.hop))) return current;
+      return matchedRef.current[0] ?? null;
+    });
+  }, [matchedKeys, selectorOpen]);
 
   React.useEffect(() => {
     const signature = valid.invalidIndexes.join(",");
@@ -277,6 +308,7 @@ export const RouteChainDialog: React.FC<{
     invalidSignature.current = signature;
     if (phase === "rejected") setPhase("ready");
     setSelectorOpen(false);
+    setQuery("");
     setCandidate(null);
     advanceInteraction({ type: "drop-grab" });
     focusAfterRender({
@@ -639,44 +671,22 @@ export const RouteChainDialog: React.FC<{
     doneButtonRef.current?.focus();
     commitReconciliation.retry();
   };
-  const chooseCandidate = (next: RouteCandidate) => {
-    setCandidate(next);
+  // Every ET-5d move — arrow keys, Home/End, pointer activation — arrives here as
+  // the list's single active key, so activeness and selection cannot diverge.
+  const chooseCandidate = (next: string) => {
+    setCandidate(
+      matchedRef.current.find((item) => candidateKey(item.hop) === next) ?? null,
+    );
   };
-  const moveCandidateFocus = (index: number) => {
-    const nextIndex = Math.max(0, Math.min(candidates.length - 1, index));
-    const next = candidates[nextIndex];
-    if (!next) return;
-    setCandidate(next);
-    candidateRefs.current[nextIndex]?.focus();
-  };
-  const onCandidateKeyDown = (
-    event: React.KeyboardEvent<HTMLButtonElement>,
-    index: number,
-  ) => {
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-      event.preventDefault();
-      moveCandidateFocus(index + 1);
-    } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-      event.preventDefault();
-      moveCandidateFocus(index - 1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      moveCandidateFocus(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      moveCandidateFocus(candidates.length - 1);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      setSelectorOpen(false);
-      setCandidate(null);
-      focusAfterSelectorClose();
-    }
+  const closeSelector = () => {
+    setSelectorOpen(false);
+    setQuery("");
+    setCandidate(null);
   };
   const addCandidate = () => {
     if (!candidate) return;
     const next = advanceInteraction({ type: "append", hop: candidate.hop });
-    setSelectorOpen(false);
-    setCandidate(null);
+    closeSelector();
     requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
   };
   const renderHop = (hop: RouteHop, index: number) => {
@@ -961,12 +971,20 @@ export const RouteChainDialog: React.FC<{
               {t("settings.models.routeDialog.empty")}
             </div>
           )}
+          {/* `modal` is what makes the panel scrollable: the Dialog's overlay owns a
+              `react-remove-scroll` lock whose shards cover the dialog only, so a
+              body-portalled non-modal popover has its wheel events cancelled. A
+              modal popover pushes its own lock, which the dialog's defers to. */}
           <Popover
+            modal
             open={selectorOpen}
             onOpenChange={(open) => {
-              setSelectorOpen(open);
-              setCandidate(open ? (candidates[0] ?? null) : null);
-              if (!open) focusAfterSelectorClose();
+              if (open) {
+                setSelectorOpen(true);
+                return;
+              }
+              closeSelector();
+              focusAfterSelectorClose();
             }}
           >
             <PopoverTrigger asChild>
@@ -985,71 +1003,100 @@ export const RouteChainDialog: React.FC<{
                 {t("settings.models.routeDialog.addHop")}
               </button>
             </PopoverTrigger>
-            {/* `collisionPadding` plus the class's available-height bound keep the
-                whole panel — not just its list — inside the viewport; without
-                them a source with many models opened a panel that ran past the
-                dialog and clipped its own last row. */}
+            {/* Placement is deterministic and the height adapts, rather than the
+                other way round. Two variants were measured and rejected: bounding
+                collisions to the dialog gives a 131px panel over an 18px list,
+                because an empty chain — the case where this picker matters most —
+                makes the dialog short; letting it flip gives a full 300px panel
+                that jumps 150px above the dialog's own top, covering the page
+                title, since the room below happens to fall a few px short of the
+                300px preference. Dropping down always and taking `min(300px,
+                available-height)` keeps the panel attached to its trigger and on
+                screen. It stays scrollable when a long chain leaves little room
+                below; the dialog body scrolls, so the trigger can be moved up. */}
             <PopoverContent
+              side="bottom"
+              avoidCollisions={false}
               align="start"
               sideOffset={6}
               collisionPadding={16}
-              className="model-hub-route-selector flex w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-64px)] flex-col gap-2 rounded-lg border border-border bg-background p-2"
+              className="model-hub-route-selector flex w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-64px)] flex-col p-0"
               onOpenAutoFocus={(event) => {
                 event.preventDefault();
-                candidateRefs.current[0]?.focus();
+                searchRef.current?.focus();
               }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
                 addButtonRef.current?.focus();
               }}
             >
-              <div className="model-hub-route-selector-list flex flex-col gap-2">
-                {candidateGroups.map((group) => (
-                  <section
-                    key={group.source.id}
-                    aria-label={group.source.display_name}
-                    className="flex flex-col gap-1"
-                  >
-                    <p className="model-hub-route-selector-label truncate px-2">
-                      {group.source.display_name}
-                    </p>
-                    {group.items.map(({ candidate: item, index }) => (
-                      <button
-                        ref={(node) => {
-                          candidateRefs.current[index] = node;
-                        }}
-                        key={`${item.hop.source_id}:${item.hop.model_id}`}
-                        type="button"
-                        aria-pressed={Boolean(
-                          candidate &&
-                          equalHopIdentity(candidate.hop, item.hop),
-                        )}
-                        tabIndex={
-                          candidate &&
-                          equalHopIdentity(candidate.hop, item.hop)
-                            ? 0
-                            : -1
-                        }
-                        onClick={() => chooseCandidate(item)}
-                        onKeyDown={(event) => onCandidateKeyDown(event, index)}
-                        className="model-hub-route-candidate flex items-center rounded-md px-2 py-1 text-left text-xs text-foreground"
-                      >
-                        <span className="model-hub-route-candidate-model truncate font-mono text-muted">
-                          {item.hop.model_id}
-                        </span>
-                      </button>
-                    ))}
-                  </section>
-                ))}
-              </div>
-              <Button
-                type="button"
-                className="model-hub-route-selector-confirm shrink-0 self-end px-4"
-                disabled={!candidate}
-                onClick={addCandidate}
+              <Command
+                shouldFilter={false}
+                disablePointerSelection
+                label={t("settings.models.routeDialog.addHop") as string}
+                value={candidate ? candidateKey(candidate.hop) : ""}
+                onValueChange={chooseCandidate}
+                className="model-hub-route-selector-command min-h-0 bg-transparent"
               >
-                {t("settings.models.routeDialog.add.confirm")}
-              </Button>
+                <CommandInput
+                  ref={searchRef}
+                  value={query}
+                  onValueChange={setQuery}
+                  placeholder={
+                    t("settings.models.routeDialog.add.search") as string
+                  }
+                />
+                <p
+                  className="model-hub-route-selector-head model-hub-route-selector-row"
+                  aria-hidden="true"
+                >
+                  <span>{t("settings.models.routeDialog.add.source")}</span>
+                  <span>{t("settings.models.routeDialog.add.model")}</span>
+                </p>
+                <CommandList className="model-hub-route-selector-list">
+                  {matched.length === 0 && (
+                    <CommandEmpty>
+                      {t("settings.models.routeDialog.add.noMatch")}
+                    </CommandEmpty>
+                  )}
+                  {candidateGroups.map((group) => (
+                    <CommandGroup
+                      key={group.source.id}
+                      heading={group.source.display_name}
+                      className="model-hub-route-selector-group [&_[cmdk-group-heading]]:sr-only"
+                    >
+                      {group.items.map((item, itemIndex) => (
+                        <CommandItem
+                          key={candidateKey(item.hop)}
+                          value={candidateKey(item.hop)}
+                          onSelect={() => setCandidate(item)}
+                          className="model-hub-route-candidate model-hub-route-selector-row text-foreground"
+                        >
+                          {/* The frame prints the source once per group and leaves
+                              the rest of the column blank; the group's own heading
+                              carries it for assistive tech. */}
+                          <span className="model-hub-route-candidate-source truncate">
+                            {itemIndex === 0 ? group.source.display_name : ""}
+                          </span>
+                          <span className="model-hub-route-candidate-model truncate font-mono">
+                            {item.hop.model_id}
+                          </span>
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  ))}
+                </CommandList>
+                <div className="model-hub-route-selector-foot flex shrink-0 items-center justify-end border-t border-border">
+                  <Button
+                    type="button"
+                    className="model-hub-route-selector-confirm px-4"
+                    disabled={!candidate}
+                    onClick={addCandidate}
+                  >
+                    {t("settings.models.routeDialog.add.confirm")}
+                  </Button>
+                </div>
+              </Command>
             </PopoverContent>
           </Popover>
         </div>
