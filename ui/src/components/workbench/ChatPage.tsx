@@ -38,7 +38,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { canMarkConversationRead, readPageActivity } from '../../lib/pageActivity';
+import { canMarkConversationRead, onPageReactivated, usePageActive } from '../../lib/pageActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
@@ -239,22 +239,7 @@ export const ChatPage: React.FC = () => {
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
-  const [pageActive, setPageActive] = useState(() => readPageActivity());
-  useEffect(() => {
-    const syncPageActivity = () => setPageActive(readPageActivity());
-    document.addEventListener('visibilitychange', syncPageActivity);
-    window.addEventListener('focus', syncPageActivity);
-    window.addEventListener('blur', syncPageActivity);
-    window.addEventListener('pageshow', syncPageActivity);
-    window.addEventListener('pagehide', syncPageActivity);
-    return () => {
-      document.removeEventListener('visibilitychange', syncPageActivity);
-      window.removeEventListener('focus', syncPageActivity);
-      window.removeEventListener('blur', syncPageActivity);
-      window.removeEventListener('pageshow', syncPageActivity);
-      window.removeEventListener('pagehide', syncPageActivity);
-    };
-  }, []);
+  const pageActive = usePageActive();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -1501,8 +1486,8 @@ export const ChatPage: React.FC = () => {
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
-  // Reconcile when the page becomes visible again so the answer + working state
-  // catch up to durable storage.
+  // Reconcile when the page comes back so the answer + working state catch up
+  // to durable storage.
   useEffect(() => {
     if (!sessionId) return;
     const resync = () => {
@@ -1514,13 +1499,12 @@ export const ChatPage: React.FC = () => {
       void syncTurnState({ quiet: true });
       void refreshSessionRow();
     };
-    document.addEventListener('visibilitychange', resync);
+    // Regaining the network is its own gap, independent of the page coming back.
+    const stopReactivation = onPageReactivated(resync);
     window.addEventListener('online', resync);
-    window.addEventListener('focus', resync);
     return () => {
-      document.removeEventListener('visibilitychange', resync);
+      stopReactivation();
       window.removeEventListener('online', resync);
-      window.removeEventListener('focus', resync);
     };
   }, [sessionId, reconcile, refreshQueue, syncTurnState, refreshSessionRow]);
 

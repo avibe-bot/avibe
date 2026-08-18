@@ -6,6 +6,7 @@ import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
+import { onPageReactivated } from '../lib/pageActivity';
 import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
@@ -583,19 +584,18 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
   // frozen and its SSE socket dropped, and the broker never replays the gap;
   // iOS can leave EventSource in a zombie OPEN state without onerror. ApiContext
-  // reopens the shared stream on visibility, online, and focus; independently
-  // reconcile the durable feed here so missed events never gate data freshness.
+  // reopens the shared stream when the page comes back and when the network
+  // returns; independently reconcile the durable feed here so missed events
+  // never gate data freshness.
   useEffect(() => {
     const resync = () => {
       if (document.visibilityState === 'visible') void reconcile();
     };
-    document.addEventListener('visibilitychange', resync);
+    const stopReactivation = onPageReactivated(resync);
     window.addEventListener('online', resync);
-    window.addEventListener('focus', resync);
     return () => {
-      document.removeEventListener('visibilitychange', resync);
+      stopReactivation();
       window.removeEventListener('online', resync);
-      window.removeEventListener('focus', resync);
     };
   }, [reconcile]);
 
