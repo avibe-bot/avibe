@@ -855,7 +855,7 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """A CLOCK_REALTIME step must not block SIGTERM for a stable child stamp."""
+    """A CLOCK_REALTIME step must not block SIGTERM on the handle we spawned."""
 
     child = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -872,9 +872,9 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
         original_iter = memory_process.psutil.process_iter
         original_stamp = memory_process._process_creation_stamp
 
-        def _stamp_immune_to_wall_drift(proc: object) -> float:
+        def _shifted_stamp(proc: object) -> float:
             if getattr(proc, "pid", None) == child.pid:
-                return captured_stamp
+                return captured_stamp + 48.0
             return original_stamp(proc)
 
         class _ShiftedProcess:
@@ -897,7 +897,12 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
 
         monkeypatch.setattr(memory_process.psutil, "Process", _ShiftedProcess)
         monkeypatch.setattr(memory_process.psutil, "process_iter", _shifted_iter)
-        monkeypatch.setattr(memory_process, "_process_creation_stamp", _stamp_immune_to_wall_drift)
+        monkeypatch.setattr(memory_process, "_process_creation_stamp", _shifted_stamp)
+        monkeypatch.setattr(
+            memory_process,
+            "_read_linux_starttime_ticks",
+            lambda _pid: captured_stamp + 48.0,
+        )
         process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
         await process._terminate_owned_tree(
             child,
