@@ -455,14 +455,16 @@ async def test_current_sync_parent_prefers_stable_stamp_over_wall_time(
 
 
 @pytest.mark.parametrize("field", ["starttime_ticks", "parent_starttime_ticks"])
-async def test_sync_record_rejects_non_finite_stable_stamps(
+@pytest.mark.parametrize("stamp", [-1.0, float("nan")])
+async def test_sync_record_rejects_invalid_stable_stamps(
     field: str,
+    stamp: float,
     tmp_path: Path,
 ) -> None:
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
     record = _record(root, state="finalized", pid=451)
-    record[field] = float("nan")
+    record[field] = stamp
     ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=_Host())
     ownership.write(record)
 

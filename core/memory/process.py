@@ -2745,9 +2745,10 @@ def _is_identity_stamp(value: object) -> bool:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     try:
-        return math.isfinite(float(value))
+        stamp = float(value)
     except (OverflowError, ValueError):
         return False
+    return math.isfinite(stamp) and stamp >= 0.0
 
 
 class _RecordedSidecar(Enum):

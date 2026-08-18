@@ -1451,8 +1451,11 @@ def test_linux_starttime_reader_accepts_non_utf8_comm(monkeypatch: pytest.Monkey
     assert memory_process._read_linux_starttime_ticks(_ORPHAN_PID) == 987654.0
 
 
-@pytest.mark.parametrize("stamp", [float("nan"), float("inf"), float("-inf"), 10**1000])
-def test_identity_stamps_must_be_finite(stamp: float | int) -> None:
+@pytest.mark.parametrize(
+    "stamp",
+    [-1.0, float("nan"), float("inf"), float("-inf"), 10**1000],
+)
+def test_identity_stamps_must_be_finite_and_non_negative(stamp: float | int) -> None:
     assert not memory_process._is_identity_stamp(stamp)
 
 
