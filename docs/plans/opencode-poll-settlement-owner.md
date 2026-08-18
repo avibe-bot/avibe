@@ -10,12 +10,14 @@ error never became a terminal result.
 
 ## Goal
 
-Settle from the assistant that owns the current turn: skip trailing user
-injects. An in-flight assistant after that inject — including an empty one
-just created by auto-retry ``continue`` or an accepted steer — stays pending.
-Only a completed assistant with nothing newer generating is terminal.
+Settle from the assistant that owns the current turn, using both the message
+snapshot and native session status. A trailing user while OpenCode is
+busy/retry is a live steer or auto-retry. The same snapshot while idle is a
+hang (watch callback / typed "继续" after a completed error) and can settle.
+An unreadable status is treated as live so an accepted steer is not closed.
 
 ## Solution
 
-`_settlement_assistant_message` walks the snapshot backward. Both prompt and
-restored poll loops use it instead of `messages[-1]`.
+`_settlement_assistant_message` walks the snapshot backward and takes
+``native_live`` from ``/session/status``. Both prompt and restored poll loops
+use it instead of ``messages[-1]``.

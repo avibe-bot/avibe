@@ -51,37 +51,51 @@ def _message_info(message: Dict[str, Any]) -> Dict[str, Any]:
     return info if isinstance(info, dict) else {}
 
 
+def _native_session_is_live(status: Optional[Dict[str, Any]]) -> bool:
+    """True when OpenCode still owns the turn (busy/retry).
+
+    A successful ``/session/status`` that omits this session is idle. A missing
+    or unreadable status is treated as live so an accepted steer is not closed
+    during the window where the user message exists and the assistant does not.
+    """
+
+    if not isinstance(status, dict):
+        return True
+    return status.get("type") in {"busy", "retry"}
+
+
 def _settlement_assistant_message(
     messages: list[Dict[str, Any]],
     baseline_message_ids: set[str],
+    *,
+    native_live: bool,
 ) -> Optional[Dict[str, Any]]:
     """The assistant message that owns this poll's settlement.
 
-    Trailing user injects (steer, watch callbacks, typed "继续", auto-retry
-    ``continue``) are not the turn. An in-flight assistant after that inject —
-    even with no parts yet — is the live follow-up and must stay pending.
-    Only when nothing new is generating do we settle the latest completed
-    assistant behind the inject.
+    Trailing user injects are not the turn. While the native session is live,
+    a trailing user or an in-flight assistant — even with no parts yet — means
+    a steer or auto-retry is still running. When the native session is idle, an
+    empty leftover generation is skipped and the completed assistant behind it
+    can settle.
     """
 
-    latest_new: Optional[Dict[str, Any]] = None
+    skipped_user = False
     for message in reversed(messages):
         info = _message_info(message)
         message_id = info.get("id")
         if not message_id or message_id in baseline_message_ids:
             continue
-        if latest_new is None:
-            latest_new = message
         if info.get("role") != "assistant":
+            if info.get("role") == "user":
+                skipped_user = True
             continue
-        if info.get("time", {}).get("completed"):
-            return message
-        return None
-    if latest_new is None:
-        return None
-    info = _message_info(latest_new)
-    if info.get("role") == "assistant" and info.get("time", {}).get("completed"):
-        return latest_new
+        if not info.get("time", {}).get("completed"):
+            if native_live or (message.get("parts") or []):
+                return None
+            continue
+        if skipped_user and native_live:
+            return None
+        return message
     return None
 
 
@@ -220,6 +234,26 @@ class OpenCodePollLoop:
         """Map an infinite remaining budget to ``wait_for``'s no-timeout form."""
 
         return None if math.isinf(remaining) else remaining
+
+    async def _native_session_is_live(
+        self,
+        server: OpenCodeServerManager,
+        session_id: str,
+        directory: str,
+    ) -> bool:
+        reader = getattr(server, "get_session_status", None)
+        if not callable(reader):
+            return True
+        try:
+            status = await reader(session_id, directory)
+        except Exception as err:
+            logger.debug(
+                "OpenCode session status unavailable for %s: %s",
+                session_id,
+                err,
+            )
+            return True
+        return _native_session_is_live(status)
 
     @staticmethod
     async def _sleep_with_deadline(deadline: float) -> None:
@@ -543,7 +577,13 @@ class OpenCodePollLoop:
                     emitted_assistant_messages.add(message_id)
 
             if messages:
-                last_message = _settlement_assistant_message(messages, baseline_message_ids)
+                last_message = _settlement_assistant_message(
+                    messages,
+                    baseline_message_ids,
+                    native_live=await self._native_session_is_live(
+                        server, session_id, request.working_path
+                    ),
+                )
                 last_info = _message_info(last_message) if last_message else {}
                 last_id = last_info.get("id")
 
@@ -840,7 +880,11 @@ class OpenCodePollLoop:
 
                 if messages:
                     last_message = _settlement_assistant_message(
-                        messages, baseline_message_ids
+                        messages,
+                        baseline_message_ids,
+                        native_live=await self._native_session_is_live(
+                            server, session_id, poll_info.working_path
+                        ),
                     )
                     last_info = _message_info(last_message) if last_message else {}
                     if last_info.get("id"):

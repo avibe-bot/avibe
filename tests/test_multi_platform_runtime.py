@@ -1542,18 +1542,26 @@ def test_settlement_assistant_message_walks_back_to_the_owning_turn():
     }
 
     cases = (
-        ([error_assistant], "msg-err"),
-        ([error_assistant, trailing_user], "msg-err"),
-        ([error_assistant, trailing_user, empty_inflight], None),
-        ([error_assistant, live_followup], None),
-        ([completed_ok, trailing_user], "msg-ok"),
-        ([trailing_user], None),
-        ([error_assistant, trailing_user, empty_inflight, completed_ok], "msg-ok"),
+        ([error_assistant], False, "msg-err"),
+        ([error_assistant], True, "msg-err"),
+        ([error_assistant, trailing_user], False, "msg-err"),
+        ([error_assistant, trailing_user], True, None),
+        ([error_assistant, trailing_user, empty_inflight], False, "msg-err"),
+        ([error_assistant, trailing_user, empty_inflight], True, None),
+        ([error_assistant, live_followup], True, None),
+        ([error_assistant, live_followup], False, None),
+        ([completed_ok, trailing_user], False, "msg-ok"),
+        ([completed_ok, trailing_user], True, None),
+        ([trailing_user], False, None),
+        ([trailing_user], True, None),
+        ([error_assistant, trailing_user, empty_inflight, completed_ok], False, "msg-ok"),
     )
-    for messages, expected_id in cases:
-        owner = _settlement_assistant_message(messages, set())
+    for messages, native_live, expected_id in cases:
+        owner = _settlement_assistant_message(
+            messages, set(), native_live=native_live
+        )
         actual_id = None if owner is None else owner["info"]["id"]
-        assert actual_id == expected_id, (expected_id, actual_id)
+        assert actual_id == expected_id, (native_live, expected_id, actual_id)
 
 
 def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
@@ -1733,6 +1741,9 @@ def test_opencode_poll_settles_error_when_trailing_user_is_last():
                 },
             ]
 
+        async def get_session_status(self, session_id, directory):
+            return {"type": "idle"}
+
     request = AgentRequest(
         context=MessageContext(user_id="u", channel_id="c", platform="slack"),
         message="hello",
@@ -1761,6 +1772,105 @@ def test_opencode_poll_settles_error_when_trailing_user_is_last():
     assert model_hub_failures == [
         "UnknownError - unknown certificate verification error"
     ]
+
+
+def test_opencode_poll_keeps_accepted_steer_pending_while_native_busy(monkeypatch):
+    """A trailing user while OpenCode is busy is a live steer, not a hang."""
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
+    )
+    emitted = []
+    polls = {"n": 0}
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def _t(self, key, **kwargs):
+            return f"translated:{key}"
+
+        async def emit_agent_message(self, *args, **kwargs):
+            emitted.append((args, kwargs))
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+
+        def _extract_response_text(self, message):
+            return "steered"
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            raise AssertionError("must not settle the prior turn while steer is live")
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            polls["n"] += 1
+            followup_ready = polls["n"] >= 3
+            rows = [
+                {
+                    "info": {
+                        "id": "msg-ok",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "finish": "stop",
+                    },
+                    "parts": [{"type": "text", "text": "old"}],
+                },
+                {
+                    "info": {"id": "msg-steer", "role": "user", "time": {}},
+                    "parts": [{"type": "text", "text": "steer"}],
+                },
+            ]
+            if followup_ready:
+                rows.append(
+                    {
+                        "info": {
+                            "id": "msg-new",
+                            "role": "assistant",
+                            "time": {"completed": 1},
+                            "finish": "stop",
+                        },
+                        "parts": [{"type": "text", "text": "steered"}],
+                    }
+                )
+            return rows
+
+        async def get_session_status(self, session_id, directory):
+            if polls["n"] >= 3:
+                return {"type": "idle"}
+            return {"type": "busy"}
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    final_text, should_emit = asyncio.run(
+        OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert (final_text, should_emit) == ("steered", True)
+    assert polls["n"] == 3
+    assert not any(item[0][1] == "result" for item in emitted)
 
 
 def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypatch):
