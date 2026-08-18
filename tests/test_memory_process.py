@@ -613,7 +613,9 @@ async def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_pat
     assert await process.start() is False
     assert process.last_error == "memory_sidecar_unavailable"
     assert process.consecutive_failures == 1
+    assert process.restart_authorized is True
     await process.stop()
+    assert process.restart_authorized is False
 
 
 async def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(monkeypatch, tmp_path: Path) -> None:
@@ -2060,6 +2062,7 @@ async def test_unplanned_sidecar_signals_still_consume_crash_budget(
     assert process.consecutive_failures == 5
     assert process.down is True
     assert process._restart_task is None
+    assert process.restart_authorized is False
 
 
 async def test_planned_reap_from_exited_issuer_cannot_exempt_same_generation(
@@ -3753,6 +3756,7 @@ async def test_sidecar_stop_and_cancellation_end_a_busy_root_wait(
         assert process.last_error is None
         assert process.down is False
         assert process.starting is False
+        assert process.restart_authorized is False
         assert host.spawn_calls == []
 
         lock_attempted.clear()
@@ -3765,6 +3769,7 @@ async def test_sidecar_stop_and_cancellation_end_a_busy_root_wait(
         assert process.last_error is None
         assert process.down is False
         assert process.starting is False
+        assert process.restart_authorized is False
         assert host.spawn_calls == []
     finally:
         await process.stop()
@@ -3913,6 +3918,7 @@ async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
         assert retention_started.is_set()
         assert process.consecutive_failures == 0
         assert process.starting is False
+        assert process.restart_authorized is False
 
         rebuild_child = _RebuildChild(0, pid=_ORPHAN_DESCENDANT_PID)
         rebuild_identities = {

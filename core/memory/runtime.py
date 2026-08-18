@@ -2407,10 +2407,10 @@ class MemoryRuntime:
             # including its terminal "down" state, while claims are fenced so a
             # repair can safely replace the executable it might otherwise relaunch.
             supervisor = self._process
-            # A HEALTHY running sidecar must not be force-stopped/replaced through
-            # Repair — that requires a coordinated disable first. Only a retained
-            # supervisor in its terminal "down" state (no live child) may be stopped
-            # here so Repair can recover enabled/down Memory.
+            # A healthy running sidecar must not be force-stopped/replaced through
+            # Repair — that requires a coordinated disable first. Any retained
+            # supervisor without a live child can be stopped here: Stop revokes
+            # delayed-retry authority before Repair adopts the durable config.
             if supervisor is not None and supervisor.running:
                 return {
                     "ok": False,
@@ -2431,6 +2431,20 @@ class MemoryRuntime:
                             "download_error": None,
                         }
                     try:
+                        activation_config = await asyncio.to_thread(
+                            lambda: V2Config.load().memory
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Memory Runtime repair could not load the durable config"
+                        )
+                        self._runtime_error = "memory_runtime_install_failed"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
+                    try:
                         await supervisor.stop()
                     except Exception:
                         self._runtime_error = "memory_runtime_install_failed"
@@ -2442,6 +2456,10 @@ class MemoryRuntime:
                     self._process = None
                     self._process_records_calls = False
                     self._ensure_call_log_retention()
+                    # The prior supervisor's launch authority is now retired.
+                    # Artifact activation must use the durable desired settings,
+                    # not the active snapshot that was kept while it could retry.
+                    self._config = deepcopy(activation_config)
             self._artifact_installing = True
         ensure_task = asyncio.create_task(
             asyncio.to_thread(self._artifact_manager.ensure, force=True)

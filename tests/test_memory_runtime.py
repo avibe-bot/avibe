@@ -2772,7 +2772,7 @@ async def test_runtime_install_activates_config_retained_after_missing_artifact(
     await memory_runtime_factory.close(runtime)
 
 
-async def test_missing_artifact_does_not_publish_config_while_supervisor_can_restart(
+async def test_missing_artifact_defers_config_until_repair_retires_restart_authority(
     tmp_path: Path,
     memory_runtime_factory,
     monkeypatch: pytest.MonkeyPatch,
@@ -2796,6 +2796,74 @@ async def test_missing_artifact_does_not_publish_config_while_supervisor_can_res
         agents=AgentsConfig(),
         memory=candidate,
     ).save()
+    artifact = _FirstInstallArtifact()
+    artifact.status_payload = {
+        "installed": False,
+        "status": "missing",
+        "reason": "memory_runtime_missing",
+    }
+    process_factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=artifact,
+        process_factory=process_factory,
+        effective_home=tmp_path,
+    )
+    restarting = FakeEverOSProcess(
+        _running=False,
+        _down=False,
+        _desired_running=True,
+        _restart_pending=True,
+    )
+    runtime._process = restarting
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    assert await runtime.reconcile(active) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
+    assert runtime._config == active
+    assert runtime._restart_config == active
+    assert runtime._process is restarting
+    assert restarting.stopped is False
+
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    assert restarting.stopped is True
+    assert runtime._config == candidate
+    assert runtime._restart_config == candidate
+    assert process_factory.supervised[0].settings is not None
+    assert process_factory.supervised[0].settings.embedding_model == "embed-v2"
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_missing_artifact_publishes_config_from_cancelled_supervisor(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained supervisor without launch authority cannot keep stale settings."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    durable = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
     artifact = FakeMemoryArtifactManager(
         python=None,
         status_payload={
@@ -2809,20 +2877,22 @@ async def test_missing_artifact_does_not_publish_config_while_supervisor_can_res
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
-    restarting = FakeEverOSProcess()
-    restarting._running = False
-    restarting._down = False
-    runtime._process = restarting
+    cancelled = FakeEverOSProcess(
+        _running=False,
+        _down=False,
+        _desired_running=False,
+    )
+    runtime._process = cancelled
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
     assert await runtime.reconcile(active) == {
         "ok": False,
         "error": "memory_runtime_missing",
     }
-    assert runtime._config == active
+    assert cancelled.restart_authorized is False
+    assert runtime._config == durable
     assert runtime._restart_config == active
-    assert runtime._process is restarting
-    assert restarting.stopped is False
+    assert runtime._process is cancelled
     await memory_runtime_factory.close(runtime)
 
 
@@ -3509,8 +3579,17 @@ async def test_runtime_repair_stops_retained_down_supervisor_before_replacing_ar
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
+    config = MemoryConfig(enabled=True, processing=processing)
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=config,
+    ).save()
     runtime = memory_runtime_factory(
-        MemoryConfig(enabled=True, processing=processing),
+        config,
         artifact_manager=_Artifact(root_format=None, fingerprint=None),
         effective_home=tmp_path,
     )

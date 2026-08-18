@@ -32,7 +32,7 @@ class SidecarSnapshot:
     def supervisor_can_restart(self) -> bool:
         """Whether retained launch authority can still produce a child."""
 
-        return bool(self.process and not self.process.down)
+        return bool(self.process and self.process.restart_authorized)
 
 
 @dataclass(frozen=True, slots=True)

@@ -607,6 +607,21 @@ class EverOSProcess:
         return self._down
 
     @property
+    def restart_authorized(self) -> bool:
+        """Whether this supervisor still owns a current or future launch."""
+
+        restart_task = self._restart_task
+        return bool(
+            self._desired_running
+            and not self._down
+            and (
+                self.running
+                or self._starting
+                or (restart_task is not None and not restart_task.done())
+            )
+        )
+
+    @property
     def last_error(self) -> MemoryErrorCode | None:
         return self._last_error
 
@@ -3790,7 +3805,7 @@ class EverOSProcessPort(Protocol):
     def starting(self) -> bool: ...
 
     @property
-    def down(self) -> bool: ...
+    def restart_authorized(self) -> bool: ...
 
     async def start(self) -> bool: ...
 
@@ -3849,6 +3864,8 @@ class FakeEverOSProcess:
     _running: bool = True
     _starting: bool = False
     _down: bool = False
+    _desired_running: bool = True
+    _restart_pending: bool = False
 
     @property
     def running(self) -> bool:
@@ -3862,15 +3879,27 @@ class FakeEverOSProcess:
     def down(self) -> bool:
         return self._down
 
+    @property
+    def restart_authorized(self) -> bool:
+        return bool(
+            self._desired_running
+            and not self._down
+            and (self._running or self._starting or self._restart_pending)
+        )
+
     async def start(self) -> bool:
         self.starts += 1
+        self._desired_running = True
         self._down = False
+        self._restart_pending = False
         before_start = self.before_start
         if before_start is not None:
             result = before_start()
             if inspect.isawaitable(result):
                 await result
         if self.start_failure is not None:
+            self._desired_running = False
+            self._down = True
             self._running = False
             await self._notify_reaped()
             raise self.start_failure
@@ -3880,12 +3909,15 @@ class FakeEverOSProcess:
         if started:
             await self.ready()
         else:
+            self._restart_pending = True
             await self._notify_reaped()
         return started
 
     async def stop(self) -> None:
         self.stops += 1
         self.stopped = True
+        self._desired_running = False
+        self._restart_pending = False
         self._running = False
         self._starting = False
         if self.stop_failure is not None:
