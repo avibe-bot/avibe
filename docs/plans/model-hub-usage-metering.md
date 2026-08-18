@@ -238,6 +238,34 @@ the work continued rather than stopping for a decision. The recurring signal was
 and was answered the way the property-ownership rule prescribes: consolidate the
 owner, then resume.
 
+### Round 3 (head `1ddff18d`)
+
+Three more P2 findings, two of them class C again — a third findings-bearing head for
+that class. Diagnosis over patching, per the same ruling: class C had two *remaining*
+seams, both the same shape as the original one. "What upstream reported for this call"
+was still being re-derived at each site that needed it, so any site that ended the call
+by another route answered the question with nothing.
+
+- **Seam 1, engine client** (`vibe/model_hub_runtime/client.py`). The prelude reader
+  owned the wire tracker as a local and returned it alongside the outcome, so an exit
+  that *raised* — a read timeout, a frame-limit error, a transport drop — lost whatever
+  the wire had already reported. Anthropic reports input tokens on `message_start`,
+  which lands while the prelude is still buffering, so this is a call the vendor billed.
+  The tracker now belongs to the caller, and one closure (`ended`) is the sole exit for
+  the whole population `_meter_call` meters; it attaches the report in one place instead
+  of at nine construction sites.
+- **Seam 2, turn gateway** (`core/handlers/model_hub/turn_gateway.py`). For a streamed
+  turn the report lived in `execution.wire_state`; for a buffered one it lived in a
+  request-frame local. `_settle_boundary_termination` runs at the boundary and could
+  only see the former, so a downstream disconnect during settlement dropped a billed
+  buffered turn. `_TurnExecution.reported_usage` now owns the question for both shapes,
+  and the buffered observation is published before anything cancellable runs.
+- **Class B again** (finding 3, `_timestamp`). The read surface promises an
+  offset-bearing date-time while `_instant` accepts every spelling
+  `datetime.fromisoformat` does. Publishing the raw text let a hand-edited
+  `2026-08-18T03:14` leave through the API as something the schema does not describe.
+  The field now carries what the parser understood, not what the file said.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

@@ -6225,6 +6225,70 @@ def test_a_stream_that_forwarded_output_is_metered_without_a_token_report(
     asyncio.run(exercise())
 
 
+def test_a_buffered_response_cancelled_while_settling_is_still_metered(
+    tmp_path: Path,
+) -> None:
+    """Review 4960016618: the boundary meters the turn's report, not one shape's.
+
+    Upstream delivered a complete billed response and the client then went away
+    while the turn was settling. The buffered shape has no wire tracker for the
+    boundary to read, so a report that lived only in the request frame's local
+    would vanish exactly when the turn was already billed.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterbuf01", "Cancelled buffered turn")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (b'{"usage":{"input_tokens":704,"output_tokens":21}}',),
+                )
+            ],
+        )
+        settling = asyncio.Event()
+        release = asyncio.Event()
+        settle_handle_outcome = service.settle_handle_outcome
+
+        async def blocked_settlement(*args: object, **kwargs: object):
+            settling.set()
+            await release.wait()
+            return await settle_handle_outcome(*args, **kwargs)
+
+        service.settle_handle_outcome = blocked_settlement
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_buffered_cancel",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(settling.wait(), timeout=1)
+        turn.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 704
+        assert metered["output_tokens"] == 21
+
+    asyncio.run(exercise())
+
+
 def test_gateway_meters_a_failed_turn_that_upstream_already_billed(
     tmp_path: Path,
 ) -> None:

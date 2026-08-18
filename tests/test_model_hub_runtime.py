@@ -34,7 +34,11 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import SSE_MAX_FRAME_BYTES, SSE_MAX_LINE_BYTES
+from core.handlers.model_hub.stream_wire import (
+    SSE_MAX_FRAME_BYTES,
+    SSE_MAX_LINE_BYTES,
+    ProtocolUsageReport,
+)
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -106,13 +110,14 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
 
     async def run() -> tuple[bytes, object, object]:
         prelude = client_module._StreamPrelude()
-        state, outcome = await client_module._read_stream_prelude(
+        state = client_module.ProtocolSSEState("anthropic")
+        outcome = await client_module._read_stream_prelude(
             response=response,
             first=first,
             prelude=prelude,
+            wire_state=state,
             source=source,
             model_id="claude-sonnet-4-5",
-            protocol="anthropic",
             timeout=1,
         )
         payload = b"".join([chunk async for chunk in prelude.chunks()])
@@ -124,6 +129,71 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
     assert payload == first + output
     assert state.model_output_started is True
     assert outcome is None
+
+
+def test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 4960016618: usage reported before model output survives the failure.
+
+    Anthropic bills input tokens on `message_start`, which arrives while the
+    prelude is still buffering. A read that then times out never hands a body
+    onward, so the resolver is the only half of metering that will ever see this
+    call — and it can only see what the returned outcome carries.
+    """
+
+    async def run() -> None:
+        message_start = (
+            b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+            b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+        )
+        reads = iter([message_start])
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                try:
+                    return next(reads)
+                except StopIteration:
+                    raise asyncio.TimeoutError from None
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_billedhalt",
+            vendor="anthropic",
+            protocol="anthropic",
+            base_url="https://billed.example.test",
+            credential_ref="cred_billedhalt",
+            allowed_origins=("codex",),
+            model_ids=("claude-sonnet-4-5",),
+            prefix="billed",
+        )
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15221", "management", "gateway")
+        )
+
+        handle = await client.invoke(source, "claude-sonnet-4-5", {}, stream=True)
+        outcome = await handle.outcome()
+
+        assert handle.stream is None
+        assert outcome.kind == RawOutcomeKind.TIMEOUT
+        assert outcome.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
+
+    asyncio.run(run())
 
 
 def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(

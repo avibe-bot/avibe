@@ -123,16 +123,20 @@ def _instant(value: object) -> Optional[datetime]:
 
 
 def _timestamp(value: object) -> Optional[str]:
-    """Read one persisted instant as text, dropping anything unparseable.
+    """Read one persisted instant as the canonical text for that instant.
 
-    The read surface promises a date-time, so a corrupt or hand-edited value
-    degrades the field to absent rather than travelling out through the API.
+    The read surface promises a date-time with an offset, and `_instant` accepts
+    every spelling `datetime.fromisoformat` does — naive, space-separated, second-
+    less. Publishing the original text would let a hand-edited `2026-08-18T03:14`
+    travel out through the API as something the schema does not describe, so the
+    field carries what the parser understood rather than what the file said. An
+    unparseable value degrades the field to absent.
     """
 
-    text = _text(value)
-    if text is None or _instant(text) is None:
+    parsed = _instant(_text(value))
+    if parsed is None:
         return None
-    return text
+    return parsed.isoformat()
 
 
 def _normalize_row(row: object) -> Optional[dict]:

@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, BinaryIO, Mapping
 
 import aiohttp
@@ -273,6 +273,25 @@ class EngineClient:
         model_output_started = False
         ownership_transferred = False
         prelude: _StreamPrelude | None = None
+        # Held here rather than inside the prelude reader so every way out of this
+        # call can still see what the wire already reported. A stream that reports
+        # usage before its first model output — Anthropic's `message_start` does —
+        # and then times out has already been billed for those input tokens.
+        wire_state: ProtocolSSEState | None = None
+
+        def ended(outcome: RawCallOutcome) -> EngineInvokeHandle:
+            """Finish a call whose body never becomes the gateway's to forward.
+
+            The sole exit for that population, so the tokens the wire reported are
+            attached in one place instead of at each construction site: the resolver
+            meters exactly what this returns, and an outcome that lost its report on
+            the way out is a call the vendor billed and the ledger never saw.
+            """
+
+            if outcome.usage is None and wire_state is not None and wire_state.usage is not None:
+                outcome = replace(outcome, usage=wire_state.usage)
+            return completed_handle(outcome)
+
         try:
             response = await asyncio.wait_for(
                 session.post(
@@ -312,7 +331,7 @@ class EngineClient:
                 assert outcome is not None
                 response.close()
                 await session.close()
-                return completed_handle(outcome)
+                return ended(outcome)
 
             first = await asyncio.wait_for(
                 response.content.read(_STREAM_CHUNK_BYTES),
@@ -321,7 +340,7 @@ class EngineClient:
             if not first:
                 response.close()
                 await session.close()
-                return completed_handle(
+                return ended(
                     _outcome(
                         kind=RawOutcomeKind.NETWORK_ERROR,
                         source=source,
@@ -344,7 +363,7 @@ class EngineClient:
                 except _ResponseTooLargeError:
                     response.close()
                     await session.close()
-                    return completed_handle(
+                    return ended(
                         _protocol_error_outcome(
                             ProtocolObservation(
                                 outcome="protocol_error",
@@ -375,17 +394,18 @@ class EngineClient:
                 return (
                     buffered_handle(first, outcome)
                     if outcome.kind == RawOutcomeKind.SUCCESS
-                    else completed_handle(outcome)
+                    else ended(outcome)
                 )
 
             prelude = _StreamPrelude()
-            wire_state, prelude_outcome = await _read_stream_prelude(
+            wire_state = ProtocolSSEState(request_protocol)
+            prelude_outcome = await _read_stream_prelude(
                 response=response,
                 first=first,
                 prelude=prelude,
+                wire_state=wire_state,
                 source=source,
                 model_id=model_id,
-                protocol=request_protocol,
                 timeout=self.timeout,
             )
             model_output_started = wire_state.model_output_started
@@ -397,7 +417,7 @@ class EngineClient:
                     ownership_transferred = True
                     return handle
                 prelude.close()
-                return completed_handle(prelude_outcome)
+                return ended(prelude_outcome)
 
             loop = asyncio.get_running_loop()
             outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
@@ -428,7 +448,7 @@ class EngineClient:
             if response is not None:
                 response.close()
             await session.close()
-            return completed_handle(
+            return ended(
                 _outcome(
                     kind=RawOutcomeKind.TIMEOUT,
                     source=source,
@@ -442,7 +462,7 @@ class EngineClient:
             if response is not None:
                 response.close()
             await session.close()
-            return completed_handle(
+            return ended(
                 _protocol_error_outcome(
                     ProtocolObservation(outcome="protocol_error", message=str(exc)),
                     source,
@@ -455,7 +475,7 @@ class EngineClient:
             if response is not None:
                 response.close()
             await session.close()
-            return completed_handle(
+            return ended(
                 _outcome(
                     kind=RawOutcomeKind.NETWORK_ERROR,
                     source=source,
@@ -612,16 +632,20 @@ async def _read_stream_prelude(
     response: aiohttp.ClientResponse,
     first: bytes,
     prelude: _StreamPrelude,
+    wire_state: ProtocolSSEState,
     source: SourceRecord,
     model_id: str,
-    protocol: str,
     timeout: float,
-) -> tuple[ProtocolSSEState, RawCallOutcome | None]:
-    """Buffer transport metadata until the sole first-model-output fact."""
+) -> RawCallOutcome | None:
+    """Buffer transport metadata until the sole first-model-output fact.
 
-    wire_state = ProtocolSSEState(protocol)
+    The tracker belongs to the caller: this coroutine can also end by raising a
+    transport error, and what the wire reported before that has to survive the
+    raise for the call to be metered.
+    """
+
     if not prelude.write(first):
-        return wire_state, _prelude_ended_outcome(source, model_id, response.status)
+        return _prelude_ended_outcome(source, model_id, response.status)
     wire_state.observe(first)
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
@@ -631,7 +655,7 @@ async def _read_stream_prelude(
             response.status,
         )
         if outcome is not None:
-            return wire_state, outcome
+            return outcome
         chunk = await asyncio.wait_for(
             response.content.read(_STREAM_CHUNK_BYTES),
             timeout=timeout,
@@ -644,15 +668,12 @@ async def _read_stream_prelude(
                 response.status,
             )
             if completion is not None:
-                return wire_state, completion
-            return (
-                wire_state,
-                _prelude_ended_outcome(source, model_id, response.status),
-            )
+                return completion
+            return _prelude_ended_outcome(source, model_id, response.status)
         if not prelude.write(chunk):
-            return wire_state, _prelude_ended_outcome(source, model_id, response.status)
+            return _prelude_ended_outcome(source, model_id, response.status)
         wire_state.observe(chunk)
-    return wire_state, None
+    return None
 
 
 def _prelude_ended_outcome(

@@ -755,6 +755,44 @@ def test_a_persisted_report_count_above_its_requests_is_repaired_on_read(
     }
 
 
+def test_a_persisted_instant_is_published_in_the_shape_the_schema_promises(
+    tmp_path: Path,
+) -> None:
+    """Review 4960016618: the read surface publishes an offset-bearing date-time.
+
+    `datetime.fromisoformat` accepts spellings the API schema does not describe —
+    naive, space-separated, minute-less — so the field carries what the parser
+    understood rather than the text the file happened to hold. A naive value is
+    read in the same local calendar the day buckets use.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": 4,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 2,
+                    "last_metered_at": "2026-07-23 12:00",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    published = ledger.window(days=30, now=NOW)[0]["last_metered_at"]
+
+    assert published == datetime(2026, 7, 23, 12, 0).astimezone().isoformat()
+    assert datetime.fromisoformat(published).tzinfo is not None
+
+
 def test_a_written_row_is_validated_the_same_way_a_persisted_one_is(
     tmp_path: Path,
 ) -> None:

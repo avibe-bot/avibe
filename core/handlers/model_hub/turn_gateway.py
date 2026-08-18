@@ -98,7 +98,23 @@ class _TurnExecution:
     # without reaching the end of the chunk loop can still read the tokens the
     # upstream had already reported.
     wire_state: _SSEWireState | None = None
+    # The same fact for a response the gateway buffered whole, which has no wire
+    # tracker to read it from.
+    buffered_usage: ProtocolUsageReport | None = None
     usage_recorded: bool = False
+
+    @property
+    def reported_usage(self) -> ProtocolUsageReport | None:
+        """Tokens upstream reported for this turn, whichever shape it answered in.
+
+        One owner for the question, because a boundary that ends the turn early
+        cannot know which shape the response took — and a turn the vendor billed
+        was billed in both.
+        """
+
+        if self.wire_state is not None:
+            return self.wire_state.usage
+        return self.buffered_usage
 
 
 @dataclass(frozen=True)
@@ -599,6 +615,14 @@ class ModelHubTurnGateway:
             payload = bytearray()
             async for chunk in handle.stream:
                 payload.extend(chunk)
+            # Published before settling, not after: settling can be cancelled by a
+            # downstream disconnect, and a report only this frame's local knew about
+            # would leave the boundary with nothing to meter.
+            execution.buffered_usage = observe_protocol_response(
+                protocol,
+                streamed=False,
+                data=bytes(payload),
+            ).usage
             outcome, settlement = await self._settle_turn_handle(
                 execution,
                 terminalizer,
@@ -611,14 +635,9 @@ class ModelHubTurnGateway:
             )
             assert outcome is not None
             assert settlement.decision is not None
-            buffered_usage = observe_protocol_response(
-                protocol,
-                streamed=False,
-                data=bytes(payload),
-            ).usage
             await self._record_usage(
                 execution,
-                usage=buffered_usage,
+                usage=execution.reported_usage,
                 served=settlement.decision.action == "return",
             )
             if settlement.decision.action != "return":
@@ -769,15 +788,16 @@ class ModelHubTurnGateway:
     ) -> None:
         # Ahead of the settlement guard: a downstream disconnect can arrive after
         # the upstream already reported its tokens, so the turn was billed even
-        # though the chunk loop never reached its own metering call. The recorder
-        # is idempotent, so an ending that already metered costs nothing here.
+        # though the request path never reached its own metering call. The recorder
+        # is idempotent, so an ending that already metered costs nothing here, and
+        # it reads the turn's own report rather than one shape's tracker — a
+        # buffered response cancelled mid-settlement was billed the same way.
         wire_state = execution.wire_state
-        if wire_state is not None:
-            await self._record_usage(
-                execution,
-                usage=wire_state.usage,
-                served=wire_state.reached_model,
-            )
+        await self._record_usage(
+            execution,
+            usage=execution.reported_usage,
+            served=wire_state is not None and wire_state.reached_model,
+        )
         if execution.settlement_recorded:
             return
         _outcome, settlement = await self._settle_turn_handle(
