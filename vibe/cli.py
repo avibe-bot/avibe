@@ -6687,7 +6687,11 @@ def cmd_data_retention(args):
         try:
             config = V2Config.load()
             load_warnings = getattr(config, "load_warnings", None) or ()
-            if any("could not be recovered" in str(w) or "recovery defaults" in str(w) for w in load_warnings):
+            if any(
+                marker in str(w)
+                for w in load_warnings
+                for marker in ("could not be recovered", "recovery defaults", "Recovered invalid config section")
+            ):
                 config_recovered = True
                 # Recovery defaults carry enabled=True, but the controller
                 # fails closed on them; the status view must agree. Unrelated
@@ -6711,7 +6715,9 @@ def cmd_data_retention(args):
                 enabled = False
                 config_recovered = True
         except Exception:
-            enabled = True
+            # Unreadable/missing config: the controller disables the
+            # automatic pass, so the status must not claim it is enabled.
+            enabled = False
             config_recovered = True
         if days_override is not None:
             retention_days = int(days_override)
@@ -6737,6 +6743,8 @@ def cmd_data_retention(args):
                 # completion marker — automation must retry both, not record
                 # success.
                 exit_code = 1
+            # ok_with_contested_compaction keeps exit 0: deletion completed
+            # and its marker is written; only the compaction was contested.
         else:
             payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
         if getattr(args, "json", False):
@@ -6811,6 +6819,9 @@ def _print_data_retention_human(payload: dict, language: str) -> None:
         print(i18n_t("data.retention.busy", language))
     elif status == "lease_lost":
         print(i18n_t("data.retention.leaseLost", language))
+    elif status == "ok_with_contested_compaction":
+        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        print(i18n_t("data.retention.compactionDeferred", language, reason=i18n_t("data.retention.compactionReasonOther", language)))
     else:
         print(f"retention status: {status}")
 

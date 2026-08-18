@@ -3114,7 +3114,20 @@ class Controller:
             logger.warning("Agent trace-event retention: config unreadable; disabling automatic pass", exc_info=True)
             return None
         warnings = getattr(config, "load_warnings", None) or ()
-        if any("could not be recovered" in str(w) or "recovery defaults" in str(w) for w in warnings):
+
+        def _is_recovery_warning(warning: str) -> bool:
+            return any(
+                marker in warning
+                for marker in (
+                    "could not be recovered",
+                    "recovery defaults",
+                    # v2_config emits this shape when a section (incl. runtime)
+                    # is replaced wholesale: "Recovered invalid config section 'runtime': ..."
+                    "Recovered invalid config section",
+                )
+            )
+
+        if any(_is_recovery_warning(str(w)) for w in warnings):
             # Only recovery-substituted sections make the retention policy
             # unknown. Unrelated warnings (e.g. legacy Model Hub migration
             # notes) leave a valid runtime section in force — failing closed

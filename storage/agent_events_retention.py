@@ -150,18 +150,17 @@ def _delete_batch(conn: Connection, cutoff: str, batch_rows: int) -> int:
 def renew_lease(conn: Connection, token: str, *, now: Optional[datetime] = None) -> bool:
     """Extend this runner's lease while work remains active.
 
-    Called between batches and around compaction: a run lasting past the TTL
-    keeps its lease refreshed, so a second runner cannot treat it as expired
-    and overlap. No-op when the stored token no longer matches (the lease was
-    already replaced); the caller treats that as lost ownership.
+    Renewal is one token-conditional UPDATE (no read-then-write), so a
+    contender committing a replacement between operations can neither be
+    overwritten nor trip a busy-snapshot upgrade in the heartbeat thread.
     """
-    stored = _read_meta(conn, RETENTION_LEASE_KEY)
-    if not stored or stored.get("token") != token:
-        return False
     moment = now or _utc_now()
-    conn.execute(
+    result = conn.execute(
         state_meta.update()
-        .where(state_meta.c.key == RETENTION_LEASE_KEY)
+        .where(
+            state_meta.c.key == RETENTION_LEASE_KEY,
+            func.json_extract(state_meta.c.value_json, "$.token") == token,
+        )
         .values(
             value_json=json.dumps(
                 {"token": token, "expires_at": _iso(moment + timedelta(seconds=LEASE_TTL_SECONDS))},
@@ -170,7 +169,7 @@ def renew_lease(conn: Connection, token: str, *, now: Optional[datetime] = None)
             updated_at=_iso(moment),
         )
     )
-    return True
+    return int(result.rowcount or 0) == 1
 
 
 def run_retention(
@@ -383,15 +382,19 @@ def maybe_compact(
         # stops renewing and reports it so this runner never finishes into a
         # state where a replacement runner was already admitted.
         lease_state = {"owned": True, "lost": False}
+        heartbeat_stop: Optional[threading.Event] = None
         heartbeat: Optional[threading.Thread] = None
         if lease_heartbeat is not None:
+            heartbeat_stop = threading.Event()
+
             def _beat() -> None:
-                while lease_state["owned"]:
+                while not heartbeat_stop.is_set():
                     if not lease_heartbeat():
-                        lease_state["owned"] = False
                         lease_state["lost"] = True
                         return
-                    time.sleep(LEASE_HEARTBEAT_SECONDS)
+                    # Wait on the stop event (not time.sleep) so VACUUM's
+                    # completion wakes the heartbeat immediately.
+                    heartbeat_stop.wait(LEASE_HEARTBEAT_SECONDS)
 
             heartbeat = threading.Thread(target=_beat, daemon=True)
             heartbeat.start()
@@ -402,6 +405,8 @@ def maybe_compact(
             # Normal shutdown flips only "owned" so the thread exits; "lost"
             # is reserved for an actual renewal failure observed mid-run.
             lease_state["owned"] = False
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=LEASE_HEARTBEAT_SECONDS * 2)
         if lease_state["lost"]:
@@ -498,10 +503,16 @@ def run_once(
 
             compaction = maybe_compact(engine, db_path=db_path, lease_heartbeat=_lease_heartbeat)
             if str(compaction.get("reason")) == "lease_lost_during_compaction":
+                # Deletion already completed and its marker is written; only
+                # the compaction was contested. Report that distinctly so the
+                # CLI does not claim deletion stopped partway.
                 return {
-                    "status": "lease_lost",
+                    "status": "ok_with_contested_compaction",
                     "deleted_rows": result["deleted_rows"],
+                    "batches": result["batches"],
                     "cutoff": result["cutoff"],
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "last_run": result_marker,
                     "compaction": compaction,
                 }
         return {
