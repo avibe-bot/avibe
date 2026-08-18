@@ -5852,6 +5852,12 @@ class ScheduledTaskService:
         ):
             await self._reconcile_rejected_one_shot_fire(task_id)
             return
+        # Every registered job carries its APScheduler job id so the callback can
+        # reject a stale generation above. Only a one-shot fire carries it further:
+        # downstream the job id is one field of the schedule identity that retires
+        # the definition, and the store requires that identity whole or absent. A
+        # cron fire has no run_at, so it must not present a partial one.
+        enqueue_job_id = expected_job_id if expected_run_at is not None else None
         try:
             queued = await self._run_runtime_sync(
                 self.request_store.enqueue_task_run,
@@ -5862,7 +5868,7 @@ class ScheduledTaskService:
                 expected_run_at=expected_run_at,
                 expected_timezone=expected_timezone,
                 expected_updated_at=expected_updated_at,
-                expected_job_id=expected_job_id,
+                expected_job_id=enqueue_job_id,
             )
         except Exception as exc:
             if expected_run_at is None or expected_job_id is None:

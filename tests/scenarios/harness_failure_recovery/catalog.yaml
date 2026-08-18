@@ -4355,6 +4355,17 @@ scenarios:
     # atomically records the runtime reservation while mismatched bound Runs stay
     # protected by the existing hard refusal.
     test: tests/test_internal_server.py::test_hfr_482_create_per_run_delivery_adopts_reserved_session
+  - id: HFR-483
+    name: a registered cron fire enqueues from its own scheduler arguments
+    status: covered
+    kind: regression
+    layer: contract
+    backend: shared
+    # Every registered job carries its APScheduler job id for the stale-generation
+    # guard, but only an at job carries a run_at. Firing the arguments the
+    # scheduler actually registered proves a cron fire never presents the job id
+    # as half of the one-shot schedule identity the enqueue requires whole.
+    test: tests/test_scheduled_tasks.py::test_hfr_483_registered_job_fires_through_its_own_scheduler_arguments
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

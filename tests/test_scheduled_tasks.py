@@ -130,7 +130,9 @@ class _StubScheduler:
         return self.jobs.get(job_id)
 
     def add_job(self, func, trigger, id, replace_existing, coalesce, max_instances, args):
-        self.jobs[id] = SimpleNamespace(id=id, trigger=trigger, args=args)
+        # ``func`` is retained so a test can fire a registered job exactly the way
+        # APScheduler does: ``await job.func(*job.args)``.
+        self.jobs[id] = SimpleNamespace(id=id, func=func, trigger=trigger, args=args)
 
     def remove_job(self, job_id):
         self.jobs.pop(job_id, None)
@@ -11208,6 +11210,72 @@ def test_hfr_477_stale_scheduler_enqueue_cannot_consume_a_replacement_generation
     )
     assert stale_after_cron is None
     assert store.refresh_task(task.id).schedule_type == "cron"
+
+
+@pytest.mark.parametrize("schedule", ["cron", "at"])
+def test_hfr_483_registered_job_fires_through_its_own_scheduler_arguments(
+    tmp_path: Path,
+    monkeypatch,
+    schedule: str,
+) -> None:
+    """HFR-483 -- every registered schedule enqueues from the args it registered.
+
+    ``reconcile_jobs`` gives every job its APScheduler job id so the callback can
+    reject a stale generation, but only an ``at`` job carries a run_at. Firing the
+    registered arguments -- rather than a hand-built call -- is what proves a cron
+    job never presents the job id as half of a one-shot schedule identity.
+    """
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    run_at = (
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        if schedule == "at"
+        else None
+    )
+    task = store.add_task(
+        session_key="",
+        prompt="daily digest",
+        schedule_type=schedule,
+        cron="0 11 * * *" if schedule == "cron" else None,
+        run_at=run_at,
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+
+    jobs = service.scheduler.get_jobs()
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.args[0] == task.id
+    assert job.args[4] == job.id
+    if schedule == "cron":
+        assert job.id == task.id
+        assert tuple(job.args[1:4]) == (None, None, None)
+    else:
+        assert tuple(job.args[1:4]) == (run_at, "UTC", task.updated_at)
+
+    asyncio.run(job.func(*job.args))
+
+    pending = service.request_store.list_pending()
+    assert [(request.task_id, request.source_kind) for request in pending] == [
+        (task.id, "scheduler")
+    ]
+    refreshed = store.refresh_task(task.id)
+    assert refreshed is not None
+    if schedule == "cron":
+        # A recurring definition survives its own fire; only a one-shot is consumed.
+        assert refreshed.enabled is True
+        assert refreshed.retired_at is None
+    else:
+        assert refreshed.enabled is False
+        assert refreshed.retired_at is not None
 
 
 def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
