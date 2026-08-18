@@ -98,7 +98,7 @@ class AuthorizationContext:
 
     @property
     def can_read_instance(self) -> bool:
-        return self.has_role("viewer")
+        return self.has_role("viewer") and self.instance_access_source != "show_page_email"
 
     @property
     def can_chat(self) -> bool:

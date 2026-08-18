@@ -13,7 +13,12 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import (
+    csrf_headers,
+    remote_peer,
+    remote_session_cookie,
+    save_config,
+)
 from vibe import permissions, remote_access
 from vibe.authorization import http_authorization_policy
 from vibe.sse_broker import broker
@@ -1376,6 +1381,54 @@ def test_permissions_projection_get_is_private_and_not_cached(monkeypatch) -> No
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
     assert response.get_json()["projection"]["instance"]["id"] == "inst-123"
+
+
+def test_permissions_projection_rejects_page_scoped_guest_before_backend(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    backend_called = False
+
+    def get_current_permissions():
+        nonlocal backend_called
+        backend_called = True
+        return permissions.PermissionsProjectionResult(
+            projection=_projection(),
+            source="live",
+        )
+
+    monkeypatch.setattr(permissions, "get_current_permissions", get_current_permissions)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "guest@example.com",
+            "guest-1",
+            session_claims={
+                "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "show_page_email",
+                "vibe_show_page_id": "session-one",
+            },
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/api/permissions",
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "ok": False,
+        "error": "show_page_access_forbidden",
+    }
+    assert backend_called is False
 
 
 def test_permissions_same_origin_routes_reject_non_contract_entry_fields(monkeypatch) -> None:
