@@ -1439,7 +1439,8 @@ def test_processing_preflight_projects_sanitized_provider_error() -> None:
     assert "secret" not in result.failure.diagnostic.message
 
 
-def test_processing_preflight_accepts_truncated_chat_completion_from_resolved_slot() -> None:
+@pytest.mark.parametrize("content", ["", None])
+def test_processing_preflight_accepts_truncated_chat_completion_from_resolved_slot(content) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1457,7 +1458,7 @@ def test_processing_preflight_accepts_truncated_chat_completion_from_resolved_sl
                             "finish_reason": "length",
                             "message": {
                                 "role": "assistant",
-                                "content": "",
+                                "content": content,
                                 "reasoning_content": "O",
                             },
                         }

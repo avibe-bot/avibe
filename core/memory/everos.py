@@ -1604,9 +1604,9 @@ def _chat_probe_response_issue(value: Any) -> str | None:
     if "content" not in message:
         return "provider_response_missing_content"
     content = message["content"]
-    if not isinstance(content, str):
+    if content is not None and not isinstance(content, str):
         return "provider_response_invalid_content"
-    if not content.strip():
+    if content is None or not content.strip():
         if message.get("role") != "assistant":
             return "provider_response_invalid_role"
         finish_reason = choices[0].get("finish_reason")
