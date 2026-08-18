@@ -127,6 +127,32 @@ State and lookup notes:
 - `.env.regression` is read from the current worktree first, then the primary checkout
 - branch/master source checkouts default `REGRESSION_SHOW_RUNTIME_SOURCE=github-source`; packaged release installs should use the packaged manifest path
 
+#### Connecting to Incus on macOS
+
+There is no native Incus daemon on macOS; it runs inside the Lima VM
+`avibe-incus-regression`. A plain `incus` on the host reaches no server, so the
+runner must be driven through the VM:
+
+```
+INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh
+```
+
+Two consequences worth knowing before reading a runner failure:
+
+- Lima's default port-forward rule mirrors every `127.0.0.1` listener inside the
+  VM onto the Mac. A live environment's UI port therefore *is* held on the host,
+  by its own Incus proxy device. The host-side port preflight is a valid check
+  precisely because of this mirroring — it just must only run once the daemon has
+  confirmed the environment is absent.
+- The runner derives existence from a listing the daemon completed, never from a
+  lookup's exit status, so an unreachable or stalled daemon now aborts with
+  `Could not list …` instead of reporting the environment as absent and trying to
+  create it. Seeing that error means `INCUS_CMD` is unset, or the daemon is up but
+  stalled — `context deadline exceeded` / `no available cowsql leader server
+  found` usually means the VM is starved. Check `/proc/pressure/memory` and
+  `/proc/pressure/io` inside the VM; if `full avg10` is high, raise `cpus` /
+  `memory` in `~/.lima/avibe-incus-regression/lima.yaml` and restart the VM.
+
 ## 4. Configuration and Routing Model
 
 Persistent configuration is centered on `config/v2_config.py` and the Web UI.
