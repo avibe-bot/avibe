@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Deque, Protocol, TypeVar, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -2651,12 +2651,15 @@ class _ProcessIdentity:
 
     ``create_time`` is the identity stamp from ``_process_creation_stamp``:
     Linux starttime ticks, or ``psutil.Process.create_time()`` elsewhere.
+    ``wall_create_time`` retains the epoch value needed to compare a live Linux
+    process with a legacy record that predates ``starttime_ticks``.
     """
 
     create_time: float | None
     cmdline: tuple[str, ...] | None
     uid: int | None
     environment: Mapping[str, str] | None = None
+    wall_create_time: float | None = None
 
 
 def _uses_linux_starttime_stamp() -> bool:
@@ -2775,6 +2778,7 @@ def _inspect_process_identity(pid: int) -> _ProcessIdentity | None:
             cmdline=None if cmdline is None else tuple(str(value) for value in cmdline),
             uid=_process_real_uid(process),
             environment=_disclosed_process_environment(process),
+            wall_create_time=_disclosed_identity_field(process.create_time),
         )
     except psutil.NoSuchProcess:
         # The process exited between the reads. That is "gone", which retires the
@@ -3073,6 +3077,7 @@ def _legacy_create_time_mismatch_verdict(
     record: object,
     identity: _ProcessIdentity,
     recorded_create_time: float,
+    live_wall_create_time: float | None,
     *,
     socket_path: Path,
     provider_root: Path,
@@ -3088,9 +3093,9 @@ def _legacy_create_time_mismatch_verdict(
     historical recycled-pid ``NOT_OURS`` verdict.
     """
 
-    if identity.create_time is None:
+    if live_wall_create_time is None:
         return _RecordedSidecar.UNVERIFIABLE
-    if abs(identity.create_time - recorded_create_time) > _LEGACY_CREATE_TIME_DRIFT_SECONDS:
+    if abs(live_wall_create_time - recorded_create_time) > _LEGACY_CREATE_TIME_DRIFT_SECONDS:
         return _RecordedSidecar.NOT_OURS
     if identity.cmdline is None:
         return _RecordedSidecar.UNVERIFIABLE
@@ -3139,21 +3144,30 @@ def _classify_recorded_child(
     )
     if identity is None or recorded_create_time is None:
         return _RecordedSidecar.NOT_OURS
+    has_starttime_ticks = _recorded_sidecar_has_starttime_ticks(
+        record,
+        socket_path=socket_path,
+        provider_root=provider_root,
+    )
+    live_recorded_stamp = (
+        identity.create_time
+        if has_starttime_ticks
+        else identity.wall_create_time
+        if identity.wall_create_time is not None
+        else identity.create_time
+    )
     getuid = getattr(os, "getuid", None)
     own_uid = getuid() if callable(getuid) else None
     if identity.uid is not None and own_uid is not None and identity.uid != own_uid:
         return _RecordedSidecar.NOT_OURS
-    if identity.create_time is not None and identity.create_time != recorded_create_time:
-        if _recorded_sidecar_has_starttime_ticks(
-            record,
-            socket_path=socket_path,
-            provider_root=provider_root,
-        ):
+    if live_recorded_stamp is not None and live_recorded_stamp != recorded_create_time:
+        if has_starttime_ticks:
             return _RecordedSidecar.NOT_OURS
         drift_verdict = _legacy_create_time_mismatch_verdict(
             record,
             identity,
             recorded_create_time,
+            live_recorded_stamp,
             socket_path=socket_path,
             provider_root=provider_root,
             role=role,
@@ -3186,7 +3200,7 @@ def _classify_recorded_child(
             or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
         ):
             return _RecordedSidecar.NOT_OURS
-    if identity.create_time is None or identity.cmdline is None:
+    if live_recorded_stamp is None or identity.cmdline is None:
         return _RecordedSidecar.UNVERIFIABLE
     if own_uid is not None and identity.uid is None:
         return _RecordedSidecar.UNVERIFIABLE
@@ -3571,8 +3585,6 @@ def _confirmed_owned_processes(identities: Mapping[int, float]) -> dict[int, flo
 def _group_contains_only_confirmed_owned_processes(
     process_group: int | None,
     identities: Mapping[int, float],
-    *,
-    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Whether a group can be signaled without bypassing PID identity checks."""
 
@@ -3580,10 +3592,8 @@ def _group_contains_only_confirmed_owned_processes(
         return False
     group_members = _snapshot_process_group(process_group)
     confirmed = _confirmed_owned_processes(identities)
-    trusted = set() if trusted_pids is None else set(trusted_pids)
     return bool(group_members) and all(
-        process_id in trusted or confirmed.get(process_id) == created_at
-        for process_id, created_at in group_members.items()
+        confirmed.get(process_id) == created_at for process_id, created_at in group_members.items()
     )
 
 
@@ -3591,26 +3601,18 @@ def _signal_owned_group(
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
-    *,
-    trusted_pids: Iterable[int] | None = None,
 ) -> bool:
     """Signal a whole isolated group, but only if every member is confirmed owned.
 
     Returns whether the group signal settled the delivery, so a caller holding a
     direct child handle can fall back to it without widening the blast radius: a
-    group with an unverifiable member is never signaled group-wide. A live
-    direct child this process spawned may be treated as confirmed without a
-    stamp match; every other member stays fail-closed.
+    group with an unverifiable member is never signaled group-wide.
     """
 
     if (
         process_group is None
         or not hasattr(os, "killpg")
-        or not _group_contains_only_confirmed_owned_processes(
-            process_group,
-            identities,
-            trusted_pids=trusted_pids,
-        )
+        or not _group_contains_only_confirmed_owned_processes(process_group, identities)
     ):
         return False
     try:
@@ -3622,46 +3624,21 @@ def _signal_owned_group(
     return True
 
 
-def _live_direct_child_pid(process: asyncio.subprocess.Process) -> int | None:
-    """The pid of an unreaped asyncio child this process spawned, if any.
-
-    ``returncode is None`` on an ``asyncio.subprocess.Process`` means the handle
-    has not been reaped, so the pid cannot have been recycled (the worst case
-    is a zombie). That handle is authoritative for signaling the direct child.
-    """
-
-    if (
-        not isinstance(process, asyncio.subprocess.Process)
-        or process.returncode is not None
-        or process.pid is None
-    ):
-        return None
-    return int(process.pid)
-
-
 def _signal_owned_group_or_process(
     process: asyncio.subprocess.Process,
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
 ) -> None:
-    trusted_pid = _live_direct_child_pid(process)
-    trusted = set() if trusted_pid is None else {trusted_pid}
-    if _signal_owned_group(
-        process_group,
-        identities,
-        signum,
-        trusted_pids=trusted,
-    ):
+    if _signal_owned_group(process_group, identities, signum):
         return
     if process.returncode is not None:
         return
-    if trusted_pid is None:
-        created_at = identities.get(process.pid)
-        if created_at is None or process.pid not in _confirmed_owned_processes(
-            {process.pid: created_at}
-        ):
-            return
+    created_at = identities.get(process.pid)
+    if created_at is None or process.pid not in _confirmed_owned_processes(
+        {process.pid: created_at}
+    ):
+        return
     try:
         process.send_signal(signum)
     except ProcessLookupError:

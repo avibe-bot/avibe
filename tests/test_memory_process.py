@@ -867,8 +867,15 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
         host = _SystemProcessHost()
         process_group = os.getpgid(child.pid)
         identities = host.snapshot_tree(child.pid, process_group)
+        captured_stamp = identities[child.pid]
         original_process = memory_process.psutil.Process
         original_iter = memory_process.psutil.process_iter
+        original_stamp = memory_process._process_creation_stamp
+
+        def _stamp_immune_to_wall_drift(proc: object) -> float:
+            if getattr(proc, "pid", None) == child.pid:
+                return captured_stamp
+            return original_stamp(proc)
 
         class _ShiftedProcess:
             def __init__(self, process_id: int) -> None:
@@ -890,6 +897,7 @@ async def test_sidecar_stop_reaps_direct_child_after_create_time_clock_step(
 
         monkeypatch.setattr(memory_process.psutil, "Process", _ShiftedProcess)
         monkeypatch.setattr(memory_process.psutil, "process_iter", _shifted_iter)
+        monkeypatch.setattr(memory_process, "_process_creation_stamp", _stamp_immune_to_wall_drift)
         process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
         await process._terminate_owned_tree(
             child,
@@ -966,6 +974,38 @@ async def test_sidecar_cleanup_never_signals_spawned_pid_after_identity_changes(
             except TimeoutError:
                 child.kill()
                 await child.wait()
+
+
+def test_sidecar_cleanup_reverifies_asyncio_pid_before_signaling(monkeypatch) -> None:
+    signals: list[int] = []
+
+    class _Transport:
+        def get_pid(self) -> int:
+            return _ORPHAN_PID
+
+        def get_returncode(self) -> None:
+            # Models the interval after waitpid() reaped the child but before
+            # asyncio's scheduled process-exited callback updates the transport.
+            return None
+
+        def send_signal(self, signum: int) -> None:
+            signals.append(signum)
+
+    class _Protocol:
+        stdin = None
+        stdout = None
+        stderr = None
+
+    process = asyncio.subprocess.Process(_Transport(), _Protocol(), None)
+    monkeypatch.setattr(memory_process, "_confirmed_owned_processes", lambda _identities: {})
+
+    _SystemProcessHost().signal(
+        {_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        signal.SIGTERM,
+        process=process,
+    )
+
+    assert signals == []
 
 
 def test_sidecar_cleanup_does_not_group_signal_an_unconfirmed_member(monkeypatch) -> None:
@@ -1153,8 +1193,9 @@ def _orphan_record(process: EverOSProcess, **overrides) -> dict:
 
 
 def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
+    creation_stamp = overrides.pop("create_time", _ORPHAN_CREATE_TIME)
     fields = {
-        "create_time": _ORPHAN_CREATE_TIME,
+        "create_time": creation_stamp,
         "cmdline": (
             sys.executable,
             "-m",
@@ -1163,6 +1204,7 @@ def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
             str(process.socket_path),
         ),
         "uid": os.getuid() if hasattr(os, "getuid") else None,
+        "wall_create_time": overrides.pop("wall_create_time", creation_stamp),
     }
     fields.update(overrides)
     return _ProcessIdentity(**fields)
@@ -1252,6 +1294,23 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
         )
 
 
+def test_inspect_identity_keeps_wall_clock_beside_linux_starttime_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(memory_process, "_uses_linux_starttime_stamp", lambda: True)
+    monkeypatch.setattr(memory_process, "_read_linux_starttime_ticks", lambda _pid: 99.0)
+    monkeypatch.setattr(memory_process.psutil, "Process", _guarded_process_class(uid=4_242))
+
+    identity = memory_process._inspect_process_identity(_ORPHAN_PID)
+
+    assert identity == _ProcessIdentity(
+        create_time=99.0,
+        cmdline=None,
+        uid=4_242,
+        wall_create_time=_ORPHAN_CREATE_TIME,
+    )
+
+
 def test_linux_creation_stamp_reads_starttime_ticks_not_wall_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1266,6 +1325,23 @@ def test_linux_creation_stamp_reads_starttime_ticks_not_wall_clock(
             return _ORPHAN_CREATE_TIME + 48.0
 
     assert memory_process._process_creation_stamp(_Proc()) == ticks
+
+
+def test_linux_process_identity_keeps_wall_time_for_legacy_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = 424_242.0
+    guarded = _guarded_process_class(create_time=_ORPHAN_CREATE_TIME, uid=4_242)
+    monkeypatch.setattr(memory_process.psutil, "Process", guarded)
+    monkeypatch.setattr(memory_process, "_uses_linux_starttime_stamp", lambda: True)
+    monkeypatch.setattr(memory_process, "_read_linux_starttime_ticks", lambda _pid: ticks)
+
+    assert memory_process._inspect_process_identity(_ORPHAN_PID) == _ProcessIdentity(
+        create_time=ticks,
+        cmdline=None,
+        uid=4_242,
+        wall_create_time=_ORPHAN_CREATE_TIME,
+    )
 
 
 def test_parse_proc_stat_starttime_handles_spaces_in_comm() -> None:
@@ -1292,19 +1368,21 @@ def test_creation_stamp_falls_back_to_create_time_off_linux(
 def test_legacy_record_accepts_bounded_create_time_drift_when_facts_match(
     tmp_path: Path,
 ) -> None:
+    ticks = 424_242.0
     drifted = _ORPHAN_CREATE_TIME + 48.0
-    host = _FakeProcessHost(live_processes={_ORPHAN_PID: drifted})
+    host = _FakeProcessHost(live_processes={_ORPHAN_PID: ticks})
     process = _orphan_process(tmp_path, host=host)
     host.identities[_ORPHAN_PID] = _orphan_identity(
         process,
-        create_time=drifted,
+        create_time=ticks,
+        wall_create_time=drifted,
         environment={"EVEROS_ROOT": str(process.provider_root)},
     )
     record_path = _write_orphan_record(process, _orphan_record(process))
 
     asyncio.run(process._ownership.reap())
 
-    assert host.signal_calls == [({_ORPHAN_PID: drifted}, signal.SIGTERM, None, None)]
+    assert host.signal_calls == [({_ORPHAN_PID: ticks}, signal.SIGTERM, None, None)]
     assert not record_path.exists()
 
 
@@ -1316,7 +1394,8 @@ def test_legacy_record_rejects_create_time_drift_when_cmdline_mismatches(
         _orphan_record(process),
         _orphan_identity(
             process,
-            create_time=_ORPHAN_CREATE_TIME + 48.0,
+            create_time=424_242.0,
+            wall_create_time=_ORPHAN_CREATE_TIME + 48.0,
             cmdline=(sys.executable, "-m", "http.server"),
             environment={"EVEROS_ROOT": str(process.provider_root)},
         ),
@@ -1333,7 +1412,8 @@ def test_legacy_record_treats_undisclosed_cmdline_as_unverifiable_on_create_time
         _orphan_record(process),
         _orphan_identity(
             process,
-            create_time=_ORPHAN_CREATE_TIME + 48.0,
+            create_time=424_242.0,
+            wall_create_time=_ORPHAN_CREATE_TIME + 48.0,
             cmdline=None,
             environment={"EVEROS_ROOT": str(process.provider_root)},
         ),
@@ -1500,7 +1580,12 @@ def test_process_identity_reports_undisclosed_fields_instead_of_gone(
 
     identity = memory_process._inspect_process_identity(_ORPHAN_PID)
 
-    assert identity == _ProcessIdentity(create_time=_ORPHAN_CREATE_TIME, cmdline=None, uid=4_242)
+    assert identity == _ProcessIdentity(
+        create_time=_ORPHAN_CREATE_TIME,
+        cmdline=None,
+        uid=4_242,
+        wall_create_time=_ORPHAN_CREATE_TIME,
+    )
 
     class _Zombie(guarded):
         def status(self) -> str:
@@ -1530,6 +1615,7 @@ def test_process_identity_reports_undisclosed_fields_instead_of_gone(
         create_time=_ORPHAN_CREATE_TIME,
         cmdline=None,
         uid=None,
+        wall_create_time=_ORPHAN_CREATE_TIME,
     )
 
 
@@ -2922,6 +3008,7 @@ def test_sidecar_and_rebuild_use_one_physical_identity_for_a_symlinked_home(
             "EVEROS_ROOT": str(logical_provider_root),
             "AVIBE_MEMORY_CHILD_ROLE": "sidecar",
         },
+        wall_create_time=_ORPHAN_CREATE_TIME,
     )
     assert _classify_recorded_child(
         legacy_spelling_record,
@@ -4346,8 +4433,9 @@ def _rebuild_record(process: EverOSRebuildProcess, **overrides) -> dict:
 
 
 def _rebuild_identity(process: EverOSRebuildProcess, **overrides) -> _ProcessIdentity:
+    creation_stamp = overrides.pop("create_time", _ORPHAN_CREATE_TIME)
     fields = {
-        "create_time": _ORPHAN_CREATE_TIME,
+        "create_time": creation_stamp,
         "cmdline": (
             sys.executable,
             "-m",
@@ -4361,6 +4449,7 @@ def _rebuild_identity(process: EverOSRebuildProcess, **overrides) -> _ProcessIde
             "EVEROS_ROOT": str(process._provider_root),
             "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
         },
+        "wall_create_time": overrides.pop("wall_create_time", creation_stamp),
     }
     fields.update(overrides)
     return _ProcessIdentity(**fields)
