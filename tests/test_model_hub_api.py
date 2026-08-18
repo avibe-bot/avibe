@@ -45,6 +45,8 @@ from core.handlers.model_hub.oauth import (
 )
 from core.handlers.model_hub.provenance import BoundedProvenanceStore
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
+from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.usage import BoundedUsageLedger
 from core.handlers.model_hub.service import (
     CONTRACT_VERSION,
     ModelHubError,
@@ -326,6 +328,7 @@ def _service(tmp_path, adapter=None):
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
+        usage=BoundedUsageLedger(tmp_path / "usage.json"),
         native_oauth_adapter=adapter,
         oauth_flows=OAuthFlowRegistry(
             tmp_path / "oauth_flows.json",
@@ -513,6 +516,22 @@ def _seed_response_conformance_service(tmp_path: Path) -> ModelHubService:
     provenance = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
     provenance["turn_id"] = "turn_contract01"
     service.provenance.put(provenance)
+    service.usage.record(
+        source_id="src_conform001",
+        model_id="claude-opus-4-6",
+        usage=ProtocolUsageReport(
+            input_tokens=148230,
+            cached_input_tokens=96010,
+            output_tokens=4120,
+        ),
+        at=service.now(),
+    )
+    service.usage.record(
+        source_id="src_conform001",
+        model_id="claude-opus-4-6",
+        usage=None,
+        at=service.now(),
+    )
     asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))
     return service
 

@@ -7,6 +7,7 @@ from typing import Any, Optional
 import httpx
 
 from core.handlers.model_hub import ModelHubError
+from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
 from vibe.internal_client import default_socket_path
 
 
@@ -205,6 +206,9 @@ class ModelHubRemoteService:
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         return _rpc_sync("list_events", {"limit": limit, "before": before})
+
+    def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+        return _rpc_sync("usage_summary", {"days": days})
 
     def agent_chain(self, backend: str, model_id: str) -> dict:
         return _rpc_sync(

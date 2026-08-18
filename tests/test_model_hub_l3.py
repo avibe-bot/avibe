@@ -68,6 +68,7 @@ from core.handlers.model_hub.turn_gateway import (
     _SSEWireState,
     render_protocol_terminal_event,
 )
+from core.handlers.model_hub.usage import BoundedUsageLedger
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -1155,6 +1156,7 @@ def _service(
         adapter=ProbeAdapter(outcomes or [], live_handles),
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
+        usage=BoundedUsageLedger(tmp_path / "usage.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: NOW,
         requested_model_override=store.requested_model,
@@ -6059,3 +6061,227 @@ def test_known_opencode_turn_is_fail_closed_but_not_unknown(
         service.get_turn_provenance("turn_opencode")
     assert unavailable.value.code == "provenance_unavailable"
     assert unavailable.value.detail == "models.provenance.attribution_ambiguous"
+
+
+def _usage_of(service: ModelHubService, source_id: str) -> dict:
+    summary = service.usage_summary(days=30)
+    matches = [source for source in summary["sources"] if source["source_id"] == source_id]
+    return matches[0] if matches else {}
+
+
+def test_gateway_meters_a_buffered_served_turn_from_the_upstream_body(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_meterbuf01", "Buffered meter")
+        body = json.dumps(
+            {
+                "id": "resp_buffered",
+                "usage": {
+                    "input_tokens": 4096,
+                    "input_tokens_details": {"cached_tokens": 3072},
+                    "output_tokens": 128,
+                },
+            }
+        ).encode("utf-8")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (body,),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_buffered",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        result = await gateway._handle_request(request)
+
+        assert result.status == 200
+        assert result.body == body
+        metered = _usage_of(service, source.id)
+        assert metered["label"] == "Buffered meter"
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 4096
+        assert metered["cached_input_tokens"] == 3072
+        assert metered["output_tokens"] == 128
+        assert [model["model_id"] for model in metered["models"]] == ["shared-model"]
+
+    asyncio.run(exercise())
+
+
+def test_gateway_meters_a_streamed_served_turn_from_the_wire(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        source = _source("src_meterwire01", "Streamed meter")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                        b'event: response.completed\ndata: {"type":"response.completed",'
+                        b'"sequence_number":2,"response":{"usage":{"input_tokens":900,'
+                        b'"output_tokens":64}}}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_streamed",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 900
+        assert metered["output_tokens"] == 64
+
+    asyncio.run(exercise())
+
+
+def test_gateway_meters_a_failed_turn_that_upstream_already_billed(
+    tmp_path: Path,
+) -> None:
+    """A vendor that reported tokens billed us even when the stream failed."""
+
+    async def exercise() -> None:
+        source = _source("src_meterfail01", "Billed failure")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.HTTP_ERROR,
+                        status=500,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                        b'event: error\ndata: {"type":"error","code":"server_error",'
+                        b'"sequence_number":2,"usage":{"input_tokens":41,'
+                        b'"output_tokens":0}}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_billed_failure",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 41
+        # The failure keeps its own surface; metering does not replace it.
+        assert service.store.load().sources[0].state.status != "standby"
+
+    asyncio.run(exercise())
+
+
+def test_gateway_meters_nothing_for_a_turn_that_never_reached_the_model(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_meternone01", "Unreached", status="needs_action")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_unreached",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        result = await gateway._handle_request(request)
+
+        assert result.status == 409
+        summary = service.usage_summary(days=30)
+        assert summary["sources"] == []
+        assert summary["totals"]["requests"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) -> None:
+    """Metering is a report, so a ledger fault must stay invisible downstream."""
+
+    async def exercise() -> None:
+        source = _source("src_meterbust01", "Broken ledger")
+        body = json.dumps({"id": "resp_ok", "usage": {"input_tokens": 7}}).encode("utf-8")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (body,),
+                )
+            ],
+        )
+        service.usage.record = Mock(side_effect=OSError("read-only state directory"))
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_broken_ledger",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        result = await gateway._handle_request(request)
+
+        assert result.status == 200
+        assert result.body == body
+        service.usage.record.assert_called_once()
+        assert service.store.load().sources[0].state.status == "standby"
+
+    asyncio.run(exercise())

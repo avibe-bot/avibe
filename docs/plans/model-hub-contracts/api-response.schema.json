@@ -26,6 +26,7 @@
     {"method": "PUT", "path": "/api/models/agents/<backend>/chain?model=<id>", "response_schema": "ChainMutationResponse", "exercise": {"path": "/api/models/agents/claude/chain?model=claude-opus-4-6", "status": 200, "json": {"hops": [{"source_id": "src_conform001", "model_id": "claude-opus-4-6"}]}}},
     {"method": "POST", "path": "/api/models/agents/<backend>/probe", "response_schema": "ProbeResponse", "exercise": {"path": "/api/models/agents/claude/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
     {"method": "GET", "path": "/api/models/events?limit=<n>&before=<id>", "response_schema": "EventsResponse", "exercise": {"path": "/api/models/events?limit=20", "status": 200}},
+    {"method": "GET", "path": "/api/models/usage?days=<n>", "response_schema": "UsageResponse", "exercise": {"path": "/api/models/usage?days=30", "status": 200}},
     {"method": "POST", "path": "/api/models/oauth/start", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/oauth/start", "status": 200, "json": {"vendor": "anthropic", "channel": "hub"}}},
     {"method": "GET", "path": "/api/models/oauth/status/<flow_id>", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/status/oaf_00000001", "status": 200}},
     {"method": "POST", "path": "/api/models/oauth/submit", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/submit", "status": 200, "json": {"flow_id": "oaf_00000001", "value": "contract-code"}}},
@@ -261,6 +262,16 @@
         "ok": {"const": true},
         "contract_version": {"const": 5},
         "events": {"type": "array", "items": {"$ref": "model-hub/resolution-event.schema.json"}}
+      }
+    },
+    "UsageResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "usage"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 5},
+        "usage": {"$ref": "model-hub/usage-summary.schema.json"}
       }
     },
     "OAuthFlowResponse": {

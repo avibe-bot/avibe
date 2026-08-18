@@ -44,6 +44,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; the handler never reads `sources.order`, and the submitted `hops` carry no Source-order semantics. It is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
+| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary}` | Bounded metered token report over a trailing local-day window. `days` is clamped to the retained window; a Source with no metered turn is absent rather than reported as zero. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
@@ -984,6 +985,30 @@ source orders and named-Agent effective models.
 Model-scoped kinds require a string. `agent: system` is invalid on backend-scoped
 `supply_interrupted`. Source endpoints use canonical ids and are checked for existence
 when emitted.
+
+## Usage metering
+
+Usage is a report, never a control input. Nothing in resolution, admission, or
+cooldown reads these numbers, so an upstream that misreports usage cannot change
+which Source serves the next turn.
+
+`requests` is self-measured by the gateway and is always present. Token counts are
+vendor-reported and may be absent for a served turn — streaming chat completions
+report usage only when the client asked for it — so `token_reports` counts the
+turns that carried a report and a missing report is never read as zero usage. Every
+reported integer is bounded by a ceiling fixed in server code, never by a total the
+response declares.
+
+Input composition follows each protocol rather than one invented total.
+`cached_input_tokens` is always the subset of `input_tokens` that was served from
+cache: Anthropic's own `input_tokens` excludes both cache members, so the reported
+input total is their sum; OpenAI's already includes cached input, so the cached
+count is informational only.
+
+Days are local-calendar days on the Avibe host. `from_day` and `to_day` bound the
+requested window even when no turn fell inside it; `days[]` contains only days that
+carry a metered turn. `label` is joined from current Source config, so it is `null`
+for a Source that has since been removed and follows a rename immediately.
 
 ## Runtime installation and host support
 

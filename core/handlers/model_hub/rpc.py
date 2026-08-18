@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from .service import ModelHubError, ModelHubService
+from .usage import USAGE_DEFAULT_WINDOW_DAYS
 
 
 async def _refresh_agent_presence(service: ModelHubService) -> None:
@@ -95,6 +96,8 @@ async def dispatch_model_hub_rpc(
         )
     if operation == "list_events":
         return service.list_events(limit=payload.get("limit", 20), before=payload.get("before"))
+    if operation == "usage_summary":
+        return service.usage_summary(days=payload.get("days", USAGE_DEFAULT_WINDOW_DAYS))
     if operation == "get_agent_chain":
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))
     if operation == "probe_agent":

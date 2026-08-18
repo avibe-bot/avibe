@@ -4465,6 +4465,22 @@ def model_hub_events_get():
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/usage", methods=["GET"])
+def model_hub_usage_get():
+    from core.handlers.model_hub import ModelHubError
+    from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
+
+    try:
+        days = int(request.args.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
+    except (TypeError, ValueError):
+        days = USAGE_DEFAULT_WINDOW_DAYS
+    try:
+        usage = _model_hub_service().usage_summary(days=days)
+        return _model_hub_success(usage=usage)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/agents/<backend>/chain", methods=["GET"])
 def model_hub_agent_chain_get(backend):
     from core.handlers.model_hub import ModelHubError

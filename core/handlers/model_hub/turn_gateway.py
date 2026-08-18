@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Final, Optional
 
 from aiohttp import web
@@ -37,10 +38,13 @@ from .provenance import (
 from .request import ModelHubRequest
 from .stream_wire import (
     ProtocolSSEState,
+    ProtocolUsageReport,
     StreamTerminalOutcome,
+    observe_protocol_response,
     render_protocol_terminal_event,
     render_protocol_terminal_frame,
 )
+from .usage import BoundedUsageLedger
 from .service import (
     HandleSettlement,
     HandleTerminationOrigin,
@@ -64,6 +68,10 @@ _REQUEST_PROTOCOLS: Final = {
     "chat/completions": "openai_chat",
 }
 logger = logging.getLogger(__name__)
+
+
+def _gateway_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 _PROTOCOL_HEADERS: Final = frozenset(
@@ -110,12 +118,17 @@ class ModelHubTurnGateway:
         service: ModelHubService,
         *,
         correlation: Optional[TurnCorrelationRegistry] = None,
+        usage: Optional[BoundedUsageLedger] = None,
         language_provider: Callable[[], str] | None = None,
         transport_timeout: float = ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.service = service
         self._language_provider = language_provider or (lambda: "en")
         self._transport_timeout = transport_timeout
+        # One clock per hub: the service already owns it, so a test that fixes the
+        # service clock gets deterministic usage days without a second injection.
+        self._now = now or getattr(service, "now", None) or _gateway_utc_now
         self._resource_leak_records: deque[tuple[str, str | None]] = deque(maxlen=100)
         self.correlation = correlation or TurnCorrelationRegistry(
             getattr(
@@ -123,6 +136,11 @@ class ModelHubTurnGateway:
                 "provenance",
                 BoundedProvenanceStore(paths.get_state_dir() / "model_hub_turn_provenance.json"),
             )
+        )
+        self.usage = (
+            usage
+            or getattr(service, "usage", None)
+            or BoundedUsageLedger(paths.get_state_dir() / "model_hub_usage.json")
         )
         self._start_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
@@ -571,6 +589,16 @@ class ModelHubTurnGateway:
             )
             assert outcome is not None
             assert settlement.decision is not None
+            buffered_usage = observe_protocol_response(
+                protocol,
+                streamed=False,
+                data=bytes(payload),
+            ).usage
+            self._record_usage(
+                resolved,
+                usage=buffered_usage,
+                served=settlement.decision.action == "return",
+            )
             if settlement.decision.action != "return":
                 return self._outcome_response(
                     outcome,
@@ -612,6 +640,11 @@ class ModelHubTurnGateway:
             terminalizer,
             settlement,
         )
+        self._record_usage(
+            resolved,
+            usage=wire_state.usage,
+            served=wire_state.terminal_outcome == "served",
+        )
         await self._write_stream_terminal_copy(
             response,
             protocol,
@@ -621,6 +654,38 @@ class ModelHubTurnGateway:
         )
         await self._downstream_io(response.write_eof())
         return response
+
+    def _record_usage(
+        self,
+        resolved: ResolvedInvocation,
+        *,
+        usage: ProtocolUsageReport | None,
+        served: bool,
+    ) -> None:
+        """Fold one proxied turn into the usage ledger, best-effort.
+
+        A turn counts when it reached the model: either the hub returned upstream
+        output downstream, or upstream reported usage for it — a vendor that
+        reported tokens billed us even when the stream ended in an error. Turns
+        that never reached the model already have their own surface in the
+        resolution feed and source health, so counting them here would duplicate
+        that concept.
+
+        Metering is a report, never a control input, so a ledger failure must not
+        change the turn the caller sees.
+        """
+
+        if not served and usage is None:
+            return
+        try:
+            self.usage.record(
+                source_id=resolved.source_id,
+                model_id=resolved.model_id,
+                usage=usage,
+                at=self._now(),
+            )
+        except (OSError, ValueError) as exc:
+            logger.debug("Model Hub usage metering skipped one turn: %s", exc)
 
     async def _write_stream_terminal_copy(
         self,

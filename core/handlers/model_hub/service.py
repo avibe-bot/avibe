@@ -110,6 +110,7 @@ from .resolver import (
     source_runnable,
 )
 from .revocations import CredentialRevocationJournal
+from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger
 
 CONTRACT_VERSION = 5
 AGENT_CHAIN_CONTRACT_VERSION = 5
@@ -569,6 +570,7 @@ class ModelHubService:
         adapter: EngineAdapter,
         events: BoundedEventLog,
         provenance: Optional[BoundedProvenanceStore] = None,
+        usage: Optional[BoundedUsageLedger] = None,
         native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
@@ -588,6 +590,9 @@ class ModelHubService:
         self.events = events
         self.provenance = provenance or BoundedProvenanceStore(
             paths.get_state_dir() / "model_hub_turn_provenance.json"
+        )
+        self.usage = usage or BoundedUsageLedger(
+            paths.get_state_dir() / "model_hub_usage.json"
         )
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(
@@ -3601,6 +3606,20 @@ class ModelHubService:
                 "interrupted": would_interrupt,
             }
 
+    def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+        """Report metered token usage, labelled from current Source config.
+
+        Labels are joined here rather than persisted: a Source label is
+        user-supplied text that the ledger has no business storing, and a join
+        keeps a rename visible immediately instead of freezing old copies.
+        """
+
+        summary = self.usage.summary(days=days, now=self.now())
+        labels = {source.id: source.display_name for source in self.store.load().sources}
+        for source in summary["sources"]:
+            source["label"] = labels.get(source["source_id"])
+        return summary
+
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         events = self.events.list(limit=limit, before=before)
         for event in events:
@@ -5297,6 +5316,7 @@ def create_default_service(
         store=V2ModelHubConfigStore(),
         adapter=adapter,
         events=BoundedEventLog(paths.get_state_dir() / "model_hub_resolution_events.json"),
+        usage=BoundedUsageLedger(paths.get_state_dir() / "model_hub_usage.json"),
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
