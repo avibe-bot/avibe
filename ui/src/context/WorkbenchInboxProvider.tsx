@@ -469,6 +469,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       return;
     }
     unreadReadInFlightRef.current = true;
+    // A mid-flight mutation invalidates this response, and unlike the feed path
+    // nothing else is queued to replace it: the ``inbox.session.updated`` handler
+    // merges one session's count and never claims an authoritative whole map, so
+    // silently discarding would leave every other session's count — and the
+    // favicon/PWA badge — missing until some later focus or reconnect. Re-read,
+    // exactly as ``refresh`` does. A newer read of the same resource is a
+    // different case: it owns the map now and will apply its own, so stepping
+    // aside is correct and keeps this terminating.
+    const staleReadNeedsReread = (read: WorkbenchSessionReadStamp) =>
+      !readOwnershipRef.current.isMutationCurrent(read, 'inbox-unread') &&
+      (readOwnershipRef.current.latestGeneration('inbox-unread') ?? 0) <= read.generation;
     try {
       do {
         unreadReadPendingRef.current = false;
@@ -482,15 +493,51 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           });
           if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
             applyWholeUnreadRead(read, result.unread_by_session ?? {});
+          } else if (staleReadNeedsReread(read)) {
+            unreadReadPendingRef.current = true;
           }
         } catch (err) {
-          console.error('[inbox] refreshUnread failed', err);
+          if (staleReadNeedsReread(read)) unreadReadPendingRef.current = true;
+          else console.error('[inbox] refreshUnread failed', err);
         }
       } while (unreadReadPendingRef.current);
     } finally {
       unreadReadInFlightRef.current = false;
     }
   }, [api, applyWholeUnreadRead]);
+
+  // Same rule as the projects tree: a reconnect is revalidation and may wait for
+  // a consumer, but an authorization change is invalidation and cannot. The feed's
+  // resumption path merges rather than replaces — ``reconcile`` deliberately keeps
+  // rows the response omitted — so rows loaded before the change would survive the
+  // trip back, and a failed reconcile would keep them indefinitely. Drop them and
+  // reset ``initialFetched`` so the next feed consumer takes the authoritative
+  // page-one path instead.
+  //
+  // The unread map is deliberately NOT dropped here: the counts read that follows
+  // replaces it whole, and blanking it first would clear a badge the push service
+  // worker may legitimately own while this document was never authoritative (the
+  // ``unreadLoaded`` invariant). A count is a number for a session id the user
+  // already had; a feed row is its title and preview.
+  const discardAuthorizedFeed = useCallback(() => {
+    const cachedSessionIds = new Set([
+      ...inboxSessionsRef.current.map((row) => row.session_id),
+      ...targetedSnapshotsRef.current.keys(),
+      ...targetedReadInFlightRef.current,
+    ]);
+    // Fence the reads already in flight: a response that left the server before
+    // the change must not repopulate what we are dropping.
+    readOwnershipRef.current.acceptMutation([
+      'inbox-feed',
+      ...[...cachedSessionIds].map((sessionId) => `inbox-session:${sessionId}`),
+    ]);
+    initialFetched.current = false;
+    inboxSessionsRef.current = [];
+    targetedSnapshotsRef.current.clear();
+    targetedReadPendingRef.current.clear();
+    setInboxSessions([]);
+    applyNextCursor(null);
+  }, [applyNextCursor]);
 
   // Targeted reconcile for one session (contract A6 foreground restore): fetch
   // that exact session by id and upsert its card, so a restored session
@@ -594,9 +641,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     const disconnect = api.connectWorkbenchEvents({
       onAuthorizationChanged: () => {
         // A permission change invalidates whatever is loaded; re-read exactly
-        // what this route reads.
-        if (isFeedActive()) void refresh();
-        else void refreshUnread();
+        // what this route reads — and, when no route reads the feed, still drop
+        // the rows nobody is watching rather than keeping them for later.
+        if (isFeedActive()) {
+          void refresh();
+          return;
+        }
+        discardAuthorizedFeed();
+        void refreshUnread();
       },
       onInboxSessionUpdated: (row) => {
         targetedSnapshotsRef.current.delete(row.session_id);
@@ -654,6 +706,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     acceptUnreadMutation,
     api,
     applyUnreadMap,
+    discardAuthorizedFeed,
     isFeedActive,
     reconcileSession,
     refresh,

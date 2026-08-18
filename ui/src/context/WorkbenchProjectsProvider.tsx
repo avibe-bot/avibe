@@ -206,6 +206,42 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     }
   }, []);
 
+  // A reconnect and an authorization change are not the same kind of signal. A
+  // reconnect says "you may have missed events", so deferring it while nothing
+  // reads the tree costs nothing — activation re-reads anyway. An authorization
+  // change says "what you already hold may no longer be authorized", and that
+  // cannot wait for a consumer: the cache outlives the gate, and every recovery
+  // path here deliberately PRESERVES what it has (``fetchProjects`` keeps the old
+  // list when the read fails), so a tree loaded before the change would render
+  // revoked rows on the way back. Dropping it returns this provider to exactly
+  // its pre-mount state — which is what every document that never read the tree
+  // already has — so the next activation bootstraps as a fresh load.
+  const discardAuthorizedTree = useCallback(() => {
+    // Fence the reads already in flight first: a response that left the server
+    // before the change must not repopulate the cache we are dropping.
+    const cachedProjectIds = new Set([
+      ...Object.keys(sessionsRef.current),
+      ...(projectsRef.current ?? []).map((project) => project.id),
+    ]);
+    readOwnershipRef.current.acceptMutation([
+      'projects',
+      'projects-bootstrap',
+      ...[...cachedProjectIds].map((projectId) => `project:${projectId}`),
+      ...[...sessionProjectRef.current.keys()].map((sessionId) => `project-session:${sessionId}`),
+    ]);
+    projectsRef.current = null;
+    sessionsRef.current = {};
+    expandedRef.current = new Set();
+    sessionProjectRef.current.clear();
+    pendingReconcileRef.current.clear();
+    pendingCachedRowRefreshRef.current.clear();
+    setProjects(null);
+    setProjectsError(null);
+    setSessions({});
+    setExpanded(new Set());
+    setCreating(new Set());
+  }, []);
+
   const queueReconcile = useCallback((projectId: string, minCount = 0) => {
     const pending = pendingReconcileRef.current.get(projectId) ?? 0;
     pendingReconcileRef.current.set(projectId, Math.max(pending, minCount));
@@ -594,16 +630,22 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // broadcast to, so listSessions is the authoritative source on reconnect).
   useEffect(() => {
     const disconnect = api.connectWorkbenchEvents({
-      // A reconnect or an authorization change only has a tree to recover when
-      // one was loaded; while no consumer reads it, activation is what fetches
-      // a fresh one. Guarding here keeps a long-lived admin tab from re-issuing
-      // the bootstrap every time the shared stream flaps.
+      // A reconnect only has a tree to recover when one was being read; while no
+      // consumer reads it, activation is what fetches a fresh one. Guarding here
+      // keeps a long-lived admin tab from re-issuing the bootstrap every time the
+      // shared stream flaps.
       onConnected: () => {
         if (!isActive()) return;
         void reconcileProjectTree();
       },
+      // An authorization change is invalidation rather than revalidation, so the
+      // no-consumer case still has work to do: drop the cache instead of leaving
+      // it to be rendered on the way back. See ``discardAuthorizedTree``.
       onAuthorizationChanged: () => {
-        if (!isActive()) return;
+        if (!isActive()) {
+          discardAuthorizedTree();
+          return;
+        }
         void reconcileProjectTree();
       },
       onSessionActivity: (data) => {
@@ -682,6 +724,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   }, [
     acceptSessionMutation,
     api,
+    discardAuthorizedTree,
     isActive,
     projectIdForSession,
     reconcileProjectTree,

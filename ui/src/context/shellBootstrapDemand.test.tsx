@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkbenchInboxProvider } from './WorkbenchInboxProvider';
 import { useWorkbenchInbox, type InboxState } from './WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './WorkbenchProjectsProvider';
-import { useWorkbenchProjectsTree } from './WorkbenchProjectsContext';
+import { useWorkbenchProjectsTree, type WorkbenchProjectsTree } from './WorkbenchProjectsContext';
 import type { WorkbenchEventHandlers } from './ApiContext';
 
 const project = {
@@ -100,8 +100,21 @@ function settle() {
   });
 }
 
-const TreeProbe = () => {
-  useWorkbenchProjectsTree();
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const TreeProbe = ({ onState }: { onState?: (tree: WorkbenchProjectsTree) => void } = {}) => {
+  const tree = useWorkbenchProjectsTree();
+  useEffect(() => {
+    onState?.(tree);
+  }, [onState, tree]);
   return null;
 };
 
@@ -276,6 +289,172 @@ describe('Demand-driven shell bootstrap', () => {
       expect(listInbox.mock.calls[1][0]).toMatchObject({ platform: 'avibe', limit: 30 });
       expect(listInbox.mock.calls[1][0]).not.toHaveProperty('before');
       expect(state?.inboxSessions).toHaveLength(1);
+    });
+  });
+
+  // The demand gate decides what is READ. It must not also decide what stays
+  // cached: a reconnect says "you may have missed events" and can wait for a
+  // consumer, but an authorization change says "what you hold may no longer be
+  // authorized", and both providers' resumption paths deliberately preserve rows
+  // (the projects list survives a failed retry; the inbox reconcile keeps rows the
+  // response omitted). These pin the drop WITHOUT letting any response resolve, so
+  // they hold for a revalidation that is slow, failing, or never arrives.
+  describe('authorization changes invalidate what nothing is reading', () => {
+    it('drops the cached project tree rather than keeping it for the way back', async () => {
+      const bootstrap = vi.fn().mockResolvedValue(bootstrapPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        getWorkbenchProjectsBootstrap: bootstrap,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let tree: WorkbenchProjectsTree | null = null;
+      const capture = (next: WorkbenchProjectsTree) => {
+        tree = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchProjectsProvider>
+          <TreeProbe onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toHaveLength(1);
+
+      // Navigate to a route that renders no project, then lose access there.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <div />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      bootstrap.mockReturnValue(deferred<typeof bootstrapPayload>().promise);
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+
+      // Nothing re-reads the tree here, and nothing needs to: coming back must not
+      // be able to render a project that was authorized before the change.
+      rerender(
+        <WorkbenchProjectsProvider>
+          <TreeProbe onState={capture} />
+        </WorkbenchProjectsProvider>,
+      );
+      await settle();
+      expect(tree?.projects).toBeNull();
+      expect(tree?.sessionsOf(project.id).sessions).toBeNull();
+      expect(tree?.isExpanded(project.id)).toBe(false);
+    });
+
+    it('drops cached inbox rows and makes the next feed read authoritative', async () => {
+      const listInbox = vi.fn().mockResolvedValue(inboxPayload);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+      const capture = (next: InboxState) => {
+        state = next;
+      };
+
+      const { rerender } = render(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(state?.inboxSessions).toHaveLength(1);
+
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed={false} onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      listInbox.mockReturnValue(deferred<typeof inboxPayload>().promise);
+      await act(async () => {
+        handlers?.onAuthorizationChanged?.();
+      });
+
+      expect(state?.inboxSessions).toEqual([]);
+      expect(state?.nextCursor).toBeNull();
+
+      // Returning to a feed must reload page one destructively, not reconcile onto
+      // a window whose rows were just invalidated.
+      listInbox.mockResolvedValue({ sessions: [], next_cursor: null, unread_by_session: {} });
+      rerender(
+        <WorkbenchInboxProvider>
+          <InboxProbe feed onState={capture} />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+
+      const feedRead = listInbox.mock.calls.at(-1)?.[0];
+      expect(feedRead).toMatchObject({ platform: 'avibe', limit: 30 });
+      expect(feedRead).not.toHaveProperty('before');
+      // reconcile() re-reads with cache disabled; page one does not.
+      expect(feedRead).not.toHaveProperty('cache');
+      expect(state?.inboxSessions).toEqual([]);
+    });
+
+    it('re-reads the unread map when a mutation invalidates the counts read', async () => {
+      const first = deferred<typeof inboxPayload>();
+      const second = deferred<typeof inboxPayload>();
+      const listInbox = vi
+        .fn()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise);
+      let handlers: WorkbenchEventHandlers | null = null;
+      apiRef.current = {
+        listInbox,
+        connectWorkbenchEvents: vi.fn((next) => {
+          handlers = next;
+          return vi.fn();
+        }),
+      };
+      let state: InboxState | null = null;
+
+      render(
+        <WorkbenchInboxProvider>
+          <InboxProbe
+            feed={false}
+            onState={(next) => {
+              state = next;
+            }}
+          />
+        </WorkbenchInboxProvider>,
+      );
+      await settle();
+      expect(listInbox).toHaveBeenCalledTimes(1);
+
+      // A live event lands while the counts read is in flight, so that response is
+      // no longer authoritative — and the event itself only carries one session's
+      // count. Discarding it silently would leave every other session's badge
+      // missing until some later focus or reconnect.
+      await act(async () => {
+        handlers?.onInboxSessionUpdated?.(inboxRow);
+      });
+      await act(async () => {
+        first.resolve({ ...inboxPayload, unread_by_session: { [session.id]: 3, ses_b: 5 } });
+      });
+      await settle();
+
+      expect(listInbox).toHaveBeenCalledTimes(2);
+      expect(listInbox.mock.calls[1][0]).toMatchObject({ platform: 'avibe', limit: 1 });
+
+      await act(async () => {
+        second.resolve({ ...inboxPayload, sessions: [], unread_by_session: { ses_b: 7 } });
+      });
+      await settle();
+
+      expect(state?.unreadBySession).toEqual({ ses_b: 7 });
+      expect(state?.totalUnread).toBe(7);
     });
   });
 });
