@@ -20,6 +20,31 @@ assert SPEC.loader is not None
 sys.modules[SPEC.name] = incus_regression
 SPEC.loader.exec_module(incus_regression)
 
+MASTER_NAMES = ("avr-master", "avibe-master")
+
+
+def daemon_listing(*names: str):
+    """Build a ``Runner.names`` stand-in that answers from a fixed inventory.
+
+    Stubs describe what the daemon enumerated rather than a bare yes/no, because
+    the runner has to tell "absent" apart from "could not ask": a stub that can
+    only say True or False cannot express the difference the code now depends on.
+    """
+
+    def listing(self, command, *, what):
+        return list(names)
+
+    return listing
+
+
+def stub_incus_result(returncode: int, *, stdout: str = "", stderr: str = ""):
+    """Stand in for `subprocess.run` so the real `Runner` sees a given incus result."""
+
+    def run(command, **kwargs):
+        return subprocess.CompletedProcess(list(command), returncode, stdout=stdout, stderr=stderr)
+
+    return run
+
 
 def test_master_target_uses_stable_project_instance_and_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REGRESSION_PORT", raising=False)
@@ -331,6 +356,79 @@ def test_require_incus_reports_missing_override(monkeypatch: pytest.MonkeyPatch)
         incus_regression.require_incus()
 
 
+def test_existence_comes_from_the_names_the_daemon_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    listing = json.dumps([{"name": "avr-master"}, {"name": "avr-wt-demo-branch"}, {"other": "ignored"}])
+    monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(0, stdout=listing))
+
+    names = incus_regression.Runner().names(incus_regression.incus("project", "list"), what="Incus projects")
+
+    assert names == ["avr-master", "avr-wt-demo-branch"]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param({"returncode": 1, "stderr": "Error: unix.socket: connect: connection refused\n"}, id="daemon-down"),
+        pytest.param({"returncode": 1, "stderr": "Error: Failed to begin transaction: context deadline exceeded\n"}, id="daemon-stalled"),
+        pytest.param({"returncode": 1, "stdout": "boom on stdout\n"}, id="detail-on-stdout"),
+        pytest.param({"returncode": 1}, id="silent-failure"),
+        pytest.param({"returncode": 0, "stdout": "not json"}, id="unparseable"),
+        pytest.param({"returncode": 0, "stdout": '{"name": "avr-master"}'}, id="not-a-listing"),
+    ],
+)
+@pytest.mark.parametrize(
+    "ask",
+    [
+        pytest.param(lambda runner: incus_regression.project_exists(runner, None, "avr-master"), id="project"),
+        pytest.param(
+            lambda runner: incus_regression.instance_exists(runner, None, "avr-master", "avibe-master"), id="instance"
+        ),
+    ],
+)
+def test_unanswerable_existence_question_raises_instead_of_reporting_absence(
+    monkeypatch: pytest.MonkeyPatch, result: dict, ask
+) -> None:
+    """Whatever keeps the daemon from producing a listing, the answer is an error.
+
+    `incus` exits non-zero both when an object is genuinely absent and when the
+    daemon is unreachable or stalled, so a boolean answer derived from exit
+    status silently turns "cannot tell" into "not there" — and every caller then
+    sets out to create what already exists.
+    """
+    monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(**result))
+
+    with pytest.raises(incus_regression.RegressionError):
+        ask(incus_regression.Runner())
+
+
+def test_unanswerable_existence_question_reports_the_daemon_detail_and_the_fix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        incus_regression.subprocess,
+        "run",
+        stub_incus_result(1, stderr="Error: Failed to begin transaction: context deadline exceeded\n"),
+    )
+
+    with pytest.raises(incus_regression.RegressionError) as excinfo:
+        incus_regression.project_exists(incus_regression.Runner(), None, "avr-master")
+
+    message = str(excinfo.value)
+    assert "context deadline exceeded" in message
+    assert "INCUS_CMD" in message
+
+
+def test_absent_project_answers_without_listing_inside_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(list(command), 0, stdout=json.dumps([{"name": "avr-other"}]))
+
+    monkeypatch.setattr(incus_regression.subprocess, "run", run)
+
+    assert incus_regression.instance_exists(incus_regression.Runner(), None, "avr-master", "avibe-master") is False
+    assert commands == [incus_regression.incus("project", "list", "--format", "json")]
+
+
 def test_default_base_image_alias_is_not_remote_syntax() -> None:
     assert ":" not in incus_regression.DEFAULT_IMAGE
 
@@ -357,8 +455,7 @@ def test_existing_instance_proxy_device_is_refreshed() -> None:
     commands = []
 
     class RecordingRunner:
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, *, check=True, **kwargs):
             commands.append((command, check))
@@ -1151,8 +1248,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return command[:4] == ["incus", "--project", "avr-master", "info"]
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1208,8 +1304,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1274,8 +1369,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return False
+        names = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1329,6 +1423,68 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
     assert preflight_calls == [("127.0.0.1", 15130)]
 
 
+def test_up_stops_when_the_daemon_cannot_say_whether_the_target_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable or stalled daemon aborts `up` before it touches anything.
+
+    This is the shape that broke a real run: a starved daemon failed the instance
+    lookup, the runner read that as "instance absent", and the host-port preflight
+    then tripped over the port the still-live instance's own proxy device holds.
+    The port was never the problem — the unanswered question was.
+    """
+    touched = []
+
+    def refuse(name):
+        def wrapper(*args, **kwargs):
+            touched.append(name)
+            raise AssertionError(f"{name} ran while the daemon's answer was unknown")
+
+        return wrapper
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(
+        incus_regression.subprocess,
+        "run",
+        stub_incus_result(1, stderr="Error: Failed to begin transaction: context deadline exceeded\n"),
+    )
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", refuse("ensure_host_port_available"))
+    monkeypatch.setattr(incus_regression, "require_runtime_seed_env", refuse("require_runtime_seed_env"))
+    monkeypatch.setattr(incus_regression, "ensure_project_and_instance", refuse("ensure_project_and_instance"))
+    monkeypatch.setattr(incus_regression, "stop_service_for_update", refuse("stop_service_for_update"))
+
+    args = argparse.Namespace(
+        target="master",
+        slug=None,
+        host_port=None,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        reset_mode="none",
+    )
+
+    with pytest.raises(incus_regression.RegressionError, match="context deadline exceeded"):
+        incus_regression.cmd_up(args)
+
+    assert touched == []
+
+
 def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
@@ -1336,8 +1492,7 @@ def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: 
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return False
+        names = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 1, stdout="")
@@ -1398,8 +1553,7 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="")
@@ -1457,8 +1611,7 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout='{"state": "paired"}')
@@ -1515,8 +1668,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return False
+        names = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1585,8 +1737,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1661,8 +1812,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1730,8 +1880,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1795,8 +1944,7 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        def exists(self, command):
-            return True
+        names = daemon_listing("avr-wt-demo-branch", "avibe-wt-demo-branch")
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -1832,6 +1980,10 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
     monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
     monkeypatch.setattr(incus_regression, "Runner", ExistingRunner)
+    # Port allocation probes real host ports, so pin the preflight: this test is
+    # about reserving the mapping under the lock, not about which ports happen to
+    # be free on the machine running it.
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
     monkeypatch.setattr(incus_regression, "worktree_mapping_lock", mapping_lock)
     original_reserve_worktree_mapping = incus_regression.reserve_worktree_mapping
 
