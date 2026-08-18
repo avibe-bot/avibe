@@ -167,7 +167,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     });
   });
 
-  it('keeps Link access usable while Workspace access is still loading', async () => {
+  it('keeps Link access usable while Organization access is still loading', async () => {
     const organizationAccess = showPageAccess({
       mode: 'organization',
       ownership_status: 'unchanged',
@@ -212,7 +212,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
     expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
-    expect(screen.getByText('Loading Workspace access…')).toBeTruthy();
+    expect(screen.getByText('Loading Organization access…')).toBeTruthy();
     expect(api.getShowAccessSettings).toHaveBeenCalledWith('ses-1');
     expect(permissionsApi.getPermissions).toHaveBeenCalledOnce();
     expect(permissionsApi.getResourceAccess).toHaveBeenCalledWith({
@@ -353,7 +353,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     expect(screen.queryByDisplayValue(/\/p\/stable-link\/$/)).toBeNull();
   });
 
-  it('keeps the online toggle and custom link out while showing Workspace access', async () => {
+  it('keeps the online toggle and custom link out while showing Organization access', async () => {
     const organizationAccess = showPageAccess({
       mode: 'organization',
       ownership_status: 'unchanged',
@@ -399,10 +399,58 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
     expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
-    expect(screen.getByText('Workspace access')).toBeTruthy();
+    expect(screen.getByText('Organization access')).toBeTruthy();
     expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
     expect(screen.queryByText('Page online')).toBeNull();
     expect(api.setShowPageAvailability).not.toHaveBeenCalled();
+  });
+
+  it('does not mount Organization access for a normal Personal Avibe', async () => {
+    const personalAccess = showPageAccess({
+      mode: 'personal',
+      ownership_status: 'unchanged',
+      instance_id: null,
+      organization_id: null,
+      policy_organization_id: null,
+      can_use: true,
+      can_manage: true,
+      can_publish_public: true,
+    });
+    api.getShowPageAccess.mockResolvedValue(personalAccess);
+    api.ensureShowPage.mockResolvedValue({
+      session_id: 'ses-1',
+      visibility: 'private',
+      active_url: '/show/ses-1/',
+      share_id: null,
+      url_available: true,
+      offline: false,
+      title: null,
+    });
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: {
+        page_id: 'ses-1',
+        access_mode: 'private',
+        share_id: null,
+        revision: 0,
+        normalized_emails: [],
+      },
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl
+          sessionId="ses-1"
+          initialAccess={personalAccess}
+          canManageInstance
+        />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.queryByText('Organization access')).toBeNull();
+    expect(permissionsApi.getPermissions).not.toHaveBeenCalled();
+    expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
   });
 
   it('shows a Personal ownership conflict through the Workspace control', async () => {
@@ -440,7 +488,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
   });
 
-  it('keeps explicit custom-link saving while online and Workspace controls stay out', async () => {
+  it('keeps explicit custom-link saving while online and Organization controls stay out', async () => {
     api.getShowPageAccess.mockResolvedValue(showPageAccess({
       can_use: true,
       can_manage: true,
@@ -501,7 +549,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
         target_emails: [],
       });
     });
-    expect(screen.queryByText('Workspace access')).toBeNull();
+    expect(screen.queryByText('Organization access')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
     expect(api.setShowPageAvailability).not.toHaveBeenCalled();
   });
