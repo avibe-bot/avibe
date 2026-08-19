@@ -461,8 +461,24 @@ def rechained_revisions(baseline: str | None = None) -> list[str]:
     return problems
 
 
+def released_bodies(sources: dict[str, str]) -> dict[str, tuple[str, str]]:
+    """``{revision: (filename, source)}`` -- what each migration in ``sources`` runs.
+
+    Keyed by revision because that is the key Alembic uses. A filename is not a migration's
+    identity: databases record the revision, ``version_locations`` is scanned rather than
+    enumerated, and renaming a file changes nothing Alembic can observe. Keying bodies by
+    filename would therefore let a rename carry an edit across a release boundary
+    untouched, which is the same mistake as inventing a key for anything else here.
+    """
+    return {
+        revision: (name, sources[name])
+        for revision, (name, _) in revision_graph(sources).items()
+        if is_migration_source(name)
+    }
+
+
 def edited_released_bodies(baseline: str | None = None) -> list[str]:
-    """Released migration files whose contents are no longer what the baseline shipped.
+    """Released revisions whose migration no longer does what the baseline ran.
 
     The properties above watch what a migration *declares*; this watches what it *does*.
     They are one contract seen from two sides -- a released migration is a shipped surface
@@ -477,19 +493,30 @@ def edited_released_bodies(baseline: str | None = None) -> list[str]:
     different, so it cannot be relied on to notice in general -- and concluding otherwise
     from the one edit it did catch is how this gap survived a whole design pass.
 
+    A released revision missing from the working tree is passed over here because
+    ``rechained_revisions`` is what reports it, and from the same two calls: either its
+    file is unreadable or contested, or the revision is gone from the graph outright.
+    Restating it would describe one defect as two. The pair is what must be exhaustive,
+    not either half, and ``collect_problems`` runs both.
+
     No exemption for edits judged harmless. Judging them is the convention this guard
     exists to replace, and no exemption is needed: restoring the shipped file and adding a
     new migration carrying the change is always available, and is the only form of the
     change every database can actually apply.
     """
     baseline = baseline or latest_released_tag()
-    current = working_tree_sources()
-    return [
-        f"{name} is no longer what {baseline} shipped; a released migration's body is fixed "
-        "once a database has run it"
-        for name, source in sorted(released_sources(baseline).items())
-        if is_migration_source(name) and name in current and current[name] != source
-    ]
+    current = released_bodies(working_tree_sources())
+    problems = []
+    for revision, (shipped_name, source) in sorted(released_bodies(released_sources(baseline)).items()):
+        if revision not in current or current[revision][1] == source:
+            continue
+        name = current[revision][0]
+        where = shipped_name if name == shipped_name else f"{shipped_name}, now {name}"
+        problems.append(
+            f"{revision} ({where}) is no longer what {baseline} shipped; a released "
+            "migration's body is fixed once a database has run it"
+        )
+    return problems
 
 
 def _alembic_config(db_path: Path, versions: Path | None = None) -> Config:

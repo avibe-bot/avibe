@@ -334,8 +334,9 @@ def test_no_released_revision_can_be_rewritten_without_a_report(monkeypatch, rev
     assert [problem for problem in problems if revision in problem or name in problem]
 
 
+@pytest.mark.parametrize("renamed", [False, True], ids=["in-place", "renamed"])
 @pytest.mark.parametrize(("revision", "slug"), [(revision, slug) for revision, slug, _, _ in SHIPPED_REVISIONS])
-def test_no_released_migration_body_can_change_without_a_report(monkeypatch, revision, slug):
+def test_no_released_migration_body_can_change_without_a_report(monkeypatch, revision, slug, renamed):
     """What a released migration *does* is as fixed as what it declares.
 
     A database stamped at the revision never reruns the edited body and a fresh install
@@ -343,16 +344,73 @@ def test_no_released_migration_body_can_change_without_a_report(monkeypatch, rev
     moment. The edit here is a comment, which is the weakest case on purpose: an
     exemption for edits that look harmless would put a human judgement back on the path
     this guard exists to take it off.
+
+    Renaming is the same edit wearing a filename, and both axes are stated together
+    because they are one defect rather than a case and its afterthought. Alembic keys a
+    migration by ``revision`` and scans the directory to find it, so the renamed file runs
+    on every fresh install exactly as the original did -- while a check keyed by filename
+    sees the old name absent and compares nothing.
     """
     name = f"{revision}_{slug}.py"
     current = dict(SHIPPED_GRAPH)
-    current[name] += "\n# a later edit\n"
+    edited = current.pop(name) + "\n# a later edit\n"
+    current[f"{revision}_renamed.py" if renamed else name] = edited
     _graphs(monkeypatch, SHIPPED_GRAPH, current)
 
     problems = guard.edited_released_bodies("v0.0.0")
 
     assert len(problems) == 1
-    assert name in problems[0]
+    assert revision in problems[0]
+
+
+def test_renaming_a_released_migration_without_editing_it_is_not_a_change(monkeypatch):
+    """The boundary the property above draws, stated from the side it must not cross.
+
+    A database records the revision it reached and nothing else, and Alembic finds that
+    revision by scanning ``version_locations`` rather than by name. A rename leaving the
+    body alone is therefore invisible to every database in the field, and reporting it
+    would be the guard enforcing a filename convention of its own -- which is the slot
+    property's subject, not this one's.
+    """
+    revision, slug = SHIPPED_REVISIONS[0][0], SHIPPED_REVISIONS[0][1]
+    current = dict(SHIPPED_GRAPH)
+    current[f"{revision}_moved.py"] = current.pop(f"{revision}_{slug}.py")
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    assert guard.edited_released_bodies("v0.0.0") == []
+    assert guard.rechained_revisions("v0.0.0") == []
+
+
+# Every way a released revision can stop running what the release ran, keyed by the shape
+# of the change rather than by which half of the pair happens to catch it.
+RELEASED_REVISION_MUTATIONS = {
+    "edited": lambda sources, name: dict(sources) | {name: sources[name] + "\n# a later edit\n"},
+    "renamed-and-edited": lambda sources, name: {key: value for key, value in sources.items() if key != name}
+    | {"20269999_9999_moved.py": sources[name] + "\n# a later edit\n"},
+    "deleted": lambda sources, name: {key: value for key, value in sources.items() if key != name},
+    "rechained": lambda sources, name: dict(sources) | {name: _revision_file("20260102_0002", '"20269999_9999"')},
+    "made-unreadable": lambda sources, name: dict(sources)
+    | {name: sources[name].replace('"20260102_0002"', "SOME_CONSTANT")},
+    "duplicated": lambda sources, name: dict(sources) | {"20260102_0002_copy.py": sources[name]},
+}
+
+
+@pytest.mark.parametrize(
+    "mutate", list(RELEASED_REVISION_MUTATIONS.values()), ids=list(RELEASED_REVISION_MUTATIONS)
+)
+def test_a_released_revision_is_always_accounted_for(monkeypatch, mutate):
+    """The pair is exhaustive even where neither half is, and that is the claim on record.
+
+    ``rechained_revisions`` watches what a revision declares and ``edited_released_bodies``
+    watches what it does, so each passes over what the other owns -- a revision that is
+    gone, contested, or unreadable has no body to compare, and a body edit under an
+    unchanged declaration produces no drift. Asserting on their union is what makes those
+    hand-offs safe: a case falling out of one half without landing in the other fails here
+    rather than becoming a silently unguarded shape.
+    """
+    _graphs(monkeypatch, SHIPPED_GRAPH, mutate(SHIPPED_GRAPH, "20260102_0002_linear.py"))
+
+    assert guard.rechained_revisions("v0.0.0") + guard.edited_released_bodies("v0.0.0")
 
 
 def test_support_files_are_not_held_to_the_release(monkeypatch):
