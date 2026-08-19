@@ -79,6 +79,12 @@ class ScenarioInvokeHandle:
         return chunks()
 
     @property
+    def observed(self) -> None:
+        """This double reports nothing about the body until its consumer reads it."""
+
+        return None
+
+    @property
     def outcome_available(self) -> bool:
         return True
 

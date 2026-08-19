@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import copy
+import inspect
 import json
 import re
 import stat
@@ -27,6 +29,7 @@ from config.v2_config import (
     V2Config,
     is_model_hub_enabled,
 )
+from core.handlers.model_hub.service import CONTRACT_VERSION
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
     OBSERVATION_TERMINAL_RULES,
@@ -100,7 +103,7 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 5
+    assert schema["properties"]["contract_version"]["const"] == 6
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -124,7 +127,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 5,
+            "contract_version": 6,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -623,7 +626,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 5,
+        "contract_version": 6,
         "error": "source_in_route_chain",
         "would_remove_hops": [hop],
         "would_interrupt": [],
@@ -686,12 +689,104 @@ def test_v5_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 5
+    assert registry["contract_version"] == 6
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
     for entry in registry["entries"]:
         _validate_mirror_entry(entry, schemas)
+
+
+def _versioned_nodes(node):
+    """Yield every `contract_version` subschema, however deeply a branch nests it."""
+
+    if isinstance(node, dict):
+        declared = node.get("properties")
+        if isinstance(declared, dict) and isinstance(declared.get("contract_version"), dict):
+            yield declared["contract_version"]
+        for value in node.values():
+            yield from _versioned_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _versioned_nodes(item)
+
+
+def test_every_versioned_object_ends_at_the_terminal_version_the_code_writes():
+    # One number spans all versioned objects, so a bump has to move every one of
+    # them at once — round 4 shipped it half-applied because nothing compared the
+    # schemas with each other or with the writer. Reading the accepted values out
+    # of whatever schemas the directory holds, rather than listing the ones that
+    # carry a version, covers an object added later without editing this test.
+    #
+    # TurnProvenance is the one exception, and it earns it by being written to
+    # disk: the same bump that republishes an envelope would strand every record
+    # a released build persisted, so it accepts the released values and ends at
+    # the terminal one. The `== [terminal]` branch is what keeps that from
+    # spreading to objects that never outlive their request.
+    terminal = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))[
+        "contract_version"
+    ]
+    assert CONTRACT_VERSION == terminal
+    persisted = {"turn-provenance.schema.json"}
+    checked = set()
+    for path in sorted(CONTRACTS.glob("*.schema.json")):
+        for node in _versioned_nodes(json.loads(path.read_text(encoding="utf-8"))):
+            checked.add(path.name)
+            accepted = [node["const"]] if "const" in node else list(node["enum"])
+            assert accepted == sorted(set(accepted)), path.name
+            assert accepted[-1] == terminal, path.name
+            if path.name in persisted:
+                assert accepted[0] < terminal, path.name
+            else:
+                assert accepted == [terminal], path.name
+    assert persisted <= checked
+    assert "api-response.schema.json" in checked
+
+    # The schemas above are structured, so their versions are read from the shape.
+    # Every other file beside them publishes the same number as text, and nothing
+    # compared those: `api.md` carried the terminal value in eighteen envelopes
+    # while three of its own declarations still named the previous one, which is
+    # two review rounds spent on one stale sentence at a time. Matching the token
+    # a consumer reads, rather than a list of sentences, is what makes the next
+    # declaration fail here instead of in review — and it is why a claim about the
+    # current value is written as `contract_version <n>` while a bare `vN` names
+    # the generation a sentence was authored in.
+    stated = 0
+    for path in sorted(CONTRACTS.iterdir()):
+        if not path.is_file() or path.name.endswith(".schema.json"):
+            continue
+        for value in re.findall(
+            r"contract_version[^0-9]{0,12}(\d+)", path.read_text(encoding="utf-8")
+        ):
+            stated += 1
+            assert int(value) == terminal, path.name
+    assert stated
+
+    # The UI declares the same number as a literal type, and `tsc` is the only
+    # thing that would have caught it drifting — one language boundary away from
+    # every check above, which is where this bump went half-applied a second time.
+    # A regex over the declaration is cheap; noticing in review is not.
+    declared = re.search(
+        r"^export const CONTRACT_VERSION = (\d+) as const;$",
+        Path("ui/src/components/settings/models/types.ts").read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    assert declared is not None
+    assert int(declared.group(1)) == terminal
+
+
+def test_contracts_readme_indexes_every_file_beside_it():
+    # The index is what a reader consults to learn a contract exists at all, so a
+    # file missing from it is invisible even though it ships. Both this PR's
+    # `usage-summary.schema.json` and the older `api-response.schema.json` had gone
+    # unlisted, which is what a hand-maintained list does on a long enough timeline.
+    # Comparing against the directory rather than against a second list means the
+    # next file added is caught by this test instead of by whoever needed it.
+    readme = (CONTRACTS / "README.md").read_text(encoding="utf-8")
+    indexed = set(re.findall(r"^\| `([^`]+)` \|", readme, flags=re.MULTILINE))
+    present = {path.name for path in CONTRACTS.iterdir() if path.is_file()}
+    assert present - indexed == set()
+    assert indexed - present == set()
 
 
 def test_v5_mirror_registry_mutation_probes_detect_every_comparable_drift():
@@ -1104,7 +1199,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 5,
+        "contract_version": 6,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "chain": [{
@@ -1600,6 +1695,161 @@ def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, t
     assert route.hops[0].model_id == model_id
     assert loaded.load_warnings == ()
     assert loaded.model_hub.sources[0].models[0].reasoning_efforts == []
+
+
+def test_config_reload_spells_route_hops_like_the_inventory_they_name(monkeypatch, tmp_path):
+    # A hop names a model in a source's inventory, and `inspect_exact_hop` decides
+    # membership by comparing the two identifiers exactly, so the chain only
+    # survives an upgrade while one rule spells both sides — the set equality below
+    # is that same comparison, taken over the whole route. The file seeds a model
+    # *and* the hop naming it in every spelling a persisted config can carry rather
+    # than listing the spellings that are exempt: a spelling admitted later is
+    # covered here without editing this test, which is what an enumeration misses.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    spellings = (
+        lambda base: base,
+        lambda base: f" {base}",
+        lambda base: f"{base} ",
+        lambda base: f"  {base}  ",
+        lambda base: f"\t{base}\n",
+        lambda base: "   ",
+    )
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "native_cli"
+    source["models"] = [
+        {
+            "id": spelling(f"claude-opus-4-{index}"),
+            "display_name": None,
+            "origin": "discovered",
+            "reasoning_efforts": [],
+            "discovered_at": "2026-07-23T03:00:00Z",
+        }
+        for index, spelling in enumerate(spellings)
+    ]
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    current["model_hub"]["sources"] = [source]
+    menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
+    route["hops"] = [
+        {"source_id": source["id"], "model_id": model["id"]} for model in source["models"]
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    hub = loaded.model_hub
+    hops = hub.agents["claude"].routes[menu_model].hops
+    assert {hop.model_id for hop in hops} == {model.id for model in hub.sources[0].models}
+
+
+def test_loading_a_persisted_config_yields_one_this_product_can_load_again(monkeypatch, tmp_path):
+    # The terminal property behind two rounds of findings, stated once instead of
+    # per collection: whatever `load` returns for a file a released build wrote,
+    # serializing it has to produce a file `load` accepts. Normalization is what
+    # threatened it — a many-to-one map applied in the leaf validator while the
+    # uniqueness check sits in the parent, so both spellings survive the load,
+    # `to_payload` writes one spelling twice, and the *next* load raises. That
+    # second load is the assertion, and it does not care which collections exist.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    padded = " claude-opus-4-6 "
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "native_cli"
+    source["models"] = [
+        {
+            "id": spelling,
+            "display_name": None,
+            "origin": "discovered",
+            "reasoning_efforts": [],
+            "discovered_at": "2026-07-23T03:00:00Z",
+        }
+        for spelling in (padded.strip(), padded)
+    ]
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    current["model_hub"]["sources"] = [source]
+    menu_model, route = next(iter(current["model_hub"]["agents"]["claude"]["routes"].items()))
+    route["hops"] = [
+        {"source_id": source["id"], "model_id": spelling} for spelling in (padded.strip(), padded)
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current, ensure_ascii=False), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+    assert loaded.load_warnings == ()
+
+    rewritten = tmp_path / "rewritten.json"
+    rewritten.write_text(
+        json.dumps(
+            api.config_to_payload(loaded, include_secrets=True, include_internal=True),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    reloaded = V2Config.load(config_path=rewritten)
+
+    assert reloaded.load_warnings == ()
+    assert reloaded.model_hub.to_payload() == loaded.model_hub.to_payload()
+
+
+def test_every_normalized_identifier_collection_collapses_through_one_owner():
+    # Naming the class rather than its third member. Each collection whose leaf
+    # validator settles a spelling needs its parent to collapse on the settled
+    # value, and the two that exist cost one review round each because nothing
+    # tied the two halves together. Counting them does: a normalization added
+    # without its collapse fails here instead of arriving as a finding.
+    source = Path("config/v2_config.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    normalizing = set()
+    collapsing = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                continue
+            if call.func.id == "normalized_model_id":
+                normalizing.add(node.name)
+            elif call.func.id == "_collapse_settled_duplicates":
+                collapsing.add(node.name)
+    assert normalizing == {"ModelHubModelConfig", "ModelHubRouteHopConfig"}
+    assert collapsing == {"ModelHubSourceConfig", "ModelHubRouteConfig"}
+    assert len(collapsing) == len(normalizing)
+
+
+def test_collapsing_a_settled_duplicate_is_a_repair_no_caller_gets_by_default():
+    # The other half of the collapse: *who* asked. Repairing a file a released
+    # build wrote has to keep loading, and admitting a request that names one
+    # model twice has to say so — the same pair, two answers, so the parser cannot
+    # infer it and the caller has to state it. This asserts the default rather
+    # than the two call sites, because the default is what a call site added later
+    # inherits without deciding: an ordinary `from_payload` collapses nothing.
+    for owner in (ModelHubSourceConfig, ModelHubRouteConfig, ModelHubAgentSupplyConfig, ModelHubConfig):
+        signature = inspect.signature(owner.from_payload)
+        assert signature.parameters["repairing"].default is False, owner.__name__
+
+    settled = inspect.signature(v2_config._collapse_settled_duplicates)
+    assert settled.parameters["repairing"].default is inspect.Parameter.empty
+    assert settled.parameters["repairing"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_a_live_chain_is_refused_the_duplicate_a_persisted_chain_is_repaired():
+    """MH-USAGE-012: one payload, both doors, opposite answers.
+
+    Which is the property, and the reason it is one test. The chain names one
+    upstream model in two spellings, so it is one ledger row either way; what
+    differs is whether the caller gets to learn that before it becomes one.
+    """
+
+    hops = [
+        {"source_id": "src_same0001", "model_id": "model-a"},
+        {"source_id": "src_same0001", "model_id": " model-a "},
+    ]
+
+    with pytest.raises(ValueError, match="unique pairs"):
+        ModelHubRouteConfig.from_payload({"hops": copy.deepcopy(hops)})
+
+    repaired = ModelHubRouteConfig.from_payload({"hops": copy.deepcopy(hops)}, repairing=True)
+    assert [hop.model_id for hop in repaired.hops] == ["model-a"]
 
 
 def test_config_reload_recovers_dangling_legacy_custom_source_order(monkeypatch, tmp_path):
@@ -2419,6 +2669,23 @@ def test_route_hops_allow_one_source_to_supply_distinct_models():
                 ]
             }
         )
+    # Two hops that only become one pair once spelling is settled are a legacy
+    # file naming one upstream model twice, not a malformed payload: the second
+    # was already unreachable past the first, so it collapses and the chain loads.
+    # Raising here would instead fail a load the persisted-shape rule requires
+    # to succeed.
+    collapsed = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [
+                {"source_id": "src_same0001", "model_id": "model-a"},
+                {"source_id": "src_same0001", "model_id": " model-a "},
+            ]
+        },
+        repairing=True,
+    )
+    assert [(hop.source_id, hop.model_id) for hop in collapsed.hops] == [
+        ("src_same0001", "model-a"),
+    ]
 
 
 def _ordering_source(

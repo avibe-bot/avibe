@@ -13,7 +13,18 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union, get_args
+from typing import (
+    Callable,
+    ClassVar,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    TypeVar,
+    Union,
+    get_args,
+)
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
@@ -2623,6 +2634,64 @@ class AgentsConfig:
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
+_SettledItem = TypeVar("_SettledItem")
+
+
+def _collapse_settled_duplicates(
+    parsed: list[_SettledItem],
+    identity: Callable[[_SettledItem], object],
+    as_written: list,
+    message: str,
+    *,
+    repairing: bool,
+) -> list[_SettledItem]:
+    """Keep a collection of model identifiers unique after spelling is settled.
+
+    `normalized_model_id` is a many-to-one map applied inside the leaf validator,
+    while the uniqueness check belongs to the parent holding the collection. So
+    every such parent is checking pre-images while the object it builds carries
+    post-images, and the difference is not cosmetic: the loaded config keeps both
+    entries, `to_payload` writes one spelling for both, and the next load of what
+    this one wrote raises. Loading a file must produce something loadable, and
+    that round trip is what this restores.
+
+    Duplicates **as written** are a malformed payload either way and raise.
+    Duplicates that appear only once spelling is settled depend on where the
+    payload came from, which is what `repairing` names:
+
+    - Repairing a payload already on disk, the later entry collapses into the
+      earlier. It was already unreachable — an inventory lookup and an exact hop
+      comparison both find the first — and raising would fail exactly the load the
+      persisted-shape rule requires to succeed.
+    - Admitting a payload from a caller, the same pair is a request to name one
+      model twice, and silently keeping one half answers with a collection the
+      caller did not send. It raises, so the caller learns which spelling survived
+      by being told rather than by reading the response.
+
+    Required, and not defaulted, because the answer is a property of the caller
+    rather than of the collection: a parser cannot infer whether it is repairing
+    history or admitting a request, and a default would let the next call site
+    inherit whichever guess this one made.
+    """
+
+    if len(set(as_written)) != len(as_written):
+        raise ValueError(message)
+    if not repairing:
+        settled_ids = [identity(item) for item in parsed]
+        if len(set(settled_ids)) != len(settled_ids):
+            raise ValueError(message)
+        return list(parsed)
+    collapsed: list[_SettledItem] = []
+    seen: set[object] = set()
+    for item in parsed:
+        settled = identity(item)
+        if settled in seen:
+            continue
+        seen.add(settled)
+        collapsed.append(item)
+    return collapsed
+
+
 @dataclass
 class ModelHubModelConfig:
     id: str
@@ -2679,8 +2748,15 @@ class ModelHubModelConfig:
             raise ValueError(
                 "Config 'model_hub.sources.models.retired' must be false for manual models"
             )
+        # Spelling is settled here, at the one place a payload becomes a model
+        # config, so no admission path can invent a second spelling for one
+        # model and split its usage across two ledger rows. The length bound
+        # stays with the admission surfaces: this constructor also reads files
+        # older releases wrote, and rejecting one of those would fail config load.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
         return cls(
-            id=model_id,
+            id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
             display_name=display_name,
@@ -2835,7 +2911,7 @@ class ModelHubSourceConfig:
     masked_credential: Optional[str] = None
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
+    def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources' entries must be objects")
         allowed_fields = {
@@ -2891,8 +2967,13 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
         if any(not isinstance(model_id, str) for model_id in model_ids):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if len(set(model_ids)) != len(model_ids):
-            raise ValueError("Config 'model_hub.sources.models' contains duplicate ids")
+        models = _collapse_settled_duplicates(
+            [ModelHubModelConfig.from_payload(model) for model in models_payload],
+            lambda model: model.id,
+            model_ids,
+            "Config 'model_hub.sources.models' contains duplicate ids",
+            repairing=repairing,
+        )
         usage_payload = payload.get("usage")
         base_url = payload.get("base_url")
         credential_ref = payload.get("credential_ref")
@@ -2933,7 +3014,7 @@ class ModelHubSourceConfig:
             supply_channel=supply_channel,
             billing=billing,
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
-            models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            models=models,
             created_at=(
                 _validate_optional_datetime(
                     created_at,
@@ -2997,7 +3078,13 @@ class ModelHubRouteHopConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
-        return cls(source_id=source_id, model_id=model_id)
+        # A hop names a model in some source's inventory, and membership is decided
+        # by an exact comparison against that inventory. So the reference has to be
+        # spelled by whatever spells the thing it refers to: normalizing one side
+        # only would turn a working chain into `model_unsupported` on upgrade.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
+        return cls(source_id=source_id, model_id=normalized_model_id(model_id))
 
     def to_payload(self) -> dict:
         return {"source_id": self.source_id, "model_id": self.model_id}
@@ -3008,17 +3095,23 @@ class ModelHubRouteConfig:
     hops: tuple[ModelHubRouteHopConfig, ...] = ()
 
     @classmethod
-    def from_payload(cls, payload: object) -> "ModelHubRouteConfig":
+    def from_payload(cls, payload: object, *, repairing: bool = False) -> "ModelHubRouteConfig":
         if not isinstance(payload, dict) or set(payload) != {"hops"}:
             raise ValueError("Config 'model_hub.agents.routes' entries must contain hops")
         hops = payload.get("hops")
         if not isinstance(hops, list):
             raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
-        parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
-        pairs = [(hop.source_id, hop.model_id) for hop in parsed]
-        if len(set(pairs)) != len(pairs):
-            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
-        return cls(hops=parsed)
+        return cls(
+            hops=tuple(
+                _collapse_settled_duplicates(
+                    [ModelHubRouteHopConfig.from_payload(hop) for hop in hops],
+                    lambda hop: (hop.source_id, hop.model_id),
+                    [(hop["source_id"], hop["model_id"]) for hop in hops],
+                    "Config 'model_hub.agents.routes.hops' must contain unique pairs",
+                    repairing=repairing,
+                )
+            )
+        )
 
     def to_payload(self) -> dict:
         return {"hops": [hop.to_payload() for hop in self.hops]}
@@ -3095,7 +3188,13 @@ class ModelHubAgentSupplyConfig:
         )
 
     @classmethod
-    def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
+    def from_payload(
+        cls,
+        payload: dict,
+        *,
+        expected_backend: Optional[str] = None,
+        repairing: bool = False,
+    ) -> "ModelHubAgentSupplyConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents' entries must be objects")
         if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
@@ -3125,7 +3224,7 @@ class ModelHubAgentSupplyConfig:
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
         routes = {
-            model_id: ModelHubRouteConfig.from_payload(route)
+            model_id: ModelHubRouteConfig.from_payload(route, repairing=repairing)
             for model_id, route in routes_payload.items()
         }
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
@@ -3205,7 +3304,7 @@ class ModelHubConfig:
         return list(self.agents[backend].sources.order)
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubConfig":
+    def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
         if set(payload) - {"sources", "agents"}:
@@ -3218,7 +3317,10 @@ class ModelHubConfig:
             raise ValueError("Config 'model_hub.agents' must be an object")
         if set(agents_payload) - set(MODEL_HUB_BACKENDS):
             raise ValueError("Config 'model_hub.agents' contains unknown backends")
-        sources = [ModelHubSourceConfig.from_payload(source) for source in sources_payload]
+        sources = [
+            ModelHubSourceConfig.from_payload(source, repairing=repairing)
+            for source in sources_payload
+        ]
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
@@ -3253,6 +3355,7 @@ class ModelHubConfig:
             agents[backend] = ModelHubAgentSupplyConfig.from_payload(
                 raw_agent,
                 expected_backend=backend,
+                repairing=repairing,
             )
             expected_menu_ids = (
                 model_hub_fixed_menu_ids(backend)
@@ -3836,7 +3939,15 @@ class V2Config:
             # the user explicitly opts in after the release capability is enabled.
             model_hub = ModelHubConfig()
         else:
-            model_hub = ModelHubConfig.from_payload(model_hub_payload)
+            # The one repairing door, because this is the one caller parsing a
+            # document a previous release wrote. Every other entry into these
+            # constructors is either a request from a client — which must be told
+            # it named a model twice rather than answered with half of what it
+            # sent — or a round trip of objects this process already settled. The
+            # save paths reach here too, but never with this subtree: the config
+            # API drops ``model_hub`` from what the client sends, so the payload
+            # under this key is always what was last read off disk.
+            model_hub = ModelHubConfig.from_payload(model_hub_payload, repairing=True)
 
         ui_payload = payload.get("ui") or {}
         if not isinstance(ui_payload, dict):

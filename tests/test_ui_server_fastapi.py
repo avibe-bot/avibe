@@ -370,6 +370,41 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     assert deleted_scopes == [("telegram", "-1001", "42")]
 
 
+def test_the_usage_read_is_served_natively_rather_than_from_a_compat_worker(monkeypatch):
+    """Review 4966281026 finding 4: this read blocks, so where it is served matters.
+
+    Summarising the ledger takes the lock its writers hold across an fsync. The
+    compat surface hands a sync handler to a threadpool worker, so serving it
+    there occupies a UI worker for as long as the disk takes — while the native
+    surface awaits it on the loop, which is what the async client below exists
+    for. `ui_compat` names its endpoints `<name>_compat_endpoint`, so the route
+    table is where the two are told apart.
+    """
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    asked: list[int] = []
+
+    class LedgerClient:
+        async def usage_summary(self, *, days: int) -> dict:
+            asked.append(days)
+            return {"window_days": days}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: LedgerClient())
+
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/models/usage" and "GET" in route.methods
+    )
+    assert route.endpoint.__name__ == "model_hub_usage_get"
+
+    response = app.test_client().get("/api/models/usage?days=7")
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {"window_days": 7}
+    assert asked == [7]
+
+
 def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(monkeypatch):
     from core.services import settings as settings_service
     from storage.settings_service import StaleScopeAgentBindingError

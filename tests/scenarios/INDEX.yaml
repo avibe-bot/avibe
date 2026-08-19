@@ -117,6 +117,8 @@ capabilities:
       - tests/test_model_hub_resolution.py
       - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
+      - tests/test_model_hub_l3.py
+      - tests/test_model_hub_usage.py
       - tests/test_opencode_server.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery

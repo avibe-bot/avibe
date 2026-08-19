@@ -22,7 +22,7 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
 });
 
 const runtime: RuntimeDependency = {
-  contract_version: 5,
+  contract_version: 6,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [] },
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -73,7 +73,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = {
-  contract_version: 5,
+  contract_version: 6,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -585,7 +585,7 @@ describe('SettingsModelsPage surface branches', () => {
         builtin_models: [modelId],
       };
       const affectedChain: AgentChain = {
-        contract_version: 5,
+        contract_version: 6,
         backend: 'claude',
         model_id: modelId,
         current: { source_id: retainedSource.id, model_id: modelId },

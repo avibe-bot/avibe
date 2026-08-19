@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
+import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,9 +69,10 @@ from core.handlers.model_hub.service import (
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
     _RenderedTurnOutcome,
-    _SSEWireState,
     render_protocol_terminal_event,
 )
+from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
+from core.handlers.model_hub.usage import BoundedUsageLedger, UsageWriter, _ledger_executor
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -245,7 +250,7 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
 
 
 def test_responses_terminal_event_discards_partial_sequence_before_injection() -> None:
-    wire = _SSEWireState("openai_responses")
+    wire = ProtocolSSEState("openai_responses")
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":7}\n\n')
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":8}')
 
@@ -262,7 +267,7 @@ def test_responses_terminal_event_discards_partial_sequence_before_injection() -
 
 
 def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None:
-    wire = _SSEWireState("openai_responses")
+    wire = ProtocolSSEState("openai_responses")
     wire.observe(
         b'data: {"type":"response.output_text.delta","sequence_number":7}\r\r'
         b'data: {"type":"response.output_text.delta","sequence_number":8}\r\r'
@@ -725,7 +730,23 @@ class MemoryStore:
         return self.requested_models.get(backend, "")
 
 
-class InvokeHandle:
+class _EngineObservation:
+    """The adapter-side half of `InvokeHandle` these fakes all answer the same way.
+
+    Every fake below stands in for an engine that reports nothing about a body
+    until the gateway reads it, which is the state the contract calls `None`.
+    A fake that hands over a real observation sets `_observed` and thereby says
+    so explicitly, instead of being the only one that remembered the member.
+    """
+
+    _observed = None
+
+    @property
+    def observed(self):
+        return self._observed
+
+
+class InvokeHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
 
@@ -744,9 +765,15 @@ class InvokeHandle:
         return self._outcome
 
 
-class LiveInvokeHandle:
-    def __init__(self, outcome: RawCallOutcome, chunks: tuple[bytes, ...]):
+class LiveInvokeHandle(_EngineObservation):
+    def __init__(
+        self,
+        outcome: RawCallOutcome,
+        chunks: tuple[bytes, ...],
+        observed: ProtocolSSEState | None = None,
+    ):
         self._outcome = outcome
+        self._observed = observed
         self._stream = self._iterate(chunks)
 
     @staticmethod
@@ -769,7 +796,7 @@ class LiveInvokeHandle:
         return self._outcome
 
 
-class BlockingLiveInvokeHandle:
+class BlockingLiveInvokeHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self.started = asyncio.Event()
@@ -819,7 +846,7 @@ class MidStreamBlockingInvokeHandle(BlockingLiveInvokeHandle):
         yield b"data: [DONE]\n\n"
 
 
-class BrokenUpstreamInvokeHandle:
+class BrokenUpstreamInvokeHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self._stream = self._iterate()
@@ -843,6 +870,30 @@ class BrokenUpstreamInvokeHandle:
 
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
+
+
+@contextmanager
+def _occupied_ledger_writer():
+    """Hold the one thread ledger writes run on, so a queued write cannot start.
+
+    That is the window where cancelling whoever awaits a write used to cancel the
+    write itself, and it is only reachable while the writing thread is busy.
+    """
+
+    occupied = threading.Event()
+    release = threading.Event()
+
+    def occupy() -> None:
+        occupied.set()
+        release.wait(5)
+
+    occupant = _ledger_executor().submit(occupy)
+    assert occupied.wait(5)
+    try:
+        yield
+    finally:
+        release.set()
+        occupant.result(timeout=5)
 
 
 class FakeStreamResponse:
@@ -881,7 +932,7 @@ class FakeStreamResponse:
         return None
 
 
-class DeferredLifecycleHandle:
+class DeferredLifecycleHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self._available = False
@@ -916,7 +967,7 @@ class DeferredLifecycleHandle:
         return self._outcome
 
 
-class RepeatedCancellationHandle:
+class RepeatedCancellationHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome, blocked_phase: str):
         self._outcome = outcome
         self._blocked_phase = blocked_phase
@@ -959,7 +1010,7 @@ class RepeatedCancellationHandle:
         return self._outcome
 
 
-class NeverResolvingCloseHandle:
+class NeverResolvingCloseHandle(_EngineObservation):
     def __init__(self, outcome: RawCallOutcome):
         self._outcome = outcome
         self.started = asyncio.Event()
@@ -1130,6 +1181,7 @@ def _outcome(
     message: str | None = None,
     source_id: str = "src_primary01",
     stream_started: bool = False,
+    usage: ProtocolUsageReport | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1139,6 +1191,7 @@ def _outcome(
         stream_started=stream_started,
         model_id="shared-model",
         source_id=source_id,
+        usage=usage,
     )
 
 
@@ -1155,6 +1208,7 @@ def _service(
         adapter=ProbeAdapter(outcomes or [], live_handles),
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
+        usage=BoundedUsageLedger(tmp_path / "usage.json", now=lambda: NOW),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: NOW,
         requested_model_override=store.requested_model,
@@ -2113,7 +2167,7 @@ def test_gateway_emits_at_most_one_wire_terminal(case: dict[str, object]) -> Non
             response,  # type: ignore[arg-type]
             "openai_responses",
             outcomes[str(case["settlement"])],
-            _SSEWireState("openai_responses"),
+            ProtocolSSEState("openai_responses"),
             forwarded_terminal=cast(str | None, forwarded),  # type: ignore[arg-type]
         )
         assert bool(response.writes) is case["write_terminal"]
@@ -4402,7 +4456,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 5,
+            "contract_version": 6,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -5487,7 +5541,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 5,
+        "contract_version": 6,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,
@@ -6059,3 +6113,1202 @@ def test_known_opencode_turn_is_fail_closed_but_not_unknown(
         service.get_turn_provenance("turn_opencode")
     assert unavailable.value.code == "provenance_unavailable"
     assert unavailable.value.detail == "models.provenance.attribution_ambiguous"
+
+
+def _usage_of(service: ModelHubService, source_id: str) -> dict:
+    summary = service.usage_summary(days=30)
+    matches = [source for source in summary["sources"] if source["source_id"] == source_id]
+    return matches[0] if matches else {}
+
+
+def test_gateway_meters_a_buffered_served_turn_from_the_upstream_body(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_meterbuf01", "Buffered meter")
+        body = json.dumps(
+            {
+                "id": "resp_buffered",
+                "usage": {
+                    "input_tokens": 4096,
+                    "input_tokens_details": {"cached_tokens": 3072},
+                    "output_tokens": 128,
+                },
+            }
+        ).encode("utf-8")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (body,),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_buffered",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        result = await gateway._handle_request(request)
+
+        assert result.status == 200
+        assert result.body == body
+        metered = _usage_of(service, source.id)
+        assert metered["label"] == "Buffered meter"
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 4096
+        assert metered["cached_input_tokens"] == 3072
+        assert metered["output_tokens"] == 128
+        assert [model["model_id"] for model in metered["models"]] == ["shared-model"]
+
+    asyncio.run(exercise())
+
+
+def test_gateway_meters_a_streamed_served_turn_from_the_wire(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        source = _source("src_meterwire01", "Streamed meter")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                        b'event: response.completed\ndata: {"type":"response.completed",'
+                        b'"sequence_number":2,"response":{"usage":{"input_tokens":900,'
+                        b'"output_tokens":64}}}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_streamed",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 900
+        assert metered["output_tokens"] == 64
+
+    asyncio.run(exercise())
+
+
+def test_a_stream_that_forwarded_output_is_metered_without_a_token_report(
+    tmp_path: Path,
+) -> None:
+    """Review 4959575659 finding 10: `requests` is what our own code measured.
+
+    Model output reached the client, so the call reached the model — a connection
+    lost after a text delta is still a request that happened. Nobody reported its
+    tokens, which is exactly what `token_reports` staying at zero records.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterpart01", "Interrupted stream")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.NETWORK_ERROR,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_partial",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+        assert metered["input_tokens"] == 0
+        assert metered["output_tokens"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_buffered_response_cancelled_while_settling_is_still_metered(
+    tmp_path: Path,
+) -> None:
+    """Review 4960016618: the boundary meters the turn's report, not one shape's.
+
+    Upstream delivered a complete billed response and the client then went away
+    while the turn was settling. The buffered shape has no wire tracker for the
+    boundary to read, so a report that lived only in the request frame's local
+    would vanish exactly when the turn was already billed.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterbuf01", "Cancelled buffered turn")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (b'{"usage":{"input_tokens":704,"output_tokens":21}}',),
+                )
+            ],
+        )
+        settling = asyncio.Event()
+        release = asyncio.Event()
+        settle_handle_outcome = service.settle_handle_outcome
+
+        async def blocked_settlement(*args: object, **kwargs: object):
+            settling.set()
+            await release.wait()
+            return await settle_handle_outcome(*args, **kwargs)
+
+        service.settle_handle_outcome = blocked_settlement
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_buffered_cancel",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(settling.wait(), timeout=1)
+        turn.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 704
+        assert metered["output_tokens"] == 21
+
+    asyncio.run(exercise())
+
+
+def test_a_cancelled_buffered_turn_is_counted_even_when_it_reported_no_tokens(
+    tmp_path: Path,
+) -> None:
+    """Review 4964520496: a request is self-measured, so a silent vendor still owes one.
+
+    Same cancellation as above with the one thing removed that was carrying it —
+    the usage block. `requests` is measured by our own code and must not depend on
+    what upstream chose to report, which is exactly what `token_reports` staying
+    at zero records.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterbuf02", "Cancelled silent turn")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (b'{"output":[{"type":"message","content":[]}]}',),
+                )
+            ],
+        )
+        settling = asyncio.Event()
+        release = asyncio.Event()
+        settle_handle_outcome = service.settle_handle_outcome
+
+        async def blocked_settlement(*args: object, **kwargs: object):
+            settling.set()
+            await release.wait()
+            return await settle_handle_outcome(*args, **kwargs)
+
+        service.settle_handle_outcome = blocked_settlement
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_buffered_silent_cancel",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(settling.wait(), timeout=1)
+        turn.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
+    tmp_path: Path,
+) -> None:
+    """Review 4964754924: the gateway owns the write, so no ending can cancel it.
+
+    Occupy the writing thread and the ledger write is queued but not started —
+    the window where cancelling the awaiting task also cancels the work. The turn
+    dies there, and the row still lands, because what the turn owns is the
+    decision to meter and not the write that carries it out.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterown01", "Owned write")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (b'{"usage":{"input_tokens":512,"output_tokens":16}}',),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_owned_write",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        with _occupied_ledger_writer():
+            turn = asyncio.create_task(gateway._handle_request(request))
+            while not gateway._usage_writer.unpersisted:
+                await asyncio.sleep(0.01)
+            # The scenario is only the scenario while the write is still queued.
+            assert _usage_of(service, source.id) == {}
+
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(turn, timeout=5)
+
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["input_tokens"] == 512
+        assert metered["output_tokens"] == 16
+
+    asyncio.run(exercise())
+
+
+def test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it(
+    tmp_path: Path,
+) -> None:
+    """Review 4964894667: the same window at the other metering owner.
+
+    A call the resolver consumed itself still reports tokens the vendor billed.
+    Occupy the writing thread and its row is queued but not started; the caller
+    is cancelled there, and the row lands anyway. Neither owner keeps a write of
+    its own, so neither can lose one — `UsageWriter` holds both.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterown02", "Owned resolve write")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    source_id=source.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=512,
+                        cached_input_tokens=0,
+                        output_tokens=16,
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        with _occupied_ledger_writer():
+            resolve = asyncio.create_task(
+                service.resolve(
+                    backend="codex",
+                    model_id=requested_model,
+                    request=ModelHubRequest(
+                        {"model": requested_model, "input": "ping"},
+                        protocol="openai_responses",
+                    ),
+                    supply_channel="hub",
+                )
+            )
+            while not service.usage_writer.unpersisted:
+                await asyncio.sleep(0.01)
+            # The scenario is only the scenario while the write is still queued.
+            assert _usage_of(service, source.id) == {}
+
+            resolve.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(resolve, timeout=5)
+
+        assert await service.usage_writer.drain(timeout=5) == 0
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["input_tokens"] == 512
+        assert metered["output_tokens"] == 16
+
+    asyncio.run(exercise())
+
+
+def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded(
+    tmp_path: Path,
+) -> None:
+    """Review 4965076681: the writes queue on their own thread, a batch at a time.
+
+    `record_many` holds the ledger's lock across an fsync, so one shared-pool job
+    per completed call would park that many workers on a lock that admits one,
+    and unrelated `asyncio.to_thread` work would wait behind metering for nothing.
+    Hold the loop's default executor for the whole test and metering still lands:
+    it was never borrowing from there.
+
+    What bounds the queue is in the same run. Calls that arrive while a flush is
+    on disk are taken together by the next one, so a burst costs transactions in
+    proportion to how long the disk takes rather than to how hard the hub is
+    driven — and every row still lands, which dropping them would not do.
+    """
+
+    async def exercise() -> None:
+        loop = asyncio.get_running_loop()
+        shared = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(shared)
+        borrowed_started = threading.Event()
+        give_back = threading.Event()
+
+        def borrow() -> None:
+            borrowed_started.set()
+            give_back.wait(5)
+
+        borrower = loop.run_in_executor(shared, borrow)
+        assert borrowed_started.wait(5)
+
+        source = _source("src_meterburst1", "Burst")
+        service = _service(tmp_path, sources=[source])
+        transactions: list[int] = []
+        fold = service.usage.record_many
+
+        def counting(calls) -> None:
+            transactions.append(len(calls))
+            fold(calls)
+
+        service.usage.record_many = counting
+        writer = service.usage_writer
+
+        def meter() -> None:
+            writer.record(
+                source_id=source.id,
+                model_id="gpt-5-codex",
+                usage=ProtocolUsageReport.of(
+                    input_tokens=1, cached_input_tokens=0, output_tokens=1
+                ),
+                at=NOW,
+            )
+
+        with _occupied_ledger_writer():
+            meter()
+            # White-box on purpose: the batch boundary is the thing under test,
+            # and it is only observable once the first flush is holding one.
+            while not writer._writing:
+                await asyncio.sleep(0.01)
+            for _ in range(7):
+                meter()
+
+        assert await writer.drain(timeout=5) == 0
+        # Eight calls, two trips to disk — the second took every call that piled
+        # up behind the first, which is the whole of the bound. It carries one row
+        # rather than seven, because the seven were headed for one row anyway; the
+        # requests below are what proves that folded and lost are different things.
+        assert transactions == [1, 1]
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 8
+        assert metered["input_tokens"] == 8
+
+        give_back.set()
+        await borrower
+        shared.shutdown()
+
+    asyncio.run(exercise())
+
+
+def test_no_ending_of_a_turn_decides_for_itself_what_the_call_did() -> None:
+    """The metering facts have one owner, so an ending is a *when*, not a *what*.
+
+    Endings that answered locally answered in the vocabulary of the shape they
+    happened to see, and the boundary — which can see either — got the buffered
+    one wrong. An ending added later is covered by construction if it cannot pass
+    the answer in, so that is what is asserted rather than today's three endings.
+    """
+
+    path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
+    calls = [
+        node
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_record_usage"
+    ]
+
+    assert calls, "the gateway must still meter the calls whose body it forwards"
+    assert all(len(call.args) == 1 and not call.keywords for call in calls)
+
+
+def test_no_downstream_ending_after_adoption_can_drop_the_turn_from_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """Review 4965076681: the gateway takes the body before it can serve it.
+
+    Between adopting the upstream body and reading it, the gateway prepares a
+    downstream response — and a client that leaves in that gap leaves behind
+    neither a wire tracker nor a buffered verdict for the boundary to read. The
+    vendor billed the call either way, so what the ledger must not depend on is
+    *where* the turn died.
+
+    Driven off `FakeStreamResponse`'s own failure points instead of a list of
+    them: a downstream step that becomes failable later is covered the moment it
+    can fail, rather than the moment someone remembers this test.
+    """
+
+    failure_points = [
+        name for name in inspect.signature(FakeStreamResponse).parameters if name.endswith("_error")
+    ]
+    assert failure_points
+
+    async def exercise(point: str) -> None:
+        state = tmp_path / point
+        state.mkdir()
+        source = _source("src_meterdrop01", "Adopted body")
+        service = _service(
+            state,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=f"turn_meter_{point}",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(**{point: ConnectionResetError("client left")}),
+        ):
+            with pytest.raises(ConnectionError):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=5)
+        await gateway.close()
+
+        assert _usage_of(service, source.id).get("requests") == 1, point
+
+    for point in failure_points:
+        asyncio.run(exercise(point))
+
+
+def test_the_tokens_the_engine_already_read_survive_every_ending_before_our_first(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-001, review 4965405530: the engine read this body's head before we did.
+
+    The gateway asks the engine for a stream, and the engine only knows there is
+    one because it read far enough to see the first model output — which for
+    Anthropic is past `message_start`, the frame carrying the input tokens the
+    vendor already billed. Those bytes then reach the gateway as a replay it
+    re-tokenizes itself, so every fact it holds about the call starts existing
+    only once forwarding starts. `requests` survived that gap because adoption
+    is a fact of the turn; the token counts had nowhere to come from.
+
+    Same enumeration as the sibling above, for the same reason: the property is
+    that no downstream ending decides what upstream reported, so the endings are
+    read off the response double rather than listed here.
+    """
+
+    failure_points = [
+        name for name in inspect.signature(FakeStreamResponse).parameters if name.endswith("_error")
+    ]
+    assert failure_points
+
+    prelude = (
+        b'event: message_start\ndata: {"type":"message_start","message":'
+        b'{"usage":{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+    )
+
+    async def exercise(point: str) -> None:
+        state = tmp_path / f"prelude_{point}"
+        state.mkdir()
+        source = _source("src_meterprel01", "Prelude-billed body")
+        engine_view = ProtocolSSEState("anthropic")
+        engine_view.observe(prelude)
+        assert engine_view.usage is not None
+        service = _service(
+            state,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (prelude,),
+                    observed=engine_view,
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=f"turn_meter_prelude_{point}",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(**{point: ConnectionResetError("client left")}),
+        ):
+            with pytest.raises(ConnectionError):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=5)
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered.get("requests") == 1, point
+        assert metered.get("token_reports") == 1, point
+        assert metered.get("input_tokens") == 1028, point
+
+    for point in failure_points:
+        asyncio.run(exercise(point))
+
+
+def test_a_turn_cancelled_before_it_read_the_body_is_still_a_call_that_happened(
+    tmp_path: Path,
+) -> None:
+    """The same gap on the buffered path, which the review did not reach.
+
+    A non-streaming turn adopts the whole body and reads it in one go, so a
+    client that disconnects while that read is in flight leaves the boundary
+    exactly as empty-handed as the prepare gap does. Same adoption, same answer,
+    and `token_reports` at zero is the ledger saying nobody got to read the
+    tokens rather than that there were none.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterdrain01", "Adopted buffered body")
+        handle = BlockingLiveInvokeHandle(
+            _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id)
+        )
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_cancelled_drain",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        turn = asyncio.create_task(gateway._handle_request(request))
+        await asyncio.wait_for(handle.started.wait(), timeout=5)
+        # The scenario is only the scenario while nothing has been read yet.
+        assert _usage_of(service, source.id) == {}
+
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=5)
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_gateway_meters_a_failed_turn_that_upstream_already_billed(
+    tmp_path: Path,
+) -> None:
+    """A vendor that reported tokens billed us even when the stream failed."""
+
+    async def exercise() -> None:
+        source = _source("src_meterfail01", "Billed failure")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.HTTP_ERROR,
+                        status=500,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.output_text.delta\ndata: {"type":'
+                        b'"response.output_text.delta","sequence_number":1}\n\n',
+                        b'event: error\ndata: {"type":"error","code":"server_error",'
+                        b'"sequence_number":2,"usage":{"input_tokens":41,'
+                        b'"output_tokens":0}}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_billed_failure",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 41
+        # The failure keeps its own surface; metering does not replace it.
+        assert service.store.load().sources[0].state.status != "standby"
+
+    asyncio.run(exercise())
+
+
+def test_gateway_meters_nothing_for_a_turn_that_never_reached_the_model(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_meternone01", "Unreached", status="needs_action")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_unreached",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        result = await gateway._handle_request(request)
+
+        assert result.status == 409
+        summary = service.usage_summary(days=30)
+        assert summary["sources"] == []
+        assert summary["totals"]["requests"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_surfaced_buffered_error_still_meters_the_tokens_it_billed(
+    tmp_path: Path,
+) -> None:
+    """The call never hands a body onward, so only the resolver can meter it."""
+
+    async def exercise() -> None:
+        source = _source("src_meterbuferr", "Surfaced billing")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=400,
+                    code="invalid_request_error",
+                    source_id=source.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=310,
+                        cached_input_tokens=64,
+                        output_tokens=0,
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        with pytest.raises(ModelHubError) as raised:
+            await service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+
+        assert raised.value.code == "upstream_request_invalid"
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 310
+        assert metered["cached_input_tokens"] == 64
+        assert metered["last_metered_at"] == NOW.isoformat()
+
+    asyncio.run(exercise())
+
+
+def test_a_billed_failover_hop_is_metered_against_the_source_that_billed_it(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-002: every hop that reported tokens billed its own Source, not the last one."""
+
+    async def exercise() -> None:
+        first = _source("src_meterhop001", "Billed hop")
+        second = _source("src_meterhop002", "Serving hop")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    code="rate_limit_error",
+                    source_id=first.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=88,
+                        cached_input_tokens=0,
+                        output_tokens=0,
+                    ),
+                ),
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    source_id=second.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=120,
+                        cached_input_tokens=0,
+                        output_tokens=17,
+                    ),
+                ),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(
+                ModelHubRouteHopConfig(first.id, "shared-model"),
+                ModelHubRouteHopConfig(second.id, "shared-model"),
+            )
+        )
+
+        resolved = await service.resolve(
+            backend="codex",
+            model_id=requested_model,
+            request=ModelHubRequest(
+                {"model": requested_model, "input": "ping"},
+                protocol="openai_responses",
+            ),
+            supply_channel="hub",
+        )
+
+        assert resolved.source_id == second.id
+        assert _usage_of(service, first.id)["input_tokens"] == 88
+        assert _usage_of(service, second.id)["input_tokens"] == 120
+        # One turn, two upstream calls: the unit is the call, so the total says so.
+        assert service.usage_summary(days=30)["totals"]["requests"] == 2
+
+    asyncio.run(exercise())
+
+
+def test_a_call_that_reached_no_model_is_never_metered(tmp_path: Path) -> None:
+    """A rejected credential billed nothing; source health already reports it."""
+
+    async def exercise() -> None:
+        source = _source("src_meterauth01", "Rejected")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=401,
+                    code="authentication_error",
+                    source_id=source.id,
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        with pytest.raises(ModelHubError):
+            await service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+
+        assert service.usage_summary(days=30)["totals"]["requests"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_a_downstream_disconnect_meters_the_terminal_frame_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """The wire read the tokens before the write failed, so the turn was billed."""
+
+    async def exercise() -> None:
+        source = _source("src_meterdrop01", "Dropped client")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (
+                        b'event: response.completed\ndata: {"type":"response.completed",'
+                        b'"sequence_number":1,"response":{"usage":{"input_tokens":512,'
+                        b'"output_tokens":33}}}\n\n',
+                    ),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_disconnect",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        response = FakeStreamResponse(
+            write_error=ConnectionResetError("downstream write failed")
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=response,
+        ):
+            with pytest.raises(ConnectionError, match="downstream"):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=1)
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["token_reports"] == 1
+        assert metered["input_tokens"] == 512
+        assert metered["output_tokens"] == 33
+
+    asyncio.run(exercise())
+
+
+def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-004: a ledger read-modify-write is file I/O; the loop must not wait."""
+
+    async def exercise() -> None:
+        recording_threads: list[int] = []
+
+        def capture(_calls: object) -> None:
+            recording_threads.append(threading.get_ident())
+
+        resolver_source = _source("src_meterloop01", "Resolver owner")
+        resolver_service = _service(
+            tmp_path / "resolver",
+            sources=[resolver_source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.SUCCESS,
+                    status=200,
+                    source_id=resolver_source.id,
+                    usage=ProtocolUsageReport.of(
+                        input_tokens=5,
+                        cached_input_tokens=0,
+                        output_tokens=1,
+                    ),
+                )
+            ],
+        )
+        resolver_service.usage.record_many = capture
+        requested_model = _canonicalize_fixed_test_routes(resolver_service)["codex"]
+        await resolver_service.resolve(
+            backend="codex",
+            model_id=requested_model,
+            request=ModelHubRequest(
+                {"model": requested_model, "input": "ping"},
+                protocol="openai_responses",
+            ),
+            supply_channel="hub",
+        )
+
+        gateway_source = _source("src_meterloop02", "Gateway owner")
+        gateway_service = _service(
+            tmp_path / "gateway",
+            sources=[gateway_source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS, status=200, source_id=gateway_source.id
+                    ),
+                    (json.dumps({"id": "resp", "usage": {"input_tokens": 9}}).encode(),),
+                )
+            ],
+        )
+        gateway_service.usage.record_many = capture
+        gateway_model = _canonicalize_fixed_test_routes(gateway_service)["codex"]
+        gateway = ModelHubTurnGateway(gateway_service)
+        await gateway._handle_request(
+            _prepared_gateway_request(
+                gateway,
+                turn_id="turn_meter_offloop",
+                requested_model=gateway_model,
+                source_id=gateway_source.id,
+                stream=False,
+            )
+        )
+
+        assert len(recording_threads) == 2
+        assert threading.get_ident() not in recording_threads
+
+    asyncio.run(exercise())
+
+
+def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) -> None:
+    """Metering is a report, so a ledger fault must stay invisible downstream."""
+
+    async def exercise() -> None:
+        source = _source("src_meterbust01", "Broken ledger")
+        body = json.dumps({"id": "resp_ok", "usage": {"input_tokens": 7}}).encode("utf-8")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (body,),
+                )
+            ],
+        )
+        service.usage.record_many = Mock(side_effect=OSError("read-only state directory"))
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_broken_ledger",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        result = await gateway._handle_request(request)
+
+        assert result.status == 200
+        assert result.body == body
+        service.usage.record_many.assert_called_once()
+        assert service.store.load().sources[0].state.status == "standby"
+
+    asyncio.run(exercise())
+
+
+def test_a_settlement_that_raises_still_meters_the_call_it_was_settling(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-010: the vendor billed the call before our bookkeeping got a turn.
+
+    Metering used to be each ending's own step, placed after that ending's
+    bookkeeping, so a settlement that raised on the way through took the row with
+    it. Both shapes, because the two reach the ending from different frames and
+    each used to carry its own copy of the order — and `requests == 1` rather than
+    `>= 1`, because the boundary that catches the raise re-enters the same ending.
+    """
+
+    async def exercise(stream: bool) -> None:
+        state = tmp_path / ("stream" if stream else "buffer")
+        state.mkdir()
+        source = _source("src_meterraise1", "Broken settlement")
+        chunks = (
+            (
+                b'event: response.completed\ndata: {"type":"response.completed",'
+                b'"sequence_number":1,"response":{"usage":{"input_tokens":256,'
+                b'"output_tokens":12}}}\n\n',
+            )
+            if stream
+            else (b'{"usage":{"input_tokens":256,"output_tokens":12}}',)
+        )
+        service = _service(
+            state,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=stream,
+                    ),
+                    chunks,
+                )
+            ],
+        )
+
+        async def exploding_settlement(*args: object, **kwargs: object):
+            raise RuntimeError("settlement exploded")
+
+        service.settle_handle_outcome = exploding_settlement
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=f"turn_meter_raise_{'stream' if stream else 'buffer'}",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=stream,
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            with pytest.raises(RuntimeError, match="settlement exploded"):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=5)
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1, stream
+        assert metered["token_reports"] == 1, stream
+        assert metered["input_tokens"] == 256, stream
+        assert metered["output_tokens"] == 12, stream
+
+    for stream in (False, True):
+        asyncio.run(exercise(stream))
+
+
+def test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-011: waiting for the row is an ordering convenience, not a gate.
+
+    Metering waits out its own write so a client that opens the usage tab right
+    after its call already sees that call. Unbounded, the convenience becomes the
+    turn's critical path: hold the one thread ledger writes run on and the served
+    response waits behind a disk that has stopped answering. Bounded, the turn is
+    served and the row stays queued — timed out is not dropped, which is the other
+    half of the same wait.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterhang01", "Unresponsive ledger")
+        body = json.dumps({"usage": {"input_tokens": 64, "output_tokens": 4}}).encode("utf-8")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (body,),
+                )
+            ],
+        )
+        service.usage_writer = UsageWriter(service.usage, durability_wait=0.05)
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_hung_ledger",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        with _occupied_ledger_writer():
+            result = await asyncio.wait_for(gateway._handle_request(request), timeout=1)
+            assert result.status == 200
+            assert result.body == body
+            # The scenario is only the scenario while the write is still queued,
+            # and a queued write is still the writer's to finish.
+            assert service.usage_writer.unpersisted == 1
+            assert _usage_of(service, source.id) == {}
+
+        assert await service.usage_writer.drain(timeout=5) == 0
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["input_tokens"] == 64
+        assert metered["output_tokens"] == 4
+
+    asyncio.run(exercise())

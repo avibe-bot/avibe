@@ -4676,6 +4676,30 @@ def model_hub_events_get():
         return _model_hub_error(exc)
 
 
+@app.get("/api/models/usage", include_in_schema=False)
+async def model_hub_usage_get(starlette_request: FastAPIRequest):
+    # Native rather than on the compat surface, and awaited rather than called:
+    # this read blocks on the lock the usage ledger's writers hold across an
+    # fsync, so reaching it from a threadpool worker would occupy that worker for
+    # as long as the disk takes. The controller side of the same rule is in
+    # `rpc.py`, which keeps the read off the event loop there.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
+
+        try:
+            days = int(starlette_request.query_params.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
+        except (TypeError, ValueError):
+            days = USAGE_DEFAULT_WINDOW_DAYS
+        try:
+            usage = await _model_hub_service().usage_summary(days=days)
+            return _model_hub_success(usage=usage)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chain", methods=["GET"])
 def model_hub_agent_chain_get(backend):
     from core.handlers.model_hub import ModelHubError
