@@ -248,6 +248,32 @@ class _SteeringAwareOpenCodeServer:
             for index, message in enumerate(messages)
         )
 
+    @classmethod
+    def _has_completed_error_after(
+        cls,
+        messages: list[Dict[str, Any]],
+        excluded_message_ids: set[str],
+        *,
+        inserted_user_text: str | None = None,
+    ) -> bool:
+        inserted_user_index = -1
+        if inserted_user_text is not None:
+            inserted_user_index = cls._inserted_user_index(
+                messages,
+                excluded_message_ids,
+                inserted_user_text,
+            )
+            if inserted_user_index < 0:
+                return False
+        return any(
+            index > inserted_user_index
+            and message.get("info", {}).get("role") == "assistant"
+            and message.get("info", {}).get("id") not in excluded_message_ids
+            and message.get("info", {}).get("time", {}).get("completed")
+            and message.get("info", {}).get("error")
+            for index, message in enumerate(messages)
+        )
+
     def _has_pending_question_tool(self, messages: list[Dict[str, Any]]) -> bool:
         return any(
             message.get("info", {}).get("id") not in self._state.baseline_message_ids
@@ -482,7 +508,12 @@ class _SteeringAwareOpenCodeServer:
                                         inserted_user_text=inserted_user_text,
                                     )
                                 )
-                                if has_final_insert_result:
+                                has_post_boundary_error = self._has_completed_error_after(
+                                    messages,
+                                    awaiting,
+                                    inserted_user_text=inserted_user_text,
+                                )
+                                if has_final_insert_result or has_post_boundary_error:
                                     self._clear_awaiting_reconciliation()
                                     self._state.closing = True
                                     return messages

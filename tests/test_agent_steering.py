@@ -1712,6 +1712,49 @@ async def test_opencode_retry_keeps_completed_error_snapshots_gated() -> None:
 
 
 @pytest.mark.anyio
+async def test_opencode_idle_post_boundary_error_clears_awaiting_boundary() -> None:
+    """A completed retry error must reach the poll owner, not a synthetic idle failure."""
+
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "continue"}],
+            },
+            {
+                "info": {
+                    "id": "retry-error",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "error": {"name": "UnknownError", "data": {"message": "tls"}},
+                },
+                "parts": [],
+            },
+        ],
+        status={"type": "idle"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"older-error"}
+    state.awaiting_user_text = "continue"
+    state.awaiting_active_status_observed = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        snapshot = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+        assert snapshot[-1]["info"]["id"] == "retry-error"
+        assert snapshot[-1]["info"]["error"]["name"] == "UnknownError"
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
 async def test_opencode_refuses_after_poll_owner_claims_terminal_result() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
