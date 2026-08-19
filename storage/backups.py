@@ -204,6 +204,60 @@ def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
     return candidate
 
 
+def _source_identity(source_path: Path) -> dict[str, int]:
+    stat = source_path.stat()
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _backup_already_covering(
+    target_root: Path,
+    *,
+    source: dict[str, int],
+    from_revisions: list[str],
+    to_revisions: list[str],
+) -> Path | None:
+    """Return a backup of this exact upgrade attempt, if one is already on disk.
+
+    A failed upgrade rolls back and leaves the source database untouched, so the
+    next attempt copies bytes that are already backed up. Retrying an upgrade that
+    cannot succeed therefore grew the backup directory without bound, and because
+    a rollback copy must outlive the failure that made it necessary, retention
+    could not reclaim any of it. Reusing the copy keeps every rollback point while
+    bounding the directory by distinct states rather than by attempts.
+    """
+
+    try:
+        entries = sorted(target_root.iterdir())
+    except OSError:
+        return None
+
+    reusable: list[_BackupCandidate] = []
+    for entry in entries:
+        # Accept exactly what the pruner recognizes as a managed SQLite backup:
+        # reusing a directory it does not track would move the copy outside the
+        # retention window that is supposed to reclaim it.
+        candidate = _directory_candidate(entry)
+        if candidate is None or candidate.kind != "sqlite":
+            continue
+        manifest = _read_manifest(entry / "manifest.json")
+        if manifest is None:
+            continue
+        # Match the target as well as the source: a backup names the upgrade it
+        # protects, and reusing one across a different target would leave a
+        # manifest that misdescribes its own contents.
+        if (
+            manifest.get("source") != source
+            or manifest.get("from_revisions") != from_revisions
+            or manifest.get("to_revisions") != to_revisions
+        ):
+            continue
+        reusable.append(candidate)
+    if not reusable:
+        return None
+    # Newest, so a reused backup is the one retention would keep longest.
+    return max(reusable, key=lambda item: item.order_key).root
+
+
 def create_sqlite_migration_backup(
     db_path: Path,
     *,
@@ -218,6 +272,18 @@ def create_sqlite_migration_backup(
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
     target_root.mkdir(parents=True, exist_ok=True)
+    source_identity = _source_identity(source_path)
+    sorted_from = sorted(set(from_revisions))
+    sorted_to = sorted(set(to_revisions))
+    reusable = _backup_already_covering(
+        target_root,
+        source=source_identity,
+        from_revisions=sorted_from,
+        to_revisions=sorted_to,
+    )
+    if reusable is not None:
+        logger.info("Reusing pre-migration SQLite backup at %s", reusable)
+        return reusable
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
     temp_db = backup_dir / "vibe.sqlite.tmp"
@@ -239,8 +305,12 @@ def create_sqlite_migration_backup(
             "kind": "sqlite-migration",
             "created_at": created_at.astimezone(timezone.utc).isoformat(),
             "database": "vibe.sqlite",
-            "from_revisions": sorted(set(from_revisions)),
-            "to_revisions": sorted(set(to_revisions)),
+            "from_revisions": sorted_from,
+            "to_revisions": sorted_to,
+            # Identifies the bytes this copy holds, so a retry of the same upgrade
+            # can recognize its own backup instead of making another. Backups
+            # written before this field simply never match and are left alone.
+            "source": source_identity,
         }
         (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     except Exception:

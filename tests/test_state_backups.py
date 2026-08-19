@@ -276,6 +276,41 @@ def test_failed_schema_upgrade_keeps_existing_sqlite_rollbacks(monkeypatch, tmp_
     assert all(path.exists() for path in existing)
 
 
+def test_retried_failing_migration_reuses_one_rollback_backup(monkeypatch, tmp_path: Path) -> None:
+    # The property: retrying an upgrade that cannot succeed costs one backup per
+    # distinct database state, not one per attempt, and buys that bound without
+    # giving up a rollback point. A failed upgrade rolls back and leaves the
+    # database untouched, so each retry was copying bytes that were already backed
+    # up; on a full-size database a caller retried per request filled the disk,
+    # and retention cannot reclaim a rollback copy while the failure it exists for
+    # is still live.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+    backups_dir = state_dir / "backups"
+    backups_dir.mkdir(exist_ok=True)
+    existing = [
+        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-2026070{day}T020000Z.sqlite")
+        for day in (7, 8, 9)
+    ]
+
+    def _blocked(*args, **kwargs):
+        raise RuntimeError("upgrade blocked")
+
+    monkeypatch.setattr("storage.migrations.command.upgrade", _blocked)
+
+    made = []
+    for _ in range(5):
+        with pytest.raises(RuntimeError, match="upgrade blocked"):
+            ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
+        made.append(sorted(backups_dir.glob("avibe-sqlite-migration-*")))
+
+    assert made[0] == made[-1], "a retry must reuse the copy it already made"
+    assert len(made[0]) == 1
+    assert all(path.exists() for path in existing)
+
+
 def test_run_migrations_backs_up_only_when_existing_schema_advances(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     db_path.parent.mkdir()
