@@ -3,10 +3,12 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { useLayoutEffect } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import { AuthGuard } from './App';
-import { DENIED_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
+import { useInstanceAuthorization } from './context/InstanceAuthorizationContext';
+import { DENIED_INSTANCE_CAPABILITIES, OWNER_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
+import { isOwnerOnlyPath } from './lib/adminNavigation';
 import { reportRemoteAuthorizationState, REMOTE_AUTH_STATE_EVENT } from './lib/remoteAuth';
 
 vi.hoisted(() => {
@@ -128,5 +130,71 @@ describe('AuthGuard remote authorization recovery', () => {
 
     expect(api.getAuthSession).toHaveBeenCalledTimes(2);
     expect(screen.getByText('protected shell')).toBeTruthy();
+  });
+});
+
+const CapabilityProbe = () => {
+  const { capabilities } = useInstanceAuthorization();
+  return <div>{capabilities.can_manage_instance ? 'owner-shell' : 'denied-shell'}</div>;
+};
+
+const OwnerOnlyGate = () => {
+  const { capabilities } = useInstanceAuthorization();
+  if (isOwnerOnlyPath('/admin/settings/diagnostics') && !capabilities.can_manage_instance) {
+    return <Navigate to="/" replace />;
+  }
+  return <div>diagnostics-page</div>;
+};
+
+describe('AuthGuard setup-bypass authorization', () => {
+  const localOwnerSession = {
+    remote: false as const,
+    instance_kind: 'personal' as const,
+    instance_role: 'owner' as const,
+    capabilities: OWNER_INSTANCE_CAPABILITIES,
+  };
+
+  it.each(['/admin/settings/diagnostics', '/admin/logs'])(
+    'keeps the instance owner on %s instead of treating the setup bypass as denied',
+    async (path) => {
+      api.getAuthSession.mockResolvedValue(localOwnerSession);
+      api.getConfig.mockResolvedValue({
+        mode: 'v2',
+        setup_state: { needs_setup: false },
+      });
+
+      render(
+        <MemoryRouter initialEntries={[path]}>
+          <AuthGuard>
+            <CapabilityProbe />
+          </AuthGuard>
+        </MemoryRouter>,
+      );
+
+      expect(await screen.findByText('owner-shell')).toBeTruthy();
+      expect(screen.queryByText('denied-shell')).toBeNull();
+    },
+  );
+
+  it('lets an owner open Diagnostics from Advanced Settings without bouncing home', async () => {
+    api.getAuthSession.mockResolvedValue(localOwnerSession);
+    api.getConfig.mockResolvedValue({
+      mode: 'v2',
+      setup_state: { needs_setup: false },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/admin/settings/diagnostics']}>
+        <AuthGuard>
+          <Routes>
+            <Route path="/admin/settings/diagnostics" element={<OwnerOnlyGate />} />
+            <Route path="/" element={<div>workbench-home</div>} />
+          </Routes>
+        </AuthGuard>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('diagnostics-page')).toBeTruthy();
+    expect(screen.queryByText('workbench-home')).toBeNull();
   });
 });
