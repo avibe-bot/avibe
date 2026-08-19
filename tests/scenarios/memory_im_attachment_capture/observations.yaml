@@ -33,3 +33,13 @@ observations:
       fail-closed for embed-bearing messages pending the Incus matrix.
     evidence:
       avibe_commit: 063aebd29713615e63ec828da94c4c8b339b6647
+  - id: MEMORY-IM-ATTACH-OBS-005
+    scenarios:
+      - MEMORY-IM-ATTACH-012
+    observation: >-
+      EverOS converts Office/iWork/ODF/RTF through LibreOffice before the
+      multimodal LLM; a missing soffice binary returns CAPABILITY_UNAVAILABLE
+      for the whole /add batch. Avibe therefore admits those extensions only
+      when soffice is resolvable and skips them independently otherwise.
+    evidence:
+      everos_commit: 560fb80b59fe5f033a911e38bebc87a3232a5234

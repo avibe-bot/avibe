@@ -376,6 +376,17 @@ install_node() {
     return 1
 }
 
+warn_if_libreoffice_missing() {
+    if command_exists soffice || [ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]; then
+        success "LibreOffice is available for Memory Office attachment capture"
+        return 0
+    fi
+
+    warn "LibreOffice is not available, so Memory will skip Word, Excel, PowerPoint, and other Office attachments."
+    warn "Install it to enable that path: macOS \"brew install --cask libreoffice\", Debian/Ubuntu \"apt-get install -y libreoffice-nogui\"."
+    return 0
+}
+
 install_node_optional() {
     set +e
     install_node
@@ -706,6 +717,10 @@ main() {
     # Node.js only powers the optional managed Show Page runtime. Never let it
     # block installation of the main avibe CLI/service.
     install_node_optional
+
+    # LibreOffice only powers Memory Office capture. Warn when it is missing;
+    # never block the main avibe CLI/service or download a host package here.
+    warn_if_libreoffice_missing
     
     # Install avibe-os
     install_vibe

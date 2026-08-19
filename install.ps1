@@ -134,6 +134,16 @@ function Install-Node {
     throw "Node.js $NODE_MINIMUM_REQUIREMENT is required for Show Pages runtime. Please install Node.js LTS from https://nodejs.org/ if needed."
 }
 
+function Warn-IfLibreOfficeMissing {
+    if (Test-Command "soffice") {
+        Write-Success "LibreOffice is available for Memory Office attachment capture"
+        return
+    }
+
+    Write-Warning "LibreOffice is not available, so Memory will skip Word, Excel, PowerPoint, and other Office attachments."
+    Write-Warning "Install LibreOffice from https://www.libreoffice.org/ if you want Memory to capture those files."
+}
+
 function Install-NodeOptional {
     try {
         Install-Node
@@ -412,6 +422,7 @@ function Main {
     # Node.js only powers the optional managed Show Page runtime. Never let it
     # block installation of the main avibe CLI/service.
     Install-NodeOptional
+    Warn-IfLibreOfficeMissing
     
     # Install avibe-os
     Install-Vibe

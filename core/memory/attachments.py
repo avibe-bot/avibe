@@ -25,7 +25,12 @@ from core.memory.confined_filesystem import (
     open_confined_directory,
     required_no_follow_flag,
 )
-from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+from core.memory.modality import (
+    OFFICE_ATTACHMENT_EXTENSIONS,
+    SUPPORTED_ATTACHMENT_EXTENSIONS,
+    office_attachment_bytes_match,
+    office_conversion_available,
+)
 from core.memory.types import (
     CaptureAttachment,
     MemoryContentKind,
@@ -724,6 +729,19 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
             # The provider answers an unparseable extension with a permanent
             # rejection, so an upload it cannot read never becomes a capture.
             continue
+        if extension in OFFICE_ATTACHMENT_EXTENSIONS:
+            # EverOS aborts the whole /add batch when soffice is missing or the
+            # bytes are not a convertible Office container.
+            try:
+                with path.open("rb") as file_obj:
+                    sample = file_obj.read(4096)
+            except OSError:
+                continue
+            if not office_conversion_available() or not office_attachment_bytes_match(
+                extension,
+                sample,
+            ):
+                continue
         normalized_mime = mimetype.lower().split(";", 1)[0].strip()
         if normalized_mime.startswith("image/"):
             kind: MemoryContentKind = "image"

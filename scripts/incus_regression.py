@@ -598,6 +598,7 @@ def cloud_init_user_data() -> str:
         "  - python3-venv",
         "  - rsync",
         "  - sudo",
+        "  - libreoffice-nogui",
         "users:",
         f"  - name: {SERVICE_USER}",
         "    groups: sudo",
@@ -1394,7 +1395,7 @@ def cmd_build_base(args: argparse.Namespace) -> int:
                 """\
                 set -euo pipefail
                 apt-get update
-                apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
+                apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux libreoffice-nogui
                 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
                 apt-get install -y nodejs
                 # Install the agent backends under the service user's home so the

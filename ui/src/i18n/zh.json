@@ -4573,7 +4573,7 @@
       "rerankHelpLabel": "关于重排序模型",
       "rerankClearLabel": "移除重排序端点",
       "multimodalTitle": "IM 附件处理模型（可选）",
-      "multimodalHelp": "完整配置后，已绑定私聊中的合规附件会发送到这个兼容 OpenAI 格式的视觉模型端点，用于记忆捕获。",
+      "multimodalHelp": "完整配置后，已绑定私聊中的合规附件会发送到这个兼容 OpenAI 格式的视觉模型端点，用于记忆捕获。Office 文档还需要本机已安装 LibreOffice。SVG 和视频仍不支持。",
       "multimodalHelpLabel": "关于 IM 附件处理",
       "multimodalClearLabel": "关闭 IM 附件捕获",
       "baseUrl": "Base URL",

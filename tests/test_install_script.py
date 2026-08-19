@@ -387,6 +387,32 @@ def test_install_script_continues_when_node_install_fails(tmp_path):
     assert "avibe-os 9.9.9" in version_result.stdout
 
 
+def test_install_script_warns_when_libreoffice_is_missing(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_INSTALL_SKIP_NODE"] = "1"
+
+    missing = _install(env, cwd=tmp_path)
+    assert missing.returncode == 0, missing.stdout + missing.stderr
+    assert "LibreOffice is not available" in missing.stdout
+    assert "Memory will skip Word, Excel, PowerPoint" in missing.stdout
+
+    _write_executable(path_dir / "soffice", "#!/usr/bin/env bash\nexit 0\n")
+    present = _install(env, cwd=tmp_path)
+    assert present.returncode == 0, present.stdout + present.stderr
+    assert "LibreOffice is available for Memory Office attachment capture" in present.stdout
+    assert "LibreOffice is not available" not in present.stdout
+
+
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

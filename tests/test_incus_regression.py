@@ -287,6 +287,7 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "MemoryAccounting=yes" in data
     assert "/opt/avibe/source" in data
     assert "/home/avibe/.vibe_remote" in data
+    assert "libreoffice-nogui" in data
 
 
 def test_project_config_marks_regression_target() -> None:

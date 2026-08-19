@@ -4573,7 +4573,7 @@
       "rerankHelpLabel": "About the reranking model",
       "rerankClearLabel": "Remove reranking endpoint",
       "multimodalTitle": "IM attachment processing model (optional)",
-      "multimodalHelp": "When fully configured, eligible attachments from bound direct messages are sent to this OpenAI-compatible vision endpoint for Memory capture.",
+      "multimodalHelp": "When fully configured, eligible attachments from bound direct messages are sent to this OpenAI-compatible vision endpoint for Memory capture. Office documents also require LibreOffice on this machine. SVG and video stay excluded.",
       "multimodalHelpLabel": "About IM attachment processing",
       "multimodalClearLabel": "Disable IM attachment capture",
       "baseUrl": "Base URL",

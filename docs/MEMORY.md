@@ -25,8 +25,10 @@ Only direct, ordinary files shared by a human are eligible. Bot, system,
 forwarded, edited, quoted, rich, and unrecognized native message shapes are
 excluded. Avibe then validates each eligible file against one shared format and
 content policy. Supported formats are plain text, Markdown, CSV/TSV, VTT, PDF,
-bitmap images, audio, HTML, and EML. Unsupported or malformed files are skipped
-independently, so eligible text and valid siblings can still be captured.
+bitmap images, audio, HTML, EML, and Office / iWork / ODF / RTF documents when
+LibreOffice is installed. SVG and video stay excluded. Unsupported or malformed
+files are skipped independently, so eligible text and valid siblings can still
+be captured.
 
 Each turn is limited to 8 captured attachments, 25 MiB per attachment, and
 100 MiB in total. Admitted files are copied into private Avibe storage until the

@@ -314,6 +314,61 @@ def test_provider_attachment_rejection_retries_caption_as_text_only(
     assert harness.memory_bundle_entries == ()
 
 
+def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-IM-ATTACH-012."""
+
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
+    without_home = tmp_path / "without-soffice"
+    monkeypatch.setenv("AVIBE_HOME", str(without_home / "avibe-home"))
+    without_soffice = MemoryIMAttachmentScenarioHarness(without_home)
+    asyncio.run(
+        without_soffice.capture(
+            text="Keep the image when Office conversion is missing",
+            payloads={
+                "valid.png": ("image/png", PNG_BYTES),
+                "report.xlsx": (
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    b"PK\x03\x04office",
+                ),
+            },
+        )
+    )
+
+    assert [item.name for item in without_soffice.provider.captures[0].attachments] == [
+        "valid.png"
+    ]
+
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    with_home = tmp_path / "with-soffice"
+    monkeypatch.setenv("AVIBE_HOME", str(with_home / "avibe-home"))
+    with_soffice = MemoryIMAttachmentScenarioHarness(with_home)
+    asyncio.run(
+        with_soffice.capture(
+            text="Capture the spreadsheet when Office conversion is present",
+            payloads={
+                "valid.png": ("image/png", PNG_BYTES),
+                "report.xlsx": (
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    b"PK\x03\x04office",
+                ),
+            },
+        )
+    )
+
+    assert [item.name for item in with_soffice.provider.captures[0].attachments] == [
+        "valid.png",
+        "report.xlsx",
+    ]
+    assert [item.kind for item in with_soffice.provider.captures[0].attachments] == [
+        "image",
+        "doc",
+    ]
+    assert with_soffice.memory_bundle_entries == ()
+
+
 class _ScenarioPrincipals:
     def principal_for_user_key(self, user_key: str) -> str:
         assert user_key.split(":", 1)[0] in {"discord", "telegram", "lark", "wechat"}

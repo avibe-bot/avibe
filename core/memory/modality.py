@@ -7,11 +7,16 @@ amount of retrying can clear, so the capture boundary filters uploads here
 instead of discovering the limit at the provider.
 
 This mirrors ``everalgo.types.modality`` in the packaged EverOS runtime
-runtime and must stay in sync with it. Two modality groups from that table are
-deliberately excluded because the text-only build lacks their integrations:
+and must stay in sync with it. Two upstream groups stay out of the live
+allowlist for host-capability reasons:
 
-- ``DOCUMENT`` (docx / xlsx / pptx / ODF / iWork / rtf) needs LibreOffice
-- ``svg`` needs the cairosvg integration
+- ``svg`` needs the cairosvg integration, which this runtime does not ship
+- video is still unimplemented in the pinned EverOS parser
+
+Office / iWork / ODF / RTF are admitted only when the host can resolve
+LibreOffice's ``soffice`` binary. EverOS converts those files to PDF before
+the multimodal LLM sees them; sending one without ``soffice`` aborts the
+whole ``/add`` batch with ``CAPABILITY_UNAVAILABLE``.
 
 Kept dependency-light on purpose: ``core.memory.sidecar`` imports this from the
 runtime child process, which runs with a minimal environment.
@@ -21,10 +26,32 @@ from __future__ import annotations
 
 import codecs
 import os
+import shutil
 from pathlib import Path
 
 from core.memory.types import MemoryContentKind
 
+
+# EverOS's macOS fallback; keep this identical so Avibe and the parser agree.
+_MACOS_SOFFICE = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
+
+OFFICE_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "docx",
+        "pptx",
+        "xlsx",
+        "doc",
+        "ppt",
+        "xls",
+        "pages",
+        "key",
+        "numbers",
+        "odt",
+        "ods",
+        "odp",
+        "rtf",
+    }
+)
 
 SUPPORTED_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -58,33 +85,73 @@ SUPPORTED_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
         "htm",
         # EMAIL
         "eml",
+        *OFFICE_ATTACHMENT_EXTENSIONS,
     }
 )
 
 # These pinned upstream formats need unavailable local integrations.  They are
 # deliberately a static Avibe policy, not a provider import in request handling.
-PINNED_UPSTREAM_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset(
-    {
-        "svg",
-        "docx",
-        "pptx",
-        "xlsx",
-        "doc",
-        "ppt",
-        "xls",
-        "pages",
-        "key",
-        "numbers",
-        "odt",
-        "ods",
-        "odp",
-        "rtf",
-    }
-)
+PINNED_UPSTREAM_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset({"svg"})
 
 _IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp", "tiff", "tif", "bmp"})
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "m4a", "amr", "aiff", "aac", "ogg", "flac"})
 _TEXT_EXTENSIONS = frozenset({"txt", "md", "vtt", "csv", "tsv"})
+_OFFICE_ZIP_EXTENSIONS = frozenset(
+    {
+        "docx",
+        "pptx",
+        "xlsx",
+        "odt",
+        "ods",
+        "odp",
+        "pages",
+        "key",
+        "numbers",
+    }
+)
+_OFFICE_OLE_EXTENSIONS = frozenset({"doc", "ppt", "xls"})
+_OFFICE_RTF_EXTENSIONS = frozenset({"rtf"})
+_OFFICE_MIMES = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+        "application/x-iwork-pages-sffpages",
+        "application/x-iwork-keynote-sffkey",
+        "application/x-iwork-numbers-sffnumbers",
+        "application/vnd.oasis.opendocument.text",
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "application/vnd.oasis.opendocument.presentation",
+        "application/rtf",
+        "text/rtf",
+    }
+)
+_ZIP_MAGIC = b"PK\x03\x04"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_RTF_MAGIC = b"{\\rtf"
+
+
+def office_conversion_available() -> bool:
+    """Return whether the Memory sidecar can resolve LibreOffice.
+
+    The sidecar PATH is ``<runtime>/bin:/usr/bin:/bin``. Probe only those
+    locations plus EverOS's macOS App fallback so Avibe never admits an
+    Office file the parser child cannot convert.
+    """
+
+    return (
+        shutil.which("soffice", path="/usr/bin:/bin") is not None
+        or _MACOS_SOFFICE.is_file()
+    )
+
+
+def office_attachment_bytes_match(extension: str, data: bytes) -> bool:
+    """Return whether ``data`` has the closed Office container magic for ``extension``."""
+
+    return _office_magic_matches(extension, data)
 
 
 def classify_pinned_attachment(
@@ -134,6 +201,12 @@ def classify_pinned_attachment(
         }:
             return None
         return "pdf", extension
+    if extension in OFFICE_ATTACHMENT_EXTENSIONS:
+        if not office_conversion_available() or not _office_magic_matches(extension, sample):
+            return None
+        if normalized_mime != "application/octet-stream" and normalized_mime not in _OFFICE_MIMES:
+            return None
+        return "doc", extension
     if not _valid_utf8_text_file(path, file_fd):
         return None
     if normalized_mime != "application/octet-stream" and not (
@@ -174,6 +247,16 @@ def _valid_utf8_text_file(path: Path, file_fd: int | None) -> bool:
 def _extension_aliases_match(expected: str, detected: str) -> bool:
     aliases = ({"jpg", "jpeg"}, {"tif", "tiff"}, {"m4a", "mp4"})
     return expected == detected or any({expected, detected} <= group for group in aliases)
+
+
+def _office_magic_matches(extension: str, data: bytes) -> bool:
+    if extension in _OFFICE_ZIP_EXTENSIONS:
+        return data.startswith(_ZIP_MAGIC)
+    if extension in _OFFICE_OLE_EXTENSIONS:
+        return data.startswith(_OLE_MAGIC)
+    if extension in _OFFICE_RTF_EXTENSIONS:
+        return data.startswith(_RTF_MAGIC)
+    return False
 
 
 def _image_extension(data: bytes) -> str | None:

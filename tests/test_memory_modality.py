@@ -5,9 +5,11 @@ from types import ModuleType
 import pytest
 
 from core.memory.modality import (
+    OFFICE_ATTACHMENT_EXTENSIONS,
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
     classify_pinned_attachment,
+    office_conversion_available,
     pinned_modality_contract_matches,
     pinned_modality_contract_script,
 )
@@ -112,3 +114,116 @@ def test_pinned_modality_admission_script_accepts_supported_upstream_containers(
     monkeypatch.setitem(sys.modules, "everalgo.types.modality", modality)
 
     exec(pinned_modality_contract_script(), {})
+
+
+_ZIP_MAGIC = b"PK\x03\x04office"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1office"
+_RTF_MAGIC = b"{\\rtf office"
+
+
+def test_classifier_keeps_svg_out_of_the_live_allowlist(tmp_path: Path) -> None:
+    path = _write_private(
+        tmp_path / "logo.svg",
+        b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    )
+
+    assert "svg" in PINNED_UPSTREAM_EXCLUDED_EXTENSIONS
+    assert classify_pinned_attachment("logo.svg", "image/svg+xml", path) is None
+
+
+def test_office_probe_uses_sidecar_path_and_macos_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        seen["name"] = name
+        seen["path"] = path
+        return None
+
+    monkeypatch.setattr("core.memory.modality.shutil.which", fake_which)
+    monkeypatch.setattr(
+        "core.memory.modality._MACOS_SOFFICE",
+        tmp_path / "missing-soffice",
+    )
+    assert office_conversion_available() is False
+    assert seen == {"name": "soffice", "path": "/usr/bin:/bin"}
+
+    fallback = _write_private(tmp_path / "soffice", b"")
+    monkeypatch.setattr("core.memory.modality._MACOS_SOFFICE", fallback)
+    assert office_conversion_available() is True
+
+
+def test_classifier_skips_office_without_soffice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
+    path = _write_private(tmp_path / "report.docx", _ZIP_MAGIC)
+
+    assert classify_pinned_attachment(
+        "report.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        path,
+    ) is None
+
+
+def test_classifier_accepts_office_when_soffice_is_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / "report.xlsx", _ZIP_MAGIC)
+
+    assert classify_pinned_attachment(
+        "report.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        path,
+    ) == ("doc", "xlsx")
+
+
+def test_classifier_rejects_office_bytes_that_are_not_convertible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / "report.docx", b"not an office container")
+
+    assert classify_pinned_attachment(
+        "report.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        path,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("filename", "mimetype", "payload"),
+    [
+        (
+            "legacy.doc",
+            "application/msword",
+            _OLE_MAGIC,
+        ),
+        (
+            "notes.rtf",
+            "application/rtf",
+            _RTF_MAGIC,
+        ),
+    ],
+)
+def test_classifier_accepts_closed_office_containers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    mimetype: str,
+    payload: bytes,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / filename, payload)
+
+    assert classify_pinned_attachment(filename, mimetype, path) == (
+        "doc",
+        Path(filename).suffix.lstrip("."),
+    )
+    assert Path(filename).suffix.lstrip(".") in OFFICE_ATTACHMENT_EXTENSIONS
