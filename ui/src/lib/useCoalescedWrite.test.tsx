@@ -124,7 +124,7 @@ describe('useCoalescedWrite', () => {
     second.unmount();
   });
 
-  it('still sends what is waiting when the request in flight fails', async () => {
+  it('drops what is waiting when the request in flight fails', async () => {
     const started: string[] = [];
     const pending = new Map<string, Deferred>();
     const send = gatedSend(started, pending);
@@ -146,27 +146,23 @@ describe('useCoalescedWrite', () => {
       result.current.write('s1', 'route');
     });
 
-    // The independent title save is rejected. The route pick behind it was never
-    // derived from that request's success, so dropping it would lose an edit the
-    // user can still see in the UI.
+    // The write in flight is rejected. What was clicked behind it was composed
+    // against the state that request was installing — the state the server has
+    // just refused — and these patches are partial, so sending one now would
+    // persist a combination nobody picked. The failure ends the burst, and the
+    // owner's reconcile takes the whole burst back.
     await act(async () => {
       pending.get('s1:title')!.resolve(false);
       await Promise.resolve();
     });
     await settle();
-    expect(started).toEqual(['s1:title', 's1:route']);
-    expect(settled).toEqual([]);
-
-    await act(async () => {
-      pending.get('s1:route')!.resolve(true);
-      await pending.get('s1:route')!.promise;
-    });
-    await settle();
-    // One settle per burst, reporting the burst's outcome, not the last write's.
+    expect(started).toEqual(['s1:title']);
+    // One settle per burst, reporting the burst's outcome.
     expect(settled).toEqual([['s1', false]]);
+    expect(result.current.isSaving('s1')).toBe(false);
   });
 
-  it('treats a throw as a failed write and keeps draining', async () => {
+  it('treats a throw as a failed write', async () => {
     const started: string[] = [];
     const boom = deferred();
     const send = vi.fn(async (patch: string, key: string) => {
@@ -195,7 +191,9 @@ describe('useCoalescedWrite', () => {
       await boom.promise.catch(() => undefined);
     });
     await settle();
-    expect(started).toEqual(['s1:boom', 's1:after']);
+    // A throw counts as a failure, so it ends the burst the same way a `false`
+    // does — including the patch that was waiting behind it.
+    expect(started).toEqual(['s1:boom']);
     expect(settled).toEqual([['s1', false]]);
     expect(result.current.isSaving('s1')).toBe(false);
   });
@@ -216,73 +214,76 @@ describe('useCoalescedWrite', () => {
     });
     await settle();
     await act(async () => {
-      pending.get('p1:route')!.resolve(false);
+      pending.get('p1:route')!.resolve(true);
       await Promise.resolve();
     });
     await settle();
-    // The rollback read is in flight: the project is still mid-write, so the
-    // picker keeps its indicator and nothing starts a fresh burst against state
-    // the read is still rewriting.
+    // The authoritative re-read is in flight: the project is still mid-write, so
+    // the picker keeps its indicator and nothing starts a fresh burst against
+    // state the read is still rewriting.
     expect(result.current.isSaving('p1')).toBe(true);
 
-    let drained = false;
-    void result.current.whenDrained('p1').then(() => {
-      drained = true;
-    });
     act(() => {
-      result.current.write('p1', 'retry');
+      result.current.write('p1', 'next');
     });
     await settle();
     expect(started).toEqual(['p1:route']);
-    expect(drained).toBe(false);
 
     await act(async () => {
       reconcile.resolve(true);
       await reconcile.promise;
     });
     await settle();
-    expect(started).toEqual(['p1:route', 'p1:retry']);
+    // A pick made during a SUCCESSFUL burst's reconcile is still live intent: it
+    // was composed against a route the server took, so it goes out.
+    expect(started).toEqual(['p1:route', 'p1:next']);
+    expect(result.current.isSaving('p1')).toBe(true);
 
     await act(async () => {
-      pending.get('p1:retry')!.resolve(true);
-      await pending.get('p1:retry')!.promise;
+      pending.get('p1:next')!.resolve(true);
+      await pending.get('p1:next')!.promise;
     });
     await settle();
-    expect(drained).toBe(true);
     expect(result.current.isSaving('p1')).toBe(false);
   });
 
-  it('resolves whenDrained immediately for an idle resource and per resource on failure', async () => {
+  it('drops a pick made while a failed burst is rolling back', async () => {
     const started: string[] = [];
     const pending = new Map<string, Deferred>();
     const send = gatedSend(started, pending);
-    const { result } = renderHook(() => useCoalescedWrite<string>('t', send));
-
-    await expect(result.current.whenDrained('idle')).resolves.toBeUndefined();
+    const rollback = deferred();
+    const { result } = renderHook(() =>
+      useCoalescedWrite<string>('t', send, {
+        onSettled: () => rollback.promise.then(() => undefined),
+      }),
+    );
 
     act(() => {
-      result.current.write('s1', 'a');
-      result.current.write('s2', 'b');
-    });
-    let s1Drained = false;
-    let s2Drained = false;
-    void result.current.whenDrained('s1').then(() => {
-      s1Drained = true;
-    });
-    void result.current.whenDrained('s2').then(() => {
-      s2Drained = true;
+      result.current.write('p1', 'route');
     });
     await settle();
-
     await act(async () => {
-      pending.get('s1:a')!.resolve(false);
+      pending.get('p1:route')!.resolve(false);
       await Promise.resolve();
     });
     await settle();
-    // A failure must not hold a waiter hostage — "settled" means landed or failed
-    // loudly — and one resource's failure says nothing about another's.
-    expect(s1Drained).toBe(true);
-    expect(s2Drained).toBe(false);
+    // The rollback read is in flight, so the row on screen is still the one the
+    // server refused.
+    expect(result.current.isSaving('p1')).toBe(true);
+
+    act(() => {
+      result.current.write('p1', 'during-rollback');
+    });
+    await act(async () => {
+      rollback.resolve(true);
+      await rollback.promise;
+    });
+    await settle();
+    // This pick was composed against the refused row, so it goes back with it.
+    // The rollback lands whole and the user picks again from what the server
+    // actually holds.
+    expect(started).toEqual(['p1:route']);
+    expect(result.current.isSaving('p1')).toBe(false);
   });
 
   it('keeps two scopes writing the same id apart', async () => {

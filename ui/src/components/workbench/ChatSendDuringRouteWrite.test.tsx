@@ -1,11 +1,11 @@
 /** @vitest-environment jsdom */
 
 // The header's route edits apply within the click and persist behind them, which
-// is the point of the optimistic path — but it means a prompt sent right after a
-// model pick could be admitted while that PATCH is still waiting to flush, and
-// the turn would run on the PREVIOUS route while the header already shows the new
-// one. These tests pin the ordering at the boundary where it is observable: what
-// reached the network, in which order.
+// is the point of the optimistic path. These tests pin what that means at the
+// boundary where it is observable — what reached the network, in which order:
+// Enter is never held behind an in-flight route PATCH (the resulting admission
+// gap is the server's to close; see the PR ledger), and the picks made during one
+// PATCH reach the row as a single merged follow-up.
 
 import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -201,7 +201,7 @@ async function mountChat() {
   }
 }
 
-describe('sending after an optimistic route pick', () => {
+describe('sending while an optimistic route write is in flight', () => {
   beforeEach(() => {
     for (const name of ['ResizeObserver', 'IntersectionObserver']) {
       vi.stubGlobal(
@@ -251,7 +251,7 @@ describe('sending after an optimistic route pick', () => {
     vi.unstubAllGlobals();
   });
 
-  it('holds the prompt until the route write lands', async () => {
+  it('sends without waiting for the route write to land', async () => {
     const patchGate = deferred<unknown>();
     mocks.api.updateSession.mockReturnValue(patchGate.promise);
     await mountChat();
@@ -263,20 +263,28 @@ describe('sending after an optimistic route pick', () => {
       void mocks.onSend!('run it on opus');
     });
     await settle();
-    // The turn must not be admitted on the route the user has already clicked
-    // past — the header is showing `opus` at this point.
-    expect(messagePosts()).toHaveLength(0);
+    // Enter stays live: the POST goes out while the PATCH is still deciding. That
+    // leaves a real gap — the turn can be admitted on the route the row still
+    // holds while the header already shows the new one — and the client cannot
+    // close it, because routing a turn and sending it are separate requests
+    // (``POST /messages`` accepts text, content and metadata only). Gating the
+    // send would trade the gap for the very latency this path removes. Atomic
+    // admission belongs to the server.
+    expect(messagePosts()).toHaveLength(1);
+    expect(String(messagePosts()[0][0])).toContain(`/api/sessions/${SESSION_ID}/messages`);
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       patchGate.resolve({ ...sessionRow, model: 'opus' });
       await patchGate.promise;
     });
     await settle();
-    expect(messagePosts()).toHaveLength(1);
-    expect(String(messagePosts()[0][0])).toContain(`/api/sessions/${SESSION_ID}/messages`);
+    // And the send did not disturb the write: one PATCH for the pick, one row
+    // re-read on settle.
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
   });
 
-  it('waits behind every write of a burst, and folds the picks made during one into a single PATCH', async () => {
+  it('folds the picks made during a route write into a single follow-up PATCH', async () => {
     const gates = [deferred<unknown>(), deferred<unknown>()];
     let call = 0;
     mocks.api.updateSession.mockImplementation(() => gates[call++].promise);
@@ -296,9 +304,6 @@ describe('sending after an optimistic route pick', () => {
       model: 'gpt-5',
     });
 
-    act(() => {
-      void mocks.onSend!('and now with high effort');
-    });
     await act(async () => {
       gates[0].resolve({ ...sessionRow, agent_name: 'codex', model: 'gpt-5' });
       await gates[0].promise;
@@ -312,9 +317,6 @@ describe('sending after an optimistic route pick', () => {
       reasoning_effort: 'high',
       model: 'gpt-5-codex',
     });
-    // That follow-up is only now in flight; admitting the turn here would run it
-    // at the previous effort.
-    expect(messagePosts()).toHaveLength(0);
 
     await act(async () => {
       gates[1].resolve({
@@ -326,64 +328,6 @@ describe('sending after an optimistic route pick', () => {
       await gates[1].promise;
     });
     await settle();
-    expect(messagePosts()).toHaveLength(1);
-  });
-
-  it('still sends when the route write fails, rather than holding the prompt hostage', async () => {
-    const patchGate = deferred<unknown>();
-    mocks.api.updateSession.mockReturnValue(patchGate.promise);
-    await mountChat();
-
-    act(() => mocks.onPatch!({ model: 'opus' }));
-    act(() => {
-      void mocks.onSend!('send me anyway');
-    });
-    await settle();
-    expect(messagePosts()).toHaveLength(0);
-
-    // Settle means "landed or failed loudly": the failure is already on the error
-    // banner and the row is re-read, so the composer must not stay stuck.
-    await act(async () => {
-      patchGate.reject(new Error('offline'));
-      await patchGate.promise.catch(() => undefined);
-    });
-    await settle();
-    expect(messagePosts()).toHaveLength(1);
-  });
-
-  it('abandons a prompt the user stopped while the route write was still in flight', async () => {
-    const patchGate = deferred<unknown>();
-    mocks.api.updateSession.mockReturnValue(patchGate.promise);
-    // Nothing has been admitted yet, so the controller has no turn to interrupt —
-    // Stop is answered by clearing this tab's indicator.
-    mocks.api.cancelSession.mockResolvedValue({ ok: false, code: 'not_in_flight' });
-    await mountChat();
-
-    act(() => mocks.onPatch!({ model: 'opus' }));
-    let submission: unknown = 'pending';
-    act(() => {
-      void Promise.resolve(mocks.onSend!('never mind')).then((result) => {
-        submission = result;
-      });
-    });
-    await settle();
-    expect(messagePosts()).toHaveLength(0);
-
-    // Stop is live during the wait — the indicator went up on submit — and it is a
-    // real cancel, so the prompt must not be POSTed once the route finally lands.
-    await act(async () => {
-      await mocks.onStop!();
-    });
-    expect(mocks.api.cancelSession).toHaveBeenCalledWith(SESSION_ID);
-
-    await act(async () => {
-      patchGate.resolve({ ...sessionRow, model: 'opus' });
-      await patchGate.promise;
-    });
-    await settle();
-    expect(messagePosts()).toHaveLength(0);
-    // ``false`` hands the text back to the Composer as a retryable submission,
-    // rather than swallowing what the user typed.
-    expect(submission).toBe(false);
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
   });
 });

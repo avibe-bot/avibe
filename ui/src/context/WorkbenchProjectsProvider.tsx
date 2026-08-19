@@ -1041,9 +1041,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       try {
         const updated = await api.updateProject(projectId, { display_name: name });
         acceptProjectsMutation();
-        commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev), {
-          confirmed: [updated],
-        });
+        // Take ONLY the field this request changed. A mutation response is a
+        // snapshot of the row as that request found it, so installing it whole
+        // would drag an unrelated in-flight route pick back to the route the
+        // rename saw — and recording it as ``confirmed`` would hand the
+        // compare-and-set token a route the server has since replaced, making the
+        // user's next pick a deterministic ``project_agent_conflict``. A rename is
+        // not route truth, so it records none.
+        commitProjects((prev) =>
+          prev
+            ? prev.map((p) => (p.id === projectId ? { ...p, display_name: updated.display_name } : p))
+            : prev,
+        );
       } catch (err) {
         console.error('[workbench] rename project failed', err);
       }
@@ -1259,11 +1268,24 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const upsertProjectToTop = useCallback(
     (project: WorkbenchProject) => {
       acceptProjectsMutation();
+      // Same rule as the rename above, for the one row this response is allowed to
+      // install whole: a live route write owns that project's route
+      // (``latestProjectRouteRef`` holds its newest pick until the writer settles),
+      // and this snapshot was taken before it. Keep the cached route and let the
+      // writer record its own confirmation; for a project the tree has never seen
+      // there is no pick to protect and the response IS the truth.
+      const routeInFlight = latestProjectRouteRef.current.has(project.id);
       // create_project is find-or-create by path: opening a tracked folder returns
       // the existing project, refreshed. Drop any stale copy, hoist to top, expand.
-      commitProjects((prev) => (prev ? [project, ...prev.filter((p) => p.id !== project.id)] : [project]), {
-        confirmed: [project],
-      });
+      commitProjects(
+        (prev) => {
+          if (!prev) return [project];
+          const cached = routeInFlight ? prev.find((p) => p.id === project.id) : undefined;
+          const row = cached ? { ...project, default_agent: cached.default_agent } : project;
+          return [row, ...prev.filter((p) => p.id !== project.id)];
+        },
+        routeInFlight ? undefined : { confirmed: [project] },
+      );
       setExpanded((prev) => {
         const next = new Set(prev);
         next.add(project.id);

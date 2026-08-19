@@ -9,7 +9,6 @@ type Entry = {
   send: (patch: unknown, key: string) => Promise<boolean>;
   merge: (prev: unknown, next: unknown) => unknown;
   onSettled: ((key: string, committed: boolean) => void | Promise<void>) | undefined;
-  drainedWaiters: Array<() => void>;
 };
 
 // MODULE scope on purpose: a resource outlives the view that edits it. ChatPage
@@ -51,41 +50,42 @@ const drain = async (scopedKey: string, key: string) => {
   for (;;) {
     const entry = entries.get(scopedKey);
     if (!entry) break;
-    const next = entry.pending;
+    const next = committed ? entry.pending : undefined;
     if (next) {
       entry.pending = undefined;
-      let ok = false;
       try {
-        ok = await entry.send(next.patch, key);
+        committed = await entry.send(next.patch, key);
       } catch {
-        ok = false;
+        committed = false;
       }
-      // A failure does NOT drop what is waiting. Nothing here is derived from the
-      // request that failed: a session PATCH has no compare-and-set, and a
-      // project route derives its expected agent at send time from the last
-      // SERVER-confirmed route, so the waiting patch is still the user's current
-      // intent and still the right thing to send.
-      if (!ok) committed = false;
       continue;
     }
-    // Nothing left to send. Reconcile BEFORE releasing the key, so a pick made
-    // during a rollback read coalesces into this writer instead of starting a
-    // fresh burst against state the read is still rewriting — and so a caller
-    // waiting on `whenDrained` gets the authoritative row, not just the ack.
+    // Nothing more goes out in this burst — either nothing is waiting, or a send
+    // failed. A FAILURE ENDS THE BURST: everything clicked while that request was
+    // in flight was composed against the state it was installing, and the server
+    // has just refused that state. Those patches are partial by nature (the
+    // picker emits an effort click as `{reasoning_effort}` alone), so sending one
+    // now would apply it to a route that never existed — an effort chosen for the
+    // Agent the failed write was switching to, landing on the Agent the row still
+    // holds. Dropping it is what makes the rollback whole: the reconcile below
+    // reverts the burst together, so the user sees the row the server holds
+    // instead of a combination nobody picked.
+    entry.pending = undefined;
+    // Reconcile BEFORE releasing the key, so a pick made during a rollback read
+    // coalesces into this writer instead of starting a fresh burst against state
+    // the read is still rewriting.
     try {
       await entry.onSettled?.(key, committed);
     } catch {
       // Reconciliation is the owner's business; it reports its own failures.
     }
-    if (entry.pending) {
-      committed = true;
-      continue;
-    }
+    // A pick made during a successful burst's reconcile is still live intent. One
+    // made during a FAILED burst's rollback was composed against the state being
+    // rolled back, so it goes the same way as the rest.
+    if (committed && entry.pending) continue;
+    entry.pending = undefined;
     entries.delete(scopedKey);
-    const waiters = entry.drainedWaiters;
-    entry.drainedWaiters = [];
     publish();
-    waiters.forEach((resolve) => resolve());
     break;
   }
 };
@@ -95,8 +95,6 @@ export type CoalescedWrite<P> = {
   write: (key: string, patch: P) => void;
   /** True from the first write for `key` until that key has been reconciled. */
   isSaving: (key: string) => boolean;
-  /** Resolves once `key` has nothing waiting, nothing in flight, and nothing left to reconcile — immediately when it is idle. */
-  whenDrained: (key: string) => Promise<void>;
 };
 
 /**
@@ -113,15 +111,15 @@ export type CoalescedWrite<P> = {
  * What is waiting is COALESCED rather than queued: the clicks a user makes while
  * a request is in flight are transit, not intent, so `merge` folds them into one
  * payload and only the result is sent. That is what makes the writer safe to
- * share between fields — a title save and a route pick land in one request
- * instead of taking each other hostage — and it is sound because nothing in the
- * payload is derived from an earlier request's success (see the failure note in
- * `drain`).
+ * share between fields: a title save and a route pick land in one request
+ * instead of taking each other hostage.
  *
  * `send` reports its own failure (banner / toast) and returns false; a throw
- * counts as false too. `onSettled` then runs once per burst, for the owner to
- * reconcile its optimistic state with the server (a re-read, or a revert), and
- * the resource stays `isSaving` until that reconciliation finishes.
+ * counts as false too. A failure ENDS the burst and drops what was waiting — it
+ * was composed against the state the server just refused (see `drain`).
+ * `onSettled` then runs once per burst, for the owner to reconcile its optimistic
+ * state with the server (a re-read, or a revert), and the resource stays
+ * `isSaving` until that reconciliation finishes.
  */
 export function useCoalescedWrite<P>(
   /** Namespace for the keys, so two owners writing different resource kinds never share an entry. */
@@ -158,7 +156,7 @@ export function useCoalescedWrite<P>(
         };
         return;
       }
-      entries.set(scopedKey, { pending: { patch }, send, merge, onSettled, drainedWaiters: [] });
+      entries.set(scopedKey, { pending: { patch }, send, merge, onSettled });
       publish();
       // Entered synchronously, so the first request is in flight within the click
       // that recorded it: owners open their read-ordering fence inside `send`,
@@ -170,19 +168,5 @@ export function useCoalescedWrite<P>(
 
   const isSaving = useCallback((key: string) => savingKeys.has(`${scope}:${key}`), [savingKeys, scope]);
 
-  // Resolves on settle whether or not the burst committed: a caller waiting for
-  // "what the UI is showing has reached the server, or failed loudly" must not
-  // hang on the failure path.
-  const whenDrained = useCallback(
-    (key: string) => {
-      const entry = entries.get(`${scope}:${key}`);
-      if (!entry) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        entry.drainedWaiters.push(resolve);
-      });
-    },
-    [scope],
-  );
-
-  return { write, isSaving, whenDrained };
+  return { write, isSaving };
 }

@@ -172,12 +172,11 @@ describe('project default Agent route', () => {
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
   });
 
-  it('still sends the pick waiting behind a rejected write, expecting the route the server kept', async () => {
+  it('drops the pick waiting behind a rejected write, rolling the whole burst back', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    const saved = { ...project, default_agent: route({ model: 'opus' }) };
     const getWorkbenchProjectsBootstrap = vi.fn()
       .mockResolvedValueOnce({ projects: [project], sessions: {} })
-      .mockResolvedValueOnce({ projects: [saved], sessions: {} });
+      .mockResolvedValueOnce({ projects: [project], sessions: {} });
     const calls: UpdateCall[] = [];
     const gates: Deferred<unknown>[] = [];
     apiRef.current = {
@@ -202,24 +201,71 @@ describe('project default Agent route', () => {
     });
     await settle();
 
-    // The waiting pick is the route the user is still looking at, and nothing in
-    // it was derived from the request that failed — so it is sent rather than
-    // discarded along with it.
+    // The waiting pick was composed against the route this request was
+    // installing, and the server has just refused that route. Sending it would
+    // persist a model chosen for an Agent the row never took, so it goes with
+    // the burst.
+    expect(calls).toHaveLength(1);
+    // The rollback is the re-read, and it takes the burst back as a whole: the
+    // user sees the row the server holds rather than a combination nobody picked.
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
+    expect(tree()!.projects?.[0].default_agent).toBeNull();
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+
+    // Picking again after the rollback expects what that read found, not the
+    // route the server refused.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
     expect(calls).toHaveLength(2);
-    // And it expects what the server actually holds: expecting the route the
-    // server just refused is what would make this retry a deterministic conflict.
     expect(calls[1].payload).toMatchObject({ expected_agent_id: null, model: 'opus' });
+  });
+
+  it('does not let a rename response revert the route or poison the next write', async () => {
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap: vi.fn().mockResolvedValue({ projects: [project], sessions: {} }),
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    // A rename and a route pick are separate requests on the same row, and the
+    // rename answers LAST — carrying the row as it was before the pick.
+    act(() => {
+      void tree()!.renameProject(project.id, 'Renamed');
+    });
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route());
+    });
+    expect(calls[0].payload).toEqual({ display_name: 'Renamed' });
+    expect(calls[1].payload).toMatchObject({ expected_agent_id: null, model: 'sonnet' });
 
     await act(async () => {
-      gates[1].resolve(saved);
+      gates[1].resolve({ ...project, default_agent: route() });
       await gates[1].promise;
     });
     await settle();
-    // A burst containing a failed write still reconciles: whatever that write
-    // left optimistic is still on screen.
-    expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
-    expect(tree()!.projects?.[0].default_agent).toEqual(route({ model: 'opus' }));
-    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+    expect(tree()!.projects?.[0].default_agent).toEqual(route());
+
+    await act(async () => {
+      gates[0].resolve({ ...project, display_name: 'Renamed', default_agent: null });
+      await gates[0].promise;
+    });
+    await settle();
+    // Only the field the rename changed is taken. Installing its snapshot whole
+    // would revert the route the user just set...
+    expect(tree()!.projects?.[0].display_name).toBe('Renamed');
+    expect(tree()!.projects?.[0].default_agent).toEqual(route());
+
+    // ...and recording it as confirmed would hand the next pick a token naming a
+    // route the server has already replaced — a deterministic conflict.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    expect(calls[2].payload).toMatchObject({ expected_agent_id: 'agt_claude', model: 'opus' });
   });
 
   it('rolls a rejected pick back by re-reading the server, and retries against that route', async () => {
@@ -308,15 +354,11 @@ describe('project default Agent route', () => {
       await gates[0].promise.catch(() => undefined);
     });
     await settle();
-    await act(async () => {
-      gates[2].reject(new Error('project_agent_conflict'));
-      await gates[2].promise.catch(() => undefined);
-    });
-    await settle();
 
-    // A rolls back to the server route; B's pick survives a failure it had no
-    // part in.
-    expect(calls.map((c) => c.projectId)).toEqual([project.id, other.id, project.id]);
+    // A's failure ends A's burst, taking the pick that was waiting behind it with
+    // it — so there is no third request — and A rolls back to the server route.
+    // B's pick survives a failure it had no part in.
+    expect(calls.map((c) => c.projectId)).toEqual([project.id, other.id]);
     expect(tree()!.projects?.[0].default_agent).toBeNull();
     expect(tree()!.projects?.[1].default_agent).toEqual(route({ model: 'sonnet' }));
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);

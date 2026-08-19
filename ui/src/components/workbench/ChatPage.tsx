@@ -885,8 +885,7 @@ export const ChatPage: React.FC = () => {
     await read(true);
   }, [api]);
 
-  // Persistence for the header's optimistic edits. Declared here, above the send
-  // path, because sending has to wait for the route the header is already showing.
+  // Persistence for the header's optimistic edits.
   const sendSessionPatch = useCallback(
     async ({ changes, gate }: SessionPatchWrite, patchedId: string): Promise<boolean> => {
       const finishPatch = gate.beginMutation();
@@ -913,16 +912,14 @@ export const ChatPage: React.FC = () => {
     [api, t],
   );
 
-  const {
-    write: writeSessionPatch,
-    isSaving: isPatchSaving,
-    whenDrained: whenSessionPatchDrained,
-  } = useCoalescedWrite<SessionPatchWrite>('session-row', sendSessionPatch, {
+  const { write: writeSessionPatch, isSaving: isPatchSaving } = useCoalescedWrite<SessionPatchWrite>('session-row', sendSessionPatch, {
     // A title edit and a route pick are independent fields of one row, so the
     // clicks made while a request is in flight fold into a single follow-up
-    // PATCH instead of waiting on each other — and neither can be lost because
-    // the other one failed. The newest gate wins: it belongs to the mount that
-    // is on screen now and whose reads the reconcile below has to fence.
+    // PATCH instead of waiting on each other. If that request fails, the
+    // follow-up goes with it (see ``drain``) and the re-read below shows what the
+    // server actually holds — a half-applied route is worse than a visible
+    // rollback. The newest gate wins: it belongs to the mount that is on screen
+    // now and whose reads the reconcile below has to fence.
     merge: useCallback(
       (prev: SessionPatchWrite, next: SessionPatchWrite): SessionPatchWrite => ({
         changes: { ...prev.changes, ...next.changes },
@@ -1630,7 +1627,6 @@ export const ChatPage: React.FC = () => {
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
       const refs = references ?? [];
       markWorking();
-      const sendEpoch = turnEpochRef.current;
       setError(null);
       try {
         // Plain (non-streaming) POST: the turn runs fire-and-forget on the
@@ -1671,20 +1667,13 @@ export const ChatPage: React.FC = () => {
           // so the locked/highlighted state can be derived on reload.
           ...(metadata ? { metadata } : {}),
         };
-        // The header's route edits apply within the click and persist behind
-        // them, so a prompt sent right after a model pick could otherwise be
-        // admitted while that PATCH is still queued — and the turn would run on
-        // the previous route while the header shows the new one. Wait for this
-        // session's writes to settle first; settle means "landed or failed
-        // loudly", so a rejected route cannot hold the send hostage.
-        await whenSessionPatchDrained(sessionId);
-        // Stop pressed during that wait is a real cancel, and it has nothing to
-        // cancel yet: the turn was never admitted, so ``cancelSession`` answers
-        // ``not_in_flight`` and clears the indicator. Drop the prompt instead of
-        // POSTing a turn the user already stopped; ``false`` hands the text back
-        // to the Composer as a retryable submission. A moved epoch means a newer
-        // turn owns the indicator and this check is not about it.
-        if (turnEpochRef.current === sendEpoch && !workingRef.current) return false;
+        // This POST does not wait for the header's route writes, so a prompt sent
+        // in the same breath as a model pick can be admitted on the route the row
+        // still holds. The client cannot close that window: routing a turn and
+        // sending it are separate requests (``POST /messages`` accepts text,
+        // content and metadata only), so gating the send would trade the gap for
+        // the very latency this optimistic path removes — a slow PATCH would make
+        // Enter feel dead. Atomic admission belongs to the server.
         const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1805,7 +1794,6 @@ export const ChatPage: React.FC = () => {
       reloadLatestMessages,
       t,
       writable,
-      whenSessionPatchDrained,
     ],
   );
 
