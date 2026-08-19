@@ -1436,6 +1436,31 @@ def _raise_service_start_not_ready(pid: int, *, timeout: float) -> None:
     raise RuntimeError(f"Vibe service process pid={pid} did not acquire the service lock")
 
 
+def _raise_service_started_but_never_ran(pid: int, *, timeout: float) -> None:
+    """The service was identified and never reported itself up.
+
+    Kept apart from :func:`_raise_service_start_not_ready` because the two are
+    different failures that used to be reported as one. That one means nothing
+    on this machine ever claimed to be the service. This one is the incident
+    behind the rollback work: something did claim it, took the lock, and then
+    died or hung inside its own startup -- which is exactly how an upgrade to a
+    release that cannot start looks from outside, and saying "did not acquire
+    the service lock" about it sends whoever reads the log looking for a lock
+    contention that is not there.
+    """
+
+    owner_pid = resolve_service_owner_pid() or pid
+    if not pid_alive(owner_pid):
+        _clear_service_pid_reservation(owner_pid)
+        raise RuntimeError(f"Vibe service process pid={owner_pid} exited while starting up")
+    if service_instance_still_starting(owner_pid):
+        raise RuntimeError(
+            f"Vibe service process pid={owner_pid} acquired the service lock but did not "
+            f"finish starting within {timeout:.0f} seconds"
+        )
+    _raise_service_start_not_ready(owner_pid, timeout=timeout)
+
+
 # --- cgroup resource-governance bootstrap -----------------------------------
 #
 # ``core/resource_governance.py`` can only move agent subprocesses into a
@@ -1729,7 +1754,56 @@ def start_service(
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
     memory_ui_secret: str | None = None,
     launcher: ServiceLauncher | None = None,
-):
+) -> int:
+    """Start the service and return the pid, by default only once it is up.
+
+    Two questions, and this function exists because they were being answered by
+    the same value. WHICH process is the service is settled below, by taking the
+    spawn lock, reconciling the pid file against the live lock holder and
+    launching if nobody holds it. WHETHER that process is up is settled here,
+    once, for every way the answer can be reached.
+
+    The split is the fix. `_resolve_service_pid()` has seven places it can hand a
+    pid back -- a recorded pid file, a lock holder whose command does not match,
+    a scoped launch adopting its owner, a fresh spawn taking the lock -- and only
+    one of them ever waited for the running phase. Every other caller of
+    `wait_for_ready=True` got "the lock was taken", which is the state an
+    instance is in when the release that took it is about to die on its own
+    migration. The Dashboard recorded that as a started service and the doctor
+    recorded it as a successful repair, both correctly trusting the parameter.
+
+    Waiting out here also takes the wait off the spawn lock, where a slow start
+    used to block every other caller for the length of it.
+    """
+
+    pid = _resolve_service_pid(
+        wait_for_ready=wait_for_ready,
+        initial_ready_timeout=initial_ready_timeout,
+        memory_ui_secret=memory_ui_secret,
+        launcher=launcher,
+    )
+    if not wait_for_ready:
+        return pid
+    ready_pid = wait_for_service_ready(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    if ready_pid is None:
+        _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    return ready_pid
+
+
+def _resolve_service_pid(
+    *,
+    wait_for_ready: bool,
+    initial_ready_timeout: float,
+    memory_ui_secret: str | None,
+    launcher: ServiceLauncher | None,
+) -> int:
+    """Which process is the service, starting one if nothing holds the lock.
+
+    Answers only that. Whether the process it names has finished starting is
+    `start_service()`'s to establish -- see its docstring for why that is not
+    left to the individual returns below.
+    """
+
     from storage.migrations import guard_source_checkout_default_state_bootstrap
     from core.memory.ui_access import process_ui_read_secret
 
@@ -1748,15 +1822,12 @@ def start_service(
                     if service_pid_recorded(existing_pid):
                         return existing_pid
                     if _pid_reservation_is_fresh(pid_path, existing_pid):
-                        if not wait_for_ready:
-                            return existing_pid
-                        ready_pid = wait_for_service_ready(
-                            existing_pid,
-                            timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS,
-                        )
-                        if ready_pid is not None:
-                            return ready_pid
-                        _raise_service_start_not_ready(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+                        # A reservation this recent names the service whether or
+                        # not it is up yet, so the question is answered. Waiting
+                        # for the running phase used to happen here, and only
+                        # here, which is precisely why every other return below
+                        # answered a question it had not asked.
+                        return existing_pid
                     logger.warning(
                         "Ignoring stale service pid file pid=%s because it never acquired the service lock",
                         existing_pid,

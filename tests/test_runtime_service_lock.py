@@ -23,8 +23,20 @@ class RuntimeServiceLockTests(unittest.TestCase):
         # pin it off here. The scoped path has its own dedicated tests.
         self._no_scope = patch("vibe.runtime.maybe_systemd_scope_prefix", return_value=[])
         self._no_scope.start()
+        # Every test in this class asks WHICH process is the service -- reuse a
+        # recorded pid, ignore an unrelated one, refuse a second instance. None of
+        # them asks whether that process finished starting, and they mock the pid
+        # into existence without a lock record for it to report through, so the
+        # readiness gate `start_service()` now applies would wait out its full
+        # timeout on a process that does not exist. Stubbing it to the pid it was
+        # handed keeps these tests on the public entry point while confining them
+        # to their own question; the gate itself is covered by
+        # `ServiceReadinessGateTests` below, which deliberately does not stub it.
+        self._ready = patch("vibe.runtime.wait_for_service_ready", side_effect=lambda pid, timeout=None: pid)
+        self._ready.start()
 
     def tearDown(self):
+        self._ready.stop()
         self._no_scope.stop()
         self._extra_service_pids.stop()
 
@@ -929,6 +941,124 @@ class ReadinessWaitIsNeverOptionalTests(unittest.TestCase):
                     "the lock is taken before the database is migrated, so that is the case the "
                     "wait exists for",
                 )
+
+
+class ServiceReadinessGateTests(unittest.TestCase):
+    """What `start_service(wait_for_ready=True)` is allowed to hand back.
+
+    The parameter has always promised readiness, and `_resolve_service_pid()` has
+    seven places it can name a pid -- a recorded pid file, a lock holder whose
+    command does not match this install, a scoped launch adopting its owner, a
+    fresh spawn that took the lock. Exactly one of them ever waited for the
+    running phase. Every other one answered "the lock was taken", which is the
+    state an instance is in while the release that took it is dying on its own
+    migration, so the Dashboard recorded a started service and the doctor
+    recorded a successful repair, both correctly trusting the parameter.
+
+    The property is that the promise is kept however the pid was reached, and it
+    is asserted in two halves that are complete together: the gate holds for the
+    situations below, and the structural test proves there is no way to reach a
+    pid that skips it.
+    """
+
+    def setUp(self):
+        self._extra_service_pids = patch("vibe.runtime.extra_service_process_pids", return_value=[])
+        self._extra_service_pids.start()
+        self._no_scope = patch("vibe.runtime.maybe_systemd_scope_prefix", return_value=[])
+        self._no_scope.start()
+        # A stuck start is the case under test, so the wait has to be allowed to
+        # run out. Two tenths of a second rather than the shipped two minutes.
+        self._short_wait = patch("vibe.runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS", 0.2)
+        self._short_wait.start()
+
+    def tearDown(self):
+        self._short_wait.stop()
+        self._no_scope.stop()
+        self._extra_service_pids.stop()
+
+    def _start_with_phase(self, phase: str, *, already_recorded: bool):
+        """Run the real `start_service()` against a lock record saying `phase`.
+
+        `already_recorded` picks the situation: a service this machine already
+        knows about, or one spawned here. Both used to return on the lock alone.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+            pid = 12345
+            lock_path.write_text(json.dumps({"pid": pid, "phase": phase}), encoding="utf-8")
+            if already_recorded:
+                pid_path.write_text(str(pid), encoding="utf-8")
+
+            def fake_spawn(args, stdout_name, stderr_name, env=None, **kwargs):
+                return SimpleNamespace(pid=pid, poll=lambda: None)
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                        with patch("vibe.runtime.pid_alive", return_value=True):
+                            with patch("vibe.runtime.service_pid_recorded", return_value=True):
+                                with patch(
+                                    "vibe.runtime.get_process_command",
+                                    return_value=f"{sys.executable} {runtime.get_service_main_path()}",
+                                ):
+                                    with patch(
+                                        "vibe.runtime.service_instance_lock_available", return_value=(True, None)
+                                    ):
+                                        with patch(
+                                            "vibe.runtime.spawn_service_background_process", side_effect=fake_spawn
+                                        ):
+                                            with patch("vibe.runtime.wait_for_service_pid", return_value=True):
+                                                return runtime.start_service()
+
+    def test_a_service_that_only_took_the_lock_is_not_a_started_service(self):
+        for already_recorded in (True, False):
+            with self.subTest(already_recorded=already_recorded):
+                with self.assertRaises(RuntimeError) as raised:
+                    self._start_with_phase("starting", already_recorded=already_recorded)
+                # And says so. Reporting this as "did not acquire the service
+                # lock" sent whoever read the log looking for a lock contention
+                # that was never there.
+                self.assertIn("did not finish starting", str(raised.exception))
+
+    def test_a_service_that_reported_itself_up_is_returned(self):
+        for already_recorded in (True, False):
+            with self.subTest(already_recorded=already_recorded):
+                self.assertEqual(self._start_with_phase("running", already_recorded=already_recorded), 12345)
+
+    def test_nothing_reaches_a_service_pid_without_passing_the_gate(self):
+        """The other half: no shipped caller can route around `start_service()`.
+
+        `_resolve_service_pid()` answers only which process is the service, and
+        the gate is applied to its result once. That split is worth nothing if a
+        caller can take the unguarded answer, so the property is that nobody
+        does -- checked by looking, so that a caller written later fails here
+        rather than on someone's instance. A resolution path added inside
+        `_resolve_service_pid()` then inherits the gate by construction, which is
+        the arrangement that was missing when six of its returns did not.
+        """
+
+        import ast
+
+        repo_root = Path(__file__).resolve().parents[1]
+        callers = {}
+        for root in ("main.py", "config", "core", "modules", "storage", "vibe", "scripts"):
+            target = repo_root / root
+            for source in [target] if target.is_file() else sorted(target.rglob("*.py")):
+                tree = ast.parse(source.read_text(encoding="utf-8"))
+                calls = sum(
+                    1
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) == "_resolve_service_pid"
+                )
+                if calls:
+                    callers[source.relative_to(repo_root).as_posix()] = calls
+
+        self.assertEqual(callers, {"vibe/runtime.py": 1})
 
 
 if __name__ == "__main__":

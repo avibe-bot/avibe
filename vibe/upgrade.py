@@ -62,9 +62,28 @@ _PRE_ORDER = {
 
 @dataclass(frozen=True)
 class UpgradePlan:
+    """A command that installs a version of avibe, and what it will replace.
+
+    `rollback_to` travels with the command because of WHEN it has to be taken,
+    not because the two are related ideas. It describes the install this command
+    is about to overwrite, and running the command is what destroys the evidence
+    it is read from -- so the only safe moment to take it is before there is a
+    command to run.
+
+    Left as a function the caller was told to call early, both call sites called
+    it late: after `subprocess.run(plan.command)` had already installed
+    `avibe-os` over a `vibe-remote` machine, so the question "what was this
+    install published as" had two answers and returned neither, and the rollback
+    pinned `avibe-os==2.x`, a release that was never published under that name.
+    Writing the ordering rule into a docstring is what failed; a field cannot be
+    called late, because there is no plan without the measurement and no install
+    without the plan.
+    """
+
     command: list[str]
     env: dict[str, str] | None
     method: str
+    rollback_to: RollbackTarget | None = None
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
@@ -564,6 +583,11 @@ def rollback_target() -> RollbackTarget | None:
     left on the machine to measure. Calling this from the detached restart job
     would answer for the install that did the replacing, which is not a rollback.
 
+    Which is why the only caller is :func:`build_upgrade_plan`, and why the
+    answer reaches everyone else as `UpgradePlan.rollback_to`. As a function
+    anyone could reach, it was reached at the wrong time -- both upgrade paths
+    called it after the install they were describing had already been overwritten.
+
     So: the version from this process's already-bound `__version__`, which the
     install on disk cannot change underneath it; the distribution from this
     install's own metadata; and the launcher that started this process, because
@@ -645,6 +669,11 @@ def build_upgrade_plan(
     """
 
     executable = python_executable or sys.executable
+    # Taken here, before the command below exists, because that command is what
+    # makes it unanswerable. A pinned plan is itself a rollback and has none of
+    # its own: the process building one is the release that failed, so measuring
+    # there would carry the failure forward as its own recovery target.
+    rollback_to = None if version else rollback_target()
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     package_spec = (
         pinned_package_spec(version, python_executable=executable, package_name=package_name)
@@ -666,16 +695,28 @@ def build_upgrade_plan(
             command=command,
             env=env,
             method="uv",
+            rollback_to=rollback_to,
         )
 
     command = [executable, "-m", "pip", "install"]
-    if not version:
+    if version:
+        # A pin alone does not make pip act. The forward install of `avibe-os`
+        # never uninstalls the differently named `vibe-remote` distribution, so
+        # its metadata still stands and still claims the old version -- while the
+        # files under `vibe/` are the new release's, having been written over the
+        # top. `pip install vibe-remote==<old>` then reads as already satisfied,
+        # pip does nothing, and the supervisor starts the failed generation again
+        # and reports the rollback a success. Forcing it is what the uv branch
+        # above has always done for a pinned plan; this branch quietly did not.
+        command.append("--force-reinstall")
+    else:
         command.append("--upgrade")
     command.append(package_spec)
     return UpgradePlan(
         command=command,
         env=dict(base_env or os.environ),
         method="pip",
+        rollback_to=rollback_to,
     )
 
 
