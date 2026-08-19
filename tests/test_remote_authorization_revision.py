@@ -169,6 +169,26 @@ def test_personal_session_slides_past_claim_and_original_identity_deadlines(
     assert result.payload["claims_issued_at"] == base
 
 
+def test_validated_remote_payload_projects_paired_instance_kind(tmp_path):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    payload = remote_access._validated_authorization_payload(
+        config,
+        {
+            "sub": "personal-user",
+            "email": "personal@example.com",
+            "instance_id": "inst_123",
+        },
+        {
+            "id": "authorization-1",
+            "claims": {**_organization_claims(config), "vibe_instance_kind": "organization"},
+        },
+    )
+
+    assert payload is not None
+    assert context_from_session_payload(payload).is_personal_instance
+
+
 def test_personal_revision_hint_refreshes_in_background_without_blocking(
     monkeypatch,
     tmp_path,

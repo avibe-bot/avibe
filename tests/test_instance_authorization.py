@@ -60,6 +60,7 @@ def test_context_from_session_payload_keeps_role_and_acl_claims() -> None:
             "sub": "user-1",
             "vibe_instance_role": "editor",
             "vibe_instance_access_source": "organization_group",
+            "vibe_instance_kind": "organization",
             "vibe_organization_id": "org-1",
             "vibe_organization_member_id": "membership-1",
             "vibe_organization_role": "member",
@@ -68,8 +69,25 @@ def test_context_from_session_payload_keeps_role_and_acl_claims() -> None:
     )
     assert context.instance_role == "editor"
     assert context.group_ids == frozenset({"group-a"})
+    assert context.is_organization_instance
     assert context.can_chat
     assert not context.can_manage_instance
+
+
+def test_context_from_session_payload_only_recognizes_known_instance_kinds() -> None:
+    base = {
+        "sub": "user-1",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "owner",
+    }
+    personal = context_from_session_payload({**base, "vibe_instance_kind": "personal"})
+    unknown = context_from_session_payload({**base, "vibe_instance_kind": "workspace"})
+
+    assert personal.is_personal_instance
+    assert not personal.is_organization_instance
+    assert personal.instance_kind == "personal"
+    assert unknown.instance_kind is None
+    assert not unknown.is_personal_instance
 
 
 def test_show_page_email_context_is_exactly_page_scoped() -> None:

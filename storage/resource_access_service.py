@@ -282,6 +282,7 @@ def metadata_with_resource_user_context(
         "vibe_membership_version": context.membership_version,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "vibe_instance_kind": context.instance_kind,
         "vibe_show_page_id": context.show_page_id,
         "claims_issued_at": context.claims_issued_at,
         "vibe_instance_authorization_revision": context.authorization_revision,
@@ -1000,6 +1001,8 @@ def _policy_allows(
 ) -> bool:
     if context.is_instance_owner:
         return True
+    if resource_kind == "agent" and context.is_personal_instance:
+        return context.can_use_resource(resource_kind)
     # Skill and Vault ACL rows remain persisted for compatibility, but Editor
     # runtime access intentionally ignores them for validated remote sessions.
     # Direct non-remote contexts still use the stored policy so service-level

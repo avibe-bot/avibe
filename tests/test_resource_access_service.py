@@ -18,6 +18,7 @@ def _context(
     role: str | None = "member",
     instance_role: str = "editor",
     access_source: str = "organization_group",
+    instance_kind: str | None = None,
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -28,6 +29,7 @@ def _context(
         instance_role=instance_role,
         instance_access_source=access_source,
         is_remote=True,
+        instance_kind=instance_kind,
     )
 
 
@@ -83,6 +85,55 @@ def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_
                 resource_access_service.can_use_resource(
                     engineering_member, "future_resource", "future-1", connection=connection
                 )
+    finally:
+        engine.dispose()
+
+
+def test_personal_editor_uses_all_agents_without_organization_acl(tmp_path) -> None:
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as connection:
+            _seed_policies(connection)
+            personal_editor = _context(
+                "personal-user",
+                organization_id=None,
+                role=None,
+                access_source="owner",
+                instance_kind="personal",
+            )
+            organization_editor = _context(
+                "organization-user",
+                instance_kind="organization",
+            )
+
+            assert resource_access_service.can_use_resource(
+                personal_editor, "agent", "private-agent", connection=connection
+            )
+            assert resource_access_service.can_use_resource(
+                personal_editor, "agent", "scoped-agent", connection=connection
+            )
+            assert resource_access_service.can_use_resource(
+                personal_editor, "agent", "unmanaged-agent", connection=connection
+            )
+            assert resource_access_service.filter_accessible_resources(
+                personal_editor,
+                "agent",
+                [
+                    {"id": "private-agent"},
+                    {"id": "scoped-agent"},
+                    {"id": "unmanaged-agent"},
+                ],
+                connection=connection,
+            ) == [
+                {"id": "private-agent"},
+                {"id": "scoped-agent"},
+                {"id": "unmanaged-agent"},
+            ]
+            assert not resource_access_service.can_use_resource(
+                organization_editor, "agent", "private-agent", connection=connection
+            )
     finally:
         engine.dispose()
 
@@ -528,6 +579,7 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
         membership_version="membership-v2",
         instance_role="viewer",
         instance_access_source="organization_group",
+        instance_kind="organization",
         claims_issued_at=issued_at,
         is_remote=True,
     )
@@ -550,6 +602,22 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
     assert before is not None and after is not None
     assert before.subject == after.subject == "member-1"
     assert after.is_active_organization_member is True
+
+
+def test_deferred_personal_context_keeps_instance_kind() -> None:
+    context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+    restored = resource_access_service.resource_user_context_from_metadata(metadata)
+
+    assert restored is not None
+    assert restored.is_personal_instance
 
 
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:

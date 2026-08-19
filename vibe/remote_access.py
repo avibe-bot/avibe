@@ -4899,6 +4899,11 @@ def _validated_authorization_payload(
     reference = record.get("id")
     if isinstance(reference, str):
         payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
+    instance_kind = _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
+    if instance_kind is not None:
+        # The paired config is server-owned. Keep instance kind out of the
+        # user-submitted claims while making it available to every ACL caller.
+        payload["vibe_instance_kind"] = instance_kind
     try:
         session_claims_from_oidc(config, payload)
     except OAuthCodeExchangeError:

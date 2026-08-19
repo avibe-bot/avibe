@@ -319,6 +319,8 @@ def get_effective_project_role(
     instance_role = context.instance_role
     if instance_role not in _ROLE_RANK:
         return None
+    if context.is_personal_instance:
+        return instance_role
     policy = get_project_policy(conn, project_id)
     if policy is None or policy["mode"] == "inherit":
         return instance_role
