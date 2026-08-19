@@ -110,7 +110,7 @@ from .resolver import (
     source_runnable,
 )
 from .revocations import CredentialRevocationJournal
-from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, UsageWriter
+from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
 CONTRACT_VERSION = 6
 AGENT_CHAIN_CONTRACT_VERSION = 6
@@ -3630,16 +3630,24 @@ class ModelHubService:
         leaked to a caller, and it silently dropped the label of every identity the
         key fold exists for.
 
-        A model's own identity is its label, which matters for the same reason:
-        a folded row publishes a key, not the identifier the user typed.
+        What it hands over is therefore the shape config actually has — Sources, each
+        carrying the models listed under it — and not a flat map per key level. A
+        metered model's identity is the pair, so a flat model map cannot say which
+        Source an ID came from, and answers for one Source with another's models.
         """
 
         config = self.store.load()
         return self.usage.summary(
             days=days,
             now=self.now(),
-            source_labels={source.id: source.display_name for source in config.sources},
-            model_labels={model.id: model.id for source in config.sources for model in source.models},
+            identities=[
+                SourceIdentity(
+                    source_id=source.id,
+                    label=source.display_name,
+                    model_ids=[model.id for model in source.models],
+                )
+                for source in config.sources
+            ],
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:

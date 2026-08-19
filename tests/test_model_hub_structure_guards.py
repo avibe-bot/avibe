@@ -916,7 +916,48 @@ def test_a_usage_row_is_labelled_without_its_caller_knowing_how_it_was_keyed() -
     ]
     handoffs = [node for node in ast.walk(reader) if _call_name(node) == "summary"]
     assert len(handoffs) == 1
-    assert {keyword.arg for keyword in handoffs[0].keywords} >= {"source_labels", "model_labels"}
+    assert "identities" in {keyword.arg for keyword in handoffs[0].keywords}
+    # Review 4967250750 finding 1: a mapping built here is a join key whose arity the
+    # caller chose, and arity is what went wrong on the fourth head. A metered model's
+    # identity is the pair (source, model), so a flat ``{model.id: ...}`` answered for
+    # a model removed from one Source as long as another Source still listed it.
+    # Handing the nesting down as a typed record leaves no arity to get wrong.
+    assert not [node for node in ast.walk(reader) if isinstance(node, (ast.Dict, ast.DictComp))]
+
+
+def test_no_hub_worker_thread_can_be_waited_on_at_process_exit() -> None:
+    """Review 4967250750 finding 3: metering must be abandonable, not merely bounded.
+
+    Every wait the hub makes a caller do is bounded, which is what keeps a served turn
+    off a disk. Shutdown is where a bound stops being the question: the work is still
+    running after the last bounded wait returned, so what matters is whether the
+    runtime will walk away from it. `ThreadPoolExecutor` will not — it registers an
+    `atexit` hook that joins non-daemon workers — so a worker wedged in `fsync` holds
+    interpreter shutdown open forever.
+
+    Scanned over the package rather than asserted about the one class that had the
+    defect: a second worker started anywhere in the hub inherits the same rule, which
+    is the part nobody remembers when adding one. ``MH-USAGE-015`` proves the
+    behaviour; this keeps the next thread from having to rediscover it.
+    """
+
+    started = 0
+    for path in sorted((ROOT / "core/handlers/model_hub").rglob("*.py")):
+        for node in ast.walk(_tree(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            assert name not in {
+                "ThreadPoolExecutor",
+                "ProcessPoolExecutor",
+            }, f"{path.name} builds a pool whose workers are joined at exit"
+            if name != "Thread":
+                continue
+            started += 1
+            daemon = [keyword for keyword in node.keywords if keyword.arg == "daemon"]
+            assert len(daemon) == 1, f"{path.name} starts a thread without saying whether it is a daemon"
+            assert daemon[0].value.value is True, f"{path.name} starts a thread the runtime will wait on"
+    assert started, "no hub worker thread found -- the scan has stopped covering anything"
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:

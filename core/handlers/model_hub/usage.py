@@ -22,8 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor
+from concurrent.futures import Future as CFuture
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -65,14 +67,42 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _carried(moment: datetime) -> Optional[datetime]:
+    """Carry one moment through every conversion this module performs, or refuse it.
+
+    `datetime` conversion is not total. A value near either end of the representable
+    range, offset far enough, leaves that range on the way to another zone and raises
+    `OverflowError` — which is an `ArithmeticError`, so it passes straight through a
+    handler written for bad data and takes the flush task with it, stopping metering
+    for the rest of the process while the row that caused it stays on disk.
+
+    Bounding the accepted years would leave a free parameter for the next value to
+    probe. The conversion itself is the bound instead: what this module can carry is
+    what its own conversions return, measured rather than declared. Both are
+    performed here — UTC for the spelling it publishes, local for the day it buckets
+    — so nothing that escapes this door can raise at either of them later.
+    """
+
+    try:
+        carried = moment.astimezone(timezone.utc)
+        carried.astimezone()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return carried
+
+
 def _aware(moment: datetime) -> datetime:
     """Read one caller-supplied moment, taking a naive one as local time.
 
     The same rule `_instant` applies to persisted text, so a naive value means the
     same thing however it reached this module.
+
+    Total, unlike the persisted-read door: a caller is reporting a call an upstream
+    already billed, and a moment this module cannot carry is a reason to date the row
+    by the only instant it can measure, never a reason to lose the row.
     """
 
-    return moment if moment.tzinfo is not None else moment.astimezone()
+    return _carried(moment) or _utc_now()
 
 
 def local_usage_day(moment: datetime) -> date:
@@ -82,7 +112,7 @@ def local_usage_day(moment: datetime) -> date:
     day boundary here is the user's midnight, not UTC's.
     """
 
-    return moment.astimezone().date()
+    return _aware(moment).astimezone().date()
 
 
 def _bounded_counter(value: object) -> int:
@@ -130,6 +160,10 @@ def _instant(value: object) -> Optional[datetime]:
     notion of what a day is.
 
     A naive value is read as local time, the same calendar the day buckets use.
+
+    Parsing is not the whole of reading it: a value `fromisoformat` accepts may still
+    be one no conversion can carry, so it goes through `_carried` before it escapes
+    and degrades to absent when it cannot make the trip.
     """
 
     if not isinstance(value, str) or _calendar_day(value) is not None:
@@ -138,7 +172,7 @@ def _instant(value: object) -> Optional[datetime]:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo is not None else parsed.astimezone()
+    return _carried(parsed)
 
 
 def _timestamp(value: object) -> Optional[str]:
@@ -159,7 +193,7 @@ def _timestamp(value: object) -> Optional[str]:
     parsed = _instant(_text(value))
     if parsed is None:
         return None
-    return parsed.astimezone(timezone.utc).isoformat()
+    return parsed.isoformat()
 
 
 def _normalize_row(row: object) -> Optional[dict]:
@@ -196,25 +230,55 @@ def _normalize_row(row: object) -> Optional[dict]:
     return normalized
 
 
-def _keyed_labels(labels: Optional[Mapping[str, Optional[str]]]) -> dict[str, Optional[str]]:
-    """Key one identity-to-label mapping the way the rows it will join were keyed.
+@dataclass(frozen=True)
+class SourceIdentity:
+    """One Source as config holds it, for joining onto the rows metered under it.
 
-    The read half of the rule `record_many` applies on the write half: an identity
-    a caller holds is not the key its rows carry, and a long one differs from it
-    entirely. Deriving here rather than in the caller is what keeps a join from
-    silently missing exactly the identities the fold exists for.
+    Nested rather than two flat maps, because a metered model's identity *is* the
+    pair: the same common model ID lives on several Sources, and a flat model map
+    cannot say which one it came from — it answered for a model removed from Source A
+    as long as Source B still listed it, labelling a retained row as though the
+    identity were still there. Arity is the whole of that defect, so it is carried in
+    the type rather than in a rule each caller has to remember.
 
-    Two identities that key the same are the same identity spelled differently —
-    `usage_ledger_key` is injective over anything else — so the later one wins, as
-    it would in the mapping the caller built.
+    `label` is the only genuinely caller-owned text here. A model's label is its own
+    identity, which the ledger can derive, and which matters only because a folded row
+    publishes a key rather than the identifier the user typed.
     """
 
-    keyed: dict[str, Optional[str]] = {}
-    for identity, label in (labels or {}).items():
-        key = usage_ledger_key(identity)
-        if key is not None:
-            keyed[key] = label
-    return keyed
+    source_id: str
+    label: Optional[str] = None
+    model_ids: Sequence[str] = ()
+
+
+def _keyed_identities(
+    identities: Optional[Sequence[SourceIdentity]],
+) -> tuple[dict[str, Optional[str]], dict[tuple[str, str], str]]:
+    """Key what config holds the way the rows it will join were keyed.
+
+    The read half of the rule `record_many` applies on the write half: an identity a
+    caller holds is not the key its rows carry, and a long one differs from it
+    entirely. Deriving here rather than in the caller is what keeps a join from
+    silently missing exactly the identities the fold exists for — and keying both
+    levels here is what keeps a model's join inside its own Source.
+
+    Two identities that key the same are the same identity spelled differently —
+    `usage_ledger_key` is injective over anything else — so the later one wins, as it
+    would in the mapping a caller built.
+    """
+
+    sources: dict[str, Optional[str]] = {}
+    models: dict[tuple[str, str], str] = {}
+    for identity in identities or ():
+        source_key = usage_ledger_key(identity.source_id)
+        if source_key is None:
+            continue
+        sources[source_key] = identity.label
+        for model_id in identity.model_ids:
+            model_key = usage_ledger_key(model_id)
+            if model_key is not None:
+                models[(source_key, model_key)] = model_id
+    return sources, models
 
 
 def _recency(row: dict) -> tuple[str, datetime]:
@@ -454,7 +518,7 @@ class BoundedUsageLedger:
         today = local_usage_day(measured)
         oldest = (today - timedelta(days=self.retention_days - 1)).isoformat()
         newest = today.isoformat()
-        ceiling = measured.astimezone(timezone.utc).isoformat()
+        ceiling = _aware(measured).isoformat()
         placed = []
         for row in rows:
             if not oldest <= row["day"] <= newest:
@@ -481,19 +545,24 @@ class BoundedUsageLedger:
         *,
         days: int = USAGE_DEFAULT_WINDOW_DAYS,
         now: datetime,
-        source_labels: Optional[Mapping[str, Optional[str]]] = None,
-        model_labels: Optional[Mapping[str, Optional[str]]] = None,
+        identities: Optional[Sequence[SourceIdentity]] = None,
     ) -> dict:
         """Aggregate the window into the read shape the settings page consumes.
 
         Labels are joined here rather than persisted, because a display name is
         user-supplied text this ledger has no business storing and a join keeps a
-        rename visible immediately instead of freezing old copies. They arrive as
-        *identities* and are keyed here rather than by the caller, because a row is
-        keyed and the component holding config is not the one that knows that: the
-        caller that keyed its own map looked a label up by `row["source_id"]`, so a
-        source whose ID is past the admission bound reported no label while still
-        existing, and its renames never appeared.
+        rename visible immediately instead of freezing old copies. What arrives is
+        what config holds — identities, nested by Source — and this method keys it,
+        because a row is keyed and the component holding config is not the one that
+        knows that: the caller that keyed its own map looked a label up by
+        `row["source_id"]`, so a source whose ID is past the admission bound reported
+        no label while still existing, and its renames never appeared.
+
+        The nesting is the other half of the same rule. A model's identity is its
+        Source and its ID together, so a flat model map answers for the wrong Source
+        whenever a common model ID is listed on more than one — which is every
+        interesting case. `SourceIdentity` makes that arity part of the argument's
+        type, so there is no keying convention left for a caller to hold.
 
         A model's label is its own identity, which only matters for a folded row.
         There the key is a head plus a digest, so a tab drawing `model_id` would
@@ -503,8 +572,7 @@ class BoundedUsageLedger:
         bounded_days = max(1, min(int(days), self.retention_days))
         today = local_usage_day(now)
         rows = self.window(days=bounded_days, now=now)
-        keyed_source_labels = _keyed_labels(source_labels)
-        keyed_model_labels = _keyed_labels(model_labels)
+        keyed_source_labels, keyed_model_labels = _keyed_identities(identities)
 
         totals = _empty_totals()
         sources: dict[str, dict] = {}
@@ -531,7 +599,7 @@ class BoundedUsageLedger:
                 row["model_id"],
                 {
                     "model_id": row["model_id"],
-                    "label": keyed_model_labels.get(row["model_id"]),
+                    "label": keyed_model_labels.get((row["source_id"], row["model_id"])),
                     **_empty_totals(),
                 },
             )
@@ -562,15 +630,60 @@ class BoundedUsageLedger:
         }
 
 
+class _AbandonableWriter(Executor):
+    """One serialized worker for ledger writes that the process can walk away from.
+
+    `ThreadPoolExecutor` is the obvious way to spell "one worker thread", and it is
+    the one mechanism this module may not use: its workers are non-daemon and it
+    registers an `atexit` hook that joins them. A worker wedged in `fsync` on an
+    unresponsive disk therefore holds interpreter shutdown open forever — *after*
+    every bounded wait in this module has already returned and told its caller the
+    write was unfinished. Bounding the coroutine is not the same as being able to
+    abandon the work, and this is the resource where only the second one counts:
+    metering is optional, so a stop or restart must never wait on it.
+
+    A daemon thread says exactly that, and CPython does not join one at shutdown.
+    The `Executor` interface is kept so `run_in_executor` still bridges the thread
+    to the loop; a worker is started on the first write and lives as long as the
+    process, which is the same single idle thread the pool cost.
+    """
+
+    def __init__(self) -> None:
+        self._queue: "queue.SimpleQueue[tuple[CFuture, Callable, tuple, dict]]" = queue.SimpleQueue()
+        self._worker = threading.Thread(
+            target=self._serve,
+            name="model-hub-usage",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def submit(self, fn: Callable, /, *args: object, **kwargs: object) -> CFuture:
+        future: CFuture = CFuture()
+        self._queue.put((future, fn, args, kwargs))
+        return future
+
+    def _serve(self) -> None:
+        while True:
+            future, fn, args, kwargs = self._queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - relayed to the waiting future
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+
 _LEDGER_EXECUTOR_LOCK: Final = threading.Lock()
-_LEDGER_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_LEDGER_EXECUTOR: Optional[_AbandonableWriter] = None
 # How long a metering caller waits for its own row to reach the disk. Sized for a
 # local read-modify-write and an fsync plus scheduling slack, which is orders of
 # magnitude under it, so nothing but a disk that has stopped answering gets here.
 _DURABILITY_WAIT_SECONDS: Final = 2.0
 
 
-def _ledger_executor() -> ThreadPoolExecutor:
+def _ledger_executor() -> _AbandonableWriter:
     """The one thread ledger writes run on, created when something is first metered.
 
     Deliberately not the loop's default executor. `record_many` holds the ledger's
@@ -580,12 +693,15 @@ def _ledger_executor() -> ThreadPoolExecutor:
     for no gain, since the lock admits one writer regardless. Owning the
     serialization makes it explicit instead of emergent, and it costs a single
     idle thread once anything has been metered at all.
+
+    Owning it is also what makes it abandonable; see `_AbandonableWriter` for why
+    the stdlib pool is the one mechanism that cannot be used here.
     """
 
     global _LEDGER_EXECUTOR
     with _LEDGER_EXECUTOR_LOCK:
         if _LEDGER_EXECUTOR is None:
-            _LEDGER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-hub-usage")
+            _LEDGER_EXECUTOR = _AbandonableWriter()
         return _LEDGER_EXECUTOR
 
 

@@ -943,6 +943,79 @@ ending's first statement and the ending must be the only one there is, and the c
 instant must be captured in `_resolved_response` and carried rather than re-read at the
 write. Six mutations, six distinct failures.
 
+### Round 17 (head `27aae667e`)
+
+Three P2 findings, and **all three repeat a class already seen**. The circuit breaker is
+tripped, so the round opens with the diagnosis rather than an edit. Inventory across the
+five findings-bearing heads: class **K** — *identity keying done by whoever happened to
+need it* — is on its 4th head (R13, R14, R15, R17); class **B** — *a bound stated at the
+wrong layer* — is on its 3rd (R15, R16, R17).
+
+**Scope decision, recorded: continue, no owner escalation.** The architecture is not what
+is wrong. Ledger-owns-keying survives R17 — no caller keyed anything this round — and
+one-serialized-writer survives too. What was never stated as an *owned property* is
+narrower than either: **identity arity** and **worker abandonability**. Each finding has
+exactly one terminal rule, each is reversible and contract-preserving, and two of the
+three *delete* a concept rather than add one, which is what makes the smallest complete
+action clear enough to take without asking.
+
+**F1: a model's label was keyed by its ID alone (class K, 4th head).** A common model ID
+exists precisely so several Sources can offer it, so a flat `{model_id: label}` answered
+for whichever Source asked — a model removed from Source A kept its label there for as
+long as Source B still listed it, and a retained row read as though its own identity were
+still configured. The previous three rounds moved *who* does the keying; none of them
+asked what a metered model's identity *is*. It is the pair. Two flat 1-arity maps cannot
+express a 2-arity identity, so no amount of relocating the lookup could have closed this,
+and the class was never going to end while the argument shape still admitted the mistake.
+`summary()` now takes `Sequence[SourceIdentity]` — the shape config actually holds, Sources
+each carrying their listed models — and derives both key levels itself. Arity lives in the
+type, so there is no keying convention left for a caller to hold. Model labels are derived
+on the way through (a model's label is its own identity), so the caller no longer passes
+`{model.id: model.id}` at all: one concept deleted, not relocated.
+
+**F2: `datetime` conversion was assumed total (class B, 3rd head).** A value near either
+end of the representable range, offset far enough, leaves that range on the way to another
+zone and raises `OverflowError` — an `ArithmeticError`, so it passes straight through a
+handler written for bad data, out of the flush task, and stops metering for the rest of the
+process while the row that caused it stays on disk to do it again. The tempting fix is a
+year range, and the project rule rules it out: a bound with a free parameter is not the
+terminal rule, it is the next thing to probe. **The conversion is the bound.** `_carried`
+performs both conversions this module makes — UTC for the spelling it publishes, local for
+the day it buckets — and returns nothing when either refuses, so what escapes it is safe
+at both by construction. The two doors differ in what they do with a refusal, and correctly
+so: persisted text degrades to absent, while a caller's moment cannot be lost, so it dates
+the row by the only instant the module can measure. The `(OSError, ValueError)` handlers
+were deliberately *not* widened — that would be a second answer to the same question and
+would hide the next real bug; the door makes the class unreachable instead.
+
+**F3: the write was bounded but not abandonable (class B, same round).** Every wait this
+module makes a caller do is bounded, which is what keeps a served turn off a disk. Shutdown
+is where a bound stops being the question: the write is still running after the last
+bounded wait has already returned and told its caller the row was unfinished, so all that
+is left is whether the process may walk away. `ThreadPoolExecutor` will not — its workers
+are non-daemon and it registers an `atexit` hook that joins them — so a worker wedged in
+`fsync` holds interpreter shutdown open forever, and a stop or restart waits on optional
+metering. `_AbandonableWriter` is one daemon thread over a `queue.SimpleQueue`, keeping the
+`Executor` interface so `run_in_executor` still bridges it to the loop. Same single idle
+thread, same call sites; the atexit join that *was* the whole defect is gone.
+
+**Evidence.** `MH-USAGE-013` states F1 as the biconditional over every pair the ledger
+holds — a label is published exactly when config lists that model under that Source — with
+both directions asserted, because a join that labels everything and one that labels nothing
+each satisfy half of it, and over both key populations so the scoping survives the fold.
+`MH-USAGE-014` seeds the two spellings that break the naive conversion regardless of the
+machine's zone and asserts first that they still raise `ArithmeticError`, which is the
+finding itself; then both directions of the door in one test. `MH-USAGE-015` runs a real
+subprocess, because `atexit` hooks and non-daemon joins run after the interpreter has
+finished with `__main__` and nothing in-process distinguishes a worker that will be
+abandoned from one that will be waited on forever. Two structure guards carry what behavior
+cannot: `usage_summary` may construct no mapping at all (a map built there is a join key
+whose arity the caller chose), and no module in the package may build a pool or start a
+non-daemon thread — scanned package-wide rather than asserted about the one class that had
+the defect, since the next worker inherits the rule. Six mutations, six distinct failures;
+the pool mutation fails by hanging the child for the full timeout, which is the defect
+verbatim.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

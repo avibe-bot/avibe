@@ -191,6 +191,24 @@ scenarios:
     kind: persistence
     layer: unit
     test: tests/test_model_hub_config.py::test_a_live_chain_is_refused_the_duplicate_a_persisted_chain_is_repaired
+  - id: MH-USAGE-013
+    name: A model's label belongs to the Source it was metered under, not to its ID alone
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_model_label_is_scoped_to_the_source_it_was_metered_under
+  - id: MH-USAGE-014
+    name: An instant no conversion can carry degrades instead of stopping metering
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_an_instant_no_conversion_can_carry_never_stops_metering
+  - id: MH-USAGE-015
+    name: A wedged ledger write cannot hold the process open at exit
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_wedged_ledger_write_cannot_hold_the_process_open
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

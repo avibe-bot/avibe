@@ -17,6 +17,9 @@ import json
 import logging
 import os
 import stat
+import subprocess
+import sys
+import textwrap
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +45,7 @@ from core.handlers.model_hub.stream_wire import (
 from core.handlers.model_hub.usage import (
     USAGE_RETENTION_DAYS,
     BoundedUsageLedger,
+    SourceIdentity,
     UsageWriter,
     local_usage_day,
 )
@@ -1412,11 +1416,10 @@ def test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key(tmp_path: 
         return ledger.summary(
             days=30,
             now=NOW,
-            source_labels={identity: f"{naming} {identity}" for identity in sources},
-            # A model's label is its own identity: a folded row publishes a head
-            # plus a digest, so a tab drawing `model_id` would show a string
-            # nobody typed.
-            model_labels={identity: identity for identity in models},
+            identities=[
+                SourceIdentity(source_id=source_id, label=f"{naming} {source_id}", model_ids=models)
+                for source_id in sources
+            ],
         )
 
     for naming in ("named", "renamed"):
@@ -1443,10 +1446,133 @@ def test_a_label_no_config_still_holds_is_absent_rather_than_stale(tmp_path: Pat
     ledger = _ledger(tmp_path)
     ledger.record(source_id="src_gone0001", model_id="model-gone", usage=None, at=NOW)
 
-    source = ledger.summary(days=30, now=NOW, source_labels={}, model_labels={})["sources"][0]
+    source = ledger.summary(days=30, now=NOW, identities=[])["sources"][0]
 
     assert source["label"] is None
     assert source["models"][0]["label"] is None
+
+
+def test_a_model_label_is_scoped_to_the_source_it_was_metered_under(tmp_path: Path) -> None:
+    """MH-USAGE-013, review 4967250750: a metered model's identity is the pair.
+
+    A common model ID exists precisely so several Sources can offer it, so a label
+    looked up by model ID alone answers for whichever Source happens to ask. A model
+    removed from one Source therefore kept its label there for as long as any other
+    Source still listed it, and a retained row read as though its own identity were
+    still configured.
+
+    Stated as the biconditional over every pair the ledger holds: a label is
+    published exactly when config lists that model under that Source. Both
+    directions are the test — a join that labels everything and one that labels
+    nothing each satisfy only half — and the models span both key populations, so
+    the scoping has to survive the fold as well as the verbatim case.
+    """
+
+    listing, withholding = "src_lists001", "src_hides001"
+    models = _keying_populations("model-")
+    ledger = _ledger(tmp_path)
+    for source_id in (listing, withholding):
+        for model_id in models:
+            ledger.record(source_id=source_id, model_id=model_id, usage=None, at=NOW)
+
+    summary = ledger.summary(
+        days=30,
+        now=NOW,
+        identities=[
+            SourceIdentity(source_id=listing, label="lists", model_ids=models),
+            # Configured, so its own label is present: what config no longer holds is
+            # only this Source's listing of these models.
+            SourceIdentity(source_id=withholding, label="hides", model_ids=()),
+        ],
+    )
+
+    assert {source["source_id"] for source in summary["sources"]} == {
+        usage_ledger_key(listing),
+        usage_ledger_key(withholding),
+    }
+    assert all(source["label"] is not None for source in summary["sources"])
+    assert {
+        (source["source_id"], model["model_id"]): model["label"]
+        for source in summary["sources"]
+        for model in source["models"]
+    } == {
+        (usage_ledger_key(source_id), usage_ledger_key(model_id)): (
+            model_id if source_id == listing else None
+        )
+        for source_id in (listing, withholding)
+        for model_id in models
+    }
+
+
+def test_an_instant_no_conversion_can_carry_never_stops_metering(tmp_path: Path) -> None:
+    """MH-USAGE-014, review 4967250750: the conversion is the bound, not a year range.
+
+    `datetime` conversion is not total. A value near either end of the representable
+    range, offset far enough, leaves that range on the way to another zone and raises
+    `OverflowError` — an `ArithmeticError`, so it passes straight through a handler
+    written for bad data and out of the flush task, stopping metering for the rest of
+    the process while the row that caused it stays on disk.
+
+    Bounding the accepted years would leave a free parameter for the next value to
+    probe, so the conversion itself is the bound: what this module carries is what its
+    own conversions return. Persisted text degrades to absent; a caller's moment
+    cannot be lost, so it dates the row by the only instant the module can measure.
+    """
+
+    uncarriable = ("0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59.999999-14:00")
+    # Seeds are only seeds while they still break the naive conversion, and the
+    # exception is the finding: `ArithmeticError` is not what a bad-data handler
+    # catches, so this raises out of every caller that only guarded `ValueError`.
+    for spelling in uncarriable:
+        with pytest.raises(ArithmeticError):
+            datetime.fromisoformat(spelling).astimezone(timezone.utc)
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": f"src_carry{index:03d}",
+                    "model_id": "model-carry",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": 5,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "last_metered_at": spelling,
+                }
+                for index, spelling in enumerate(uncarriable)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = ledger.summary(days=30, now=NOW)
+
+    assert summary["totals"]["input_tokens"] == 5 * len(uncarriable)
+    assert [source["last_metered_at"] for source in summary["sources"]] == [None] * len(uncarriable)
+
+    # The other direction of the same door: a caller reports a call an upstream
+    # already billed, so an uncarriable moment dates the row by the instant this
+    # module measures rather than dropping the usage.
+    live = BoundedUsageLedger(tmp_path / "live" / "usage.json")
+    for hours in (14, -14):
+        edge = datetime.min if hours > 0 else datetime.max
+        live.record(
+            source_id="src_carry999",
+            model_id="model-carry",
+            usage=None,
+            at=edge.replace(tzinfo=timezone(timedelta(hours=hours))),
+        )
+
+    rows = live.window(days=2, now=datetime.now(timezone.utc))
+    assert len(rows) == 1
+    assert rows[0]["requests"] == len((14, -14))
+    stamped = rows[0]["last_metered_at"]
+    assert stamped is not None
+    assert rows[0]["day"] == local_usage_day(datetime.fromisoformat(stamped)).isoformat()
 
 
 # --- Ownership: one queue, bounded by identity, loud when it loses a batch -----
@@ -1569,3 +1695,51 @@ def test_a_ledger_that_cannot_be_written_is_reported_once_per_outage(
         assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 1
 
     asyncio.run(exercise())
+
+
+def test_a_wedged_ledger_write_cannot_hold_the_process_open(tmp_path: Path) -> None:
+    """MH-USAGE-015, review 4967250750: metering must be abandonable, not just bounded.
+
+    Every wait this module makes a caller do is bounded, which is what keeps a served
+    turn from depending on a disk. Shutdown is the case where a bound is not enough:
+    the write is still running when the last bounded wait has already returned, so the
+    only question left is whether the process may walk away from it. Metering is
+    optional, so it must — a stop or a restart that waits on an unresponsive disk is
+    the hub failing at something it never promised.
+
+    Run as a real process because that is where the property lives. `atexit` hooks and
+    non-daemon thread joins run after the interpreter has finished with `__main__`, so
+    nothing observable in-process distinguishes a worker the runtime will abandon from
+    one it will wait on forever.
+    """
+
+    child = textwrap.dedent(
+        """
+        import threading
+        from core.handlers.model_hub.usage import _ledger_executor
+
+        wedged = threading.Event()
+        started = threading.Event()
+
+        def never_returns():
+            started.set()
+            wedged.wait()
+
+        _ledger_executor().submit(never_returns)
+        assert started.wait(10), "the ledger write never started"
+        print("wedged", flush=True)
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        # Generous next to the ~0s a walk-away costs, and finite because a hang is
+        # the defect: `TimeoutExpired` here is the test's failure signal.
+        timeout=60,
+    )
+
+    assert result.stdout.split() == ["wedged"], result.stderr
+    assert result.returncode == 0, result.stderr
