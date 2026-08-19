@@ -1,6 +1,7 @@
 import json
 import os
 import pytest
+import re
 import signal
 import shlex
 import sqlite3
@@ -183,6 +184,29 @@ def test_status_written(tmp_path, monkeypatch):
     payload = json.loads(paths.get_runtime_status_path().read_text(encoding="utf-8"))
     assert payload["state"] == "running"
     assert payload["detail"] == "pid=123"
+
+
+@pytest.mark.parametrize("state", ["running", "starting", "stopped", "error", "degraded"])
+@pytest.mark.parametrize("ok", [False, None, True], ids=["failed", "in-flight", "succeeded"])
+def test_a_restart_record_survives_every_status_write(tmp_path, monkeypatch, state, ok):
+    """Nothing about writing runtime status touches the restart record.
+
+    The record is the restart subsystem's own account of its last job, and doctor
+    reads it against live facts rather than against anything a status write
+    remembered. Seeded across every outcome and every state a caller can write, so
+    a status path added later inherits the assertion instead of needing its own.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    payload = {"ok": ok, "state": "failed" if ok is False else "succeeded", "job_id": "job-1"}
+    runtime.write_json(restart_path, payload)
+
+    runtime.write_status(state, detail="pid=123")
+
+    assert runtime.read_status()["state"] == state
+    assert runtime.read_json(restart_path) == payload
 
 
 def test_render_status_includes_restart_status(tmp_path, monkeypatch):
@@ -1344,6 +1368,228 @@ def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkey
     assert result["status"] == "repaired"
     assert not restart_path.exists()
     assert refreshed == [True]
+
+
+def _restart_status_payload(**overrides) -> dict:
+    """Return the status the restart supervisor writes, defaulted to a failure."""
+
+    payload = {
+        "ok": False,
+        "job_id": "0d1f2e3a4b5c",
+        "supervisor_pid": 4242,
+        "supervisor_started_at": 1.0,
+        "state": "failed",
+        "trigger": "auto-update",
+        "delay_seconds": 0.0,
+        "scope": "all",
+        "old_pid": 111,
+        "new_pid": None,
+        "log_path": "/tmp/vibe-restart-0d1f2e3a4b5c.log",
+        "error": "start runtime failed: Config 'model_hub'\n  contains unknown fields",
+        "created_at": "2026-08-11T04:50:31Z",
+        "stage_durations": {"restart_total_seconds": 1.5},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, payload)
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(restart_path, (stamp, stamp))
+    return restart_path
+
+
+def _stub_service_liveness(monkeypatch, *, owner_pid=None, starting_pid=None, extra_pids=(), lock_held=None):
+    """Describe a machine state, and let the real predicates read it.
+
+    Stubbing ``verified_service_running`` itself would only assert which helper
+    doctor calls. These are the sources underneath it and underneath the broader
+    ``service_process_running``, so a test can name a machine state -- a lock
+    owner, a pid that only reserved itself, a stray process -- and assert the
+    verdict the real predicates produce for it.
+
+    ``lock_held`` defaults to whether a lock owner was named, which is the usual
+    case. Pass it True with no ``owner_pid`` for the one state where the two come
+    apart: the lock is held but its record answers no pid, either because the
+    service has not written it yet or because it was corrupted. The lock is what
+    ``start_service`` refuses on, so that state is a running service.
+    """
+
+    reserved = owner_pid if starting_pid is None else starting_pid
+    holds_lock = owner_pid is not None if lock_held is None else lock_held
+
+    def resolve_owner(*, include_starting=False, **_kwargs):
+        return reserved if include_starting else owner_pid
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda: (not holds_lock, owner_pid))
+
+
+@pytest.mark.parametrize(
+    "age_seconds",
+    [0.0, cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60],
+    ids=["fresh", "past-retention"],
+)
+def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatch, age_seconds):
+    """A restart that failed and left nothing running is a failure at any age.
+
+    Age is what used to decide the verdict, so both sides of the retention
+    boundary are exercised against the same recorded failure: while the instance
+    is down, neither side may call it healthy nor offer to delete the one record
+    of why it is down.
+    """
+
+    _seed_restart_status(_restart_status_payload(), age_seconds=age_seconds)
+    _stub_service_liveness(monkeypatch)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == ["fail"]
+    item = items[0]
+    assert item["code"] == "runtime.restart_failed"
+    assert "model_hub" in item["message"]
+    assert "\n" not in item["message"]
+    assert "vibe-restart-0d1f2e3a4b5c.log" in item["message"]
+    assert not item.get("repairable")
+    assert "stale-restart-state" not in item.get("action", "")
+
+
+def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypatch):
+    """Every command the action names is one the reader can actually run.
+
+    An action is actionable on its own or not at all. An earlier revision of this
+    told the reader to "apply the extra-service-process repair listed in this
+    report", which is a dependency on what else got rendered: that item is behind
+    `--deep`, and the default run is exactly where a reader of this item lands, so
+    the instruction resolved to nothing. Naming the command instead is the fix, and
+    parsing it here is what keeps the name honest -- a renamed or misspelled repair
+    target fails against the real parser rather than against a user who is already
+    down. Extracted rather than asserted literally, so a command added to this text
+    later is checked too.
+    """
+
+    _seed_restart_status(_restart_status_payload())
+    _stub_service_liveness(monkeypatch)
+
+    action = cli._restart_state_items()[0]["action"]
+    commands = [text for text in re.findall(r"`([^`]+)`", action) if text.startswith("vibe ")]
+    assert commands, f"the action names no runnable command: {action}"
+
+    parser = cli.build_parser()
+    for command in commands:
+        parser.parse_args(shlex.split(command)[1:])
+
+    assert "vibe doctor repair duplicate-service-processes" in commands
+
+    # No command twice. `duplicate-service-processes` starts a clean service on
+    # the no-owner path it is prescribed for, so a trailing "then start again"
+    # earns `ServiceAlreadyRunningError` and reads as a recovery that failed --
+    # which is why this asserts the shape rather than that one wording: any
+    # repair that already does what a later step repeats fails here.
+    assert len(commands) == len(set(commands)), f"the action asks for a command twice: {commands}"
+
+
+@pytest.mark.parametrize(
+    ("liveness", "expected"),
+    [
+        ({}, "fail"),
+        ({"starting_pid": 5555}, "fail"),
+        ({"extra_pids": (7777,)}, "fail"),
+        ({"starting_pid": 5555, "extra_pids": (5555,)}, "fail"),
+        ({"owner_pid": 4321}, "warn"),
+        ({"owner_pid": 4321, "extra_pids": (7777,)}, "warn"),
+        ({"lock_held": True}, "warn"),
+    ],
+    ids=[
+        "nothing-running",
+        "pid-reserved-but-never-locked",
+        "stray-process-holding-no-lock",
+        "half-started-child-both-reserved-and-scanned",
+        "lock-owner",
+        "lock-owner-beside-a-stray-process",
+        "lock-held-but-its-record-answers-no-pid",
+    ],
+)
+def test_a_restart_failure_is_downtime_until_a_lock_verified_service_exists(monkeypatch, liveness, expected):
+    """One record against every liveness shape: only the service lock ends downtime.
+
+    The shapes that are not a lock owner are the wreckage a failed restart leaves:
+    a pid that reserved itself and never acquired the lock, a stray process the
+    scan can see, or one child that is both. Reading any of them as a running
+    service would suppress the very failure that produced it, so each stays a
+    failure until something actually holds the lock.
+
+    The last shape is the one that discriminates the lock from its record. A held
+    lock with no readable holder pid is a service -- caught between acquiring the
+    lock and writing the record, or holding a corrupted one -- and it is exactly
+    what ``start_service`` refuses to start past. Calling it downtime would report
+    a running instance as down and then prescribe a start that cannot succeed.
+    """
+
+    _seed_restart_status(
+        _restart_status_payload(),
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    _stub_service_liveness(monkeypatch, **liveness)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == [expected]
+    if expected == "warn":
+        assert items[0]["repair"]["target"] == "stale-restart-state"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"service_alive": True}, {"service_alive": False}, {"whatever_a_future_writer_adds": True}],
+    ids=["bare", "claims-a-service-survived", "claims-nothing-survived", "an-unknown-field"],
+)
+def test_only_live_facts_decide_downtime_not_what_the_record_claims(monkeypatch, extra):
+    """No field in the record can talk doctor out of a verdict about right now.
+
+    A record is written at failure time and read arbitrarily later, so anything it
+    says about what was alive is a snapshot that may since have been falsified --
+    by a child that took the lock after the supervisor gave up, or by any later
+    start. The rule reads the record for the outcome and the machine for liveness,
+    and nothing else. Seeded with the field a previous revision of this PR wrote,
+    both ways round, so a record produced by any version reaches the same verdict.
+    """
+
+    _seed_restart_status(
+        {**_restart_status_payload(), **extra},
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    _stub_service_liveness(monkeypatch)
+
+    assert [item["status"] for item in cli._restart_state_items()] == ["fail"]
+
+
+def test_restart_state_items_classify_non_failures_without_probing_the_service(monkeypatch):
+    """A record the supervisor did not fail keeps the classification it always had.
+
+    The probes raise instead of returning a pid so this also pins the
+    short-circuit: only a recorded failure may cost doctor a process probe.
+    """
+
+    def fail_probe(*args, **kwargs):
+        raise AssertionError("classifying a non-failure must not probe the service")
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
+    succeeded = _restart_status_payload(ok=True, state="succeeded", error=None, new_pid=222)
+
+    _seed_restart_status(succeeded)
+    assert [item["status"] for item in cli._restart_state_items()] == ["pass"]
+
+    _seed_restart_status(succeeded, age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60)
+    stale = cli._restart_state_items()
+    assert [item["status"] for item in stale] == ["warn"]
+    assert stale[0]["repair"]["target"] == "stale-restart-state"
 
 
 def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):

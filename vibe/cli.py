@@ -1184,12 +1184,89 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     return False
 
 
+def _restart_failure_summary(payload: dict) -> str:
+    """Describe a recorded restart failure on the single line doctor prints.
+
+    Why it failed is the entire value of the item, so the recorded error is
+    carried through rather than summarized away, with its whitespace collapsed
+    because the report prints one line per item.
+    """
+
+    pairs = (
+        ("state", payload.get("state") or "unknown"),
+        ("error", " ".join(str(payload.get("error") or "").split())),
+        ("trigger", payload.get("trigger")),
+        ("job_id", payload.get("job_id")),
+        ("log", payload.get("log_path")),
+    )
+    return " ".join(f"{name}={value}" for name, value in pairs if value)
+
+
 def _restart_state_items() -> list[dict]:
     items: list[dict] = []
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
+        return items
+
+    # Both clauses are read now, from what is on disk and what is running now.
+    # Nothing here asks what was true at some earlier moment, which is the whole
+    # design: an earlier version of this decided downtime from a liveness snapshot
+    # the supervisor had stamped into the record, and every interleaving between
+    # taking that snapshot and acting on it was a way to get the answer wrong. A
+    # rule with no remembered observation in it has no such window.
+    #
+    # The cost is bounded and in the safe direction. A restart that failed without
+    # stopping the old service -- the spawn path never stops anything -- leaves a
+    # record that outlives its relevance, so after that service is later stopped on
+    # purpose this reports a failure that is history. Both halves of the sentence
+    # are still true, and `vibe start` ends it. Suppressing it instead would mean
+    # trusting a remembered snapshot to stay true, and for a diagnostic the
+    # asymmetry decides it: a stale `fail` is a true statement with a self-clearing
+    # next step, while a wrong `pass` is the eight-day silent outage in #1567
+    # sitting behind a green health check.
+    #
+    # Note what the action must not say, which is the original defect: never offer
+    # the marker-deleting repair here. The reader may be genuinely down, and that
+    # command both destroys the only record of why and makes doctor pass again --
+    # an operator following it would silence their own health check.
+    #
+    # This has to be read before the staleness branch below, because terminal
+    # metadata goes stale after DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that
+    # branch offers a repair that deletes the marker -- on a still-down instance,
+    # the reason it is down.
+    #
+    # Liveness asks `verified_service_running`, never the broader
+    # `service_process_running`. The broad one reports whatever occupies this data
+    # dir, which is the right question for refusing a second start and the wrong
+    # one here: a pid reserved by a process that never acquired the lock is the
+    # wreckage of a failed start, not a recovery, and reading it as one would
+    # suppress the very failure it came from. What that leaves is a stray process
+    # `start_service` refuses to start past, because it asks the broad question --
+    # so the action has to cover it, and `_service_lifecycle_items` cannot be the
+    # one to do that here: its extra-process item is behind `--deep` and the
+    # default run is exactly where a reader of this lands.
+    #
+    # Which is the whole discipline for the text below. Every sentence of procedure
+    # is a claim about control flow this item does not own, and each one is
+    # separately falsifiable: earlier revisions deferred to an item that is not
+    # rendered by default, and then told the reader to start again after a repair
+    # that starts the service itself. So it names the two commands, in order, and
+    # says the one thing the reader cannot see -- that the repair brings the
+    # service up -- because that is what stops them from running start twice and
+    # reading `ServiceAlreadyRunningError` as a failed recovery. Anything beyond
+    # that is a prediction, and the commands report their own outcomes.
+    if payload.get("ok") is False and not runtime.verified_service_running():
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
+            "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
+            "service already running, the failed restart left a process holding no lock: run "
+            "`vibe doctor repair duplicate-service-processes`, which stops it and brings the service up.",
+            code="runtime.restart_failed",
+        )
         return items
 
     if _restart_status_is_stale(payload, restart_path):

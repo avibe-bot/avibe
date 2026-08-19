@@ -159,6 +159,48 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
     assert "failed to spawn" in status["error"]
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"ok": False, "state": "failed", "error": "boom"},
+        {"ok": None, "state": "scheduled", "error": None},
+        {"ok": True, "state": "succeeded", "error": None},
+    ],
+    ids=["failed", "in-flight", "succeeded"],
+)
+def test_a_recorded_outcome_reports_the_job_and_nothing_about_liveness(monkeypatch, tmp_path, outcome):
+    """The record says what the job did. It makes no claim about the machine.
+
+    A fence, not a repair. An earlier revision of this fix had the writer stamp
+    what was alive at write time, and every later reader of that stamp was a way
+    to get a present-tense question wrong from a past-tense answer; doctor now
+    measures liveness when it reports, so the record must stay a statement about
+    the job alone. The liveness probes are stubbed to raise rather than to answer,
+    so a writer that starts consulting them fails here instead of in review --
+    and it names the second cost of consulting them, since a probe can fail on
+    its own (an unopenable lock file is enough) and a diagnostic detail is never
+    worth losing the restart result over, least of all on the spawn-error path
+    where losing it also strands the `ok: null` marker that makes status report a
+    restart still in flight.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    def fail_probe(*_args, **_kwargs):
+        raise OSError("service.lock cannot be opened")
+
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(runtime, "extra_service_process_pids", fail_probe)
+
+    restart_supervisor._write_status({"job_id": "job-1", **outcome})
+
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["ok"] is outcome["ok"]
+    assert status["state"] == outcome["state"]
+    assert "service_alive" not in status
+
+
 def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
