@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -333,8 +334,7 @@ def _attempt(
     backups_dir: Path,
     *,
     hour: int,
-    frm: tuple[str, ...],
-    to: tuple[str, ...] = ("20260811_0051",),
+    frm: tuple[str, ...] = ("20260806_0047",),
 ) -> Path:
     """One migration attempt's backup, at a chosen wall-clock hour."""
 
@@ -342,66 +342,150 @@ def _attempt(
         db_path,
         backups_dir=backups_dir,
         from_revisions=frm,
-        to_revisions=to,
+        to_revisions=("20260811_0051",),
         now=datetime(2026, 7, 10, hour, 0, tzinfo=timezone.utc),
     )
 
 
-def test_attempt_order_survives_a_clock_that_moves_backwards(tmp_path: Path) -> None:
-    # A clock correction lands in the middle of a retry storm: the first attempt
-    # is stamped 10:00, the correction drags the next to 05:00, and the third
-    # comes back at 15:00. Sorted by wall-clock time the ends of the episode are
-    # 05:00 and 15:00 -- both taken after the upgrade began committing -- and the
-    # clean 10:00 snapshot is treated as a superseded middle and deleted. Order
-    # has to come from a counter this module writes, not from the clock.
-    db_path = tmp_path / "vibe.sqlite"
-    with sqlite3.connect(db_path) as conn:
+def _database(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
         conn.execute("create table marker (value text)")
+
+
+def _write(path: Path, value: str) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("insert into marker (value) values (?)", (value,))
+
+
+def _rows(path: Path) -> list[str]:
+    with sqlite3.connect(path) as conn:
+        return sorted(row[0] for row in conn.execute("select value from marker"))
+
+
+def _partially_apply(path: Path) -> None:
+    """The shape an upgrade leaves when it commits work and then raises.
+
+    A table appears; the revision the database is stamped with does not move,
+    because alembic never reached the stamp.
+    """
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("create table if not exists half_migrated (value text)")
+
+
+def test_the_copy_that_keeps_a_state_is_the_one_holding_its_writes(tmp_path: Path) -> None:
+    # Two attempts at the same failing migration are copies of one state, so one
+    # slot covers both -- and it has to be the copy carrying the writes made
+    # since the other. A clock correction landing mid-storm stamps the later
+    # attempt as the earlier of the two, so choosing by wall-clock time keeps the
+    # copy that is missing everything written in between. Order comes from a
+    # counter this module writes instead.
+    db_path = tmp_path / "vibe.sqlite"
+    _database(db_path)
     backups_dir = tmp_path / "backups"
 
-    clean = _attempt(db_path, backups_dir, hour=10, frm=("20260806_0047",))
-    _attempt(db_path, backups_dir, hour=5, frm=("20260809_0049",))
-    latest = _attempt(db_path, backups_dir, hour=15, frm=("20260809_0049",))
+    _write(db_path, "before")
+    clean = _attempt(db_path, backups_dir, hour=1)
+    _partially_apply(db_path)
+    _attempt(db_path, backups_dir, hour=15)
+    _write(db_path, "after")
+    corrected = _attempt(db_path, backups_dir, hour=5)
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({clean.name, corrected.name})
+    assert _rows(corrected / "vibe.sqlite") == ["after", "before"]
+
+
+def test_a_storm_of_identical_retries_holds_one_slot_between_them(tmp_path: Path) -> None:
+    # Why the window survives a retry storm at all. Every attempt after the
+    # first copies the same half-migrated database, so they are one state and
+    # hold one slot between them however many there are -- which is what leaves
+    # room for the snapshot taken before the damage, a state nothing else can
+    # produce.
+    db_path = tmp_path / "vibe.sqlite"
+    _database(db_path)
+    backups_dir = tmp_path / "backups"
+
+    clean = _attempt(db_path, backups_dir, hour=1)
+    _partially_apply(db_path)
+    for hour in range(2, 10):
+        latest = _attempt(db_path, backups_dir, hour=hour)
 
     assert _sqlite_backup_roots(backups_dir) == sorted({clean.name, latest.name})
 
 
-def test_one_episode_survives_an_upgrade_that_commits_revisions_before_failing(tmp_path: Path) -> None:
-    # `command.upgrade` walks several revisions in one call, and entering an
-    # autocommit block commits the version stamps already earned. A run that
-    # starts at 0047 can therefore reach 0049 and die inside 0050, leaving the
-    # next attempt starting from 0049 instead. Identifying the episode by where
-    # its attempts started splits it in two and lets the newer, already-damaged
-    # half take the whole window; what actually holds is that no attempt ever
-    # reached where it was headed.
+def test_restoring_a_rollback_point_makes_it_the_current_state_again(tmp_path: Path) -> None:
+    # An operator restores the clean snapshot, the service comes back up on the
+    # old schema and accepts writes, and the migration fails again. The restored
+    # database is that clean state once more, so the snapshot taken after it is a
+    # newer copy of the same state and supersedes the one restored from. That is
+    # the whole point: it is the only copy that is both clean and holds the
+    # writes made since the restore, and a rollback that landed on the original
+    # would lose every one of them.
     db_path = tmp_path / "vibe.sqlite"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("create table marker (value text)")
+    _database(db_path)
     backups_dir = tmp_path / "backups"
 
-    pristine = _attempt(db_path, backups_dir, hour=1, frm=("20260806_0047",))
+    _write(db_path, "before")
+    restored_from = _attempt(db_path, backups_dir, hour=1)
+    _partially_apply(db_path)
+    _attempt(db_path, backups_dir, hour=2)
+
+    shutil.copy(restored_from / "vibe.sqlite", db_path)
+    _write(db_path, "after restore")
+    restored = _attempt(db_path, backups_dir, hour=3)
+    _partially_apply(db_path)
+    latest = _attempt(db_path, backups_dir, hour=4)
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({restored.name, latest.name})
+    assert _rows(restored / "vibe.sqlite") == ["after restore", "before"]
+
+
+def test_a_duplicated_sequence_cannot_take_a_state_out_of_the_window(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Sequence allocation reads the highest sequence on disk and adds one, and
+    # two processes can do that at the same moment and both win -- `storage.
+    # migrations` serializes upgrades with a lock that is process-local, so the
+    # UI server and the controller can reach this at once. The collision leaves
+    # ordering within a state falling back on the clock, and a process that
+    # stalled between reserving its directory and copying can publish the
+    # already-damaged database stamped earlier than the clean copy that beat it
+    # there. Identifying a copy by what it is rather than by its place in a run
+    # of attempts is what makes that harmless: the clean snapshot is a state of
+    # its own, and no ordering accident can take its slot.
+    monkeypatch.setattr(backups, "_next_sequence", lambda _root: 1)
+    db_path = tmp_path / "vibe.sqlite"
+    _database(db_path)
+    backups_dir = tmp_path / "backups"
+
+    clean = _attempt(db_path, backups_dir, hour=2)
+    _partially_apply(db_path)
+    _attempt(db_path, backups_dir, hour=1)
+    latest = _attempt(db_path, backups_dir, hour=3)
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({clean.name, latest.name})
+
+
+def test_a_migration_that_moves_only_the_revision_is_a_new_rollback_point(tmp_path: Path) -> None:
+    # Not every migration changes the schema. One that only moves data and
+    # stamps the new revision leaves the DDL identical on both sides of it, and
+    # the two copies are still different rollback points: restoring the wrong
+    # one leaves the database at a revision whose migration has not run against
+    # its data. So the revisions belong in the identity next to the fingerprint,
+    # and neither half stands in for the other.
+    #
+    # Here the data-only migration settles and the next one starts failing. The
+    # snapshot taken before the data moved is the only way back behind it, and
+    # it has to outrank a second copy of the state the retries are stuck in.
+    db_path = tmp_path / "vibe.sqlite"
+    _database(db_path)
+    backups_dir = tmp_path / "backups"
+
+    before = _attempt(db_path, backups_dir, hour=1, frm=("20260806_0047",))
     _attempt(db_path, backups_dir, hour=2, frm=("20260809_0049",))
-    latest = _attempt(db_path, backups_dir, hour=3, frm=("20260809_0049",))
+    after = _attempt(db_path, backups_dir, hour=3, frm=("20260809_0049",))
 
-    assert _sqlite_backup_roots(backups_dir) == sorted({pristine.name, latest.name})
-
-
-def test_a_finished_migration_ends_the_episode(tmp_path: Path) -> None:
-    # The other side of the same comparison: when a run does reach its
-    # destination, the next backup starts from there, and that is what marks the
-    # boundary. Two settled migrations are two rollback points rather than one
-    # episode with ends, so the window is the newest two -- never an ancient
-    # snapshot held open by an episode that closed long ago.
-    db_path = tmp_path / "vibe.sqlite"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("create table marker (value text)")
-    backups_dir = tmp_path / "backups"
-
-    _attempt(db_path, backups_dir, hour=1, frm=("20260806_0047",), to=("20260809_0049",))
-    second = _attempt(db_path, backups_dir, hour=2, frm=("20260809_0049",), to=("20260811_0050",))
-    third = _attempt(db_path, backups_dir, hour=3, frm=("20260811_0050",), to=("20260811_0051",))
-
-    assert _sqlite_backup_roots(backups_dir) == sorted({second.name, third.name})
+    assert _sqlite_backup_roots(backups_dir) == sorted({before.name, after.name})
 
 
 def test_new_backup_reaches_stable_storage_before_older_ones_are_deleted(monkeypatch, tmp_path: Path) -> None:

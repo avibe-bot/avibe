@@ -21,9 +21,22 @@ downloads, sources, prebuilt assets, or version directories.
   10 MiB, retaining the newest 5 MiB. This preserves the inode used by live tail
   readers and avoids racing a subprocess that is actively appending output.
 - Before an existing SQLite database advances to another schema revision,
-  create a consistent SQLite online backup. Retain the newest two SQLite
-  migration/repair rollback points and the newest three legacy JSON migration
-  snapshots.
+  create a consistent SQLite online backup, and bound the rollback window in
+  the same call. Creating the copy is unconditional, so the bound has to be
+  too: gating it on the upgrade finishing leaves the window unbounded in the
+  one situation that produces attempt after attempt.
+- Bound the window to the newest two SQLite migration/repair rollback points
+  and the newest three legacy JSON migration snapshots. A rollback point is a
+  distinct database state -- the revisions a copy was stamped with plus a
+  fingerprint of its schema, both read from the copy itself. Two copies of the
+  same state are the same rollback point taken twice, and the newer one holds
+  every write the older one holds, so the window keeps the newest copy of each
+  state, newest state first, and spends any slot left over on the copies that
+  were superseded. On a healthy machine every migration finishes and every copy
+  is a state of its own, which is the newest two. Under a migration that keeps
+  failing partway, every attempt after the first copies the same half-migrated
+  database, so those attempts are one state holding one slot between them and
+  cannot crowd out the snapshot taken before the damage.
 - Prune only strict Avibe formats: self-identifying managed backup directories,
   historical `sqlite-state-migration-*` directories with valid manifests, and
   the exact legacy `vibe-pre-<revision>[-release-head]-repair-<timestamp>` file
