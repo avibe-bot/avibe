@@ -269,6 +269,7 @@ UNREADABLE_GRAPH = dict(SHIPPED_GRAPH) | {
     ),
     "20260108_0008_duplicate.py": _revision_file("20260102_0002", '"20260101_0001"'),
     "20260109_0009_no_metadata.py": '"""not a migration at all"""\n',
+    "__init__.py": "",
 }
 
 
@@ -287,12 +288,17 @@ def test_every_migration_is_compared_or_reported(sources):
     where dropping a node discards the only surviving record of what that release
     declared. An unreadable node stays in the graph carrying values that compare unequal
     to everything, so it is reached *and* reported.
+
+    The denominator is the point. Every earlier version of this assertion counted the
+    files the guard's own parser had managed to read, which cannot fail: a file it does
+    not see is missing from both the numerator and the denominator at once. Counting the
+    files Alembic will load is a measurement the parser cannot influence, so a migration
+    that becomes invisible to it now fails here instead of passing quietly.
     """
     compared = {name for name, _ in guard.revision_graph(sources).values()}
     reported = set(guard.ungraphable_sources(sources))
-    declares_a_revision = {name for name, source in sources.items() if "revision" in guard.declared_graph_fields(source)}
 
-    assert compared | reported == declares_a_revision
+    assert compared | reported == {name for name in sources if guard.is_migration_source(name)}
 
 
 # Every shape a *released* migration's metadata can take: the readable ones, plus an edge
@@ -326,6 +332,43 @@ def test_no_released_revision_can_be_rewritten_without_a_report(monkeypatch, rev
     problems = guard.rechained_revisions("v0.0.0")
 
     assert [problem for problem in problems if revision in problem or name in problem]
+
+
+@pytest.mark.parametrize(("revision", "slug"), [(revision, slug) for revision, slug, _, _ in SHIPPED_REVISIONS])
+def test_no_released_migration_body_can_change_without_a_report(monkeypatch, revision, slug):
+    """What a released migration *does* is as fixed as what it declares.
+
+    A database stamped at the revision never reruns the edited body and a fresh install
+    runs only the new one, so the two diverge permanently with nothing raised at either
+    moment. The edit here is a comment, which is the weakest case on purpose: an
+    exemption for edits that look harmless would put a human judgement back on the path
+    this guard exists to take it off.
+    """
+    name = f"{revision}_{slug}.py"
+    current = dict(SHIPPED_GRAPH)
+    current[name] += "\n# a later edit\n"
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.edited_released_bodies("v0.0.0")
+
+    assert len(problems) == 1
+    assert name in problems[0]
+
+
+def test_support_files_are_not_held_to_the_release(monkeypatch):
+    """Alembic does not load ``__init__.py`` as a migration, so neither does the guard."""
+    shipped = dict(SHIPPED_GRAPH) | {"__init__.py": ""}
+    current = dict(shipped) | {"__init__.py": "# touched\n"}
+    _graphs(monkeypatch, shipped, current)
+
+    assert guard.edited_released_bodies("v0.0.0") == []
+    assert guard.rechained_revisions("v0.0.0") == []
+
+
+@requires_release_history
+def test_no_released_migration_body_has_been_edited():
+    """The claim measured against the graph that actually ships, not a synthetic one."""
+    assert guard.edited_released_bodies() == []
 
 
 def test_an_unreadable_graph_has_its_head_refused_rather_than_guessed():

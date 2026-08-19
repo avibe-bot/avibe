@@ -7,7 +7,7 @@ never back. So editing a released revision's parentage does not change what thos
 databases have already done -- it changes what they will do next, silently, with no error
 at the moment of the edit and no error at the moment of the upgrade.
 
-Four properties, one primitive: the graph as a released tag actually shipped it, read
+Five properties, one primitive: the graph as a released tag actually shipped it, read
 straight out of git. Nothing here is a hand-maintained list of known-bad cases, and
 nothing needs an old Python environment -- ``env.py`` reads ``target_metadata`` only
 during autogenerate, so today's runtime can drive an older ``version_locations``.
@@ -17,6 +17,7 @@ during autogenerate, so today's runtime can drive an older ``version_locations``
     new_slot_collisions()         a change introduces no new duplicated slot number
     rechained_revisions()         a released revision keeps its identity and every edge
                                   Alembic orders the graph by
+    edited_released_bodies()      a released revision still does what the release ran
     unrepairable_releases()       a database built by a released graph still comes out
                                   ready when the upgrade users run upgrades it
 
@@ -53,6 +54,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from alembic import command
 from alembic.config import Config
+from alembic.script.base import _only_source_rev_file
 from alembic.util import to_tuple
 
 from storage.migrations import (
@@ -78,6 +80,18 @@ ALEMBIC_BOOKKEEPING_TABLE = "alembic_version"
 
 class MigrationGuardError(RuntimeError):
     """Raised when the guard cannot reach the release history it exists to compare against."""
+
+
+def is_migration_source(name: str) -> bool:
+    """Whether Alembic will load ``name`` as a migration, decided by Alembic's own rule.
+
+    Borrowed rather than restated, for the same reason ``GRAPH_FIELDS`` is measured off
+    ``Revision.__init__``: a file Alembic imports is a file this guard must account for,
+    so the two cannot be permitted to disagree about which files those are. Alembic
+    rejects a matching file that declares no ``revision`` outright, so nothing this admits
+    is optional for it either -- which makes it the right denominator for coverage.
+    """
+    return _only_source_rev_file.match(name) is not None
 
 
 def _git(*args: str) -> str:
@@ -340,23 +354,36 @@ def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, dict[str, ob
 def ungraphable_sources(sources: dict[str, str]) -> dict[str, str]:
     """``{filename: why the guard cannot hold that file to a released graph}``.
 
-    Both reasons are one defect wearing two faces: a key the guard invents has stopped
-    naming exactly one migration. Metadata it cannot read as a literal names nothing, and
-    an identifier two modules declare names two things. Either way the honest answer is
-    "cannot verify", and the one answer that must stay unreachable is "verified unchanged".
+    One defect wearing three faces: a key the guard invents has stopped naming exactly one
+    migration. Metadata it cannot read as a literal names nothing, an identifier two
+    modules declare names two things, and a file declaring no revision at all is never
+    keyed and so was never named by anything. Either way the honest answer is "cannot
+    verify", and the one answer that must stay unreachable is "verified unchanged".
+
+    That third face is why the denominator below is Alembic's file rule and not this
+    module's parse of those files. Asking the parser which files there were to read is
+    self-confirming -- a file it cannot see is absent from its own account of what it saw
+    -- and each earlier version of this function asked exactly that, which is why the same
+    defect kept arriving wearing a new face.
 
     Every caller reading a source tree owes this its output: a tree is compared only
     alongside the reasons parts of it cannot be, or refused outright.
     """
     reasons: dict[str, str] = {}
-    for revision, claims in revision_claims(sources).items():
-        names = [name for name, _ in claims]
-        for name, edges in claims:
+    claims = revision_claims(sources)
+    for revision, claimants in claims.items():
+        names = [name for name, _ in claimants]
+        for name, edges in claimants:
             if revision.startswith("<computed:") or any(value is COMPUTED for value in edges.values()):
                 reasons[name] = "computes its migration metadata"
-            elif len(claims) > 1:
+            elif len(claimants) > 1:
                 others = ", ".join(other for other in names if other != name)
                 reasons[name] = f"declares revision {revision!r}, which {others} also declares"
+
+    keyed = {name for claimants in claims.values() for name, _ in claimants}
+    for name in sources:
+        if name not in keyed and is_migration_source(name):
+            reasons[name] = "declares no module-level revision"
     return reasons
 
 
@@ -432,6 +459,37 @@ def rechained_revisions(baseline: str | None = None) -> list[str]:
         if drift:
             problems.append(f"{revision} ({name}) no longer matches what {baseline} shipped: {drift}")
     return problems
+
+
+def edited_released_bodies(baseline: str | None = None) -> list[str]:
+    """Released migration files whose contents are no longer what the baseline shipped.
+
+    The properties above watch what a migration *declares*; this watches what it *does*.
+    They are one contract seen from two sides -- a released migration is a shipped surface
+    -- and this repository has produced one defect of each shape: the v3.0.11 outage moved
+    a ``down_revision``, and ``20260501_0001`` had its ``upgrade()`` body edited after
+    release. Editing the body is the quieter half. A database stamped at that revision
+    never reruns it, a fresh install runs only the new version, and nothing raises at
+    either moment.
+
+    The upgrade property notices such an edit only when the divergence reaches readiness.
+    An added index, constraint, or backfill leaves both databases ready and permanently
+    different, so it cannot be relied on to notice in general -- and concluding otherwise
+    from the one edit it did catch is how this gap survived a whole design pass.
+
+    No exemption for edits judged harmless. Judging them is the convention this guard
+    exists to replace, and no exemption is needed: restoring the shipped file and adding a
+    new migration carrying the change is always available, and is the only form of the
+    change every database can actually apply.
+    """
+    baseline = baseline or latest_released_tag()
+    current = working_tree_sources()
+    return [
+        f"{name} is no longer what {baseline} shipped; a released migration's body is fixed "
+        "once a database has run it"
+        for name, source in sorted(released_sources(baseline).items())
+        if is_migration_source(name) and name in current and current[name] != source
+    ]
 
 
 def _alembic_config(db_path: Path, versions: Path | None = None) -> Config:
@@ -573,6 +631,7 @@ def collect_problems(baseline: str | None = None, *, include_upgrade: bool = Tru
         problems.append(f"slot {slot} did not collide in {baseline} and now does: {', '.join(sorted(names))}")
 
     problems.extend(rechained_revisions(baseline))
+    problems.extend(edited_released_bodies(baseline))
 
     if include_upgrade:
         for tag, reason in sorted(unrepairable_releases().items(), key=lambda item: version_key(item[0])):
