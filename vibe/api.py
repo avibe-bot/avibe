@@ -61,6 +61,7 @@ from vibe.upgrade import (
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    rollback_target_version,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -6042,6 +6043,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        rollback_to=rollback_target_version(),
                     )
                     restarting = True
                 except Exception as exc:

@@ -757,3 +757,185 @@ def test_background_store_schema_upgrade_uses_migration_backup(tmp_path: Path) -
 
     backups = list((db_path.parent / "backups").glob("avibe-sqlite-migration-*"))
     assert len(backups) == 1
+
+
+def test_a_rollback_point_is_offered_only_when_it_was_written_after_the_observation(tmp_path: Path) -> None:
+    # The pair `next_backup_sequence` / `find_restorable_backup` exists to answer
+    # one question -- did the code I just handed the database to migrate it, and
+    # where is the copy it took first -- using only numbers this side wrote and
+    # read. Stated as that property over an arbitrary run of copies rather than
+    # as a list of the cases, because the cases the earlier designs died on were
+    # all cases nobody had listed: a stamp and a schema that stay put across a
+    # migration that commits rows and then fails, and a clock corrected backwards
+    # between two attempts.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the observation')")
+
+    before = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    watermark = backups.next_backup_sequence(backups_dir)
+
+    # Nothing has been written since the watermark was read, so there is nothing
+    # to put back -- the same answer a restart that failed before starting the
+    # new version has to get.
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark) is None
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("update payload set value = 'committed by the first attempt'")
+    first_attempt = create_sqlite_migration_backup(
+        db_path, backups_dir=backups_dir, now=datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    )
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark) == first_attempt
+
+    # A retry, dated BEFORE the attempt it follows. The answer moves to it anyway:
+    # it holds the rows the first attempt committed, and the earlier copy would
+    # silently discard them.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("insert into payload (value) values ('committed, then the attempt failed')")
+    retry = create_sqlite_migration_backup(
+        db_path, backups_dir=backups_dir, now=datetime(2026, 8, 6, 11, 0, tzinfo=timezone.utc)
+    )
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark) == retry
+    # And the copy from before the window is never the answer, at any watermark
+    # at or above it: it predates the observation, so restoring it would throw
+    # away work this rollback was never asked about.
+    assert before != retry
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark + 1) == retry
+
+
+def test_a_copy_written_before_the_counter_existed_is_never_offered(tmp_path: Path) -> None:
+    # A copy carrying no number was written by a release that did not have one,
+    # which places it before any observation this release could have made. Offering
+    # it would restore a database from an unknown point in the past and report it
+    # as the rollback for this upgrade.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('from before the counter')")
+
+    from_the_previous_release = _as_pre_sequence_backup(
+        create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    )
+
+    assert from_the_previous_release.exists()
+    assert backups.next_backup_sequence(backups_dir) == 0
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=0) is None
+
+
+def test_restoring_a_rollback_point_destroys_neither_side(tmp_path: Path) -> None:
+    # A restore is a swap, and the property is that both sides survive it. The
+    # database being rolled back FROM is the only copy of whatever the failing
+    # version committed, and the restore's own outcome can turn out to be the bad
+    # one, so neither the live database nor the rollback point may be consumed to
+    # produce the other.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    point_contents = _db_contents(rollback_point / "vibe.sqlite")
+
+    # The failing version migrates: new schema, new rows, new stamp.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table added_by_the_new_version (value text)")
+        conn.execute("insert into payload (value) values ('written by the new version')")
+    _stamp(db_path, "20260819_0051")
+    forward_contents = _db_contents(db_path)
+
+    replaced = backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert _db_contents(db_path) == point_contents
+    assert replaced == rollback_point / backups.REPLACED_DATABASE_NAME
+    assert _db_contents(replaced) == forward_contents
+    assert _db_contents(rollback_point / "vibe.sqlite") == point_contents
+    assert oct(db_path.stat().st_mode)[-3:] == "600"
+
+
+def test_a_restore_leaves_no_journal_from_the_displaced_generation(tmp_path: Path) -> None:
+    # The sidecars are not tidiness. A `-wal` left beside the restored file
+    # belongs to the database that was displaced, and SQLite would replay it into
+    # the restored one and call the result consistent -- a rollback that reports
+    # success while handing back the schema it was rolling back from.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    point_contents = _db_contents(rollback_point / "vibe.sqlite")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("create table added_by_the_new_version (value text)")
+    assert db_path.with_name(db_path.name + "-wal").exists()
+
+    replaced = backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert not db_path.with_name(db_path.name + "-wal").exists()
+    assert not db_path.with_name(db_path.name + "-shm").exists()
+    assert _db_contents(db_path) == point_contents
+    # Moved rather than deleted: the displaced generation keeps its own log, so
+    # what the new version committed is still readable beside it.
+    assert replaced is not None and replaced.exists()
+
+
+def test_a_restore_that_cannot_be_staged_leaves_the_database_alone(tmp_path: Path) -> None:
+    # The replacement is copied and verified before anything about the live
+    # database changes, so a rollback point that turns out to be unreadable costs
+    # nothing. The alternative -- displace first, then discover it -- leaves the
+    # machine with no database at all, which is the failure this whole change
+    # exists to prevent.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('the only copy')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    live_contents = _db_contents(db_path)
+
+    (rollback_point / "vibe.sqlite").write_bytes(b"not a database at all")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert _db_contents(db_path) == live_contents
+    assert not (rollback_point / backups.REPLACED_DATABASE_NAME).exists()
+    assert not db_path.with_name(db_path.name + ".restoring").exists()
+
+
+def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path: Path) -> None:
+    # A displaced database is a full copy, so it needs a bound like every other
+    # copy in this directory. It gets the one that already exists by living inside
+    # the rollback point it came from: a second restore to the same point replaces
+    # the first displacement instead of accumulating beside it, and pruning the
+    # point takes it along. Otherwise a machine retrying an upgrade adds one copy
+    # of the database per attempt -- the exact growth this window was bounded to
+    # stop.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+
+    for attempt in ("first attempt", "second attempt"):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("insert into payload (value) values (?)", (attempt,))
+        backups.restore_sqlite_backup(rollback_point, db_path)
+
+    displaced = [path.name for path in rollback_point.iterdir() if backups.REPLACED_DATABASE_NAME in path.name]
+    assert displaced == [backups.REPLACED_DATABASE_NAME]
+    # The last attempt's database is the one kept, and it is the one that held
+    # the most work.
+    assert ("second attempt",) in _db_contents(rollback_point / backups.REPLACED_DATABASE_NAME)[1][1]

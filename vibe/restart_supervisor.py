@@ -11,13 +11,32 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from config import paths
+
+# Imported here, at the top, rather than where the rollback path uses it. This
+# process runs the version being rolled back FROM, and a pinned reinstall
+# replaces the source tree underneath it, so a first import taken after that
+# install reads the OTHER release's source into this process. Importing at module
+# load makes every later use a `sys.modules` hit that touches no file. The module
+# is pure stdlib, so paying for it on every restart costs nothing.
+from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
-from vibe.upgrade import get_restart_command, get_restart_environment, get_restart_invocation_command, get_safe_cwd
+from vibe.upgrade import (
+    build_upgrade_plan,
+    get_restart_command,
+    get_restart_environment,
+    get_restart_invocation_command,
+    get_safe_cwd,
+)
 
 
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
+# Long enough for a package index to be slow, short enough that a hung download
+# does not leave the machine sitting with no service forever. A rollback that
+# times out is recorded as failed, which is a diagnosable state; a rollback that
+# waits without a bound is not.
+_ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
 
 
 def _now_iso() -> str:
@@ -236,6 +255,153 @@ def _stop_runtime_for_restart(stop_ui: bool = True) -> tuple[bool, dict[str, flo
     return ui_stopped, ui_timings, stop_ui_seconds, ui_pid, service_stopped, stop_service_seconds
 
 
+def _restore_database_for_rollback(backup_watermark: int | None, write) -> dict:
+    """Put back the database the version being rolled back from migrated, if it did.
+
+    Whether a migration happened is decided from a number this job read out of
+    the backup window itself before the new version was allowed to start. Any
+    rollback point recorded at or above it was written during that window, so it
+    was written by the version now being rolled back from -- measured by our own
+    code, before and after, with nothing in between that the failing version got
+    to report about itself.
+
+    Every cheaper test compares labels and every one of them is wrong on a real
+    case: the revision stamp and the schema both stay put when a migration
+    commits rows and then fails, and the wall clock reverses the order of two
+    attempts if it is corrected backwards between them. `storage.backups` refuses
+    to answer from those for the same reason.
+
+    No watermark means the job never reached the point of starting the new
+    version, so no migration of its doing can exist and there is nothing to put
+    back. That is a normal outcome, not a degraded one.
+    """
+
+    if backup_watermark is None:
+        return {"restored": False, "reason": "no_migration_window"}
+
+    backups_dir = paths.get_state_backups_dir()
+    rollback_point = find_restorable_backup(backups_dir, written_at_or_after=backup_watermark)
+    if rollback_point is None:
+        write(f"no rollback point was written at or after backup sequence {backup_watermark}; database left as it is")
+        return {"restored": False, "reason": "no_rollback_point"}
+
+    db_path = paths.get_sqlite_state_path()
+    write(f"restoring the database from {rollback_point}")
+    replaced = restore_sqlite_backup(rollback_point, db_path)
+    write(f"database restored; the one it replaced is at {replaced}" if replaced else "database restored")
+    return {
+        "restored": True,
+        "restored_from": str(rollback_point),
+        "replaced_database": str(replaced) if replaced else None,
+    }
+
+
+def _roll_back_failed_upgrade(
+    *,
+    rollback_to: str,
+    vibe_path: str | None,
+    start_ui: bool,
+    backup_watermark: int | None,
+    write,
+    record,
+) -> dict:
+    """Put the machine back on the version it was upgrading from.
+
+    Reached only when a restart has failed AND nothing holds the service lock.
+    That second half is the whole condition, and it is deliberately not a list of
+    the failure branches that ought to qualify: such a list is complete only
+    until the next branch is added, and the branch nobody remembered is exactly
+    the one that leaves an instance dark. "No service is running" is the property
+    the upgrade must not be able to produce, so it is what gets asked -- and it
+    answers correctly for free on the failures that changed nothing, like a stop
+    that did not stop, where the old service is still serving and rolling back
+    underneath it would be the damage.
+
+    Install, then restore, then start. The install is the step that needs a
+    package index and so the step most likely to fail, and it is the only one
+    with no effect on the data: failing there leaves the database exactly as the
+    upgrade left it, and a rollback that changed nothing is a far better thing to
+    find than one that half-changed the schema. Restoring before starting is what
+    makes the started version able to read what it finds.
+
+    Each step is recorded before the next begins, because this process can be
+    killed mid-rollback and what it has already done to the database has to be
+    readable afterwards from the status record rather than inferred from the
+    disk.
+    """
+
+    rollback: dict = {"target_version": rollback_to, "state": "running", "started_at": _now_iso()}
+    record(rollback)
+    write(f"rolling back to {rollback_to}: no service is running after the failed restart")
+
+    try:
+        plan = build_upgrade_plan(vibe_path=vibe_path, version=rollback_to)
+    except Exception as exc:
+        rollback.update(state="failed", error=f"cannot build a pinned install for {rollback_to}: {exc}")
+        record(rollback)
+        return rollback
+
+    rollback["install"] = {"method": plan.method, "ok": None}
+    record(rollback)
+    try:
+        result = subprocess.run(
+            plan.command,
+            capture_output=True,
+            text=True,
+            env=plan.env,
+            cwd=get_safe_cwd(),
+            timeout=_ROLLBACK_INSTALL_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
+        rollback.update(state="failed", error=f"installing {rollback_to} failed: {exc}")
+        record(rollback)
+        return rollback
+    if result.returncode != 0:
+        # The installer's own stderr, trimmed: it is the only account of why the
+        # rollback could not proceed, and the full text can be megabytes of
+        # resolver output.
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
+        rollback.update(state="failed", error=f"installing {rollback_to} failed with exit code {result.returncode}")
+        record(rollback)
+        write(f"pinned install of {rollback_to} failed: {detail}")
+        return rollback
+    rollback["install"] = {"method": plan.method, "ok": True}
+    record(rollback)
+    write(f"installed {rollback_to} using {plan.method}")
+
+    try:
+        rollback["database"] = _restore_database_for_rollback(backup_watermark, write)
+    except Exception as exc:
+        rollback["database"] = {"restored": False, "error": str(exc)}
+        rollback.update(state="failed", error=f"restoring the database failed: {exc}")
+        record(rollback)
+        return rollback
+    record(rollback)
+
+    try:
+        service_pid, ui_pid = _start_runtime_processes(start_ui=start_ui)
+    except Exception as exc:
+        rollback.update(state="failed", error=f"starting {rollback_to} failed: {exc}")
+        record(rollback)
+        return rollback
+    ready_pid = runtime.wait_for_service_ready(service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    if ready_pid is None:
+        rollback.update(
+            state="failed",
+            service_pid=service_pid,
+            error=f"{rollback_to} started but service pid {service_pid} did not acquire the service lock",
+        )
+        record(rollback)
+        return rollback
+    runtime.write_status("running", f"pid={ready_pid}", ready_pid, ui_pid)
+    rollback.update(state="succeeded", service_pid=ready_pid, error=None)
+    record(rollback)
+    write(f"rolled back to {rollback_to}; service pid={ready_pid}")
+    return rollback
+
+
 def _wait_for_service_lock_release(timeout: float = _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -255,6 +421,7 @@ def _run_restart_job(
     trigger: str,
     scope: str = "all",
     prepare_show_runtime: bool = False,
+    rollback_to: str | None = None,
 ) -> int:
     # "service": restart only the service process, leaving the Web UI process
     # running (a config change shouldn't tear down the open Web UI). "all"
@@ -284,6 +451,46 @@ def _run_restart_job(
         def mark_duration(name: str, started_at: float) -> float:
             return record_duration(name, _rounded_seconds(time.monotonic() - started_at))
 
+        # The backup sequence read just before the new version was allowed to
+        # start, which is what tells a rollback whether that version migrated the
+        # database. None until then, and None is the right answer for a failure
+        # that never got that far: nothing it could have migrated exists.
+        backup_watermark: int | None = None
+
+        def record_rollback(rollback: dict) -> None:
+            payload["rollback"] = dict(rollback)
+            _write_status(payload)
+
+        def fail(error: str, return_code: int, *, started_at: float | None = None) -> int:
+            """End this job as failed, rolling back first when nothing is running.
+
+            Every failure in this job goes through here rather than each branch
+            deciding whether it is the kind that warrants a rollback. Which
+            branches those are is not knowable as a list -- the next branch added
+            would not be on it -- so the decision is made once, from the state the
+            upgrade must never be able to produce: no service holding the lock.
+            """
+
+            if rollback_to and not runtime.verified_service_running():
+                try:
+                    _roll_back_failed_upgrade(
+                        rollback_to=rollback_to,
+                        vibe_path=vibe_path,
+                        start_ui=restart_ui,
+                        backup_watermark=backup_watermark,
+                        write=write,
+                        record=record_rollback,
+                    )
+                except Exception as exc:
+                    # A rollback that raises must not swallow the failure that
+                    # caused it: the original error is what the operator needs,
+                    # and the rollback's own is recorded beside it.
+                    record_rollback({"target_version": rollback_to, "state": "failed", "error": str(exc)})
+                    write(f"rollback to {rollback_to} raised: {exc}")
+            elif rollback_to:
+                record_rollback({"target_version": rollback_to, "state": "skipped", "reason": "service_running"})
+            return _fail(payload, error, log, return_code, started_at=started_at)
+
         old_pid = _read_recorded_pid()
         payload = {
             "ok": None,
@@ -299,6 +506,10 @@ def _run_restart_job(
             "trigger": trigger,
             "delay_seconds": delay_seconds,
             "scope": scope,
+            # Recorded whether or not a rollback ends up happening, so a failed
+            # restart with no `rollback` record is readable: armed and killed
+            # before it could recover, versus never recoverable at all.
+            "rollback_to": rollback_to,
             "old_pid": old_pid,
             "new_pid": None,
             "log_path": str(log_path),
@@ -324,22 +535,20 @@ def _run_restart_job(
         try:
             ui_stopped, ui_timings, stop_ui_seconds, ui_pid, stopped, stop_service_seconds = _stop_runtime_for_restart(stop_ui=restart_ui)
         except Exception as exc:
-            return _fail(payload, f"stop runtime failed: {exc}", log, 2, started_at=restart_started_at)
+            return fail(f"stop runtime failed: {exc}", 2, started_at=restart_started_at)
         stage_durations.update(ui_timings)
         record_duration("stop_ui_total_seconds", stop_ui_seconds)
         record_duration("stop_service_seconds", stop_service_seconds)
         mark_duration("stop_runtime_seconds", stop_runtime_started_at)
         if restart_ui and ui_pid and ui_stopped is False and runtime.pid_alive(ui_pid):
-            return _fail(payload, f"UI pid {ui_pid} did not stop", log, 2, started_at=restart_started_at)
+            return fail(f"UI pid {ui_pid} did not stop", 2, started_at=restart_started_at)
         if stopped is False:
             remaining_service_pids = _remaining_service_pids_after_stop()
             if remaining_service_pids:
                 payload["remaining_service_pids"] = remaining_service_pids
                 pid_list = ",".join(str(pid) for pid in remaining_service_pids)
-                return _fail(
-                    payload,
+                return fail(
                     f"service stop failed; remaining service pid(s): {pid_list}",
-                    log,
                     2,
                     started_at=restart_started_at,
                 )
@@ -347,15 +556,24 @@ def _run_restart_job(
         wait_lock_release_started_at = time.monotonic()
         if not _wait_for_service_lock_release():
             mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
-            return _fail(payload, "service lock did not release after stopping runtime", log, 2, started_at=restart_started_at)
+            return fail("service lock did not release after stopping runtime", 2, started_at=restart_started_at)
         mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
+
+        if rollback_to:
+            # Read here and nowhere else: the service is stopped, its lock is
+            # released, and the new version has not run yet, so this is the last
+            # instant at which the window still holds only what earlier versions
+            # put there. Every backup numbered at or above it afterwards was
+            # written by the version about to start.
+            backup_watermark = next_backup_sequence(paths.get_state_backups_dir())
+            write(f"pre-start backup sequence is {backup_watermark}; rollback target is {rollback_to}")
 
         write("starting service")
         start_runtime_started_at = time.monotonic()
         try:
             new_pid, ui_pid = _start_runtime_processes(start_ui=restart_ui)
         except Exception as exc:
-            return _fail(payload, f"start runtime failed: {exc}", log, 1, started_at=restart_started_at)
+            return fail(f"start runtime failed: {exc}", 1, started_at=restart_started_at)
         mark_duration("start_runtime_seconds", start_runtime_started_at)
 
         service_status = runtime.read_status()
@@ -363,7 +581,7 @@ def _run_restart_job(
             new_pid = _service_pid_from_status(_read_starting_service_status())
             service_status = runtime.read_status()
         if not new_pid or not runtime.pid_alive(new_pid):
-            return _fail(payload, "start runtime completed but service pid is not alive", log, 3, started_at=restart_started_at)
+            return fail("start runtime completed but service pid is not alive", 3, started_at=restart_started_at)
         if not runtime.service_pid_recorded(new_pid):
             write(f"start runtime returned while service pid={new_pid} is still acquiring its lock")
             wait_lock_started_at = time.monotonic()
@@ -373,10 +591,8 @@ def _run_restart_job(
             resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
             if resolved_pid is None:
                 mark_duration("wait_service_lock_seconds", wait_lock_started_at)
-                return _fail(
-                    payload,
+                return fail(
                     f"service pid {new_pid} did not acquire the service lock",
-                    log,
                     3,
                     started_at=restart_started_at,
                 )
@@ -451,7 +667,18 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
+    rollback_to: str | None = None,
 ) -> dict:
+    """Spawn the detached restart job.
+
+    `rollback_to` is the version currently installed, and passing it is what
+    makes this restart recoverable: if the restart fails and leaves nothing
+    holding the service lock, the job reinstalls exactly that version, puts back
+    the database if the new one migrated it, and starts the service again. Only
+    an upgrade has an answer for it -- a plain restart is already running the
+    version it would roll back to, so there is nothing to reinstall and the
+    failure is the operator's to look at.
+    """
     from core.memory.ui_access import process_ui_read_secret
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
@@ -470,6 +697,8 @@ def schedule_restart(
         command.extend(["--vibe-path", vibe_path])
     if prepare_show_runtime:
         command.append("--prepare-show-runtime")
+    if rollback_to:
+        command.extend(["--rollback-to", rollback_to])
     env = get_restart_environment(vibe_path=vibe_path)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -539,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", default="all", choices=("all", "service"))
     parser.add_argument("--vibe-path")
     parser.add_argument("--prepare-show-runtime", action="store_true")
+    parser.add_argument("--rollback-to")
     args = parser.parse_args(argv)
     return _run_restart_job(
         job_id=args.job_id,
@@ -547,6 +777,7 @@ def main(argv: list[str] | None = None) -> int:
         trigger=args.trigger,
         scope=args.scope,
         prepare_show_runtime=args.prepare_show_runtime,
+        rollback_to=args.rollback_to,
     )
 
 

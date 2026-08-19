@@ -21,6 +21,11 @@ CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
+# A spec that names nothing but a package, so appending ``==<version>`` to it
+# yields a requirement rather than a broken string. PEP 508 names only:
+# anything with a path separator, a URL scheme, extras, a marker, or a version
+# of its own is deliberately excluded. See `pinned_package_spec`.
+_BARE_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 # PEP 440-ish parser: release + optional pre-release (a/b/rc) + optional
 # post + optional dev, plus a local version segment (``+local``) that we
 # accept but ignore for ordering. Word forms (alpha/beta/preview) are listed
@@ -443,24 +448,78 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
+def rollback_target_version() -> str | None:
+    """The version a failed restart of THIS process could be put back on.
+
+    The running version, because that is the one the machine was working on
+    before the upgrade replaced it -- read from this process's own already-bound
+    `__version__`, which the install on disk cannot change underneath it.
+
+    `None` when the running tree reports no published release (a source checkout,
+    an editable install, a regression build with a pretend version). Handing that
+    string on as a target would spend an index round-trip to fail, and then report
+    a broken rollback mechanism to whoever is looking at a dark instance, when the
+    truth is that this install never had a release to go back to.
+    """
+
+    from vibe import UNKNOWN_VERSION, __version__
+
+    return None if __version__ == UNKNOWN_VERSION else __version__
+
+
+def pinned_package_spec(version: str) -> str:
+    """The configured package spec, pinned to exactly one version.
+
+    Raises when the configured spec cannot carry a pin -- a local path, a direct
+    URL, or a spec that already states its own version. Refusing is the whole
+    point of the function existing: the caller that wants a pin is rolling back,
+    and an unpinned command resolves forward to the release it is rolling back
+    FROM, reinstalling the failure and reporting success. A rollback that cannot
+    be pinned has to fail loudly instead.
+
+    The message never quotes the spec. An operator-supplied spec can be an index
+    URL carrying credentials, and this error is written to a restart log.
+    """
+
+    spec = get_upgrade_package_spec()
+    if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
+        raise ValueError("The configured upgrade package spec cannot carry a version pin")
+    return f"{spec}=={version}"
+
+
 def build_upgrade_plan(
     *,
     python_executable: str | None = None,
     uv_path: str | None = None,
     vibe_path: str | None = None,
     base_env: dict[str, str] | None = None,
+    version: str | None = None,
 ) -> UpgradePlan:
+    """How to install avibe: the newest release, or `version` exactly.
+
+    A pinned plan is not an upgrade plan with an extra argument. It never asks
+    for the newest release, because the caller pinning a version is going
+    backwards from one -- and both package managers treat "upgrade" as a
+    direction, not a preference: uv resolves forward past the pin's own
+    requirement, and pip's `--upgrade` declines to install an older version than
+    the one already there. So the pin replaces the upgrade request rather than
+    qualifying it, and `--force` becomes unconditional on the uv path, where
+    installing over an existing tool is otherwise refused.
+    """
+
     executable = python_executable or sys.executable
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
-    package_spec = get_upgrade_package_spec()
+    package_spec = pinned_package_spec(version) if version else get_upgrade_package_spec()
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
         vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
         if vibe_bin_dir:
             env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
-        command = [uv_binary, "tool", "install", package_spec, "--upgrade"]
-        if package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
+        command = [uv_binary, "tool", "install", package_spec]
+        if not version:
+            command.append("--upgrade")
+        if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
             command.append("--force")
         return UpgradePlan(
             command=command,
@@ -468,8 +527,12 @@ def build_upgrade_plan(
             method="uv",
         )
 
+    command = [executable, "-m", "pip", "install"]
+    if not version:
+        command.append("--upgrade")
+    command.append(package_spec)
     return UpgradePlan(
-        command=[executable, "-m", "pip", "install", "--upgrade", package_spec],
+        command=command,
         env=dict(base_env or os.environ),
         method="pip",
     )

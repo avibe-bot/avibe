@@ -22,6 +22,13 @@ JSON_STATE_BACKUP_RETENTION = 3
 SQLITE_BACKUP_RETENTION = 2
 BACKUP_MANIFEST_VERSION = 1
 
+#: The name a restore gives the database it takes out of service, inside the
+#: backup directory it restored from. That directory is the record of "we rolled
+#: back to this point", so the database rolled back FROM belongs beside it -- and
+#: living inside the window means the existing bound already covers it, instead
+#: of a second growth path needing rules of its own.
+REPLACED_DATABASE_NAME = "vibe.sqlite.replaced"
+
 _JSON_BACKUP_RE = re.compile(
     r"^sqlite-state-migration-(?P<timestamp>\d{8}T\d{6}Z)(?:-(?P<suffix>\d+))?$"
 )
@@ -284,6 +291,50 @@ def next_backup_sequence(backups_dir: Path) -> int:
         if candidate.sequence is not None
     ]
     return max(recorded, default=-1) + 1
+
+
+def find_restorable_backup(backups_dir: Path, *, written_at_or_after: int) -> Path | None:
+    """The rollback point taken after a caller's own earlier observation, if any.
+
+    The other half of `next_backup_sequence`: a caller reads that number before
+    handing the database to code it does not trust, and reads it back through
+    here afterwards. Any backup numbered at or above it was written after the
+    observation, so this answers "did a migration episode begin while I was
+    watching, and where is its rollback point" without consulting a clock, a
+    revision stamp, or anything the watched code reported about itself. Those
+    were all tried and are all labels: two attempts can leave a stamp and a
+    schema identical while the rows differ, and a clock corrected backwards
+    between two attempts dates the later copy first.
+
+    The answer is the NEWEST such copy, which is the one closest to the data the
+    machine actually had: every attempt copies the database as it stood before
+    its own migration, so an older copy discards whatever was committed between
+    the attempts. It is not certified undamaged -- an attempt that commits rows
+    and then fails leaves them in the next attempt's copy -- and nothing here can
+    certify one, for the reason `_kept_within_position` gives: which copy at a
+    position is the good one cannot be decided from the position. So the
+    automatic answer loses no data, and the first copy at that position stays in
+    the window for an operator who has diagnosed the damage and wants to go
+    further back by hand.
+
+    Backups with no recorded number are never eligible. One was written by a
+    release that did not have the field, which places it before any observation
+    this release could have made.
+    """
+
+    # Filtering on a recorded sequence also guarantees a directory backup with a
+    # readable `vibe.sqlite`: only `_directory_candidate` reads the field, and it
+    # only returns a sqlite candidate when that file is present.
+    candidates = [
+        candidate
+        for candidate in _managed_candidates(backups_dir)
+        if candidate.kind == "sqlite"
+        and candidate.sequence is not None
+        and candidate.sequence >= written_at_or_after
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate.written_order).root
 
 
 def _remove_candidate(candidate: _BackupCandidate) -> bool:
@@ -579,3 +630,96 @@ def create_sqlite_migration_backup(
     # would not count itself against the bound.
     prune_state_backups(target_root, json_retention=None, protect=backup_dir)
     return backup_dir
+
+
+def _displace_live_database(db_path: Path, into: Path) -> Path | None:
+    """Move the database now being rolled back out of the way, keeping all of it.
+
+    The write-ahead log and shared-memory sidecars move with it, and that is not
+    tidiness: a `-wal` left behind belongs to the generation being displaced, and
+    SQLite would replay it into the restored database and call the result
+    recovered. Moving them under the displaced database's own name keeps them
+    where SQLite will find them for it instead.
+
+    A previous displacement into this same rollback point is replaced. The bound
+    has to come from somewhere -- a full copy of the database per rollback
+    attempt is the growth `prune_state_backups` exists to prevent -- and the copy
+    it overwrites is one an earlier rollback from this exact point already set
+    aside, which is the only version of this data nothing is still working from.
+    """
+
+    if not db_path.exists():
+        return None
+    replaced = into / REPLACED_DATABASE_NAME
+    sidecar_suffixes = ("-wal", "-shm")
+    for stale in (replaced, *(replaced.with_name(replaced.name + suffix) for suffix in sidecar_suffixes)):
+        stale.unlink(missing_ok=True)
+    try:
+        # A link, so the displaced copy exists before the live path is replaced
+        # and no instant passes with no database at all. Across filesystems the
+        # link is refused and the move is the only way through; it leaves that
+        # instant open, which is why it is the fallback and not the rule.
+        os.link(db_path, replaced)
+    except OSError:
+        logger.debug("Hard link unavailable for %s; moving it to %s instead", db_path, replaced, exc_info=True)
+        shutil.move(str(db_path), str(replaced))
+    for suffix in sidecar_suffixes:
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.is_file() and not sidecar.is_symlink():
+            shutil.move(str(sidecar), str(replaced.with_name(replaced.name + suffix)))
+    return replaced
+
+
+def restore_sqlite_backup(backup_dir: Path, db_path: Path) -> Path | None:
+    """Put a rollback point back into service, destroying nothing.
+
+    A restore is a swap, never an overwrite. The database it takes out of service
+    holds whatever the version being rolled back from committed before it failed,
+    and that is the only copy of that data anywhere; a restore that dropped it
+    would make the recovery step the unrecoverable one. It is moved into the
+    rollback point's own directory and its path is returned, for the caller to
+    record where an operator will look for it.
+
+    The rollback point itself is also left intact. Its copy is read, not moved:
+    the restore's own outcome can be the bad one, and the same point has to still
+    be there to reach for again.
+
+    The replacement is copied and verified BEFORE anything about the live
+    database changes. Every cheaper order ends the same way -- a rollback point
+    that turns out to be unreadable, discovered after the working database is
+    already gone, leaving the machine with no database rather than a failed
+    rollback.
+
+    Restoring does not grow the backup window, so it does not prune: it adds one
+    file inside a directory the window already counts, and that directory's
+    eviction takes the file with it.
+    """
+
+    source_db = backup_dir.expanduser().resolve() / "vibe.sqlite"
+    target = db_path.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(target.name + ".restoring")
+    staged_paths = (staged, *(staged.with_name(staged.name + suffix) for suffix in ("-wal", "-shm")))
+
+    for stale in staged_paths:
+        stale.unlink(missing_ok=True)
+    try:
+        with sqlite3.connect(f"{source_db.as_uri()}?mode=ro", uri=True) as source:
+            with sqlite3.connect(staged) as destination:
+                source.backup(destination)
+                destination.execute("PRAGMA journal_mode = DELETE")
+                check = destination.execute("PRAGMA quick_check").fetchone()
+                if check != ("ok",):
+                    raise sqlite3.DatabaseError(f"SQLite rollback point quick_check failed: {check!r}")
+        os.chmod(staged, 0o600)
+        _fsync_file(staged)
+    except Exception:
+        for stale in staged_paths:
+            stale.unlink(missing_ok=True)
+        raise
+
+    replaced = _displace_live_database(target, source_db.parent)
+    os.replace(staged, target)
+    _fsync_directory(target.parent)
+    _fsync_directory(source_db.parent)
+    return replaced

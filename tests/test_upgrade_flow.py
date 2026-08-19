@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api, cli
@@ -21,6 +23,8 @@ from vibe.upgrade import (
     get_restart_shell_command,
     get_running_vibe_path,
     get_safe_cwd,
+    pinned_package_spec,
+    rollback_target_version,
 )
 
 
@@ -90,6 +94,84 @@ def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
         "--upgrade",
         "--force",
     ]
+
+
+def test_a_pinned_plan_never_asks_for_an_upgrade(monkeypatch):
+    # An unpinned install resolves forward, so the one command a rollback must
+    # not produce is the command a normal upgrade produces: it would reinstall the
+    # exact release being rolled back FROM and exit 0, reporting the recovery as
+    # done. Asserted on both installer paths because the wrong answer is silent on
+    # both -- `--upgrade` resolves past the pin on uv, and pip's `--upgrade`
+    # declines to move backwards at all.
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    uv_plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/custom/bin/vibe",
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+    )
+    assert uv_plan.method == "uv"
+    assert uv_plan.command == [
+        "/usr/local/bin/uv",
+        "tool",
+        "install",
+        "avibe-os==3.0.10",
+        # Unconditional here: the version already installed is the newer one, so
+        # without it uv reports the tool as satisfied and installs nothing.
+        "--force",
+    ]
+    assert "--upgrade" not in uv_plan.command
+
+    pip_plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+    )
+    assert pip_plan.method == "pip"
+    assert pip_plan.command == ["/usr/bin/python3", "-m", "pip", "install", "avibe-os==3.0.10"]
+    assert "--upgrade" not in pip_plan.command
+
+
+def test_a_spec_that_cannot_carry_a_pin_is_refused(monkeypatch):
+    # The alternative to refusing is falling back to the unpinned spec, which is
+    # the reinstall-the-failure command above. Whoever configured a wheel path or
+    # an index URL as the upgrade source gets a rollback that fails loudly instead
+    # of one that lies. The message must not quote the spec: it can be an index
+    # URL carrying credentials, and it is written to a restart log.
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "https://user:secret@example.invalid/simple/avibe-os")
+
+    with pytest.raises(ValueError) as refusal:
+        pinned_package_spec("3.0.10")
+    assert "secret" not in str(refusal.value)
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    with pytest.raises(ValueError):
+        build_upgrade_plan(
+            python_executable="/usr/bin/python3",
+            uv_path=None,
+            base_env={"PATH": "/usr/bin"},
+            version="3.0.10",
+        )
+
+
+def test_a_tree_with_no_published_release_has_no_rollback_target(monkeypatch):
+    # A source checkout, an editable install, and a regression build all report
+    # the same placeholder version, which names no release. Handing it on as a
+    # target buys an index round-trip that fails, and then tells whoever is
+    # looking at a dark instance that the rollback mechanism is broken, when the
+    # truth is that this install never had a release to go back to.
+    from vibe import UNKNOWN_VERSION
+
+    monkeypatch.setattr("vibe.__version__", UNKNOWN_VERSION, raising=False)
+    assert rollback_target_version() is None
+
+    monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
+    assert rollback_target_version() == "3.0.10"
 
 
 def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
@@ -419,6 +501,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(api, "rollback_target_version", lambda: "3.0.10")
     monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
 
     def fake_run(cmd, **kwargs):
@@ -446,6 +529,9 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
         "vibe_path": "/custom/bin/vibe",
         "trigger": "upgrade",
         "prepare_show_runtime": True,
+        # The version this process is running, handed over BEFORE it is replaced:
+        # what the restart reinstalls if it cannot bring the new one up.
+        "rollback_to": "3.0.10",
     }
 
 
@@ -664,6 +750,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(cli, "rollback_target_version", lambda: "3.0.10")
 
     def fake_schedule_restart(**kwargs):
         calls["restart_kwargs"] = kwargs
@@ -695,6 +782,8 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         "vibe_path": "/custom/bin/vibe",
         "trigger": "upgrade",
         "prepare_show_runtime": True,
+        # See the do_upgrade case: the restart is handed the version to fall back to.
+        "rollback_to": "3.0.10",
     }
 
 
