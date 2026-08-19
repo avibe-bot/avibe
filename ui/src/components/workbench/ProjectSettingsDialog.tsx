@@ -29,7 +29,7 @@ export const ProjectSettingsDialog: React.FC<{
 }> = ({ project, open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const { setProjectDefaultAgent } = useWorkbenchProjectsActions();
+  const { setProjectDefaultAgent, isSavingDefaultAgent } = useWorkbenchProjectsActions();
   const { capabilities } = useInstanceAuthorization();
   const canManageProjects = capabilities.can_manage_projects;
   const canEditAgentsMd = canManageProjects;
@@ -58,7 +58,7 @@ export const ProjectSettingsDialog: React.FC<{
   // current default, so the picker reflects a save as soon as it lands.
   const current = project.default_agent ?? null;
 
-  const handleRouteChange = async (patch: AgentRoutePatch) => {
+  const handleRouteChange = (patch: AgentRoutePatch) => {
     // The picker emits partial patches (a model-only pick is just {model}), so
     // merge onto the stored default and persist the full 5-field route. A field
     // PRESENT in the patch wins (incl. an explicit null that clears it); an
@@ -72,11 +72,11 @@ export const ProjectSettingsDialog: React.FC<{
       reasoning_effort:
         'reasoning_effort' in patch ? patch.reasoning_effort ?? null : current?.reasoning_effort ?? null,
     };
-    try {
-      await setProjectDefaultAgent(project.id, merged, current?.agent_id ?? null);
-    } catch {
-      // apiFetch already surfaced the error toast; keep the dialog open.
-    }
+    // Applied to the shared cache within the click (which re-renders `current`
+    // here), persisted behind it: nothing to await, nothing to catch. The
+    // compare-and-set token is the provider's business — `current` is the
+    // optimistic route, which is exactly what it must not expect.
+    setProjectDefaultAgent(project.id, merged);
   };
 
   return (
@@ -114,6 +114,7 @@ export const ProjectSettingsDialog: React.FC<{
                 value={current ?? {}}
                 agents={agents}
                 onChange={handleRouteChange}
+                saving={isSavingDefaultAgent(project.id)}
                 defaultLabel={t('projectSettings.defaultAgent.followGlobal')}
                 align="start"
                 modal

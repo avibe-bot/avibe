@@ -97,8 +97,16 @@ import {
   type SessionReadOnlyReason,
 } from './sessionArchived';
 import {
+  bySessionWriteGroup,
+  commitSessionRowWrite,
   createSessionRowRefreshGate,
+  recordSessionRowWrite,
+  releaseSessionRowWrite,
   sessionRowWithBootstrapFallback,
+  sessionWriteStandsAlone,
+  useChatSessionRow,
+  type SessionRowRefreshGate,
+  type SessionWriteGroup,
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
 import { InstallHint } from '../InstallHint';
@@ -116,6 +124,7 @@ import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests
 import { VaultProvisionDialogProvider, VaultRequestCard } from '../ui/vault-request-card';
 import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
+import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
@@ -188,6 +197,19 @@ const OLDER_TRIGGER_BAND_PX = 120;
 // row's hint so the shortcut is discoverable instead of folklore.
 const ARCHIVE_SHORTCUT_LABEL = archiveSessionShortcutLabel();
 
+// One session write. The header applies an edit optimistically, so the request
+// that follows carries the chat it was made for: it is recorded under that
+// session's id (the URL may already be on another chat by the time it flushes)
+// and carries that chat's read-ordering gate, which is replaced on navigation.
+// It also carries which of the row's field groups it belongs to, because the
+// optimistic record it commits against is per group — the writer key alone says
+// that to the writer, not to the sender it hands the payload to.
+type SessionPatchWrite = {
+  changes: Partial<WorkbenchSession>;
+  gate: SessionRowRefreshGate;
+  group: SessionWriteGroup;
+};
+
 // Mirrors design.pen kxEkn — the inline header replaces the old "Session
 // settings" dialog. Title is click-to-edit; the cyan-bordered pill on the
 // right opens a single popover that drives agent / model / effort all at
@@ -255,7 +277,12 @@ export const ChatPage: React.FC = () => {
 
   // Loaded session (null while bootstrapping — ChatPage renders a loader until
   // it's set). Lifted above the composer bridge + show-page logic that gate on it.
-  const [session, setSession] = useState<WorkbenchSession | null>(null);
+  // Two ways to move it, by provenance: ``installFromServer`` for anything the
+  // server sent (an open write is re-applied on top of it), ``applyLocal`` for
+  // this document's own optimistic state. The raw setter is deliberately out of
+  // scope — see ``useChatSessionRow``.
+  const { session, installFromServer: installServerSession, applyLocal: applyLocalSession } =
+    useChatSessionRow<WorkbenchSession>();
   const sessionRowRefreshGateRef = useRef(createSessionRowRefreshGate());
   // Archive is terminal: an archived transcript stays fully readable (search's
   // "include archived" opt-in links straight here) but every mutation is refused
@@ -859,7 +886,7 @@ export const ChatPage: React.FC = () => {
         // cached a stale row; reusing it inside the read cache's TTL is exactly
         // what the callers are trying to escape.
         const row = await api.getSession(id, { cache: false });
-        setSession((prev) =>
+        installServerSession((prev) =>
           isCurrent() && row.id === sessionIdRef.current ? row : prev,
         );
       } catch {
@@ -872,7 +899,141 @@ export const ChatPage: React.FC = () => {
       }
     };
     await read(true);
-  }, [api]);
+  }, [api, installServerSession]);
+
+  // Persistence for the header's optimistic edits.
+  const sendSessionPatch = useCallback(
+    async ({ changes, gate, group }: SessionPatchWrite, patchedId: string): Promise<boolean> => {
+      const finishPatch = gate.beginMutation();
+      try {
+        await api.updateSession(patchedId, changes as any);
+        // Do not install the PATCH response: it is only a mutation snapshot and
+        // can be older than another committed write. The authoritative refresh
+        // on settle is guarded by session id and runs after every active write.
+        //
+        // The server now holds these fields, so the rollback target moves PAST
+        // them: a burst commits in parts (the Agent pick lands, the effort pick
+        // folded in behind it is refused), and reverting to where the burst started
+        // would undo a change the server took. Only the fields this request
+        // carried — the rest of the target is still the pre-burst row.
+        commitSessionRowWrite<WorkbenchSession>(patchedId, changes, group);
+        return true;
+      } catch (err) {
+        if (patchedId !== sessionIdRef.current) return false;
+        // The archive itself has already converged through the shared
+        // ``onSessionArchived`` subscription (the title editor and route picker are
+        // gone by the next render, so this PATCH cannot be re-issued). Only the
+        // wording is per-verb: the global ``errors.session_archived`` copy that
+        // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
+        // rename or a re-route.
+        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
+        return false;
+      } finally {
+        finishPatch();
+      }
+    },
+    [api, t],
+  );
+
+  // Within ONE group the clicks made while a request is in flight are transit
+  // rather than intent, so they fold into a single follow-up PATCH: an effort
+  // clicked behind an Agent switch was composed against that switch, so if the
+  // request fails the follow-up goes with it and the re-read below shows what the
+  // server actually holds — a half-applied route is worse than a visible
+  // rollback. A merged payload that ends up carrying the whole route depended on
+  // nothing, and ``sessionWriteStandsAlone`` is what keeps it from being dropped
+  // for a failure that says nothing about it. Across groups nothing folds, because
+  // they no longer share a writer at all. The newest gate wins: it belongs to the
+  // mount that is on screen now and whose reads the reconcile below has to fence.
+  const mergeSessionPatch = useCallback(
+    (prev: SessionPatchWrite, next: SessionPatchWrite): SessionPatchWrite => ({
+      changes: { ...prev.changes, ...next.changes },
+      gate: next.gate,
+      group: next.group,
+    }),
+    [],
+  );
+
+  // Once per burst, not once per write. On success the read is what makes the
+  // optimistic row authoritative again, and it is returned rather than fired and
+  // forgotten, so the session counts as saving until it has reconciled. Only for
+  // the open chat: a burst for a session the user has navigated away from has
+  // nothing on screen to reconcile, and ``refreshSessionRow`` reads whatever IS
+  // open.
+  const settleSessionPatch = useCallback(
+    (patchedId: string, committed: boolean, group: SessionWriteGroup) => {
+      // Ends this group's open write — including its overlay, so the re-read below
+      // is what those fields show from here on — and hands back what a rejection
+      // must restore. Per group: the OTHER group's request stands or falls on its
+      // own, so releasing both here would drop an overlay nobody has answered.
+      const base = releaseSessionRowWrite<WorkbenchSession>(patchedId, group);
+      if (patchedId !== sessionIdRef.current) return;
+      if (committed) return refreshSessionRow();
+      // A rejected burst lives only in this row, and the re-read is best-effort
+      // BY CONTRACT — it swallows its own failure — so it cannot be the rollback:
+      // an offline tab would keep showing a title or route the server refused,
+      // with the saving indicator already gone. Restore the values the burst
+      // replaced instead, and only for the fields it changed: putting the whole
+      // pre-burst row back would also undo what arrived meanwhile over SSE (a
+      // status flip that made the chat read-only, say), or what the sibling group
+      // is still writing — neither of which this burst touched.
+      if (base) {
+        sessionRowRefreshGateRef.current.invalidate();
+        applyLocalSession((prev) => (prev && prev.id === patchedId ? { ...prev, ...base } : prev));
+      }
+      // Converge anyway, unawaited: the restored values are the ones this tab
+      // last saw, and only a read can show a field someone else moved. The row on
+      // screen is already correct, so nothing waits for it.
+      void refreshSessionRow();
+    },
+    [refreshSessionRow, applyLocalSession],
+  );
+
+  // One writer per field group, not one per row. A writer serializes and
+  // coalesces per key and ENDS the burst on failure, so its key must name exactly
+  // the fields that share a fate — see ``bySessionWriteGroup``. Sharing one key
+  // let a refused rename drop a route pick that had never been sent, and revert
+  // it. They share the sender: the request is the same PATCH either way, and the
+  // server writes only the columns it was given.
+  // Whether a refused request takes the write behind it down with it is decided by
+  // the group that owns those fields, from the two payloads' relation — never
+  // assumed for the key as a whole (a model click behind a refused model click
+  // overwrites the very field that failed).
+  const patchStandsAlone = useCallback(
+    (pending: SessionPatchWrite, refused: SessionPatchWrite) =>
+      sessionWriteStandsAlone(pending.group, pending.changes, refused.changes),
+    [],
+  );
+
+  const { write: writeRoutePatch, isSaving: isRoutePatchSaving } = useCoalescedWrite<SessionPatchWrite>(
+    'session-route',
+    sendSessionPatch,
+    {
+      merge: mergeSessionPatch,
+      standsAlone: patchStandsAlone,
+      onSettled: useCallback(
+        (patchedId: string, committed: boolean) => settleSessionPatch(patchedId, committed, 'route'),
+        [settleSessionPatch],
+      ),
+    },
+  );
+  const { write: writeMetaPatch, isSaving: isMetaPatchSaving } = useCoalescedWrite<SessionPatchWrite>(
+    'session-meta',
+    sendSessionPatch,
+    {
+      merge: mergeSessionPatch,
+      standsAlone: patchStandsAlone,
+      onSettled: useCallback(
+        (patchedId: string, committed: boolean) => settleSessionPatch(patchedId, committed, 'meta'),
+        [settleSessionPatch],
+      ),
+    },
+  );
+  const sessionPatchWriters = useMemo(
+    () => ({ route: writeRoutePatch, meta: writeMetaPatch }) as Record<SessionWriteGroup, typeof writeRoutePatch>,
+    [writeRoutePatch, writeMetaPatch],
+  );
+
   // ── Converging on a terminal archive this tab missed ────────────────────────
   //
   // A backgrounded / offline tab can miss the archive SSE for a session that
@@ -899,10 +1060,10 @@ export const ChatPage: React.FC = () => {
       setShowPageBusy(false);
       writeChatViewMode(archivedSessionId, 'chat');
       sessionRowRefreshGateRef.current.invalidate();
-      setSession((prev) => markSessionArchived(prev, archivedSessionId));
+      installServerSession((prev) => markSessionArchived(prev, archivedSessionId));
       void refreshSessionRow();
     },
-    [refreshSessionRow],
+    [refreshSessionRow, installServerSession],
   );
 
   // Every write that goes through the shared JSON helpers (updateSession,
@@ -1196,16 +1357,20 @@ export const ChatPage: React.FC = () => {
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
       if (!requestIsCurrent()) return;
+      // A write still in flight for this session outranks the row the bootstrap
+      // answers with: opening this chat again is not a reason to show the route the
+      // user has already clicked past. ``installServerSession`` re-applies it.
+      const bootstrapRow = bootstrap.session;
       if (bootstrapIsCurrent()) {
-        setSession(bootstrap.session);
+        installServerSession(bootstrapRow);
       } else {
         // A newer turn-end/activity read won the row race. Preserve its row if
         // it landed, but keep this successful bootstrap as the fallback while a
         // cold-page recovery is pending or if both bounded attempts fail.
-        setSession((current) => sessionRowWithBootstrapFallback(
+        installServerSession((current) => sessionRowWithBootstrapFallback(
           current,
           sessionId,
-          bootstrap.session,
+          bootstrapRow,
         ));
         void refreshSessionRow();
       }
@@ -1265,7 +1430,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, installServerSession]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -1282,7 +1447,7 @@ export const ChatPage: React.FC = () => {
     // finishes, and a rename / agent change would patch() the STALE session.id
     // while the URL is already on the new chat (Codex P2). Nulling it shows the
     // loading state until refresh() resolves the new session.
-    setSession(null);
+    applyLocalSession(null);
     setSessionCanChat(false);
     setMessages([]);
     setHydratedTranscriptSessionId(null);
@@ -1330,7 +1495,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [api, sessionId]);
+  }, [api, sessionId, applyLocalSession]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
@@ -1446,7 +1611,7 @@ export const ChatPage: React.FC = () => {
         if (!Object.prototype.hasOwnProperty.call(data, 'title')) return;
         const nextTitle = data.title ?? null;
         sessionRowRefreshGateRef.current.invalidate();
-        setSession((prev) => {
+        installServerSession((prev) => {
           if (!prev || prev.id !== data.session_id || prev.title === nextTitle) return prev;
           return { ...prev, title: nextTitle };
         });
@@ -1474,7 +1639,7 @@ export const ChatPage: React.FC = () => {
         setSessionCanChat(false);
         void api.getSession(currentSessionId, { cache: false })
           .then((nextSession) => {
-            setSession(nextSession);
+            installServerSession(nextSession);
             void refresh();
           })
           .catch(() => goBack());
@@ -1490,7 +1655,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRow, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive, probeShowPageAccess]);
+  }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRow, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive, probeShowPageAccess, installServerSession]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1597,6 +1762,13 @@ export const ChatPage: React.FC = () => {
           // so the locked/highlighted state can be derived on reload.
           ...(metadata ? { metadata } : {}),
         };
+        // This POST does not wait for the header's route writes, so a prompt sent
+        // in the same breath as a model pick can be admitted on the route the row
+        // still holds. The client cannot close that window: routing a turn and
+        // sending it are separate requests (``POST /messages`` accepts text,
+        // content and metadata only), so gating the send would trade the gap for
+        // the very latency this optimistic path removes — a slow PATCH would make
+        // Enter feel dead. Atomic admission belongs to the server.
         const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1708,7 +1880,16 @@ export const ChatPage: React.FC = () => {
         return false;
       }
     },
-    [sessionId, api, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t, writable],
+    [
+      sessionId,
+      api,
+      appendMessage,
+      refreshQueue,
+      markWorking,
+      reloadLatestMessages,
+      t,
+      writable,
+    ],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -2164,31 +2345,44 @@ export const ChatPage: React.FC = () => {
     void sendMessage(initialMessage);
   }, [location.state, location.pathname, loading, session, sessionId, navigate, sendMessage]);
 
+  // Scoped to the open chat: a write still draining for a session the user has
+  // left must not spin the header of the one they are looking at. Either group
+  // counts — the header shows ONE saving indicator, and the user is owed it for
+  // whichever field they just edited.
+  const openSessionId = session?.id ?? '';
+  const patchSaving = isRoutePatchSaving(openSessionId) || isMetaPatchSaving(openSessionId);
+
+  // A route or title edit lands on the local row within the click and is
+  // persisted behind it. The picker highlight and the title are CONTROLLED by
+  // ``session``, so anything this waits for is lag the user reads as a frozen UI
+  // (the reason the picker no longer greys itself out either).
   const patch = useCallback(
-    async (changes: Partial<WorkbenchSession>) => {
+    (changes: Partial<WorkbenchSession>) => {
       if (!session) return;
       const patchedId = session.id;
-      const finishPatch = sessionRowRefreshGateRef.current.beginMutation();
-      try {
-        await api.updateSession(session.id, changes as any);
-        // Do not install the PATCH response: it is only a mutation snapshot and
-        // can be older than another committed write. The authoritative refresh
-        // in finally is guarded by session id and runs after every active write.
-      } catch (err) {
-        if (patchedId !== sessionIdRef.current) return;
-        // The archive itself has already converged through the shared
-        // ``onSessionArchived`` subscription (the title editor and route picker are
-        // gone by the next render, so this PATCH cannot be re-issued). Only the
-        // wording is per-verb: the global ``errors.session_archived`` copy that
-        // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
-        // rename or a re-route.
-        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
-      } finally {
-        finishPatch();
-        if (patchedId === sessionIdRef.current) void refreshSessionRow();
+      // ``invalidate`` stops a row read that is ALREADY in flight from
+      // re-installing the pre-patch row on top of the optimistic one.
+      const gate = sessionRowRefreshGateRef.current;
+      gate.invalidate();
+      applyLocalSession((prev) => (prev && prev.id === patchedId ? { ...prev, ...changes } : prev));
+      // The row moves as one; the REQUESTS do not. Fields that overwrite each
+      // other belong in one serialized, coalescing, fails-together burst — fields
+      // that don't must not be tied to one, so the edit is split into the
+      // independent writes it actually is (today: at most a route and a title).
+      for (const [group, groupChanges] of bySessionWriteGroup(changes)) {
+        // Both the id and the gate travel with the write: a patch waiting to flush
+        // belongs to the chat that was open when it was clicked, and the gate is
+        // per-session (replaced on navigation), so it must never fence the new
+        // chat's reads.
+        const opened = sessionPatchWriters[group](patchedId, { changes: groupChanges, gate, group });
+        // Record the write against the row it is replacing: what a rejection restores,
+        // and what every row arriving from the server has to yield to until this write
+        // is answered. ``write`` reports which call OPENED the burst, which is the one
+        // that starts the record over.
+        recordSessionRowWrite(session, groupChanges, opened, group);
       }
     },
-    [api, session, t, refreshSessionRow],
+    [session, applyLocalSession, sessionPatchWriters],
   );
 
   // Session-level actions share the sidebar/mobile row model. A read-only or
@@ -2214,7 +2408,7 @@ export const ChatPage: React.FC = () => {
     onSessionPatched: (changes, sessionId) => {
       if (sessionId !== sessionIdRef.current) return;
       sessionRowRefreshGateRef.current.invalidate();
-      setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev));
+      installServerSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev));
       // Pin updates only carry the changed sidebar field. A successful PATCH can
       // race a turn-end row read, so re-read the complete durable projection to
       // keep any newly materialized route in the header.
@@ -2437,6 +2631,7 @@ export const ChatPage: React.FC = () => {
           agents={agents}
           defaultAgentName={defaultAgentName}
           onPatch={patch}
+          patchSaving={patchSaving}
           onBack={goBack}
           working={working}
           showPageMode={showPageActive}
@@ -3013,7 +3208,10 @@ interface ChatHeaderBarProps {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
   defaultAgentName: string | null;
-  onPatch: (changes: Partial<WorkbenchSession>) => Promise<void>;
+  // Applies to the local row first, then persists — never awaited by the header.
+  onPatch: (changes: Partial<WorkbenchSession>) => void;
+  /** A queued ``onPatch`` write is still in flight. */
+  patchSaving?: boolean;
   onBack: () => void;
   working: boolean;
   // The EFFECTIVE mode (ChatPage passes ``showPageActive``): whether the page is
@@ -3048,7 +3246,7 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
@@ -3149,6 +3347,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             value={session}
             agents={agents}
             onChange={onPatch}
+            saving={patchSaving}
             disabled={pickerDisabled}
             allowedBackends={pinnedBackend ? [pinnedBackend] : undefined}
             defaultLabel={
