@@ -5,13 +5,24 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.admission import (
+    MEMORY_CLI_ADMITTED_METADATA,
+    MEMORY_ORDINARY_TEXT_METADATA,
+    MEMORY_USER_ID_METADATA,
+    CaptureAdmission,
+    InboundTurnFacts,
+    is_cli_admitted,
+    is_ordinary_text,
+    merge_identity,
+)
 from core.memory.attachments import workbench_capture_attachments
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
@@ -617,6 +628,79 @@ def test_unparseable_upload_does_not_cost_its_turn_the_text(monkeypatch, tmp_pat
     assert isinstance(request, CaptureRequest)
     assert request.text == "see the attached export"
     assert request.attachments == ()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (None, (None, False, False)),
+        ("not-a-dict", (None, False, False)),
+        (1, (None, False, False)),
+        (["_memory_user_id", "local"], (None, False, False)),
+        ({}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: None}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: ""}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: "   "}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: 1}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: True}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: ["local"]}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: "local"}, ("local", False, False)),
+        ({MEMORY_USER_ID_METADATA: "  local  "}, ("local", False, False)),
+        (
+            {
+                MEMORY_USER_ID_METADATA: "local",
+                MEMORY_ORDINARY_TEXT_METADATA: True,
+                MEMORY_CLI_ADMITTED_METADATA: True,
+            },
+            ("local", True, True),
+        ),
+        (
+            {
+                MEMORY_ORDINARY_TEXT_METADATA: "true",
+                MEMORY_CLI_ADMITTED_METADATA: 1,
+            },
+            (None, False, False),
+        ),
+        (
+            {
+                MEMORY_ORDINARY_TEXT_METADATA: False,
+                MEMORY_CLI_ADMITTED_METADATA: False,
+            },
+            (None, False, False),
+        ),
+    ],
+)
+def test_merge_identity_normalizes_unusable_metadata(
+    metadata: object,
+    expected: tuple[str | None, bool, bool],
+) -> None:
+    """Queue merge identity matches today's strip/None/`is True` semantics."""
+
+    assert merge_identity(metadata) == expected
+    assert is_ordinary_text(metadata) is expected[1]
+    assert is_cli_admitted(metadata) is expected[2]
+
+
+def test_delivery_store_shares_metadata_keys_without_capture_admission() -> None:
+    """Storage can name the keys without loading CaptureAdmission or aiohttp."""
+
+    script = """
+import sys
+from storage import message_deliveries
+from core.memory.admission_metadata import MEMORY_USER_ID_METADATA
+assert message_deliveries.MEMORY_USER_ID_METADATA is MEMORY_USER_ID_METADATA
+assert "core.memory.admission" not in sys.modules
+assert "core.memory.im_attachments" not in sys.modules
+assert "core.handlers" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:

@@ -56,6 +56,7 @@ from core.memory.admission import (
     WORKBENCH_PLATFORM,
     CaptureAdmission,
     InboundTurnFacts,
+    admitted_user_id,
 )
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
@@ -1897,14 +1898,15 @@ class Controller:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
         metadata = payload.get("message_metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
-        memory_user_id = metadata.get("_memory_user_id")
-        if isinstance(memory_user_id, str) and memory_user_id.strip():
-            user_id = memory_user_id.strip()
+        memory_user_id = admitted_user_id(metadata)
+        if memory_user_id is not None:
+            user_id = memory_user_id
         else:
             # IM: the platform sender id is what admission and
             # ``principal_for_user_key(f"{platform}:{user_id}")`` expect.
-            # Workbench without ``_memory_user_id`` keeps the scope fallback
-            # (typically ``"workbench"``), which admission rejects.
+            # Workbench without a Memory principal in delivery metadata keeps
+            # the scope fallback (typically ``"workbench"``), which admission
+            # rejects.
             user_id = getattr(context, "user_id", None)
         workdir = None
         if include_workdir:

@@ -78,6 +78,11 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
+from core.memory.admission import (
+    is_cli_admitted as memory_cli_admitted,
+    is_ordinary_text as memory_ordinary_text,
+    merge_identity as memory_admission_merge_identity,
+)
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -378,25 +383,9 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
 
 
 def _memory_admission_merge_identity(row: dict[str, Any]) -> tuple[str | None, bool, bool]:
-    """Return the Memory facts that one dispatch context must keep singular.
+    """Opaque Memory identity for one delivery row's merge batch."""
 
-    ``author_id`` is the web-push ownership identity, not the Memory principal.
-    Keep the durable Memory identity alongside the two admission flags so a
-    merged turn can never cross principals. Only a non-empty string is usable.
-    """
-
-    metadata = row.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    memory_user_id = metadata.get("_memory_user_id")
-    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
-        memory_user_id = None
-    elif memory_user_id != memory_user_id.strip():
-        memory_user_id = memory_user_id.strip()
-    return (
-        memory_user_id,
-        metadata.get("_memory_ordinary_text") is True,
-        metadata.get("_memory_cli_admitted") is True,
-    )
+    return memory_admission_merge_identity(row.get("metadata"))
 
 
 def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2276,14 +2265,14 @@ class SessionTurnManager:
             else str(delivery["id"])
         )
         # Routing identity only. Memory's principal already travels in
-        # ``platform_specific["message_metadata"]["_memory_user_id"]``.
+        # delivery ``message_metadata`` via the Memory admission vocabulary.
         if payload.get("author_id"):
             context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
         metadata = payload.get("metadata") or {}
-        context.is_ordinary_text = metadata.get("_memory_ordinary_text") is True
-        if metadata.get("_memory_cli_admitted") is True:
+        context.is_ordinary_text = memory_ordinary_text(metadata)
+        if memory_cli_admitted(metadata):
             context.platform_specific["memory_cli_admitted"] = True
         else:
             context.platform_specific.pop("memory_cli_admitted", None)
