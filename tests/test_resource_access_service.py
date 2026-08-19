@@ -620,6 +620,36 @@ def test_deferred_personal_context_keeps_instance_kind() -> None:
     assert restored.is_personal_instance
 
 
+@pytest.mark.parametrize(
+    ("paired_kind", "expected_kind"),
+    [("personal", "personal"), ("organization", "organization"), ("", None)],
+)
+def test_legacy_deferred_context_uses_only_known_current_pairing_kind(
+    monkeypatch,
+    tmp_path,
+    paired_kind: str,
+    expected_kind: str | None,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_kind = paired_kind
+    config.save()
+
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    restored = resource_access_service.resource_user_context_from_metadata(legacy_metadata)
+
+    assert restored is not None
+    assert restored.instance_kind == expected_kind
+
+
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

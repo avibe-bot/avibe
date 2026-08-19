@@ -11,6 +11,7 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -280,6 +281,7 @@ def metadata_with_resource_user_context(
         "vibe_organization_role": context.organization_role,
         "vibe_group_ids": sorted(context.group_ids) if context.group_ids is not None else None,
         "vibe_membership_version": context.membership_version,
+        "vibe_instance_id": context.instance_id,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
         "vibe_instance_kind": context.instance_kind,
@@ -321,7 +323,22 @@ def resource_user_context_from_metadata(
     snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
         return None
-    return current_resource_context(snapshot, is_remote=True)
+    context = current_resource_context(snapshot, is_remote=True)
+    if context.instance_kind is not None or "vibe_instance_kind" in snapshot:
+        return context
+
+    # Released snapshots predate the instance-kind field. Recover their kind
+    # only from the currently paired, server-owned config; an unavailable or
+    # unknown pairing remains fail-closed rather than being guessed as Personal.
+    try:
+        from config.v2_config import V2Config
+
+        paired_kind = V2Config.load().remote_access.vibe_cloud.instance_kind
+    except Exception:
+        paired_kind = None
+    if paired_kind not in {"personal", "organization"}:
+        return context
+    return replace(context, instance_kind=paired_kind)
 
 
 def _as_context(user_context: ResourceUserContext | Mapping[str, Any] | None) -> ResourceUserContext:
