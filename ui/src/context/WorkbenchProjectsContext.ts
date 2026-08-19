@@ -54,8 +54,10 @@ export interface WorkbenchProjectsActions {
     route: ProjectDefaultAgent,
     expectedAgentId: string | null,
   ) => void;
-  /** The project whose default-Agent write is still in flight, if any. */
-  savingDefaultAgentProjectId: string | null;
+  /** Whether this project's default-Agent write is still in flight. Per project:
+   *  the writes are queued per project too, so one project's slow save neither
+   *  blocks nor spins another's picker. */
+  isSavingDefaultAgent: (projectId: string) => boolean;
   archiveProject: (projectId: string) => Promise<void>;
   /** Throws on failure so the row's inline editor can fall back; patches title on success. */
   renameSession: (projectId: string, sessionId: string, title: string) => Promise<void>;

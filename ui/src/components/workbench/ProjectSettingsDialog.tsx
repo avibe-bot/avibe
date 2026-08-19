@@ -29,7 +29,7 @@ export const ProjectSettingsDialog: React.FC<{
 }> = ({ project, open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const { setProjectDefaultAgent, savingDefaultAgentProjectId } = useWorkbenchProjectsActions();
+  const { setProjectDefaultAgent, isSavingDefaultAgent } = useWorkbenchProjectsActions();
   const { capabilities } = useInstanceAuthorization();
   const canManageProjects = capabilities.can_manage_projects;
   const canEditAgentsMd = canManageProjects;
@@ -112,7 +112,7 @@ export const ProjectSettingsDialog: React.FC<{
                 value={current ?? {}}
                 agents={agents}
                 onChange={handleRouteChange}
-                saving={savingDefaultAgentProjectId === project.id}
+                saving={isSavingDefaultAgent(project.id)}
                 defaultLabel={t('projectSettings.defaultAgent.followGlobal')}
                 align="start"
                 modal

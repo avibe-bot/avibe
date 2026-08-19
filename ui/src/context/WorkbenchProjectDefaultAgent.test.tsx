@@ -124,7 +124,7 @@ describe('project default Agent route', () => {
     });
     // The picker's highlight is this cache, so it has to be current already.
     expect(tree()!.projects?.[0].default_agent).toEqual(route());
-    expect(tree()!.savingDefaultAgentProjectId).toBe(project.id);
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(true);
     expect(calls).toHaveLength(1);
 
     act(() => {
@@ -153,7 +153,7 @@ describe('project default Agent route', () => {
     await settle();
     // The last write's response IS the truth, including fields the client never sent.
     expect(tree()!.projects?.[0]).toEqual(serverRow);
-    expect(tree()!.savingDefaultAgentProjectId).toBeNull();
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
   });
 
   it('rolls a rejected pick back by re-reading the server, and drops the writes behind it', async () => {
@@ -188,7 +188,53 @@ describe('project default Agent route', () => {
     expect(calls).toHaveLength(1);
     expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
     expect(tree()!.projects?.[0].default_agent).toBeNull();
-    expect(tree()!.savingDefaultAgentProjectId).toBeNull();
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
+  it('keeps each project on its own queue, so one failing project cannot discard another', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const other = { ...project, id: 'proj_b', scope_id: 'scope_b', display_name: 'Project B' };
+    const otherSaved = { ...other, default_agent: route({ model: 'sonnet' }) };
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [project, other], sessions: {} })
+      // The rollback re-read is a whole-tree read: by then the server HAS taken
+      // Project B's write, so its row comes back with B's route, not the pre-pick one.
+      .mockResolvedValueOnce({ projects: [{ ...project, default_agent: null }, otherSaved], sessions: {} });
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route(), null);
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }), 'agt_claude');
+      tree()!.setProjectDefaultAgent(other.id, route({ model: 'sonnet' }), null);
+    });
+    // Two requests, not one: Project B has nothing to overwrite in Project A, so
+    // it goes out immediately instead of waiting behind A's queue.
+    expect(calls.map((c) => c.projectId)).toEqual([project.id, other.id]);
+
+    await act(async () => {
+      gates[1].resolve(otherSaved);
+      await gates[1].promise;
+    });
+    await act(async () => {
+      gates[0].reject(new Error('project_agent_conflict'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // A's queued write is dropped and A rolls back; B's pick is untouched by a
+    // failure it had no part in.
+    expect(calls).toHaveLength(2);
+    expect(tree()!.projects?.[0].default_agent).toBeNull();
+    expect(tree()!.projects?.[1].default_agent).toEqual(route({ model: 'sonnet' }));
+    expect(tree()!.isSavingDefaultAgent(other.id)).toBe(false);
   });
 
   it('caches a cleared route as no default at all', async () => {

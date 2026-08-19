@@ -191,11 +191,10 @@ const OLDER_TRIGGER_BAND_PX = 120;
 const ARCHIVE_SHORTCUT_LABEL = archiveSessionShortcutLabel();
 
 // One queued session write. The header applies an edit optimistically, so the
-// request that follows carries the chat it was made for: the session id (the URL
-// may already be on another chat by the time it flushes) and that chat's
-// read-ordering gate, which is replaced on navigation.
+// request that follows carries the chat it was made for: it is queued under that
+// session's id (the URL may already be on another chat by the time it flushes)
+// and carries that chat's read-ordering gate, which is replaced on navigation.
 type SessionPatchWrite = {
-  sessionId: string;
   changes: Partial<WorkbenchSession>;
   gate: SessionRowRefreshGate;
 };
@@ -885,6 +884,54 @@ export const ChatPage: React.FC = () => {
     };
     await read(true);
   }, [api]);
+
+  // Persistence for the header's optimistic edits. Declared here, above the send
+  // path, because sending has to wait for the route the header is already showing.
+  const sendSessionPatch = useCallback(
+    async ({ changes, gate }: SessionPatchWrite, patchedId: string): Promise<boolean> => {
+      const finishPatch = gate.beginMutation();
+      try {
+        await api.updateSession(patchedId, changes as any);
+        // Do not install the PATCH response: it is only a mutation snapshot and
+        // can be older than another committed write. The authoritative refresh
+        // on settle is guarded by session id and runs after every active write.
+        return true;
+      } catch (err) {
+        if (patchedId !== sessionIdRef.current) return false;
+        // The archive itself has already converged through the shared
+        // ``onSessionArchived`` subscription (the title editor and route picker are
+        // gone by the next render, so this PATCH cannot be re-issued). Only the
+        // wording is per-verb: the global ``errors.session_archived`` copy that
+        // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
+        // rename or a re-route.
+        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
+        return false;
+      } finally {
+        finishPatch();
+      }
+    },
+    [api, t],
+  );
+
+  const {
+    write: writeSessionPatch,
+    isSaving: isPatchSaving,
+    whenDrained: whenSessionPatchDrained,
+  } = useQueuedWrite(
+    sendSessionPatch,
+    // Once per burst, not once per write: this read is what makes the optimistic
+    // row authoritative again — and what rolls a rejected pick back, since the
+    // local row is the only place that ever held it. Only for the open chat: a
+    // burst for a session the user has navigated away from has nothing on screen
+    // to reconcile, and ``refreshSessionRow`` reads whatever IS open.
+    useCallback(
+      (patchedId: string) => {
+        if (patchedId === sessionIdRef.current) void refreshSessionRow();
+      },
+      [refreshSessionRow],
+    ),
+  );
+
   // ── Converging on a terminal archive this tab missed ────────────────────────
   //
   // A backgrounded / offline tab can miss the archive SSE for a session that
@@ -1609,6 +1656,13 @@ export const ChatPage: React.FC = () => {
           // so the locked/highlighted state can be derived on reload.
           ...(metadata ? { metadata } : {}),
         };
+        // The header's route edits apply within the click and persist behind
+        // them, so a prompt sent right after a model pick could otherwise be
+        // admitted while that PATCH is still queued — and the turn would run on
+        // the previous route while the header shows the new one. Wait for this
+        // session's writes to settle first; settle means "landed or failed
+        // loudly", so a rejected route cannot hold the send hostage.
+        await whenSessionPatchDrained(sessionId);
         const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1720,7 +1774,17 @@ export const ChatPage: React.FC = () => {
         return false;
       }
     },
-    [sessionId, api, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t, writable],
+    [
+      sessionId,
+      api,
+      appendMessage,
+      refreshQueue,
+      markWorking,
+      reloadLatestMessages,
+      t,
+      writable,
+      whenSessionPatchDrained,
+    ],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -2176,41 +2240,9 @@ export const ChatPage: React.FC = () => {
     void sendMessage(initialMessage);
   }, [location.state, location.pathname, loading, session, sessionId, navigate, sendMessage]);
 
-  const sendSessionPatch = useCallback(
-    async ({ sessionId, changes, gate }: SessionPatchWrite): Promise<boolean> => {
-      const finishPatch = gate.beginMutation();
-      try {
-        await api.updateSession(sessionId, changes as any);
-        // Do not install the PATCH response: it is only a mutation snapshot and
-        // can be older than another committed write. The authoritative refresh
-        // on settle is guarded by session id and runs after every active write.
-        return true;
-      } catch (err) {
-        if (sessionId !== sessionIdRef.current) return false;
-        // The archive itself has already converged through the shared
-        // ``onSessionArchived`` subscription (the title editor and route picker are
-        // gone by the next render, so this PATCH cannot be re-issued). Only the
-        // wording is per-verb: the global ``errors.session_archived`` copy that
-        // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
-        // rename or a re-route.
-        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
-        return false;
-      } finally {
-        finishPatch();
-      }
-    },
-    [api, t],
-  );
-
-  const { write: writeSessionPatch, saving: patchSaving } = useQueuedWrite(
-    sendSessionPatch,
-    // Once per burst, not once per write: this read is what makes the optimistic
-    // row authoritative again — and what rolls a rejected pick back, since the
-    // local row is the only place that ever held it.
-    useCallback(() => {
-      if (sessionIdRef.current) void refreshSessionRow();
-    }, [refreshSessionRow]),
-  );
+  // Scoped to the open chat: a write still draining for a session the user has
+  // left must not spin the header of the one they are looking at.
+  const patchSaving = isPatchSaving(session?.id ?? '');
 
   // A route or title edit lands on the local row within the click and is
   // persisted behind it. The picker highlight and the title are CONTROLLED by
@@ -2228,7 +2260,7 @@ export const ChatPage: React.FC = () => {
       // Both the id and the gate travel with the write: a queued patch belongs to
       // the chat that was open when it was clicked, and the gate is per-session
       // (replaced on navigation), so it must never fence the new chat's reads.
-      writeSessionPatch({ sessionId: patchedId, changes, gate });
+      writeSessionPatch(patchedId, { changes, gate });
     },
     [session, writeSessionPatch],
   );

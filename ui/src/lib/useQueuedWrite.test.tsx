@@ -28,121 +28,162 @@ function settle() {
   });
 }
 
+// Records what reached the network as `<key>:<patch>` and hands back a gate per
+// call, so a queued write can be observed as "not sent yet" rather than merely
+// "not resolved yet".
+function gatedSend(started: string[], pending: Map<string, Deferred>) {
+  return vi.fn(async (patch: string, key: string) => {
+    const label = `${key}:${patch}`;
+    started.push(label);
+    const gate = deferred();
+    pending.set(label, gate);
+    return gate.promise;
+  });
+}
+
 describe('useQueuedWrite', () => {
   afterEach(cleanup);
 
-  it('sends one write at a time, in the order they were queued', async () => {
+  it('sends one write at a time per resource, in the order they were queued', async () => {
     const started: string[] = [];
     const pending = new Map<string, Deferred>();
-    const send = vi.fn(async (patch: string) => {
-      started.push(patch);
-      const gate = deferred();
-      pending.set(patch, gate);
-      return gate.promise;
-    });
+    const send = gatedSend(started, pending);
     const { result } = renderHook(() => useQueuedWrite(send));
 
     // Three picks inside one burst: the first is in flight, the other two are
     // only queued — nothing about the second click may reach the network while
     // the first request is still deciding what the server holds.
     act(() => {
-      result.current.write('first');
-      result.current.write('second');
-      result.current.write('third');
+      result.current.write('s1', 'first');
+      result.current.write('s1', 'second');
+      result.current.write('s1', 'third');
     });
     await settle();
-    expect(started).toEqual(['first']);
+    expect(started).toEqual(['s1:first']);
 
     await act(async () => {
-      pending.get('first')!.resolve(true);
-      await pending.get('first')!.promise;
+      pending.get('s1:first')!.resolve(true);
+      await pending.get('s1:first')!.promise;
     });
     await settle();
-    expect(started).toEqual(['first', 'second']);
+    expect(started).toEqual(['s1:first', 's1:second']);
 
     await act(async () => {
-      pending.get('second')!.resolve(true);
-      await pending.get('second')!.promise;
+      pending.get('s1:second')!.resolve(true);
+      await pending.get('s1:second')!.promise;
     });
     await settle();
-    expect(started).toEqual(['first', 'second', 'third']);
+    expect(started).toEqual(['s1:first', 's1:second', 's1:third']);
   });
 
-  it('reports saving from the first queued write until the queue drains', async () => {
-    const gates = [deferred(), deferred()];
-    let call = 0;
-    const send = vi.fn(() => gates[call++].promise);
+  it('does not make one resource wait behind another', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
     const { result } = renderHook(() => useQueuedWrite(send));
 
-    expect(result.current.saving).toBe(false);
+    // Ordering is a property of a single resource. Two sessions (or two
+    // projects) have nothing to overwrite in each other, so a slow write to one
+    // must not delay the other.
     act(() => {
-      result.current.write('a');
-      result.current.write('b');
-    });
-    expect(result.current.saving).toBe(true);
-
-    await act(async () => {
-      gates[0].resolve(true);
-      await gates[0].promise;
-    });
-    // The queue is not empty yet, so the surface is still saving.
-    expect(result.current.saving).toBe(true);
-
-    await act(async () => {
-      gates[1].resolve(true);
-      await gates[1].promise;
+      result.current.write('s1', 'a');
+      result.current.write('s2', 'b');
     });
     await settle();
-    expect(result.current.saving).toBe(false);
+    expect(started).toEqual(['s1:a', 's2:b']);
+    expect(result.current.isSaving('s1')).toBe(true);
+    expect(result.current.isSaving('s2')).toBe(true);
   });
 
-  it('settles once per burst, not once per write', async () => {
-    const gates = [deferred(), deferred()];
-    let call = 0;
-    const send = vi.fn(() => gates[call++].promise);
+  it('reports saving per resource, from the first queued write until that queue drains', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const { result } = renderHook(() => useQueuedWrite(send));
+
+    expect(result.current.isSaving('s1')).toBe(false);
+    act(() => {
+      result.current.write('s1', 'a');
+      result.current.write('s1', 'b');
+    });
+    expect(result.current.isSaving('s1')).toBe(true);
+    // The chat the user navigated to has nothing pending, so its header must not
+    // spin for the one they left.
+    expect(result.current.isSaving('s2')).toBe(false);
+
+    await act(async () => {
+      pending.get('s1:a')!.resolve(true);
+      await pending.get('s1:a')!.promise;
+    });
+    // The queue is not empty yet, so the surface is still saving.
+    expect(result.current.isSaving('s1')).toBe(true);
+
+    await act(async () => {
+      pending.get('s1:b')!.resolve(true);
+      await pending.get('s1:b')!.promise;
+    });
+    await settle();
+    expect(result.current.isSaving('s1')).toBe(false);
+  });
+
+  it('settles once per burst per resource, naming the resource that settled', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
     const onSettled = vi.fn();
     const { result } = renderHook(() => useQueuedWrite(send, onSettled));
 
     act(() => {
-      result.current.write('a');
-      result.current.write('b');
+      result.current.write('s1', 'a');
+      result.current.write('s1', 'b');
     });
     await act(async () => {
-      gates[0].resolve(true);
-      await gates[0].promise;
+      pending.get('s1:a')!.resolve(true);
+      await pending.get('s1:a')!.promise;
     });
     expect(onSettled).not.toHaveBeenCalled();
 
     await act(async () => {
-      gates[1].resolve(true);
-      await gates[1].promise;
+      pending.get('s1:b')!.resolve(true);
+      await pending.get('s1:b')!.promise;
     });
     await settle();
-    expect(onSettled).toHaveBeenCalledTimes(1);
-    expect(onSettled).toHaveBeenCalledWith(true);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith('s1', true);
   });
 
-  it('drops the rest of the queue when a write is rejected by the server', async () => {
-    const gates = [deferred(), deferred()];
-    let call = 0;
-    const send = vi.fn(() => gates[call++].promise);
+  it('drops the rest of the failed resource queue and leaves other resources alone', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
     const onSettled = vi.fn();
     const { result } = renderHook(() => useQueuedWrite(send, onSettled));
 
     act(() => {
-      result.current.write('a');
-      result.current.write('b');
+      result.current.write('s1', 'a');
+      result.current.write('s1', 'b');
+      result.current.write('s2', 'c');
+      result.current.write('s2', 'd');
     });
-    // The queued writes were built on state the server never took, so replaying
-    // them would push a route the user's own state was never derived from.
+    // The writes queued behind a rejected one were built on state the server
+    // never took, so replaying them would push a route the user's own state was
+    // never derived from. That reasoning is scoped to the failed resource: the
+    // other session's queued pick has no relationship to this failure.
     await act(async () => {
-      gates[0].resolve(false);
-      await gates[0].promise;
+      pending.get('s1:a')!.resolve(false);
+      await pending.get('s1:a')!.promise;
     });
     await settle();
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(result.current.saving).toBe(false);
-    expect(onSettled).toHaveBeenCalledExactlyOnceWith(false);
+    expect(result.current.isSaving('s1')).toBe(false);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith('s1', false);
+    expect(started).toEqual(['s1:a', 's2:c']);
+
+    await act(async () => {
+      pending.get('s2:c')!.resolve(true);
+      await pending.get('s2:c')!.promise;
+    });
+    await settle();
+    expect(started).toEqual(['s1:a', 's2:c', 's2:d']);
+    expect(result.current.isSaving('s2')).toBe(true);
   });
 
   it('counts a thrown write as a failure instead of stalling the queue', async () => {
@@ -152,8 +193,8 @@ describe('useQueuedWrite', () => {
     const { result } = renderHook(() => useQueuedWrite(send, onSettled));
 
     act(() => {
-      result.current.write('a');
-      result.current.write('b');
+      result.current.write('s1', 'a');
+      result.current.write('s1', 'b');
     });
     await act(async () => {
       gate.reject(new Error('offline'));
@@ -161,46 +202,89 @@ describe('useQueuedWrite', () => {
     });
     await settle();
     expect(send).toHaveBeenCalledTimes(1);
-    expect(result.current.saving).toBe(false);
-    expect(onSettled).toHaveBeenCalledExactlyOnceWith(false);
+    expect(result.current.isSaving('s1')).toBe(false);
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith('s1', false);
   });
 
   it('starts a new burst after the previous one settled', async () => {
-    const gates = [deferred(), deferred()];
-    let call = 0;
-    const send = vi.fn(() => gates[call++].promise);
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
     const onSettled = vi.fn();
     const { result } = renderHook(() => useQueuedWrite(send, onSettled));
 
     act(() => {
-      result.current.write('a');
+      result.current.write('s1', 'a');
     });
     await act(async () => {
-      gates[0].resolve(true);
-      await gates[0].promise;
+      pending.get('s1:a')!.resolve(true);
+      await pending.get('s1:a')!.promise;
     });
     await settle();
-    expect(result.current.saving).toBe(false);
+    expect(result.current.isSaving('s1')).toBe(false);
 
     act(() => {
-      result.current.write('b');
+      result.current.write('s1', 'b');
     });
-    expect(result.current.saving).toBe(true);
+    expect(result.current.isSaving('s1')).toBe(true);
     await act(async () => {
-      gates[1].resolve(true);
-      await gates[1].promise;
+      pending.get('s1:b')!.resolve(true);
+      await pending.get('s1:b')!.promise;
     });
     await settle();
-    expect(send).toHaveBeenNthCalledWith(2, 'b');
+    expect(send).toHaveBeenNthCalledWith(2, 'b', 's1');
     expect(onSettled).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves whenDrained per resource, on failure as well as success', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const { result } = renderHook(() => useQueuedWrite(send));
+
+    // An idle resource has nothing to wait for, so a caller that gates on it
+    // (the composer waiting for the route the header already shows) is not
+    // delayed at all in the common case.
+    const idle: string[] = [];
+    await act(async () => {
+      await result.current.whenDrained('s1').then(() => idle.push('s1'));
+    });
+    expect(idle).toEqual(['s1']);
+
+    const drained: string[] = [];
+    act(() => {
+      result.current.write('s1', 'a');
+      result.current.write('s1', 'b');
+      result.current.write('s2', 'c');
+      void result.current.whenDrained('s1').then(() => drained.push('s1'));
+      void result.current.whenDrained('s2').then(() => drained.push('s2'));
+    });
+    await settle();
+    expect(drained).toEqual([]);
+
+    // A rejected write must still release the waiter: settle means "landed or
+    // failed loudly", so a failing route cannot hold a send hostage forever.
+    await act(async () => {
+      pending.get('s1:a')!.resolve(false);
+      await pending.get('s1:a')!.promise;
+    });
+    await settle();
+    expect(drained).toEqual(['s1']);
+
+    await act(async () => {
+      pending.get('s2:c')!.resolve(true);
+      await pending.get('s2:c')!.promise;
+    });
+    await settle();
+    expect(drained).toEqual(['s1', 's2']);
   });
 
   it('sends through the latest send, so a stale closure cannot be replayed', async () => {
     const calls: string[] = [];
     const { result, rerender } = renderHook(
       ({ label }: { label: string }) =>
-        useQueuedWrite(async (patch: string) => {
-          calls.push(`${label}:${patch}`);
+        useQueuedWrite(async (patch: string, key: string) => {
+          calls.push(`${label}:${key}:${patch}`);
           return true;
         }),
       { initialProps: { label: 'first' } },
@@ -208,9 +292,9 @@ describe('useQueuedWrite', () => {
 
     rerender({ label: 'second' });
     await act(async () => {
-      result.current.write('a');
+      result.current.write('s1', 'a');
     });
     await settle();
-    expect(calls).toEqual(['second:a']);
+    expect(calls).toEqual(['second:s1:a']);
   });
 });
