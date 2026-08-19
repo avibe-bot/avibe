@@ -719,6 +719,21 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
         if staged_sidecar.exists():
             os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
 
+    # The displacement is made durable BEFORE the live path commits, and that
+    # ordering is the same invariant as the one above, stated against power loss
+    # instead of against an exception. A rename is visible to this process the
+    # moment it returns and durable only once its directory is synced, so leaving
+    # both syncs until after the live commit admits a crash that persists the new
+    # live pathname while the directory entry naming the displaced generation is
+    # still only in cache. That generation holds everything the failed release
+    # committed and exists nowhere else -- the rollback point is a copy of an
+    # older database, not of this one -- so losing it is the one loss this whole
+    # function is built to prevent.
+    for displaced in (replaced, *sidecars_of(replaced)):
+        if displaced.is_file():
+            _fsync_file(displaced)
+    _fsync_directory(into)
+
     # Only now does anything leave the live path, and only the sidecars: the
     # displaced generation already holds its own copy of them, and the database
     # arriving under this name must not inherit them. The database itself stays
@@ -794,6 +809,10 @@ def restore_sqlite_backup(backup_dir: Path, db_path: Path) -> Path | None:
         raise
 
     replaced = _swap_live_database(target, staged, into=source_db.parent)
+    # Only the live directory, because the swap already synced the rollback point
+    # it displaced into -- it has to, in the middle of its own sequence rather
+    # than after it, and a second sync out here would suggest the ordering is
+    # decided in two places when the whole reason that function exists is that it
+    # is decided in one.
     _fsync_directory(target.parent)
-    _fsync_directory(source_db.parent)
     return replaced

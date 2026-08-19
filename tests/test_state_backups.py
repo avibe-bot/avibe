@@ -1044,3 +1044,72 @@ def test_no_rename_a_swap_performs_can_cost_the_live_generation(
     # rewritten to do less can no longer satisfy the loop above by having nothing
     # left to interrupt.
     assert renames > 3
+
+
+def test_the_displaced_generation_is_durable_before_the_live_path_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same invariant as the test above, stated against power loss instead of
+    # against an exception. A rename is visible to this process the moment it
+    # returns and durable only once its directory is synced, so the two are
+    # different instants and a crash can land between them. If both syncs waited
+    # until after the live commit, a machine losing power there would come back
+    # with the restored database at the live path and the directory entry naming
+    # the displaced generation still only in cache -- and that generation holds
+    # everything the failed release committed and exists nowhere else, because the
+    # rollback point is a copy of an OLDER database, not of that one.
+    #
+    # Read back from what the swap actually did rather than from a list of files
+    # to check: every rename into the rollback point must be durable before the
+    # live rename, whichever renames those turn out to be. A sidecar added later
+    # is covered without editing this test, which is the point -- the `-shm` and
+    # `-wal` pair is a SQLite detail that has changed before.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+
+    # A live generation with a write-ahead log, so the swap has sidecars to
+    # displace and not just the database.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("insert into payload (value) values ('written by the new version')")
+    assert db_path.with_name(db_path.name + "-wal").exists()
+
+    real_replace = os.replace
+    journal: list[tuple[str, Path]] = []
+
+    def record_replace(src, dst, *args, **kwargs):
+        result = real_replace(src, dst, *args, **kwargs)
+        journal.append(("rename", Path(dst)))
+        return result
+
+    def record_fsync_file(path: Path) -> None:
+        journal.append(("sync file", Path(path)))
+
+    def record_fsync_directory(path: Path) -> None:
+        journal.append(("sync dir", Path(path)))
+
+    monkeypatch.setattr(backups.os, "replace", record_replace)
+    monkeypatch.setattr(backups, "_fsync_file", record_fsync_file)
+    monkeypatch.setattr(backups, "_fsync_directory", record_fsync_directory)
+
+    backups.restore_sqlite_backup(rollback_point, db_path)
+
+    live_commit = journal.index(("rename", db_path))
+    into_the_point = [
+        path for operation, path in journal[:live_commit] if operation == "rename" and path.parent == rollback_point
+    ]
+    # The swap displaced something, so the ordering below is a claim about real
+    # renames rather than a vacuous one over an empty list.
+    assert into_the_point
+
+    for displaced in into_the_point:
+        assert journal.index(("sync file", displaced)) < live_commit
+    assert journal.index(("sync dir", rollback_point)) < live_commit
+    # And the directory sync comes after the renames it is there to persist:
+    # syncing it earlier records entries that do not exist yet.
+    assert journal.index(("sync dir", rollback_point)) > max(journal.index(("rename", path)) for path in into_the_point)

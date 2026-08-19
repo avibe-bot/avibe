@@ -42,18 +42,23 @@ def test_prepare_sqlite_state_uses_config_primary_platform(monkeypatch) -> None:
     assert report.imported is True
 
 
-def test_startup_is_reported_only_after_everything_that_can_break_it() -> None:
-    """Where the mark sits is the whole meaning of the mark.
+def test_the_migration_runs_under_the_lock_and_before_the_controller_exists() -> None:
+    """The order `main()` still owns, after readiness moved out of it.
 
     The lock is taken first because the migration has to run under it, so the
-    lock says only that a process got as far as trying. What the mark says is
-    that the database migrated and the controller built -- the last things a new
-    release can break structurally, and therefore the first moment "the upgrade
-    worked" is a statement about anything.
+    lock says only that a process got as far as trying. The migration then runs
+    before anything is constructed against the schema it produces.
 
-    Asserted structurally, because the failure mode is a later edit moving it
-    earlier for a plausible-sounding reason and nothing noticing until an
-    upgrade fails and is recorded as a success.
+    This test used to end by pinning `mark_service_instance_started()` between
+    the controller and `run()`, on the reasoning that building the controller was
+    the last thing a new release could break structurally. That reasoning was
+    wrong: `run()` starts the checkpoint service, the dispatch server and the IM
+    runtime, any of which a new release can fail, and each of which it catches
+    and returns from -- so a release that never served was being announced as
+    serving. Readiness now belongs to `run()`, and the tests for it are in
+    `tests/test_service_readiness.py`. What remains here is the ordering that is
+    genuinely `main()`'s, asserted structurally because the failure mode is a
+    later edit moving a step for a plausible-sounding reason.
     """
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(service_main.main)))
@@ -65,6 +70,5 @@ def test_startup_is_reported_only_after_everything_that_can_break_it() -> None:
         lines.setdefault(name, node.lineno)
 
     assert lines["acquire_service_instance_lock"] < lines["prepare_sqlite_state"]
-    assert lines["prepare_sqlite_state"] < lines["mark_service_instance_started"]
-    assert lines["Controller"] < lines["mark_service_instance_started"]
-    assert lines["mark_service_instance_started"] < lines["run"]
+    assert lines["prepare_sqlite_state"] < lines["Controller"]
+    assert lines["Controller"] < lines["run"]

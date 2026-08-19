@@ -18,6 +18,23 @@ from vibe import runtime
 from vibe.upgrade import RollbackTarget
 
 
+#: The install the machine was on before the upgrade replaced it. Deliberately
+#: not this process's own interpreter: the case the launcher exists for is the
+#: `vibe-remote` -> `avibe-os` rename, where the two generations live in
+#: different directories, and a fixture reusing `sys.executable` would pass
+#: whether or not the target's install is carried anywhere at all.
+_REPLACED_INSTALL = runtime.ServiceLauncher(
+    python="/uv/tools/vibe-remote/bin/python",
+    main="/uv/tools/vibe-remote/lib/python3.13/site-packages/vibe/service_main.py",
+)
+
+
+def _rollback_target(version: str = "3.0.10") -> RollbackTarget:
+    """The install to go back to, as the upgrade captured it before installing."""
+
+    return RollbackTarget(version=version, package="vibe-remote", launcher=_REPLACED_INSTALL)
+
+
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
@@ -590,6 +607,22 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     assert calls[3] == ("bind_host", config)
     assert calls[4][:4] == ("start_ui", "0.0.0.0", 5123, False)
     assert calls[2][3]["memory_ui_secret"] == calls[4][4]["memory_ui_secret"]
+
+    # Every process this helper starts comes from the one install it was given,
+    # asserted over whatever it started rather than over two named spawns: the
+    # service and the UI are two halves of one generation, and a rollback that
+    # started one from the restored install and the other from the replaced one
+    # is a state neither release was ever run in. `None` is "this process",
+    # which is the right answer for every restart except a rollback.
+    def started_from() -> list:
+        return [call[-1].get("launcher") for call in calls if call[0] in ("start_service", "start_ui")]
+
+    assert started_from() == [None, None]
+
+    calls.clear()
+    restart_supervisor._start_runtime_processes(launcher=_REPLACED_INSTALL)
+    assert started_from() == [_REPLACED_INSTALL, _REPLACED_INSTALL]
+
     status = runtime.read_status()
     # "starting", not "running", and the stubbed lock says the pid is recorded.
     # This helper spawns; it does not observe. Its callers wait for the service's
@@ -735,10 +768,12 @@ def _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, *, service
 
     calls: list[str] = []
     installs: list[list[str]] = []
+    launchers: list = []
     observed_by_the_rolled_back_version: list[list[str]] = []
 
-    def start(start_ui=True):
+    def start(start_ui=True, launcher=None):
         calls.append("start_runtime")
+        launchers.append(launcher)
         if calls.count("start_runtime") == 1:
             # The new version gets far enough to take its rollback point and
             # commit, then dies without ever holding the lock.
@@ -772,6 +807,7 @@ def _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, *, service
         db_path=db_path,
         calls=calls,
         installs=installs,
+        launchers=launchers,
         observed_by_the_rolled_back_version=observed_by_the_rolled_back_version,
     )
 
@@ -789,7 +825,7 @@ def test_a_restart_that_leaves_nothing_running_puts_the_old_version_back(monkeyp
     armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
 
     rc = restart_supervisor._run_restart_job(
-        job_id="jobroll", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+        job_id="jobroll", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
     )
 
     # The restart still failed, and still says so: a rollback recovers the
@@ -804,9 +840,21 @@ def test_a_restart_that_leaves_nothing_running_puts_the_old_version_back(monkeyp
     # that never reached the lock is still holding the database file open when
     # the restore rewrites it -- and is what the final start would adopt.
     assert armed.calls == ["stop_runtime", "start_runtime", "stop_runtime", "install", "start_runtime"]
-    assert "avibe-os==3.0.10" in armed.installs[0]
+    # The distribution the OLD release was published as, not the one this build
+    # is: a machine that predates the `vibe-remote` -> `avibe-os` rename has no
+    # `avibe-os==3.0.10` to go back to, and pinning one is an index round-trip
+    # that fails and leaves the instance dark.
+    assert "vibe-remote==3.0.10" in armed.installs[0]
     assert armed.observed_by_the_rolled_back_version == [["before the upgrade"]]
     assert _payload_rows(armed.db_path) == ["before the upgrade"]
+
+    # The rollback starts the install it just reinstalled, not the one this job
+    # is running out of. An upgrade spawns the job through the `vibe` on PATH,
+    # which the install has already replaced, so by now `sys.executable` names
+    # the failed generation -- and across the `vibe-remote` -> `avibe-os` rename
+    # the two are different directories, both present, both startable. `None`
+    # for the first start is the upgrade's own: it is what should run next.
+    assert armed.launchers == [None, _REPLACED_INSTALL]
 
     rollback = status["rollback"]
     assert rollback["target_version"] == "3.0.10"
@@ -829,7 +877,7 @@ def test_a_service_still_holding_the_lock_is_never_rolled_back_underneath(monkey
     armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=True)
 
     rc = restart_supervisor._run_restart_job(
-        job_id="jobheld", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+        job_id="jobheld", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
     )
 
     assert rc == 1
@@ -861,11 +909,13 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     _seed_state_database(db_path)
     calls: list[str] = []
     installs: list[list[str]] = []
+    launchers: list = []
     observed_by_the_rolled_back_version: list[list[str]] = []
     alive = {222: True, 444: True}
 
-    def start(start_ui=True):
+    def start(start_ui=True, launcher=None):
         calls.append("start_runtime")
+        launchers.append(launcher)
         if calls.count("start_runtime") == 1:
             # The new version takes its rollback point, commits, and is now in
             # the migration that will kill it -- all of it under the lock.
@@ -899,7 +949,7 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     monkeypatch.setattr(runtime, "verified_service_running", lambda: False)
 
     rc = restart_supervisor._run_restart_job(
-        job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+        job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
     )
 
     assert rc == 3
@@ -907,7 +957,7 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     assert status["ok"] is False
     assert "did not finish starting" in status["error"]
     assert status["rollback"]["state"] == "succeeded"
-    assert "avibe-os==3.0.10" in installs[0]
+    assert "vibe-remote==3.0.10" in installs[0]
     assert observed_by_the_rolled_back_version == [["before the upgrade"]]
     assert _payload_rows(db_path) == ["before the upgrade"]
 
@@ -931,7 +981,7 @@ def test_a_generation_that_was_already_gone_is_quiesced(monkeypatch, tmp_path):
     )
 
     rc = restart_supervisor._run_restart_job(
-        job_id="jobgone", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+        job_id="jobgone", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
     )
 
     assert rc == 1
@@ -975,7 +1025,7 @@ def test_a_failed_generation_that_will_not_stop_stops_the_rollback_instead(monke
     )
 
     rc = restart_supervisor._run_restart_job(
-        job_id="jobstuck", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+        job_id="jobstuck", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
     )
 
     assert rc == 1
@@ -1046,9 +1096,12 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
     drift, and a flag renamed on one of them would leave every rollback silently
     disarmed while both halves still look right.
 
-    Both halves of the target make the trip. Argv is the one place they are apart,
-    so it is the one place they can be separated by accident, and a version that
-    arrives without its distribution pins a name the old release never had.
+    Asserted as equality against the whole target rather than field by field.
+    Argv is the one place the fields are apart, so it is the one place they can
+    be separated by accident -- a version arriving without its distribution pins
+    a name the old release never had, and one arriving without its install
+    reinstalls the right release and then starts the wrong one -- and a field
+    added later is carried by this test without it being edited, or fails it.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1066,24 +1119,29 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
 
     monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
 
+    target = _rollback_target()
     restart_supervisor.schedule_restart(
         delay_seconds=0,
         vibe_path="/bin/vibe",
         trigger="upgrade",
-        rollback_to=RollbackTarget(version="3.0.10", package="vibe-remote"),
+        rollback_to=target,
     )
     upgrade_argv = commands[-1]
     restart_supervisor.schedule_restart(delay_seconds=0, vibe_path="/bin/vibe", trigger="cli")
-    assert "--rollback-to" not in commands[-1]
-    assert "--rollback-package" not in commands[-1]
+    plain_argv = commands[-1]
+    assert [argument for argument in plain_argv if argument.startswith("--rollback")] == []
 
     parsed: dict = {}
     monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: parsed.update(kwargs) or 0)
     assert restart_supervisor.main(upgrade_argv[2:]) == 0
-    assert parsed["rollback_to"] == "3.0.10"
-    assert parsed["rollback_package"] == "vibe-remote"
+    assert parsed["rollback_to"] == target
 
     parsed.clear()
-    assert restart_supervisor.main(commands[-1][2:]) == 0
+    assert restart_supervisor.main(plain_argv[2:]) == 0
     assert parsed["rollback_to"] is None
-    assert parsed["rollback_package"] is None
+
+    # A partial set is refused rather than completed from this process. The job
+    # runs the release the rollback is undoing, so "fill in the missing install
+    # from here" is the exact wrong answer, and a silent one.
+    with pytest.raises(SystemExit):
+        restart_supervisor.main(["--job-id", "jobpartial", "--rollback-to", "3.0.10"])

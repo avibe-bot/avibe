@@ -15,7 +15,6 @@ from vibe.runtime import (
     ServiceAlreadyRunningError,
     acquire_service_instance_lock,
     consume_shutdown_intent,
-    mark_service_instance_started,
     release_service_instance_lock,
     shutdown_intent_required,
 )
@@ -209,13 +208,14 @@ def main():
         signal.signal(signal.SIGTERM, _handle_shutdown)
         signal.signal(signal.SIGINT, _handle_shutdown)
 
-        # Everything a new release can break structurally is now behind us: the
-        # config parsed, the database migrated, the controller built. Whoever
-        # started this process is waiting for exactly this, and until it is
-        # written they have only seen the lock -- which was taken before all of
-        # it, and which a failed migration would have released again.
-        mark_service_instance_started()
-
+        # Readiness is published from inside `controller.run()`, by the code that
+        # reaches it. Announcing it from here was announcing something this
+        # function has not observed: `run()` still has to build the event loop,
+        # start the checkpoint service, schedule the internal server and get the
+        # IM runtime onto its thread, and it catches its own failures and returns,
+        # so the process exits through the ordinary path. A watcher that saw
+        # `running` in that window read a release dying in its own startup as an
+        # upgrade that worked.
         try:
             controller.run()
         finally:

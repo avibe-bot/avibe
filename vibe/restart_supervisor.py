@@ -180,7 +180,20 @@ def _runtime_ready_for_config(config) -> bool:
     return bool(getattr(getattr(config, "slack", None), "bot_token", ""))
 
 
-def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
+def _start_runtime_processes(
+    start_ui: bool = True,
+    launcher: runtime.ServiceLauncher | None = None,
+) -> tuple[int, int | None]:
+    """Start the service, and the UI when this job owns it.
+
+    `launcher` is the install to start them from, and `None` means this one --
+    which is the right answer for every restart except a rollback, where this
+    process is running the release being replaced and so is the one install that
+    must not be started. It is taken once here and handed to both spawns, because
+    the service and the UI are two halves of one generation: starting them from
+    different installs is a state neither release was ever tested in.
+    """
+
     from core.memory.ui_access import generate_ui_read_secret, process_ui_read_secret
     from core.services import settings as settings_service
 
@@ -205,6 +218,7 @@ def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
         wait_for_ready=False,
         initial_ready_timeout=0,
         memory_ui_secret=memory_ui_secret,
+        launcher=launcher,
     )
     if start_ui:
         bind_host = runtime.effective_ui_bind_host(config)
@@ -213,6 +227,7 @@ def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
             config.ui.setup_port,
             wait_for_ready=False,
             memory_ui_secret=memory_ui_secret,
+            launcher=launcher,
         )
     else:
         ui_pid = preserved_ui_pid
@@ -320,8 +335,7 @@ def _restore_database_for_rollback(backup_watermark: int | None, write) -> dict:
 
 def _roll_back_failed_upgrade(
     *,
-    rollback_to: str,
-    rollback_package: str | None,
+    rollback_to: RollbackTarget,
     vibe_path: str | None,
     start_ui: bool,
     backup_watermark: int | None,
@@ -359,11 +373,20 @@ def _roll_back_failed_upgrade(
     killed mid-rollback and what it has already done to the database has to be
     readable afterwards from the status record rather than inferred from the
     disk.
+
+    Start comes from `rollback_to.launcher`, never from this process. This
+    process is the release the rollback is undoing: an upgrade spawns the restart
+    job through the `vibe` on PATH, which the install has already replaced, so by
+    the time this runs `sys.executable` names the failed generation. Reading it
+    here was how a rollback across the `vibe-remote` -> `avibe-os` rename
+    reinstalled the right release into the right directory, started the wrong one
+    out of the other directory, and recorded success.
     """
 
-    rollback: dict = {"target_version": rollback_to, "state": "running", "started_at": _now_iso()}
+    version = rollback_to.version
+    rollback: dict = {"target_version": version, "state": "running", "started_at": _now_iso()}
     record(rollback)
-    write(f"rolling back to {rollback_to}: no service is running after the failed restart")
+    write(f"rolling back to {version}: no service is running after the failed restart")
 
     # `start_ui` is also the answer to whether the UI is this job's to manage: a
     # service-only restart left the running UI alone on purpose, and quiescing
@@ -383,16 +406,16 @@ def _roll_back_failed_upgrade(
         # would report success for the version it was rolling back from.
         rollback.update(
             state="failed",
-            error=f"the failed generation is still running; not rolling back to {rollback_to}",
+            error=f"the failed generation is still running; not rolling back to {version}",
         )
         record(rollback)
-        write(f"cannot roll back to {rollback_to}: the failed generation did not stop")
+        write(f"cannot roll back to {version}: the failed generation did not stop")
         return rollback
 
     try:
-        plan = build_upgrade_plan(vibe_path=vibe_path, version=rollback_to, package_name=rollback_package)
+        plan = build_upgrade_plan(vibe_path=vibe_path, version=version, package_name=rollback_to.package)
     except Exception as exc:
-        rollback.update(state="failed", error=f"cannot build a pinned install for {rollback_to}: {exc}")
+        rollback.update(state="failed", error=f"cannot build a pinned install for {version}: {exc}")
         record(rollback)
         return rollback
 
@@ -409,7 +432,7 @@ def _roll_back_failed_upgrade(
         )
     except Exception as exc:
         rollback["install"] = {"method": plan.method, "ok": False, "error": str(exc)}
-        rollback.update(state="failed", error=f"installing {rollback_to} failed: {exc}")
+        rollback.update(state="failed", error=f"installing {version} failed: {exc}")
         record(rollback)
         return rollback
     if result.returncode != 0:
@@ -418,13 +441,13 @@ def _roll_back_failed_upgrade(
         # resolver output.
         detail = (result.stderr or result.stdout or "").strip()[-2000:]
         rollback["install"] = {"method": plan.method, "ok": False, "error": detail or f"exit code {result.returncode}"}
-        rollback.update(state="failed", error=f"installing {rollback_to} failed with exit code {result.returncode}")
+        rollback.update(state="failed", error=f"installing {version} failed with exit code {result.returncode}")
         record(rollback)
-        write(f"pinned install of {rollback_to} failed: {detail}")
+        write(f"pinned install of {version} failed: {detail}")
         return rollback
     rollback["install"] = {"method": plan.method, "ok": True}
     record(rollback)
-    write(f"installed {rollback_to} using {plan.method}")
+    write(f"installed {version} using {plan.method}")
 
     try:
         rollback["database"] = _restore_database_for_rollback(backup_watermark, write)
@@ -436,9 +459,9 @@ def _roll_back_failed_upgrade(
     record(rollback)
 
     try:
-        service_pid, ui_pid = _start_runtime_processes(start_ui=start_ui)
+        service_pid, ui_pid = _start_runtime_processes(start_ui=start_ui, launcher=rollback_to.launcher)
     except Exception as exc:
-        rollback.update(state="failed", error=f"starting {rollback_to} failed: {exc}")
+        rollback.update(state="failed", error=f"starting {version} failed: {exc}")
         record(rollback)
         return rollback
     ready_pid = runtime.wait_for_service_ready(service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
@@ -446,14 +469,14 @@ def _roll_back_failed_upgrade(
         rollback.update(
             state="failed",
             service_pid=service_pid,
-            error=f"{rollback_to} started but service pid {service_pid} did not finish starting",
+            error=f"{version} started but service pid {service_pid} did not finish starting",
         )
         record(rollback)
         return rollback
     runtime.write_status("running", f"pid={ready_pid}", ready_pid, ui_pid)
     rollback.update(state="succeeded", service_pid=ready_pid, error=None)
     record(rollback)
-    write(f"rolled back to {rollback_to}; service pid={ready_pid}")
+    write(f"rolled back to {version}; service pid={ready_pid}")
     return rollback
 
 
@@ -476,8 +499,7 @@ def _run_restart_job(
     trigger: str,
     scope: str = "all",
     prepare_show_runtime: bool = False,
-    rollback_to: str | None = None,
-    rollback_package: str | None = None,
+    rollback_to: RollbackTarget | None = None,
 ) -> int:
     # "service": restart only the service process, leaving the Web UI process
     # running (a config change shouldn't tear down the open Web UI). "all"
@@ -531,7 +553,6 @@ def _run_restart_job(
                 try:
                     _roll_back_failed_upgrade(
                         rollback_to=rollback_to,
-                        rollback_package=rollback_package,
                         vibe_path=vibe_path,
                         start_ui=restart_ui,
                         backup_watermark=backup_watermark,
@@ -542,10 +563,12 @@ def _run_restart_job(
                     # A rollback that raises must not swallow the failure that
                     # caused it: the original error is what the operator needs,
                     # and the rollback's own is recorded beside it.
-                    record_rollback({"target_version": rollback_to, "state": "failed", "error": str(exc)})
-                    write(f"rollback to {rollback_to} raised: {exc}")
+                    record_rollback({"target_version": rollback_to.version, "state": "failed", "error": str(exc)})
+                    write(f"rollback to {rollback_to.version} raised: {exc}")
             elif rollback_to:
-                record_rollback({"target_version": rollback_to, "state": "skipped", "reason": "service_running"})
+                record_rollback(
+                    {"target_version": rollback_to.version, "state": "skipped", "reason": "service_running"}
+                )
             return _fail(payload, error, log, return_code, started_at=started_at)
 
         old_pid = _read_recorded_pid()
@@ -565,9 +588,13 @@ def _run_restart_job(
             "scope": scope,
             # Recorded whether or not a rollback ends up happening, so a failed
             # restart with no `rollback` record is readable: armed and killed
-            # before it could recover, versus never recoverable at all.
-            "rollback_to": rollback_to,
-            "rollback_package": rollback_package,
+            # before it could recover, versus never recoverable at all. All three
+            # fields of the target, because a record that named the version and
+            # the distribution but not the install would be silent about the one
+            # of the three that has actually been wrong in production.
+            "rollback_to": rollback_to.version if rollback_to else None,
+            "rollback_package": rollback_to.package if rollback_to else None,
+            "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
             "old_pid": old_pid,
             "new_pid": None,
             "log_path": str(log_path),
@@ -624,7 +651,7 @@ def _run_restart_job(
             # put there. Every backup numbered at or above it afterwards was
             # written by the version about to start.
             backup_watermark = next_backup_sequence(paths.get_state_backups_dir())
-            write(f"pre-start backup sequence is {backup_watermark}; rollback target is {rollback_to}")
+            write(f"pre-start backup sequence is {backup_watermark}; rollback target is {rollback_to.version}")
 
         write("starting service")
         start_runtime_started_at = time.monotonic()
@@ -743,11 +770,13 @@ def schedule_restart(
     version it would roll back to, so there is nothing to reinstall and the
     failure is the operator's to look at.
 
-    It arrives as one value from `rollback_target()` rather than as a version and
-    a distribution name, because a caller that can pass one without the other
-    eventually does, and the pin it produces then names a release that was never
-    published. The argv below is the only place the two are apart, and only
-    because a command line has no other shape.
+    It arrives as one value from `rollback_target()` rather than as a version, a
+    distribution name and an install, because a caller that can pass one without
+    the others eventually does, and what it produces then is a pin naming a
+    release that was never published, or a reinstall of the right release
+    followed by a start of the wrong one. The argv below is the only place the
+    three are apart, and only because a command line has no other shape; `main()`
+    is the only place they are put back together.
     """
     from core.memory.ui_access import process_ui_read_secret
     from storage.migrations import guard_source_checkout_default_state_bootstrap
@@ -768,7 +797,21 @@ def schedule_restart(
     if prepare_show_runtime:
         command.append("--prepare-show-runtime")
     if rollback_to:
-        command.extend(["--rollback-to", rollback_to.version])
+        command.extend(
+            [
+                "--rollback-to",
+                rollback_to.version,
+                # Not optional the way the package name is. A missing package
+                # name still leaves `build_upgrade_plan` a defensible default,
+                # while a missing launcher leaves the job with only its own --
+                # which, in the case this exists for, is the release being
+                # undone.
+                "--rollback-python",
+                rollback_to.launcher.python,
+                "--rollback-main",
+                rollback_to.launcher.main,
+            ]
+        )
         if rollback_to.package:
             command.extend(["--rollback-package", rollback_to.package])
     env = get_restart_environment(vibe_path=vibe_path)
@@ -842,7 +885,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-show-runtime", action="store_true")
     parser.add_argument("--rollback-to")
     parser.add_argument("--rollback-package")
+    parser.add_argument("--rollback-python")
+    parser.add_argument("--rollback-main")
     args = parser.parse_args(argv)
+    # The one place a rollback target is apart, and so the one place it is put
+    # back together. Reassembling here rather than passing four values inward
+    # means nothing downstream can hold a version without the install it names --
+    # and an incomplete `--rollback-*` set is refused outright rather than
+    # quietly completed from this process, which is the failed release.
+    rollback_to = None
+    if args.rollback_to:
+        if not args.rollback_python or not args.rollback_main:
+            parser.error("--rollback-to requires --rollback-python and --rollback-main")
+        rollback_to = RollbackTarget(
+            version=args.rollback_to,
+            package=args.rollback_package,
+            launcher=runtime.ServiceLauncher(python=args.rollback_python, main=args.rollback_main),
+        )
     return _run_restart_job(
         job_id=args.job_id,
         delay_seconds=max(0.0, args.delay_seconds),
@@ -850,8 +909,7 @@ def main(argv: list[str] | None = None) -> int:
         trigger=args.trigger,
         scope=args.scope,
         prepare_show_runtime=args.prepare_show_runtime,
-        rollback_to=args.rollback_to,
-        rollback_package=args.rollback_package,
+        rollback_to=rollback_to,
     )
 
 

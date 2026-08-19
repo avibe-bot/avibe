@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -13,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, cast
 
+from vibe import runtime as runtime_mod
+
+
+logger = logging.getLogger(__name__)
 
 PACKAGE_NAME = "avibe-os"
 LEGACY_PACKAGE_NAME = "vibe-remote"
@@ -444,7 +449,7 @@ def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
 
 
 def installed_package_name(python_executable: str | None = None) -> str | None:
-    """The distribution this interpreter was installed as, read from its own path.
+    """The distribution this install was published as.
 
     Which distribution published the running version is not the same question as
     which one the next install should ask for, and the two genuinely differ: a
@@ -453,15 +458,46 @@ def installed_package_name(python_executable: str | None = None) -> str | None:
     this, because `avibe-os==2.x` names a release that was never published under
     that name and an install of it can only fail.
 
-    Read off the interpreter path rather than from configuration, so it describes
-    the install that exists rather than the one intended -- which is the whole
-    point on a machine whose install predates the current configuration. `None`
-    when the path says nothing, as with pip installs into a shared environment.
+    Asked of the installed metadata first, because that is where the answer
+    actually is: the distribution that provides the running `vibe` package says
+    so itself, whatever layout it was installed into. Reading it off the
+    interpreter path recognised exactly one layout -- uv's tool directory -- and
+    answered `None` for every supported install that is not one, pip into a
+    virtualenv among them. `None` there is not neutral: the caller falls back to
+    the configured FORWARD package, so a `vibe-remote` install in a virtualenv
+    armed a rollback to `avibe-os==2.x` and spent the one recovery attempt on a
+    release that was never published.
+
+    The path heuristic stays as the fallback for the case metadata cannot answer
+    -- a source checkout, or an environment exposing two distributions for the
+    same package, where naming one would be a guess. `None` when neither can say,
+    which is the honest answer for a tree that was never installed at all.
     """
 
     executable = (python_executable or sys.executable or "").replace("\\", "/")
+    # Only this process can be asked about its own metadata. A path belonging to
+    # some OTHER interpreter is answerable only by the layout it is written in.
+    if not python_executable or executable == (sys.executable or "").replace("\\", "/"):
+        distributions = _distributions_providing_this_package()
+        if len(distributions) == 1:
+            return distributions[0]
+
     match = _UV_TOOL_PATH_RE.search(executable)
     return match.group("name") if match else None
+
+
+def _distributions_providing_this_package() -> list[str]:
+    """Every installed distribution that provides the package this module is in."""
+
+    try:
+        from importlib.metadata import packages_distributions
+    except ImportError:  # pragma: no cover - importlib.metadata ships with 3.10+
+        return []
+    try:
+        return sorted(set(packages_distributions().get(__name__.split(".")[0], [])))
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read installed distribution metadata", exc_info=True)
+        return []
 
 
 def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
@@ -473,45 +509,85 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
 
 
 class RollbackTarget(NamedTuple):
-    """An install to go back to, named the only way an install can be named.
+    """The install being replaced, described completely enough to restore it.
 
-    Both halves travel together because they are one measurement, and splitting
-    them is exactly how this went wrong once: the version was read in the process
-    that predates the install and the distribution in the one that follows it, so
-    a `vibe-remote` machine pinned `avibe-os==2.9.4`, a release that never
-    existed. There is no constructor that reads only one half.
+    Every field travels with the others because they are one measurement, and
+    splitting them is exactly how this went wrong, repeatedly and in the same
+    shape each time: the version was read in the process that predates the
+    install and the distribution in the one that follows it, so a `vibe-remote`
+    machine pinned `avibe-os==2.9.4`, a release that never existed. Then the same
+    seam reappeared one step later -- the right distribution reinstalled, and the
+    service started from whatever interpreter the restarting process happened to
+    be running, which after a rename is the tool that replaced this one. It put
+    the failed release back up and reported the rollback a success.
+
+    So the rule is that nothing about the replaced install is looked up again
+    later. Anything a rollback needs to know about it is measured here, once, in
+    the only process that can still see it, and carried. There is no constructor
+    that reads one field.
     """
 
     version: str
     package: str | None
+    launcher: runtime_mod.ServiceLauncher
+
+
+def _names_a_published_release(version: str) -> bool:
+    """Whether an index could serve `version`, as opposed to it naming this tree.
+
+    A development build's version describes the tree it was built from rather
+    than anything published: PEP 440 spells that as a `dev` segment, a local
+    segment (`+<sha>`), or both, and the regression builder emits exactly that
+    shape. Testing for one hard-coded sentinel string recognised the fallback
+    version and nothing else, so a regression instance armed a rollback to
+    `avibe-os==0.0.0.dev0+<sha>` and spent its one recovery attempt asking an
+    index for a release that cannot exist there.
+
+    Asking the property instead of listing the strings is what stops the next
+    unlisted shape from costing the same attempt. Unparseable reads as
+    unpublished for the same reason: a version this codebase cannot even order is
+    not one it should pin an install to.
+    """
+
+    match = _VERSION_RE.match(version)
+    if match is None:
+        return False
+    return not (match.group("dev") or match.group("local"))
 
 
 def rollback_target() -> RollbackTarget | None:
     """The install a failed restart of THIS process could be put back on.
 
-    The running version, because that is the one the machine was working on
-    before the upgrade replaced it -- read from this process's own already-bound
-    `__version__`, which the install on disk cannot change underneath it. The
-    distribution comes from this process's own interpreter path for the same
-    reason: it names what is installed NOW, and only a caller running before the
-    install can still see that.
+    Everything here is measured from the running process, and that is the whole
+    point rather than an implementation detail: this describes the install the
+    upgrade is about to replace, and once it has been replaced there is nothing
+    left on the machine to measure. Calling this from the detached restart job
+    would answer for the install that did the replacing, which is not a rollback.
 
-    So this is the one owner of "what can we go back to", and it belongs to the
-    pre-install process. Calling it from the detached restart job would answer
-    for the install that replaced the target, which is not a rollback.
+    So: the version from this process's already-bound `__version__`, which the
+    install on disk cannot change underneath it; the distribution from this
+    install's own metadata; and the launcher that started this process, because
+    reinstalling a distribution does not tell anyone how to run it and a rollback
+    that crosses the `vibe-remote` -> `avibe-os` rename lands in a different tool
+    directory than the one this process is running out of.
 
-    `None` when the running tree reports no published release (a source checkout,
-    an editable install, a regression build with a pretend version). Handing that
-    string on as a target would spend an index round-trip to fail, and then report
-    a broken rollback mechanism to whoever is looking at a dark instance, when the
-    truth is that this install never had a release to go back to.
+    `None` when the running tree reports no release an index could serve -- a
+    source checkout, an editable install, a regression build. Handing that string
+    on as a target would spend the one recovery attempt on a round-trip that
+    fails, and then report a broken rollback mechanism to whoever is looking at a
+    dark instance, when the truth is that this install never had a release to go
+    back to.
     """
 
-    from vibe import UNKNOWN_VERSION, __version__
+    from vibe import __version__
 
-    if __version__ == UNKNOWN_VERSION:
+    if not _names_a_published_release(__version__):
         return None
-    return RollbackTarget(version=__version__, package=installed_package_name())
+    return RollbackTarget(
+        version=__version__,
+        package=installed_package_name(),
+        launcher=runtime_mod.current_service_launcher(),
+    )
 
 
 def pinned_package_spec(

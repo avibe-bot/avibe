@@ -94,6 +94,41 @@ def get_service_main_path() -> Path:
     return dev_main_path
 
 
+class ServiceLauncher(NamedTuple):
+    """The install that a service or UI process should be started from.
+
+    One value rather than an ambient fact, because there is exactly one case
+    where the answer is not "this process" and it is the case that matters: a
+    rollback that crosses the `vibe-remote` -> `avibe-os` tool rename reinstalls
+    into a different directory than the one the rolling-back process is running
+    out of. Every spawn site read `sys.executable` for itself, so the reinstall
+    succeeded and the failed release was started again -- twice over, since the
+    service and the UI each read it separately and would otherwise have to be
+    fixed separately, and a third spawn site would have to be found and fixed
+    again.
+
+    The interpreter and the entry point travel together because they are one
+    install. Pairing an interpreter with another install's entry point runs the
+    replaced release's code under the replacement's imports, which is neither
+    generation and is the failure this exists to avoid.
+    """
+
+    python: str
+    main: str
+
+
+def current_service_launcher() -> ServiceLauncher:
+    """The install THIS process is running from.
+
+    The default for every spawn, so nothing changes for the ordinary restart:
+    the interpreter that is running is the one that should run the next
+    generation. Only a rollback overrides it, and only because by then this
+    process is no longer the install being started.
+    """
+
+    return ServiceLauncher(python=sys.executable, main=str(get_service_main_path()))
+
+
 def get_working_dir() -> Path:
     """Get the working directory for subprocess execution."""
     # In development mode, use project root
@@ -1693,6 +1728,7 @@ def start_service(
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
     memory_ui_secret: str | None = None,
+    launcher: ServiceLauncher | None = None,
 ):
     from storage.migrations import guard_source_checkout_default_state_bootstrap
     from core.memory.ui_access import process_ui_read_secret
@@ -1753,7 +1789,7 @@ def start_service(
         if extra_pids:
             raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=extra_pids[0])
 
-        main_path = get_service_main_path()
+        launcher = launcher or current_service_launcher()
         scope_prefix = maybe_systemd_scope_prefix()
         if scope_prefix:
             logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
@@ -1763,7 +1799,7 @@ def start_service(
             else {}
         )
         process = spawn_service_background_process(
-            [*scope_prefix, sys.executable, str(main_path)],
+            [*scope_prefix, launcher.python, launcher.main],
             "service_stdout.log",
             "service_stderr.log",
             env={
@@ -1925,6 +1961,7 @@ def start_ui(
     *,
     wait_for_ready: bool = True,
     memory_ui_secret: str | None = None,
+    launcher: ServiceLauncher | None = None,
 ):
     from core.memory.ui_access import process_ui_read_secret
 
@@ -1952,6 +1989,10 @@ def start_ui(
                 )
         pid_path.unlink(missing_ok=True)
 
+    # Named entry point, not a body of code: whatever release the launcher's
+    # interpreter belongs to supplies its own `run_ui_server`. A rollback that
+    # sent source text across the generation boundary would run the replacement's
+    # idea of startup inside the replaced install.
     command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
     spawn_kwargs = (
         {"memory_ui_secret": memory_ui_secret}
@@ -1959,7 +2000,7 @@ def start_ui(
         else {}
     )
     pid = spawn_background(
-        [sys.executable, "-c", command],
+        [(launcher or current_service_launcher()).python, "-c", command],
         pid_path,
         "ui_stdout.log",
         "ui_stderr.log",

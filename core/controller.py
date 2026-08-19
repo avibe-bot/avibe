@@ -61,6 +61,7 @@ from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory_telemetry import log_attachment_capture
 from vibe.i18n import get_supported_languages, t as i18n_t
+from vibe.runtime import mark_service_instance_started
 
 logger = logging.getLogger(__name__)
 
@@ -3052,6 +3053,17 @@ class Controller:
             self._im_thread.start()
             if self._shutdown_requested:
                 self._ensure_shutdown_task("pre-loop request")
+            # Readiness is published here because here is where it becomes true,
+            # and by this function because this function is what makes it true.
+            # Every step above can still fail structurally on a new release, and
+            # each one is caught below and returns rather than crashing, so a
+            # caller announcing readiness before calling this has announced a
+            # service that may never serve -- which is what let a release dying
+            # in its own startup be read, for days, as an upgrade that worked.
+            #
+            # A no-op in any process that does not hold the service lock, so the
+            # embedded and test paths that run a controller are unaffected.
+            mark_service_instance_started()
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception

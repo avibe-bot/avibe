@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api, cli
+from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     UpgradePlan,
     build_upgrade_plan,
@@ -196,12 +197,18 @@ def test_a_tree_with_no_published_release_has_no_rollback_target(monkeypatch):
     monkeypatch.setattr("vibe.__version__", UNKNOWN_VERSION, raising=False)
     assert rollback_target() is None
 
-    # And a tree that does name a release answers with the distribution too, in
-    # one value: the two halves are read here, in the process that still predates
-    # the install, and there is no way to obtain one without the other.
+    # And a tree that does name a release answers with the distribution and the
+    # install too, in one value: all three are read here, in the process that
+    # still predates the install, and there is no way to obtain one without the
+    # others. The install matters as much as the version -- a rollback across the
+    # `vibe-remote` -> `avibe-os` rename reinstalls into a directory this process
+    # is not running out of, so a target that named only the version would be
+    # restored correctly and then started from the wrong generation.
+    launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
     monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
     monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
-    assert rollback_target() == RollbackTarget(version="3.0.10", package="vibe-remote")
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    assert rollback_target() == RollbackTarget(version="3.0.10", package="vibe-remote", launcher=launcher)
 
 
 def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
@@ -531,7 +538,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(api, "rollback_target", lambda: RollbackTarget("3.0.10", "vibe-remote"))
+    monkeypatch.setattr(api, "rollback_target", lambda: RollbackTarget("3.0.10", "vibe-remote", ServiceLauncher("/uv/tools/vibe-remote/bin/python", "/uv/tools/vibe-remote/service_main.py")))
     monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
 
     def fake_run(cmd, **kwargs):
@@ -563,7 +570,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
         # what the restart reinstalls if it cannot bring the new one up. Version
         # and distribution together, because a pin needs both and a machine that
         # predates the rename does not answer "avibe-os" for the old one.
-        "rollback_to": RollbackTarget("3.0.10", "vibe-remote"),
+        "rollback_to": RollbackTarget("3.0.10", "vibe-remote", ServiceLauncher("/uv/tools/vibe-remote/bin/python", "/uv/tools/vibe-remote/service_main.py")),
     }
 
 
@@ -782,7 +789,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(cli, "rollback_target", lambda: RollbackTarget("3.0.10", "vibe-remote"))
+    monkeypatch.setattr(cli, "rollback_target", lambda: RollbackTarget("3.0.10", "vibe-remote", ServiceLauncher("/uv/tools/vibe-remote/bin/python", "/uv/tools/vibe-remote/service_main.py")))
 
     def fake_schedule_restart(**kwargs):
         calls["restart_kwargs"] = kwargs
@@ -815,7 +822,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         "trigger": "upgrade",
         "prepare_show_runtime": True,
         # See the do_upgrade case: the restart is handed the install to fall back to.
-        "rollback_to": RollbackTarget("3.0.10", "vibe-remote"),
+        "rollback_to": RollbackTarget("3.0.10", "vibe-remote", ServiceLauncher("/uv/tools/vibe-remote/bin/python", "/uv/tools/vibe-remote/service_main.py")),
     }
 
 
