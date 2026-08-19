@@ -63,6 +63,7 @@ import {
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
+import { onPageReactivated } from './lib/pageActivity';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -334,17 +335,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         if (guardStatus !== 'remote-login-required' || !shouldDeferRemoteAuthRedirect()) return;
 
         let recheckStarted = false;
-        const recheckAfterLogin = () => {
-            if (document.visibilityState !== 'visible' || recheckStarted) return;
+        return onPageReactivated(() => {
+            if (recheckStarted) return;
             recheckStarted = true;
             setAuthCheckVersion((version) => version + 1);
-        };
-        document.addEventListener('visibilitychange', recheckAfterLogin);
-        window.addEventListener('focus', recheckAfterLogin);
-        return () => {
-            document.removeEventListener('visibilitychange', recheckAfterLogin);
-            window.removeEventListener('focus', recheckAfterLogin);
-        };
+        });
     }, [guardStatus]);
 
     useEffect(() => {

@@ -47,6 +47,7 @@ import type { ComboboxOption } from '../ui/combobox';
 import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { onPageReactivated } from '../../lib/pageActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
@@ -271,18 +272,12 @@ export const AgentsPage: React.FC = () => {
       timer = window.setTimeout(tick, intervalMs);
     };
 
-    const refreshNow = () => {
-      if (document.visibilityState === 'visible') void tick();
-    };
-
     timer = window.setTimeout(tick, intervalMs);
-    document.addEventListener('visibilitychange', refreshNow);
-    window.addEventListener('focus', refreshNow);
+    const stopReactivation = onPageReactivated(() => void tick());
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', refreshNow);
-      window.removeEventListener('focus', refreshNow);
+      stopReactivation();
     };
   }, [capabilities.can_use_agents, eventBridgeConnected, fetchRunningActiveCount]);
 
