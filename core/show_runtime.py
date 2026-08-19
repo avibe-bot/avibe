@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import contextlib
+import errno
+import fnmatch
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -13,9 +16,11 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -23,9 +28,18 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from sysconfig import get_platform
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 import httpx
+
+from storage.lock import (
+    MigrationFileLock,
+    MigrationLockTimeout,
+    _try_lock as storage_lock_try_lock,
+    fcntl_available,
+    try_windows_exclusive_lock,
+    unlock_windows_exclusive_lock,
+)
 
 from config import paths
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
@@ -46,7 +60,49 @@ _RUNTIME_SOURCE_GITHUB = "github"
 _RUNTIME_SOURCE_NPM = "npm"
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
+_CUSTOM_MANIFEST_LINEAGE = "*custom*"
 _MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
+_CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
+_ABANDONED_ARCHIVE_CLAIM_RE = re.compile(r"^[0-9a-f]{64}\.tgz\.avibe-removing$")
+# Cross-process safety window: between a download finalizing ``<sha256>.tgz``
+# and the installing process writing install metadata / ``current.json``, the
+# archive is not yet protected. Archives younger than this window are never
+# pruned by automatic or manual cleanup; real stale archives are days old.
+_ARCHIVE_MTIME_GUARD_SECONDS = 15 * 60
+# Skip reasons for archive-cache cleanup; consumers (CLI, Doctor) key off
+# ``skipped_reason`` generically instead of matching literal strings.
+_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING = "runtime_install_already_running"
+_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED = "archive_inspection_failed"
+_SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED = "archive_removal_failed"
+# Every archive-cache report carries exactly one outcome from this set; the
+# enumeration test in tests/test_show_runtime_archive_cleanup.py pins CLI and
+# Doctor rendering to it, so a new outcome fails the test until wired.
+_ARCHIVE_CLEANUP_OUTCOMES = frozenset({"cleaned", "partial", "skipped"})
+
+
+class _ArchiveMetadataError(Exception):
+    """A retained install's metadata could not be read; destructive cleanup must abort."""
+
+
+class _ArchiveInspectionError(Exception):
+    """The archive cache itself could not be inspected; cleanup must abort."""
+
+
+def _is_exclusive_regular_file(info: os.stat_result) -> bool:
+    """True only for a one-link regular file that is not a reparse point."""
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return False
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return not (reparse and attrs & reparse)
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and attrs & reparse)
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -189,6 +245,15 @@ class ShowRuntimeManager:
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
         self._capability_lock = asyncio.Lock()
+        # Cross-process in-flight install guard for the archive cache: held for
+        # the whole resolve-download-validate-extract window so a concurrent
+        # ``runtime clean`` (or another process's post-install cleanup) cannot
+        # unlink an archive this process has validated but not yet opened.
+        # ``flock`` is not re-entrant across file handles, so the depth counter
+        # lets the post-install cleanup reuse the installer's lock.
+        self._install_guard = threading.RLock()
+        self._install_guard_depth = 0
+        self._install_guard_path = self.runtime_dir / ".install.lock"
         self._capability_identity: tuple[str, int | None] | None = None
         self._context_key_capability: ShowRuntimeContextCapability | None = None
         self._capability_retry_deadline = 0.0
@@ -593,21 +658,26 @@ class ShowRuntimeManager:
         return command
 
     def _clean_after_managed_install(self, command: list[str]) -> None:
-        if (
-            self.runtime_source != _RUNTIME_SOURCE_MANIFEST
-            or self.manifest_path is not None
-            or self.manifest_url is not None
-        ):
-            return
         try:
-            protected_install_dirs = self._manifest_install_dirs_for_command(command)
-            removed = self._clean_manifest_install_dirs(
-                keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
-                manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
-                protected_install_dirs=protected_install_dirs,
-            )
-            if removed:
-                logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
+            if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+                protected_install_dirs = self._manifest_install_dirs_for_command(command)
+                packaged = self.manifest_path is None and self.manifest_url is None
+                removed = self._clean_manifest_install_dirs(
+                    keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
+                    manifest_source=(
+                        _PACKAGED_RUNTIME_MANIFEST_SOURCE if packaged else _CUSTOM_MANIFEST_LINEAGE
+                    ),
+                    protected_install_dirs=protected_install_dirs,
+                )
+                if removed:
+                    logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
+            archives = self._clean_downloaded_archives()
+            if archives.get("removed_count"):
+                logger.info(
+                    "Removed %d stale Show Runtime archive(s), reclaimed %d byte(s)",
+                    archives["removed_count"],
+                    archives["removed_bytes"],
+                )
         except Exception:
             # Cache cleanup must never turn a usable runtime install into a failed prepare.
             logger.warning("Failed to clean stale managed Show Runtime installs", exc_info=True)
@@ -733,15 +803,654 @@ class ShowRuntimeManager:
             result["reason"] = "runtime_archive_download_failed"
         return result
 
-    def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
+    @contextlib.contextmanager
+    def _preview_guard(self):
+        """Hold a read-only install guard for the whole preview planning.
+
+        The probe lock stays held while staging loops enumerate candidates, so
+        an install starting after the check cannot slip a live ``manifest-*``
+        directory into the preview. Yields the busy reason (or ``None`` when
+        the preview may proceed).
+        """
+        busy = self._preview_busy_reason_locked()
+        try:
+            yield busy
+        finally:
+            self._release_preview_guard()
+
+    def _preview_busy_reason_locked(self) -> str | None:
+        """Take the read-only busy probe and keep it for the preview scope."""
+        reason = self._preview_busy_reason()
+        if reason is None:
+            self._preview_guard_fd = getattr(self, "_preview_guard_fd", None)
+        return reason
+
+    def _release_preview_guard(self) -> None:
+        fd = getattr(self, "_preview_guard_fd", None)
+        if fd is not None:
+            if getattr(self, "_preview_guard_msvcrt", False):
+                unlock_windows_exclusive_lock(fd)
+                self._preview_guard_msvcrt = False
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._preview_guard_fd = None
+
+    def _windows_preview_busy_reason(self) -> str | None:
+        """Read-only Windows busy probe covering the pre-staging interval.
+
+        A leftover ``.install.lock`` is not itself busy — Windows never
+        deletes it. An installer that already holds ``msvcrt.locking`` on
+        that file (archive validation, before ``manifest-*`` exists) is.
+        Staging remains an additional crash-leftover signal.
+        """
+        probe = self._preview_lock_probe()
+        if probe is not None:
+            return probe
+        staging = self._staging_sentinel_reason()
+        if staging:
+            return staging
+        if getattr(self, "_preview_lock_was_absent", False):
+            return None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self._install_guard_path, flags)
+        except OSError:
+            return "runtime_install_guard_unavailable"
+        try:
+            if not try_windows_exclusive_lock(fd):
+                os.close(fd)
+                return "runtime_install_already_running"
+            if not self._guard_path_matches_fd(fd):
+                os.close(fd)
+                return "runtime_install_guard_unavailable"
+            self._preview_guard_fd = fd
+            self._preview_guard_msvcrt = True
+            return None
+        except OSError:
+            os.close(fd)
+            return "runtime_install_guard_unavailable"
+
+    def _preview_busy_reason(self) -> str | None:
+        """Read-only busy probe for previews: never creates or rewrites files.
+
+        Detects an active install (same process via the RLock depth, another
+        process via an advisory lock on an existing ``.install.lock``) so a
+        preview never advertises a live in-use archive or staging directory
+        as removable. On POSIX an unopenable-but-existing guard reports
+        unavailable (an inspection problem). Native Windows has no flock;
+        the probe instead takes a non-blocking ``msvcrt.locking`` on the
+        existing lock file (never creating it) and still treats a fresh
+        ``manifest-*``/``prebuilt-*`` directory as busy.
+
+        On success the probe fd is kept open with the advisory lock held
+        (stored on the instance) so the caller can hold the guard through
+        planning; ``_release_preview_guard`` unlocks and closes it.
+        """
+        if self._install_guard_depth > 0:
+            return "runtime_install_already_running"
+        if not fcntl_available():
+            return self._windows_preview_busy_reason()
+        import fcntl
+
+        probe = self._preview_lock_probe()
+        if probe is not None:
+            return probe
+        if getattr(self, "_preview_lock_was_absent", False):
+            return None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self._install_guard_path, flags)
+        except OSError:
+            return "runtime_install_guard_unavailable"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            # Held (shared) until the preview scope ends: an installer's
+            # exclusive-lock acquisition now blocks on us and vice versa.
+            if not self._guard_path_matches_fd(fd):
+                os.close(fd)
+                return "runtime_install_guard_unavailable"
+            self._preview_guard_fd = fd
+            return None
+        except OSError:
+            os.close(fd)
+            return "runtime_install_already_running"
+
+    def _staging_sentinel_reason(self) -> str | None:
+        """Treat freshly-modified staging dirs as busy (flock-less platforms)."""
+        mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
+        try:
+            for pattern in ("manifest-*", "prebuilt-*"):
+                for path in self.runtime_dir.glob(pattern):
+                    try:
+                        if path.is_dir() and path.stat().st_mtime > mtime_floor:
+                            return "runtime_install_already_running"
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        return None
+
+    def _preview_lock_missing(self) -> bool:
+        try:
+            self._install_guard_path.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    def _preview_lock_probe(self) -> str | None:
+        """Refuse special files before a blocking preview open."""
+        try:
+            info = self._install_guard_path.lstat()
+        except FileNotFoundError:
+            self._preview_lock_was_absent = True
+            return None
+        except OSError:
+            self._preview_lock_was_absent = False
+            return "runtime_install_guard_unavailable"
+        self._preview_lock_was_absent = False
+        if _is_reparse_point(info) or not _is_exclusive_regular_file(info):
+            return "runtime_install_guard_unavailable"
+        return None
+
+    def _guard_path_matches_fd(self, fd: int) -> bool:
+        """True when the live path still names the locked descriptor."""
+        try:
+            open_stat = os.fstat(fd)
+            path_stat = self._install_guard_path.lstat()
+        except OSError:
+            return False
+        return (
+            _is_exclusive_regular_file(open_stat)
+            and _is_exclusive_regular_file(path_stat)
+            and (open_stat.st_dev, open_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+        )
+
+    def _preview_raced_busy(self) -> bool:
+        """True when an install started after a lock-absent preview probe."""
+        if getattr(self, "_preview_guard_fd", None) is not None:
+            return False
+        if self._staging_sentinel_reason():
+            return True
+        if not getattr(self, "_preview_lock_was_absent", False):
+            return False
+        return not self._preview_lock_missing()
+
+    def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         removed: list[str] = []
-        for pattern in ("prebuilt-*", "manifest-*"):
-            for path in self.runtime_dir.glob(pattern):
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
-                    removed.append(str(path))
-        removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous))
-        return {"ok": True, "removed": removed}
+        try:
+            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
+        except Exception:
+            # A planning failure (e.g. an install dir disappearing mid-scan)
+            # must return the structured inspection-failure report, never an
+            # exception through the CLI or Doctor paths. Staging removals that
+            # already happened stay in the result so the CLI does not claim
+            # zero items after files were deleted.
+            logger.warning("Show Runtime cache cleanup failed", exc_info=True)
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "removed": list(removed),
+                "archives": self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED),
+            }
+
+    def _clean_locked(
+        self,
+        *,
+        keep_previous: int,
+        dry_run: bool,
+        removed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if removed is None:
+            removed = []
+        preview_guard = self._preview_guard() if dry_run else contextlib.nullcontext(None)
+        with preview_guard as busy_reason:
+            if dry_run and busy_reason:
+                # Map both contention and guard-unavailability through the
+                # same skip-reason taxonomy the real cleanup uses, so the CLI
+                # renders reason-specific guidance either way.
+                skip_reason = (
+                    _SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED
+                    if busy_reason == "runtime_install_guard_unavailable"
+                    else _SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING
+                )
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "removed": [],
+                    "archives": self._skipped_archive_report(skip_reason),
+                }
+            for pattern in ("prebuilt-*", "manifest-*"):
+                for path in self.runtime_dir.glob(pattern):
+                    if path.is_dir():
+                        if not dry_run:
+                            shutil.rmtree(path, ignore_errors=True)
+                        removed.append(str(path))
+            self._clean_manifest_install_dirs(
+                keep_previous=keep_previous,
+                dry_run=dry_run,
+                removed=removed,
+            )
+            # A dry run leaves stale install dirs in place, so their metadata
+            # would still read as "protected" below. Skip metadata under the
+            # dirs a real run would remove, so the archive preview matches
+            # the real outcome. Hold the preview guard through this phase so
+            # an install starting after staging enumeration cannot expose an
+            # in-flight archive as reclaimable.
+            skip_metadata_under = {Path(path) for path in removed} if dry_run else None
+            archives = self._clean_downloaded_archives(
+                dry_run=dry_run,
+                skip_metadata_under=skip_metadata_under,
+            )
+            if dry_run and self._preview_raced_busy():
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "removed": [],
+                    "archives": self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING),
+                }
+            return {
+                "ok": True,
+                "dry_run": dry_run,
+                "removed": removed,
+                "archives": archives,
+            }
+
+    def archive_cache_status(self, *, keep_previous: int = 1) -> dict[str, Any]:
+        """Report reclaimable content-addressed archives without deleting anything.
+
+        Simulates the install-dir cleanup a real ``clean(keep_previous=...)``
+        would perform, so the reported candidates match what reclamation would
+        actually remove. Failures in either phase return the structured
+        inspection-failure report so Doctor can render them.
+        """
+        report = self.clean(keep_previous=keep_previous, dry_run=True)
+        archives = report.get("archives") or self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+        return archives
+
+    @staticmethod
+    def _iter_install_metadata(versions_dir: Path, pattern: str) -> Iterator[Path]:
+        """Glob install metadata with error-preserving traversal.
+
+        ``Path.glob`` suppresses per-directory OSError and silently omits
+        retained installs whose subtree cannot be scanned; that would unprotect
+        their rollback archives, so traversal failures raise instead.
+        """
+        try:
+            parts = pattern.split("/")
+            current: Iterable[Path] = [versions_dir]
+            for depth, part in enumerate(parts):
+                is_last = depth == len(parts) - 1
+                next_paths: list[Path] = []
+                for parent in current:
+                    try:
+                        iterator = os.scandir(parent)
+                    except FileNotFoundError:
+                        continue
+                    except NotADirectoryError:
+                        # An unrelated non-directory matched a wildcard level
+                        # (e.g. .DS_Store under versions/); skip it rather
+                        # than disabling archive reporting for the cache.
+                        continue
+                    except OSError as exc:
+                        raise _ArchiveInspectionError(f"versions traversal failed: {parent}") from exc
+                    try:
+                        for entry in iterator:
+                            if not fnmatch.fnmatch(entry.name, part):
+                                continue
+                            if not is_last and not entry.is_dir(follow_symlinks=False):
+                                # Intermediate wildcard levels must be
+                                # directories; files/symlinks are not installs.
+                                continue
+                            child = parent / entry.name
+                            next_paths.append(child)
+                    except OSError as exc:
+                        raise _ArchiveInspectionError(f"versions traversal failed: {parent}") from exc
+                    finally:
+                        iterator.close()
+                current = next_paths
+            for path in current:
+                if path.name == ".vibe-show-runtime.json":
+                    yield path
+        except _ArchiveInspectionError:
+            raise
+
+    def _protected_archive_sha256s(self, skip_metadata_under: set[Path] | None = None) -> set[str]:
+        """SHA-256 digests of archives the current and retained installs still need.
+
+        Sources: the ``current.json`` pointer plus every remaining managed
+        install's ``.vibe-show-runtime.json`` metadata. Called after
+        install-dir cleanup, so the remaining metadata files are exactly the
+        current install plus the retained rollback install(s). Metadata under
+        ``skip_metadata_under`` is ignored, so dry runs can simulate the state
+        after removing those install dirs.
+
+        Raises ``_ArchiveMetadataError`` when a retained install's metadata is
+        unreadable or malformed: silently treating that archive as unprotected
+        could delete the artifact a rollback reinstall needs.
+        """
+        skip_resolved = {path.resolve() for path in (skip_metadata_under or ())}
+
+        def _skipped(metadata_path: Path) -> bool:
+            if not skip_resolved:
+                return False
+            resolved = metadata_path.resolve()
+            return any(resolved == item or item in resolved.parents for item in skip_resolved)
+
+        protected: set[str] = set()
+        try:
+            pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
+            digest = pointer.get("archive_sha256")
+            if isinstance(digest, str) and _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{digest}.tgz"):
+                protected.add(digest)
+        except FileNotFoundError:
+            pass
+        except Exception as cop:
+            raise _ArchiveMetadataError("current.json is unreadable") from cop
+        if self.archive_path is not None:
+            try:
+                archive_name = self.archive_path.resolve().name
+            except OSError:
+                archive_name = self.archive_path.name
+            if _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(archive_name):
+                protected.add(archive_name[: -len(".tgz")])
+        versions_dir = self.runtime_dir / "versions"
+        if versions_dir.is_symlink():
+            raise _ArchiveMetadataError("versions directory is a symlink")
+        try:
+            # Path.is_dir()/exists() suppress OSError into False; an
+            # uninspectable versions tree must instead fail closed so every
+            # retained install keeps its rollback archive protected.
+            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+        except FileNotFoundError:
+            versions_is_dir = False
+        except OSError as exc:
+            raise _ArchiveInspectionError("versions directory cannot be inspected") from exc
+        if versions_is_dir:
+            for pattern in ("*/*/.vibe-show-runtime.json", "*/*/*/.vibe-show-runtime.json"):
+                for metadata_path in self._iter_install_metadata(versions_dir, pattern):
+                    if _skipped(metadata_path):
+                        continue
+                    try:
+                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        raise _ArchiveMetadataError(f"install metadata is unreadable: {metadata_path}") from exc
+                    digest = metadata.get("archive_sha256")
+                    if not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
+                        f"{digest}.tgz" if isinstance(digest, str) else ""
+                    ):
+                        raise _ArchiveMetadataError(
+                            f"install metadata archive_sha256 is missing or not a digest: {metadata_path}"
+                        )
+                    protected.add(digest)
+        return protected
+
+    def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int, str, int]]:
+        """Completed content-addressed archives outside the protected set.
+
+        Only strict ``<sha256>.tgz`` regular files are candidates. The manifest
+        download flow stages into ``<sha256>.tmp`` and atomically renames only
+        after size + checksum verification, so a matching name implies a
+        completed, verified archive; in-progress ``.tmp`` downloads, symlinks,
+        and unknown file names are never candidates. Archives modified within
+        the cross-process safety window are also skipped: another process may
+        have just finalized a download whose install metadata does not exist
+        yet.
+        """
+        downloads_dir = self.runtime_dir / "downloads"
+        # Windows tuples carry an extra inode field for identity checks;
+        # POSIX tuples pad it so both branches share one unpack shape.
+        candidates: list[tuple[Path, int, str, int]] = []
+        try:
+            downloads_stat = downloads_dir.lstat()  # error-preserving, no follow
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        except OSError as exc:
+            raise _ArchiveInspectionError("downloads directory cannot be inspected") from exc
+        if not exists:
+            return candidates
+        # A symlink or reparse-point downloads directory would follow the
+        # link and unlink files outside Avibe's runtime state; fail as an
+        # inspection error rather than traverse it.
+        if _is_reparse_point(downloads_stat) or not stat.S_ISDIR(downloads_stat.st_mode):
+            raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
+        mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
+        if os.name == "nt":
+            # Directory descriptors (dir_fd) are unsupported on native
+            # Windows, so scan/stat/unlink by path. Bind the scan to the
+            # validated directory identity (dev/ino) so a junction swap of
+            # ``downloads`` cannot redirect enumeration or later deletion.
+            downloads_identity = (downloads_stat.st_dev, downloads_stat.st_ino)
+
+            def _require_same_downloads() -> None:
+                try:
+                    current = downloads_dir.lstat()
+                except OSError as exc:
+                    raise _ArchiveInspectionError("downloads directory cannot be inspected") from exc
+                if _is_reparse_point(current) or not stat.S_ISDIR(current.st_mode):
+                    raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
+                if (current.st_dev, current.st_ino) != downloads_identity:
+                    raise _ArchiveInspectionError("downloads directory was replaced")
+
+            _require_same_downloads()
+            iterator = os.scandir(downloads_dir)
+            try:
+                for entry in iterator:
+                    is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(entry.name))
+                    if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(entry.name):
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as cop:
+                        raise _ArchiveInspectionError(f"archive is not stat-able: {entry.name}") from cop
+                    if not stat.S_ISREG(entry_stat.st_mode):
+                        continue
+                    if not is_claim:
+                        if entry_stat.st_mtime > mtime_floor:
+                            continue
+                        if entry.name[: -len(".tgz")] in protected:
+                            continue
+                    candidates.append(
+                        (downloads_dir / entry.name, entry_stat.st_size, entry.name, entry_stat.st_ino)
+                    )
+            finally:
+                iterator.close()
+            _require_same_downloads()
+            self._downloads_dir_identity = downloads_identity
+            return candidates
+        # POSIX: bind enumeration and unlinking to the directory we validated
+        # so a concurrent path swap (symlink replacing ``downloads`` between
+        # the stat above and iterdir/unlink below) cannot redirect operations.
+        dir_fd = os.open(downloads_dir, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
+        try:
+            opened = os.fstat(dir_fd)
+            if (opened.st_dev, opened.st_ino) != (downloads_stat.st_dev, downloads_stat.st_ino):
+                raise _ArchiveInspectionError("downloads directory was replaced before scan")
+            with os.scandir(dir_fd) as entries:
+                names = [entry.name for entry in entries]
+            for name in sorted(names):
+                is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(name))
+                if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(name):
+                    continue
+                try:
+                    stat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as cop:
+                    raise _ArchiveInspectionError(f"archive is not stat-able: {name}") from cop
+                if not stat.S_ISREG(stat_result.st_mode):
+                    continue
+                if not is_claim:
+                    if stat_result.st_mtime > mtime_floor:
+                        continue
+                    if name[: -len(".tgz")] in protected:
+                        continue
+                candidates.append((downloads_dir / name, stat_result.st_size, name, 0))
+            # Keep the enumeration descriptor until the caller closes it so
+            # the removal phase (when any) unlinks through the same fd.
+            # Dry runs, Doctor, and empty real scans close it in
+            # ``_clean_downloaded_archives``.
+            self._downloads_dir_fd = dir_fd
+            return candidates
+        except BaseException:
+            os.close(dir_fd)
+            raise
+
+    def _close_downloads_dir_fd(self) -> None:
+        fd = getattr(self, "_downloads_dir_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._downloads_dir_fd = None
+
+    def _clean_downloaded_archives(
+        self,
+        *,
+        dry_run: bool = False,
+        skip_metadata_under: set[Path] | None = None,
+    ) -> dict[str, Any]:
+        """Report on / prune the content-addressed archive cache.
+
+        Dry runs are strictly read-only: they never take the install guard,
+        never create or rewrite ``.install.lock``, and stay usable on a
+        read-only runtime directory (Doctor contract). Real cleanup serializes
+        against installs via the guard (re-entrant inside an install) and
+        reports one of two skip reasons: lock contention, or inspection
+        failure — consumers key off ``skipped_reason`` alone.
+        """
+        if dry_run:
+            try:
+                protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
+                candidates = self._archive_cleanup_candidates(protected)
+            except Exception:
+                logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+            finally:
+                # Dry runs never delete, so the enumeration descriptor (kept
+                # for the removal phase) must be closed on every path.
+                self._close_downloads_dir_fd()
+            return {
+                "outcome": "cleaned" if not candidates else "partial",
+                "protected_count": len(protected),
+                "candidate_count": len(candidates),
+                "candidate_bytes": sum(size for _, size, _name, _ino in candidates),
+                "removed_count": 0,
+                "removed_bytes": 0,
+                "failed_count": 0,
+            }
+        with self._install_guard_locked(timeout_seconds=1.0) as (acquired, guard_reason):
+            if not acquired:
+                logger.warning("Show Runtime archive cleanup skipped: install guard %s", guard_reason)
+                if guard_reason == "runtime_install_guard_unavailable":
+                    return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING)
+            try:
+                protected = self._protected_archive_sha256s(skip_metadata_under=skip_metadata_under)
+                candidates = self._archive_cleanup_candidates(protected)
+                removed_count = 0
+                removed_bytes = 0
+                failed_count = 0
+                # Unlink through the same validated directory on POSIX (no
+                # path resolution that a concurrent swap could redirect); on
+                # Windows unlink by path. A fresh runtime with no candidates
+                # never opens the directory at all.
+                if candidates:
+                    candidates.sort(key=lambda item: (0 if _ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(item[2]) else 1, item[2]))
+                    if os.name == "nt":
+                        downloads_identity = getattr(self, "_downloads_dir_identity", None)
+                        for path, size, name, inode in candidates:
+                            is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(name))
+                            claimed = path if is_claim else path.with_name(f"{name}.avibe-removing")
+                            try:
+                                if downloads_identity is not None:
+                                    dir_stat = path.parent.lstat()
+                                    if _is_reparse_point(dir_stat) or (
+                                        dir_stat.st_dev,
+                                        dir_stat.st_ino,
+                                    ) != downloads_identity:
+                                        raise OSError("downloads directory was replaced")
+                                pre_stat = os.stat(path, follow_symlinks=False)
+                                if inode and pre_stat.st_ino != inode:
+                                    raise OSError("entry was replaced after enumeration")
+                                if not stat.S_ISREG(pre_stat.st_mode):
+                                    raise OSError("entry replaced by a non-regular file")
+                                if is_claim:
+                                    os.unlink(path)
+                                else:
+                                    os.rename(path, claimed)
+                                    post_stat = os.stat(claimed, follow_symlinks=False)
+                                    if inode and post_stat.st_ino != inode:
+                                        os.rename(claimed, path)
+                                        raise OSError("rename claimed a different entry")
+                                    os.unlink(claimed)
+                            except OSError:
+                                logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
+                                failed_count += 1
+                                try:
+                                    if not is_claim and claimed.exists():
+                                        os.rename(claimed, path)
+                                except OSError:
+                                    pass
+                                continue
+                            removed_count += 1
+                            removed_bytes += size
+                    else:
+                        dir_fd = getattr(self, "_downloads_dir_fd", None)
+                        try:
+                            for path, size, name, _inode in candidates:
+                                try:
+                                    os.unlink(name, dir_fd=dir_fd)
+                                except OSError:
+                                    logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
+                                    failed_count += 1
+                                    continue
+                                removed_count += 1
+                                removed_bytes += size
+                        finally:
+                            if dir_fd is not None:
+                                os.close(dir_fd)
+                                self._downloads_dir_fd = None
+                report = {
+                    "protected_count": len(protected),
+                    "candidate_count": len(candidates),
+                    "candidate_bytes": sum(size for _, size, _name, _ino in candidates),
+                    "removed_count": removed_count,
+                    "removed_bytes": removed_bytes,
+                    "failed_count": failed_count,
+                }
+                if failed_count:
+                    report["outcome"] = "skipped" if removed_count == 0 else "partial"
+                    report["skipped_reason"] = _SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED
+                else:
+                    report["outcome"] = "cleaned"
+                return report
+            except Exception:
+                logger.warning("Show Runtime archive cleanup failed", exc_info=True)
+                return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+            finally:
+                # Empty real scans never enter the unlink branch that closes
+                # the enumeration descriptor; close it on every remaining path.
+                self._close_downloads_dir_fd()
+
+    @staticmethod
+    def _skipped_archive_report(reason: str) -> dict[str, Any]:
+        return {
+            "outcome": "skipped",
+            "protected_count": 0,
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "removed_count": 0,
+            "removed_bytes": 0,
+            "skipped_reason": reason,
+        }
 
     def _clean_manifest_install_dirs(
         self,
@@ -749,10 +1458,14 @@ class ShowRuntimeManager:
         keep_previous: int,
         manifest_source: str | None = None,
         protected_install_dirs: set[Path] | None = None,
+        dry_run: bool = False,
+        removed: list[str] | None = None,
     ) -> list[str]:
+        if removed is None:
+            removed = []
         versions_dir = self.runtime_dir / "versions"
         if not versions_dir.is_dir():
-            return []
+            return removed
         protected = set(protected_install_dirs or ())
         current_install_dir = self._current_manifest_install_dir(versions_dir)
         if current_install_dir is not None:
@@ -779,7 +1492,6 @@ class ShowRuntimeManager:
             if kept_previous < keep_previous:
                 kept_previous += 1
                 protected.add(path_resolved)
-        removed: list[str] = []
         removable_install_dirs = [
             path
             for path, path_resolved in resolved_install_dirs.items()
@@ -798,9 +1510,11 @@ class ShowRuntimeManager:
         for path in sorted(safe_removable_install_dirs, key=lambda item: len(resolved_install_dirs[item].parts), reverse=True):
             if not path.is_dir():
                 continue
-            shutil.rmtree(path, ignore_errors=True)
+            if not dry_run:
+                shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
-        self._prune_empty_manifest_version_dirs(versions_dir)
+        if not dry_run:
+            self._prune_empty_manifest_version_dirs(versions_dir)
         return removed
 
     @staticmethod
@@ -821,10 +1535,13 @@ class ShowRuntimeManager:
                         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                     except Exception:
                         continue
-                    if (
-                        metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST
-                        or metadata.get("manifest_source") != manifest_source
-                    ):
+                    if metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST:
+                        continue
+                    source = metadata.get("manifest_source")
+                    if manifest_source == _CUSTOM_MANIFEST_LINEAGE:
+                        if source == _PACKAGED_RUNTIME_MANIFEST_SOURCE:
+                            continue
+                    elif source != manifest_source:
                         continue
                 install_dirs.add(metadata_path.parent)
         return install_dirs
@@ -839,14 +1556,24 @@ class ShowRuntimeManager:
             pass
         return None
 
+    def _manifest_source_for_install_dirs(self, install_dirs: set[Path]) -> str | None:
+        for install_dir in install_dirs:
+            try:
+                metadata = json.loads(self._manifest_metadata_path(install_dir).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            source = metadata.get("manifest_source")
+            if isinstance(source, str) and source:
+                return source
+        if self.manifest_path is None and self.manifest_url is None:
+            return _PACKAGED_RUNTIME_MANIFEST_SOURCE
+        return None
+
     def _manifest_install_dirs_for_command(self, command: list[str]) -> set[Path]:
         versions_dir = self.runtime_dir / "versions"
         if not versions_dir.is_dir():
             return set()
-        install_dirs = self._manifest_install_dirs(
-            versions_dir,
-            manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
-        )
+        install_dirs = self._manifest_install_dirs(versions_dir)
         matching_install_dirs: set[Path] = set()
         for command_part in command:
             try:
@@ -914,7 +1641,172 @@ class ShowRuntimeManager:
             return command
         return self._verified_manifest_runtime_command(self._legacy_manifest_install_dir(manifest, archive), manifest, archive, node)
 
+    @contextlib.contextmanager
+    def _install_guard_locked(self, *, timeout_seconds: float = 0.0):
+        """Serialize installs and archive cleanup, across processes too.
+
+        Yields a ``(acquired, reason)`` pair. ``acquired`` is True when the
+        guard is held; otherwise ``reason`` distinguishes contention
+        (``runtime_install_already_running``) from a guard that cannot exist
+        (``runtime_install_guard_unavailable``: read-only/full directory,
+        symlinked or hard-linked lock file). The outermost caller in this
+        process takes the cross-process file lock; nested calls on the same
+        thread (post-install cleanup runs inside the install) reuse it, so the
+        non-re-entrant ``flock`` never deadlocks against itself.
+        """
+        unavailable = (False, "runtime_install_guard_unavailable")
+        busy = (False, "runtime_install_already_running")
+        with self._install_guard:
+            if self._install_guard_depth > 0:
+                self._install_guard_depth += 1
+                try:
+                    yield (True, None)
+                finally:
+                    self._install_guard_depth -= 1
+                return
+            # A symlinked lock path would make the lock truncate/rewrite a
+            # file outside the runtime directory; a hard link shares its
+            # inode with unrelated content. Refuse both before any open.
+            try:
+                guard_lstat = self._install_guard_path.lstat()
+                if not _is_exclusive_regular_file(guard_lstat):
+                    logger.warning(
+                        "Show Runtime install guard %s is a symlink or hard link; refusing to lock",
+                        self._install_guard_path,
+                    )
+                    yield unavailable
+                    return
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(
+                    "Show Runtime install guard %s cannot be inspected; refusing to lock",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield unavailable
+                return
+            # Open the guard ourselves with no-follow semantics so a raced
+            # replacement (symlink/hard link swapped in after the lstat) can
+            # never be truncated by MigrationFileLock's append-open; we then
+            # validate the descriptor and hand the same handle's fd to the
+            # lock so validation and locking cover one identical inode.
+            guard_dir = self._install_guard_path.parent
+            try:
+                guard_dir.mkdir(parents=True, exist_ok=True)
+                guard_flags = os.O_RDWR | os.O_CREAT
+                if hasattr(os, "O_NOFOLLOW"):
+                    guard_flags |= os.O_NOFOLLOW
+                lock_fd = os.open(self._install_guard_path, guard_flags, 0o644)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    logger.warning("Show Runtime install guard %s is a symlink; refusing to lock", self._install_guard_path)
+                    yield unavailable
+                    return
+                logger.warning(
+                    "Show Runtime install guard %s is unavailable",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield unavailable
+                return
+            try:
+                if not self._guard_path_matches_fd(lock_fd):
+                    logger.warning(
+                        "Show Runtime install guard descriptor is not an exclusive regular file; refusing",
+                    )
+                    os.close(lock_fd)
+                    yield unavailable
+                    return
+                file_lock = MigrationFileLock(self._install_guard_path, timeout_seconds=timeout_seconds)
+                file_lock._handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
+                deadline = time.monotonic() + timeout_seconds
+                while True:
+                    file_lock._handle.seek(0)
+                    if storage_lock_try_lock(file_lock._handle):
+                        file_lock._handle.seek(0)
+                        file_lock._handle.truncate()
+                        file_lock._handle.write(str(os.getpid()))
+                        file_lock._handle.flush()
+                        break
+                    if time.monotonic() >= deadline:
+                        file_lock._handle.close()
+                        yield busy
+                        return
+                    time.sleep(0.1)
+                if not self._guard_path_matches_fd(file_lock._handle.fileno()):
+                    logger.warning(
+                        "Show Runtime install guard path was replaced after lock acquisition; refusing",
+                    )
+                    file_lock.release()
+                    yield unavailable
+                    return
+            except OSError:
+                logger.warning(
+                    "Show Runtime install guard %s could not be locked",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield unavailable
+                return
+            except OSError:
+                # A lock file that cannot be created/opened (read-only or full
+                # runtime directory) is a structured "cannot serialize" outcome,
+                # never an exception through prepare/clean.
+                logger.warning(
+                    "Show Runtime install guard %s is unavailable; treating as busy",
+                    self._install_guard_path,
+                    exc_info=True,
+                )
+                yield unavailable
+                return
+            self._install_guard_depth = 1
+            try:
+                yield (True, None)
+            finally:
+                self._install_guard_depth = 0
+                try:
+                    file_lock.release()
+                except Exception:
+                    logger.warning("Failed to release Show Runtime install guard", exc_info=True)
+
     def _install_manifest_runtime(self) -> list[str] | None:
+        with self._install_guard_locked() as (acquired, reason):
+            if not acquired:
+                self._install_reason = reason
+                # An untakeable lock (busy or unavailable) must not break a
+                # non-forced prepare that already has a verified install to
+                # reuse. A forced reinstall that cannot run is a failure —
+                # reporting success would hide that the repair never happened.
+                if self.force_install:
+                    return None
+                return self._reuse_verified_manifest_command()
+            return self._install_manifest_runtime_locked()
+
+    def _reuse_verified_manifest_command(self) -> list[str] | None:
+        """Best-effort read-only fallback: reuse a verified installed runtime."""
+        try:
+            node = _resolve_node_command()
+            manifest = self._load_runtime_manifest()
+            if not node or not manifest:
+                return None
+            # Mirror the normal install path: an unsupported Node version must
+            # not be reported as a usable runtime.
+            if not self._manifest_node_supported(node, manifest):
+                return None
+            archive = self._manifest_archive_for_platform(manifest)
+            if not archive:
+                return None
+            install_dir = self._manifest_install_dir(manifest, archive)
+            command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
+            if not command:
+                legacy_install_dir = self._legacy_manifest_install_dir(manifest, archive)
+                command = self._verified_manifest_runtime_command(legacy_install_dir, manifest, archive, node)
+            return self._reuse_existing_archive_runtime(command)
+        except Exception:
+            return None
+
+    def _install_manifest_runtime_locked(self) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"

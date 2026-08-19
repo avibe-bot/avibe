@@ -10837,6 +10837,49 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         )
         return items
 
+    try:
+        archive_cache = manager.archive_cache_status()
+    except Exception:  # noqa: BLE001
+        archive_cache = None
+    doctor_language = _configured_cli_language()
+    archive_skipped_reason = str((archive_cache or {}).get("skipped_reason") or "")
+    if archive_cache and archive_skipped_reason == "archive_inspection_failed":
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+        )
+    elif archive_cache and archive_skipped_reason:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedAction", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+        )
+    elif archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t(
+                "runtime.doctor.archiveCacheReclaimable",
+                doctor_language,
+                count=int(archive_cache.get("candidate_count") or 0),
+                size=_format_byte_size(int(archive_cache.get("candidate_bytes") or 0)),
+            ),
+            i18n_t("runtime.doctor.archiveCacheReclaimableAction", doctor_language),
+            code="show_runtime.archive_cache_reclaimable",
+        )
+    elif archive_cache is not None:
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("runtime.doctor.archiveCacheClean", _configured_cli_language()),
+            code="show_runtime.archive_cache_clean",
+        )
+
     provider = str(status.get("provider") or "unknown")
     explicit_command = status.get("explicit_command")
     if explicit_command:
@@ -14149,15 +14192,76 @@ def cmd_runtime(args) -> int:
         strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
-        payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
-        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))
+        dry_run = bool(getattr(args, "dry_run", False))
+        payload = manager.clean(
+            keep_previous=getattr(args, "keep_previous", 1),
+            dry_run=dry_run,
+        )
+        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1), dry_run=dry_run)
         payload["git"] = git
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
+            language = _configured_cli_language()
+            archives = payload.get("archives") or {}
+            skipped_reason = str(archives.get("skipped_reason") or "")
+            outcome = str(archives.get("outcome") or "")
+            # Show/Git results are reported independently of the archive
+            # outcome: a skipped archive pass must not hide what the rest of
+            # the cleanup actually reclaimed (or would reclaim).
+            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
-            print(f"Removed {len(removed)} Show Runtime cache item(s).")
-            print(f"Removed {len(git.get('removed') or [])} Git Runtime cache item(s).")
+            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            is_partial_run = outcome == "partial" and not dry_run
+            if is_partial_run:
+                print(
+                    i18n_t(
+                        "runtime.clean.removedArchives",
+                        language,
+                        count=int(archives.get("removed_count") or 0),
+                        size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
+                    )
+                )
+                print(
+                    i18n_t("runtime.clean.partiallyRemoved", language, failed=int(archives.get("failed_count") or 0)),
+                    file=sys.stderr,
+                )
+            elif skipped_reason:
+                # A skipped/failed archive pass is not a completed zero-removal
+                # cleanup; say so instead of printing placeholder counts, with
+                # remediation that matches the actual reason.
+                if skipped_reason == "archive_removal_failed":
+                    print(
+                        i18n_t(
+                            "runtime.clean.removalFailed",
+                            language,
+                            failed=int(archives.get("failed_count") or 0),
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    skip_key = (
+                        "runtime.clean.skippedInspection"
+                        if skipped_reason == "archive_inspection_failed"
+                        else "runtime.clean.skipped"
+                    )
+                    print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
+            else:
+                archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
+                archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
+                print(
+                    i18n_t(
+                        f"{prefix_key}Archives",
+                        language,
+                        count=archive_count,
+                        size=_format_byte_size(archive_bytes),
+                    )
+                )
+            if git.get("ok") is False and git.get("reason"):
+                git_skip_key = "runtime.clean.gitSkippedPreview" if dry_run else "runtime.clean.gitSkipped"
+                print(i18n_t(git_skip_key, language, reason=git["reason"]), file=sys.stderr)
+            else:
+                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
@@ -14246,11 +14350,21 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         return {"ok": False, "message": str(exc)}
 
 
-def _clean_git_runtime(*, keep_previous: int) -> dict:
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
+
+
+def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
     try:
         from core.git_runtime import get_git_runtime_manager
 
-        return get_git_runtime_manager().clean(keep_previous=keep_previous)
+        return get_git_runtime_manager().clean(keep_previous=keep_previous, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "removed": [], "message": str(exc)}
 
@@ -14503,6 +14617,11 @@ def build_parser():
 
     runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
+    runtime_clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=i18n_t("runtime.clean.dryRunHelp", _configured_cli_language()),
+    )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(
         "remote",

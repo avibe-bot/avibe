@@ -905,5 +905,30 @@
     "interrupted": {
       "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running, and its agent runtime could not be resumed. Nothing further will arrive for it. Send the request again if the work still needs doing."
     }
+  },
+  "runtime": {
+    "clean": {
+      "dryRunHelp": "Report stale archives and cache entries without removing anything.",
+      "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
+      "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",
+      "wouldRemoveGit": "Would remove {count} Git Runtime cache item(s).",
+      "removedItems": "Removed {count} Show Runtime cache item(s).",
+      "removedArchives": "Removed {count} downloaded Show Runtime archive(s) ({size}).",
+      "removedGit": "Removed {count} Git Runtime cache item(s).",
+      "partiallyRemoved": " {failed} archive(s) could not be removed; check permissions and the Avibe log.",
+      "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes.",
+      "removalFailed": "{failed} archive(s) could not be removed; stale archives remain. Check runtime directory permissions and the Avibe log.",
+      "skippedInspection": "Archive cleanup could not inspect the cache ({reason}); stale archives may remain. Check runtime directory permissions and the Avibe log.",
+      "gitSkipped": "Git Runtime cleanup skipped ({reason}); stale entries remain.",
+      "gitSkippedPreview": "Git Runtime cache preview skipped ({reason}); stale entries may remain."
+    },
+    "doctor": {
+      "archiveCacheReclaimable": "Show Runtime archive cache holds {count} reclaimable archive(s) ({size}); the current and rollback archives are kept.",
+      "archiveCacheReclaimableAction": "Run `vibe runtime clean --dry-run` to preview, then `vibe runtime clean` to reclaim.",
+      "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives",
+      "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
+      "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
+      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed."
+    }
   }
 }
