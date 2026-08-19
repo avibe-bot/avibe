@@ -358,7 +358,7 @@ class ManagedRuntimeManager:
                         "message": "an install is currently running",
                     }
                 try:
-                    result = self._clean_locked(keep_previous=keep_previous, dry_run=True)
+                    result = self._clean_locked(keep_previous=keep_previous, dry_run=True, removed=[])
                     if self._preview_raced_busy():
                         return {
                             "ok": False,
@@ -395,18 +395,20 @@ class ManagedRuntimeManager:
                 "removed": [],
                 "reason": self._reason("install_already_running"),
             }
+        removed: list[str] = []
         try:
-            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
-        except Exception as exc:  # noqa: BLE001
+            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
+        except Exception as cop:  # noqa: BLE001
             # Real cleanups hit the same traversal errors dry runs do; return
             # the structured inspection failure instead of raising through
-            # _clean_git_runtime into a reasonless result.
+            # _clean_git_runtime into a reasonless result. Staging removals
+            # that already happened stay in the result.
             logger.exception("Managed %s runtime cleanup failed", self.spec.runtime_id)
             return {
                 "ok": False,
-                "removed": [],
+                "removed": list(removed),
                 "reason": self._reason("clean_inspection_failed"),
-                "message": str(exc),
+                "message": str(cop),
             }
         finally:
             self._release_mutation_lock(file_lock)
@@ -457,17 +459,14 @@ class ManagedRuntimeManager:
             except ImportError:
                 self._preview_lock_was_absent = self._preview_lock_missing()
                 return None
-            try:
-                self._install_file_lock_path.stat()
-            except FileNotFoundError:
-                self._preview_lock_was_absent = True
+            probe = self._preview_lock_probe()
+            if probe is not None:
+                return probe
+            if getattr(self, "_preview_lock_was_absent", False):
                 return None
-            except OSError:
-                self._preview_lock_was_absent = False
-                return self._reason("install_already_running")
-            self._preview_lock_was_absent = False
             try:
-                fd = os.open(self._install_file_lock_path, os.O_RDONLY)
+                flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                fd = os.open(self._install_file_lock_path, flags)
             except OSError:
                 # Existing but unopenable (ACLs/permissions): a preview cannot
                 # know whether an install is active — report it as busy rather
@@ -486,12 +485,26 @@ class ManagedRuntimeManager:
 
     def _preview_lock_missing(self) -> bool:
         try:
-            self._install_file_lock_path.stat()
+            self._install_file_lock_path.lstat()
         except FileNotFoundError:
             return True
         except OSError:
             return False
         return False
+
+    def _preview_lock_probe(self) -> str | None:
+        try:
+            info = self._install_file_lock_path.lstat()
+        except FileNotFoundError:
+            self._preview_lock_was_absent = True
+            return None
+        except OSError:
+            self._preview_lock_was_absent = False
+            return self._reason("install_already_running")
+        self._preview_lock_was_absent = False
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return self._reason("install_already_running")
+        return None
 
     def _preview_raced_busy(self) -> bool:
         """True when an install started after a lock-absent preview probe."""
@@ -529,8 +542,15 @@ class ManagedRuntimeManager:
             finally:
                 iterator.close()
 
-    def _clean_locked(self, *, keep_previous: int, dry_run: bool = False) -> dict[str, Any]:
-        removed: list[str] = []
+    def _clean_locked(
+        self,
+        *,
+        keep_previous: int,
+        dry_run: bool = False,
+        removed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if removed is None:
+            removed = []
         for staging_dir in self.runtime_dir.glob("install-*"):
             if staging_dir.is_dir():
                 if not dry_run:

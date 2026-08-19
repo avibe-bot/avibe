@@ -55,7 +55,7 @@ def test_clean_dry_run_reports_inspection_failure(
         offline=True,
     )
 
-    def _boom(*, keep_previous, dry_run=False):
+    def _boom(*, keep_previous, dry_run=False, removed=None):
         raise OSError("disk unreadable")
 
     monkeypatch.setattr(manager, "_clean_locked", _boom)
@@ -77,7 +77,7 @@ def test_clean_reports_inspection_failure_on_real_run(
         offline=True,
     )
 
-    def _boom(*, keep_previous, dry_run=False):
+    def _boom(*, keep_previous, dry_run=False, removed=None):
         raise OSError("disk unreadable")
 
     monkeypatch.setattr(manager, "_clean_locked", _boom)
@@ -104,13 +104,13 @@ def test_clean_dry_run_holds_preview_guard_through_planning(
     seen: dict[str, object] = {}
     real_clean_locked = manager._clean_locked
 
-    def _observe(*, keep_previous, dry_run=False):
+    def _observe(*, keep_previous, dry_run=False, removed=None):
         seen["held_lock"] = getattr(manager, "_preview_held_install_lock", False)
         seen["fd"] = getattr(manager, "_preview_guard_fd", None)
         seen["lock_busy"] = not manager._install_lock.acquire(blocking=False)
         if seen["lock_busy"] is False:
             manager._install_lock.release()
-        return real_clean_locked(keep_previous=keep_previous, dry_run=dry_run)
+        return real_clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
 
     monkeypatch.setattr(manager, "_clean_locked", _observe)
     result = manager.clean(dry_run=True)

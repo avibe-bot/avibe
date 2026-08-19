@@ -841,17 +841,14 @@ class ShowRuntimeManager:
             # Windows: no flock probe; fall back to the staging sentinel.
             self._preview_lock_was_absent = self._preview_lock_missing()
             return self._staging_sentinel_reason()
-        try:
-            self._install_guard_path.stat()
-        except FileNotFoundError:
-            self._preview_lock_was_absent = True
+        probe = self._preview_lock_probe()
+        if probe is not None:
+            return probe
+        if getattr(self, "_preview_lock_was_absent", False):
             return None
-        except OSError:
-            self._preview_lock_was_absent = False
-            return "runtime_install_guard_unavailable"
-        self._preview_lock_was_absent = False
         try:
-            fd = os.open(self._install_guard_path, os.O_RDONLY)
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self._install_guard_path, flags)
         except OSError:
             return "runtime_install_guard_unavailable"
         try:
@@ -881,12 +878,27 @@ class ShowRuntimeManager:
 
     def _preview_lock_missing(self) -> bool:
         try:
-            self._install_guard_path.stat()
+            self._install_guard_path.lstat()
         except FileNotFoundError:
             return True
         except OSError:
             return False
         return False
+
+    def _preview_lock_probe(self) -> str | None:
+        """Refuse special files before a blocking preview open."""
+        try:
+            info = self._install_guard_path.lstat()
+        except FileNotFoundError:
+            self._preview_lock_was_absent = True
+            return None
+        except OSError:
+            self._preview_lock_was_absent = False
+            return "runtime_install_guard_unavailable"
+        self._preview_lock_was_absent = False
+        if _is_reparse_point(info) or not _is_exclusive_regular_file(info):
+            return "runtime_install_guard_unavailable"
+        return None
 
     def _preview_raced_busy(self) -> bool:
         """True when an install started after a lock-absent preview probe."""
@@ -899,22 +911,32 @@ class ShowRuntimeManager:
         return not self._preview_lock_missing()
 
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
+        removed: list[str] = []
         try:
-            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
+            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
         except Exception:
             # A planning failure (e.g. an install dir disappearing mid-scan)
             # must return the structured inspection-failure report, never an
-            # exception through the CLI or Doctor paths.
+            # exception through the CLI or Doctor paths. Staging removals that
+            # already happened stay in the result so the CLI does not claim
+            # zero items after files were deleted.
             logger.warning("Show Runtime cache cleanup failed", exc_info=True)
             return {
                 "ok": False,
                 "dry_run": dry_run,
-                "removed": [],
+                "removed": list(removed),
                 "archives": self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED),
             }
 
-    def _clean_locked(self, *, keep_previous: int, dry_run: bool) -> dict[str, Any]:
-        removed: list[str] = []
+    def _clean_locked(
+        self,
+        *,
+        keep_previous: int,
+        dry_run: bool,
+        removed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if removed is None:
+            removed = []
         preview_guard = self._preview_guard() if dry_run else contextlib.nullcontext(None)
         with preview_guard as busy_reason:
             if dry_run and busy_reason:
@@ -1053,8 +1075,15 @@ class ShowRuntimeManager:
                 protected.add(digest)
         except FileNotFoundError:
             pass
-        except Exception as exc:
-            raise _ArchiveMetadataError("current.json is unreadable") from exc
+        except Exception as cop:
+            raise _ArchiveMetadataError("current.json is unreadable") from cop
+        if self.archive_path is not None:
+            try:
+                archive_name = self.archive_path.resolve().name
+            except OSError:
+                archive_name = self.archive_path.name
+            if _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(archive_name):
+                protected.add(archive_name[: -len(".tgz")])
         versions_dir = self.runtime_dir / "versions"
         if versions_dir.is_symlink():
             raise _ArchiveMetadataError("versions directory is a symlink")

@@ -1097,3 +1097,50 @@ def test_windows_preview_ignores_persistent_lock_file(tmp_path: Path, monkeypatc
     assert result["ok"] is True
     assert result["archives"]["candidate_count"] == 1
     assert stale.exists()
+
+
+def test_preview_probe_refuses_fifo_lock(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(manager.runtime_dir / ".install.lock")
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+    result = manager.clean(dry_run=True)
+    assert result["ok"] is False
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+
+
+def test_clean_keeps_completed_staging_removals_on_later_failure(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    staging = manager.runtime_dir / "manifest-gone"
+    staging.mkdir(parents=True)
+    _write_current_pointer(manager, _sha(1))
+
+    def _boom(*, keep_previous, dry_run=False):
+        raise OSError("versions unreadable")
+
+    monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
+    result = manager.clean()
+    assert result["ok"] is False
+    assert str(staging) in result["removed"]
+    assert not staging.exists()
+
+
+def test_configured_prebuilt_archive_is_protected(tmp_path: Path) -> None:
+    digest = _sha(3)
+    archive = tmp_path / "show-runtime" / "downloads" / f"{digest}.tgz"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"prebuilt")
+    stamp = time.time() - 3600
+    os.utime(archive, (stamp, stamp))
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        offline=True,
+        runtime_source="archive",
+        archive_path=archive,
+    )
+    _write_archive(manager, _sha(2), b"stale")
+    result = manager.clean()
+    assert archive.exists()
+    assert not (manager.runtime_dir / "downloads" / f"{_sha(2)}.tgz").exists()
+    assert result["archives"]["removed_count"] == 1
