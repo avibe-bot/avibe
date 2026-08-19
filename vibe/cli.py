@@ -1184,12 +1184,51 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     return False
 
 
+def _restart_failure_summary(payload: dict) -> str:
+    """Describe a recorded restart failure on the single line doctor prints.
+
+    Why it failed is the entire value of the item, so the recorded error is
+    carried through rather than summarized away, with its whitespace collapsed
+    because the report prints one line per item.
+    """
+
+    pairs = (
+        ("state", payload.get("state") or "unknown"),
+        ("error", " ".join(str(payload.get("error") or "").split())),
+        ("trigger", payload.get("trigger")),
+        ("job_id", payload.get("job_id")),
+        ("log", payload.get("log_path")),
+    )
+    return " ".join(f"{name}={value}" for name, value in pairs if value)
+
+
 def _restart_state_items() -> list[dict]:
     items: list[dict] = []
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
+        return items
+
+    # `_fail` in the restart supervisor is the only writer of ok=False, and most
+    # of its call sites run after the old service was already stopped. Which
+    # ones leave the instance down is not worth enumerating -- one of them fires
+    # precisely because the old service would not stop -- so observe the result
+    # instead: a recorded failure with no service owner means this metadata is
+    # the record of why the instance is down. It has to be read before the
+    # staleness branch below, because terminal metadata goes stale after
+    # DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that branch offers a repair
+    # that deletes the marker -- on a still-down instance, the reason it is down.
+    # Once a service is running the same metadata is history, so it falls
+    # through to the ordinary branches and stays clearable.
+    if payload.get("ok") is False and not runtime.resolve_service_owner_pid(include_starting=True):
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
+            "Run `vibe start` to bring the service back up, then read the restart log named above for the cause.",
+            code="runtime.restart_failed",
+        )
         return items
 
     if _restart_status_is_stale(payload, restart_path):

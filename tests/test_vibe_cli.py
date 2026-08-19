@@ -1346,6 +1346,105 @@ def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkey
     assert refreshed == [True]
 
 
+def _restart_status_payload(**overrides) -> dict:
+    """Return the status the restart supervisor writes, defaulted to a failure."""
+
+    payload = {
+        "ok": False,
+        "job_id": "0d1f2e3a4b5c",
+        "supervisor_pid": 4242,
+        "supervisor_started_at": 1.0,
+        "state": "failed",
+        "trigger": "auto-update",
+        "delay_seconds": 0.0,
+        "scope": "all",
+        "old_pid": 111,
+        "new_pid": None,
+        "log_path": "/tmp/vibe-restart-0d1f2e3a4b5c.log",
+        "error": "start runtime failed: Config 'model_hub'\n  contains unknown fields",
+        "created_at": "2026-08-11T04:50:31Z",
+        "stage_durations": {"restart_total_seconds": 1.5},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, payload)
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(restart_path, (stamp, stamp))
+    return restart_path
+
+
+@pytest.mark.parametrize(
+    "age_seconds",
+    [0.0, cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60],
+    ids=["fresh", "past-retention"],
+)
+def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatch, age_seconds):
+    """A restart that failed and left nothing running is a failure at any age.
+
+    Age is what used to decide the verdict, so both sides of the retention
+    boundary are exercised against the same recorded failure: while the instance
+    is down, neither side may call it healthy nor offer to delete the one record
+    of why it is down.
+    """
+
+    _seed_restart_status(_restart_status_payload(), age_seconds=age_seconds)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: None)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == ["fail"]
+    item = items[0]
+    assert item["code"] == "runtime.restart_failed"
+    assert "model_hub" in item["message"]
+    assert "\n" not in item["message"]
+    assert "vibe-restart-0d1f2e3a4b5c.log" in item["message"]
+    assert not item.get("repairable")
+    assert "stale-restart-state" not in item.get("action", "")
+
+
+def test_recorded_restart_failure_with_a_running_service_stays_clearable_history(monkeypatch):
+    """Once something is running again the same record is history, not a failure."""
+
+    _seed_restart_status(
+        _restart_status_payload(),
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 4321)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == ["warn"]
+    assert items[0]["repair"]["target"] == "stale-restart-state"
+
+
+def test_restart_state_items_classify_non_failures_without_probing_the_service(monkeypatch):
+    """A record the supervisor did not fail keeps the classification it always had.
+
+    The probe raises instead of returning a pid so this also pins the
+    short-circuit: only a recorded failure may cost doctor a process probe.
+    """
+
+    def fail_probe(*args, **kwargs):
+        raise AssertionError("classifying a non-failure must not probe the service")
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
+    succeeded = _restart_status_payload(ok=True, state="succeeded", error=None, new_pid=222)
+
+    _seed_restart_status(succeeded)
+    assert [item["status"] for item in cli._restart_state_items()] == ["pass"]
+
+    _seed_restart_status(succeeded, age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60)
+    stale = cli._restart_state_items()
+    assert [item["status"] for item in stale] == ["warn"]
+    assert stale[0]["repair"]["target"] == "stale-restart-state"
+
+
 def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     def fail_runtime_probe(*args, **kwargs):
         raise AssertionError("dry-run must not touch runtime probes")
