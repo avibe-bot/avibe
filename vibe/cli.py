@@ -1243,16 +1243,20 @@ def _restart_state_items() -> list[dict]:
     # one here: a pid reserved by a process that never acquired the lock is the
     # wreckage of a failed start, not a recovery, and reading it as one would
     # suppress the very failure it came from. What that leaves is a stray process
-    # the user is told to `vibe start` past; `_service_lifecycle_items` owns
-    # detecting it and already reports it with its own repair, so the action below
-    # points there rather than reassembling the scan here.
+    # the user is told to `vibe start` past, because `start_service` asks the broad
+    # question and refuses. `_service_lifecycle_items` owns detecting that process,
+    # so this does not reassemble the scan -- but it names the repair rather than
+    # deferring to it, because that item is behind `--deep` and the default run is
+    # exactly where a reader lands. An action is only actionable if it works on its
+    # own; pointing at a sibling item is a dependency on what else got rendered.
     if payload.get("ok") is False and not runtime.verified_service_running():
         _add_doctor_item(
             items,
             "fail",
             f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
             "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
-            "service already running, apply the extra-service-process repair listed in this report first.",
+            "service already running, the failed restart left a process holding no lock: run "
+            "`vibe doctor repair duplicate-service-processes` to stop it, then start again.",
             code="runtime.restart_failed",
         )
         return items

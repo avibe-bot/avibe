@@ -1,6 +1,7 @@
 import json
 import os
 import pytest
+import re
 import signal
 import shlex
 import sqlite3
@@ -1448,6 +1449,34 @@ def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatc
     assert "vibe-restart-0d1f2e3a4b5c.log" in item["message"]
     assert not item.get("repairable")
     assert "stale-restart-state" not in item.get("action", "")
+
+
+def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypatch):
+    """Every command the action names is one the reader can actually run.
+
+    An action is actionable on its own or not at all. An earlier revision of this
+    told the reader to "apply the extra-service-process repair listed in this
+    report", which is a dependency on what else got rendered: that item is behind
+    `--deep`, and the default run is exactly where a reader of this item lands, so
+    the instruction resolved to nothing. Naming the command instead is the fix, and
+    parsing it here is what keeps the name honest -- a renamed or misspelled repair
+    target fails against the real parser rather than against a user who is already
+    down. Extracted rather than asserted literally, so a command added to this text
+    later is checked too.
+    """
+
+    _seed_restart_status(_restart_status_payload())
+    _stub_service_liveness(monkeypatch)
+
+    action = cli._restart_state_items()[0]["action"]
+    commands = [text for text in re.findall(r"`([^`]+)`", action) if text.startswith("vibe ")]
+    assert commands, f"the action names no runnable command: {action}"
+
+    parser = cli.build_parser()
+    for command in commands:
+        parser.parse_args(shlex.split(command)[1:])
+
+    assert "vibe doctor repair duplicate-service-processes" in commands
 
 
 @pytest.mark.parametrize(
