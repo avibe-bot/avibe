@@ -10,6 +10,7 @@ import {
 } from './WorkbenchProjectsContext';
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
+import { useQueuedWrite } from '../lib/useQueuedWrite';
 import { errorMessage } from '@/lib/errorMessage';
 import { useConsumerActivation } from '@/lib/useConsumerActivation';
 import {
@@ -26,6 +27,16 @@ import {
 // size has to be one shared value (it can't differ per surface).
 const SESSIONS_PAGE_SIZE = 8;
 const RECONNECT_SESSIONS_PAGE_SIZE = 200;
+
+// One queued project default-Agent write. Order matters twice over: each payload
+// is a whole route that overwrites the last, and `expected_agent_id` is a
+// compare-and-set against the route the write before it installed — so a dropped
+// or reordered write would be rejected as a stale binding.
+type ProjectRouteWrite = {
+  projectId: string;
+  route: ProjectDefaultAgent;
+  expectedAgentId: string | null;
+};
 
 const EMPTY_SESSIONS: ProjectSessionsState = {
   sessions: null,
@@ -114,6 +125,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [sessions, setSessions] = useState<Record<string, ProjectSessionsState>>({});
   const [creating, setCreating] = useState<Set<string>>(new Set());
+  // Which project's default-Agent write is in flight. The queue's own `saving`
+  // flag can't stand in for it: the indicator belongs to one project's picker,
+  // and the writes are queued globally.
+  const [savingDefaultAgentProjectId, setSavingDefaultAgentProjectId] = useState<string | null>(null);
 
   // Stale-closure-safe mirrors so the SSE (re)connect reconcile reads the current
   // expanded set + loaded window without re-subscribing the stream on every change.
@@ -146,6 +161,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const treeInitialFetched = useRef(false);
   const fetchProjectsPendingRef = useRef<{ cache?: boolean } | null>(null);
   const projectTreePendingRef = useRef(false);
+  // The newest queued default-Agent write, so an earlier one's response can be
+  // recognised as already outdated by the time it arrives.
+  const latestProjectRouteRef = useRef<ProjectRouteWrite | null>(null);
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
 
@@ -1061,23 +1079,77 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [acceptSessionMutation, api, fetchSessions],
   );
 
-  const setProjectDefaultAgent = useCallback(
-    async (projectId: string, route: ProjectDefaultAgent, expectedAgentId: string | null) => {
-      // Always send the full 5-field route: a complete set is coherent whether
-      // the user picked an agent (all set) or cleared it (all null → default
-      // dropped). Let failures propagate — apiFetch already toasted.
-      const updated = await api.updateProject(projectId, {
-        agent_id: route.agent_id,
-        expected_agent_id: expectedAgentId,
-        agent_name: route.agent_name,
-        agent_variant: route.agent_variant,
-        model: route.model,
-        reasoning_effort: route.reasoning_effort,
-      });
-      acceptProjectsMutation();
-      commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
+  const sendProjectRoute = useCallback(
+    async (pending: ProjectRouteWrite): Promise<boolean> => {
+      const { projectId, route, expectedAgentId } = pending;
+      try {
+        // Always send the full 5-field route: a complete set is coherent whether
+        // the user picked an agent (all set) or cleared it (all null → default
+        // dropped).
+        const updated = await api.updateProject(projectId, {
+          agent_id: route.agent_id,
+          expected_agent_id: expectedAgentId,
+          agent_name: route.agent_name,
+          agent_variant: route.agent_variant,
+          model: route.model,
+          reasoning_effort: route.reasoning_effort,
+        });
+        acceptProjectsMutation();
+        // Only the newest queued write's response is still the truth. Installing
+        // an earlier one would drag the row back to the route the user has
+        // already clicked past — the lag this optimistic path exists to remove.
+        if (pending === latestProjectRouteRef.current) {
+          commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
+        }
+        return true;
+      } catch (err) {
+        // apiFetch already surfaced the toast; the settle re-read below is what
+        // puts the optimistic row back to what the server actually holds.
+        console.error('[workbench] set project default agent failed', err);
+        return false;
+      }
     },
     [acceptProjectsMutation, api, commitProjects],
+  );
+
+  const { write: writeProjectRoute } = useQueuedWrite(
+    sendProjectRoute,
+    useCallback(
+      (committed: boolean) => {
+        setSavingDefaultAgentProjectId(null);
+        latestProjectRouteRef.current = null;
+        // A rejected pick lives only in this cache, so the rollback is a re-read.
+        // Only on failure: a committed burst already installed the server row.
+        if (!committed) void fetchProjects({ cache: false });
+      },
+      [fetchProjects],
+    ),
+  );
+
+  const setProjectDefaultAgent = useCallback(
+    (projectId: string, route: ProjectDefaultAgent, expectedAgentId: string | null) => {
+      // The picker highlight is CONTROLLED by this cache, so the pick lands here
+      // within the click and the request follows behind it. `acceptProjectsMutation`
+      // stops a projects read that is already in flight from re-installing the
+      // pre-pick route on top of it.
+      acceptProjectsMutation();
+      const cleared = !(
+        route.agent_id || route.agent_name || route.agent_variant || route.model || route.reasoning_effort
+      );
+      // ``commitProjects``, not ``setProjects``: the ref it keeps in step is what
+      // every read and reconcile of this cache addresses, so an optimistic row
+      // written past it would be invisible to them and lost on the next commit.
+      commitProjects((prev) =>
+        prev
+          ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: cleared ? null : route } : p))
+          : prev,
+      );
+      setSavingDefaultAgentProjectId(projectId);
+      const pending: ProjectRouteWrite = { projectId, route, expectedAgentId };
+      latestProjectRouteRef.current = pending;
+      writeProjectRoute(pending);
+    },
+    [acceptProjectsMutation, commitProjects, writeProjectRoute],
   );
 
   const archiveProject = useCallback(
@@ -1222,6 +1294,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       forkSession,
       renameProject,
       setProjectDefaultAgent,
+      savingDefaultAgentProjectId,
       archiveProject,
       renameSession,
       setSessionPinned,
@@ -1244,6 +1317,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       forkSession,
       renameProject,
       setProjectDefaultAgent,
+      savingDefaultAgentProjectId,
       archiveProject,
       renameSession,
       setSessionPinned,

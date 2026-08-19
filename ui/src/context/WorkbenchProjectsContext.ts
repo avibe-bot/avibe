@@ -43,15 +43,19 @@ export interface WorkbenchProjectsActions {
    *  i.e. no project-bound scope) forks with `null` and simply has no row to place. */
   forkSession: (projectId: string | null, sessionId: string) => Promise<WorkbenchSession | null>;
   renameProject: (projectId: string, name: string) => Promise<void>;
-  /** Persist the project's default Agent route (Project Settings) and patch the
-   *  shared cache so the sidebar + Projects page reflect it. Pass an all-null
-   *  route to clear the default back to the global default. Throws on failure
-   *  (the apiFetch layer already surfaced a toast) so the dialog can react. */
+  /** Set the project's default Agent route (Project Settings): patches the shared
+   *  cache FIRST, so the sidebar + Projects page + the picker's own highlight move
+   *  within the click, then persists behind it. Pass an all-null route to clear
+   *  the default back to the global default. Never throws and never resolves —
+   *  concurrent picks are queued in click order, a failure is already toasted by
+   *  the apiFetch layer, and the cache is reconciled from the server on settle. */
   setProjectDefaultAgent: (
     projectId: string,
     route: ProjectDefaultAgent,
     expectedAgentId: string | null,
-  ) => Promise<void>;
+  ) => void;
+  /** The project whose default-Agent write is still in flight, if any. */
+  savingDefaultAgentProjectId: string | null;
   archiveProject: (projectId: string) => Promise<void>;
   /** Throws on failure so the row's inline editor can fall back; patches title on success. */
   renameSession: (projectId: string, sessionId: string, title: string) => Promise<void>;

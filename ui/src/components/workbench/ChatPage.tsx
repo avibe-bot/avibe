@@ -99,6 +99,7 @@ import {
 import {
   createSessionRowRefreshGate,
   sessionRowWithBootstrapFallback,
+  type SessionRowRefreshGate,
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
 import { InstallHint } from '../InstallHint';
@@ -116,6 +117,7 @@ import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests
 import { VaultProvisionDialogProvider, VaultRequestCard } from '../ui/vault-request-card';
 import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
+import { useQueuedWrite } from '../../lib/useQueuedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
@@ -187,6 +189,16 @@ const OLDER_TRIGGER_BAND_PX = 120;
 // module load — the platform can't change mid-session — and shown as the archive
 // row's hint so the shortcut is discoverable instead of folklore.
 const ARCHIVE_SHORTCUT_LABEL = archiveSessionShortcutLabel();
+
+// One queued session write. The header applies an edit optimistically, so the
+// request that follows carries the chat it was made for: the session id (the URL
+// may already be on another chat by the time it flushes) and that chat's
+// read-ordering gate, which is replaced on navigation.
+type SessionPatchWrite = {
+  sessionId: string;
+  changes: Partial<WorkbenchSession>;
+  gate: SessionRowRefreshGate;
+};
 
 // Mirrors design.pen kxEkn — the inline header replaces the old "Session
 // settings" dialog. Title is click-to-edit; the cyan-bordered pill on the
@@ -2164,18 +2176,17 @@ export const ChatPage: React.FC = () => {
     void sendMessage(initialMessage);
   }, [location.state, location.pathname, loading, session, sessionId, navigate, sendMessage]);
 
-  const patch = useCallback(
-    async (changes: Partial<WorkbenchSession>) => {
-      if (!session) return;
-      const patchedId = session.id;
-      const finishPatch = sessionRowRefreshGateRef.current.beginMutation();
+  const sendSessionPatch = useCallback(
+    async ({ sessionId, changes, gate }: SessionPatchWrite): Promise<boolean> => {
+      const finishPatch = gate.beginMutation();
       try {
-        await api.updateSession(session.id, changes as any);
+        await api.updateSession(sessionId, changes as any);
         // Do not install the PATCH response: it is only a mutation snapshot and
         // can be older than another committed write. The authoritative refresh
-        // in finally is guarded by session id and runs after every active write.
+        // on settle is guarded by session id and runs after every active write.
+        return true;
       } catch (err) {
-        if (patchedId !== sessionIdRef.current) return;
+        if (sessionId !== sessionIdRef.current) return false;
         // The archive itself has already converged through the shared
         // ``onSessionArchived`` subscription (the title editor and route picker are
         // gone by the next render, so this PATCH cannot be re-issued). Only the
@@ -2183,12 +2194,43 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
+        return false;
       } finally {
         finishPatch();
-        if (patchedId === sessionIdRef.current) void refreshSessionRow();
       }
     },
-    [api, session, t, refreshSessionRow],
+    [api, t],
+  );
+
+  const { write: writeSessionPatch, saving: patchSaving } = useQueuedWrite(
+    sendSessionPatch,
+    // Once per burst, not once per write: this read is what makes the optimistic
+    // row authoritative again — and what rolls a rejected pick back, since the
+    // local row is the only place that ever held it.
+    useCallback(() => {
+      if (sessionIdRef.current) void refreshSessionRow();
+    }, [refreshSessionRow]),
+  );
+
+  // A route or title edit lands on the local row within the click and is
+  // persisted behind it. The picker highlight and the title are CONTROLLED by
+  // ``session``, so anything this waits for is lag the user reads as a frozen UI
+  // (the reason the picker no longer greys itself out either).
+  const patch = useCallback(
+    (changes: Partial<WorkbenchSession>) => {
+      if (!session) return;
+      const patchedId = session.id;
+      // ``invalidate`` stops a row read that is ALREADY in flight from
+      // re-installing the pre-patch row on top of the optimistic one.
+      const gate = sessionRowRefreshGateRef.current;
+      gate.invalidate();
+      setSession((prev) => (prev && prev.id === patchedId ? { ...prev, ...changes } : prev));
+      // Both the id and the gate travel with the write: a queued patch belongs to
+      // the chat that was open when it was clicked, and the gate is per-session
+      // (replaced on navigation), so it must never fence the new chat's reads.
+      writeSessionPatch({ sessionId: patchedId, changes, gate });
+    },
+    [session, writeSessionPatch],
   );
 
   // Session-level actions share the sidebar/mobile row model. A read-only or
@@ -2437,6 +2479,7 @@ export const ChatPage: React.FC = () => {
           agents={agents}
           defaultAgentName={defaultAgentName}
           onPatch={patch}
+          patchSaving={patchSaving}
           onBack={goBack}
           working={working}
           showPageMode={showPageActive}
@@ -3013,7 +3056,10 @@ interface ChatHeaderBarProps {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
   defaultAgentName: string | null;
-  onPatch: (changes: Partial<WorkbenchSession>) => Promise<void>;
+  // Applies to the local row first, then persists — never awaited by the header.
+  onPatch: (changes: Partial<WorkbenchSession>) => void;
+  /** A queued ``onPatch`` write is still in flight. */
+  patchSaving?: boolean;
   onBack: () => void;
   working: boolean;
   // The EFFECTIVE mode (ChatPage passes ``showPageActive``): whether the page is
@@ -3048,7 +3094,7 @@ interface ChatHeaderBarProps {
 // which renders the header alone rather than mounting the whole page. Note the
 // live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
 // read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   const readOnly = !writable;
   const sessionReadOnly = readOnlyReason !== null;
@@ -3149,6 +3195,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             value={session}
             agents={agents}
             onChange={onPatch}
+            saving={patchSaving}
             disabled={pickerDisabled}
             allowedBackends={pinnedBackend ? [pinnedBackend] : undefined}
             defaultLabel={
