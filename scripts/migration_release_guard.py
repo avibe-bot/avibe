@@ -675,10 +675,10 @@ JSON_TYPE_MEMBERS: dict[str, object] = {
     "object": "{}",
 }
 
-# Two rows, because one proves nothing about uniqueness. A migration that builds a unique
-# index over columns no released schema constrained is exactly the kind that fails in the
-# field and cannot fail against a single row, so the second row repeats the first wherever
-# the schema permits and differs only where it already demands distinctness.
+# One row proves nothing about uniqueness, and rows that differ everywhere prove just as
+# little: a migration adding `UNIQUE(platform)` cannot fail against a fixture whose
+# platform was never allowed to repeat. So the rows differ only where the schema already
+# demands it, one member of each distinct-group at a time, and the floor is two.
 SEED_ROWS = 2
 
 
@@ -782,32 +782,60 @@ def json_proposals(
     return proposals
 
 
-def distinguishing_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    """The columns of ``table`` the schema already requires to differ between two rows.
+def distinct_column_groups(connection: sqlite3.Connection, table: str) -> list[tuple[str, ...]]:
+    """The column groups ``table``'s schema requires to be distinct across rows.
 
-    Primary key and unique index members, read from the database rather than from the
-    migration that created them. Everything outside this set may repeat, and the second
-    seeded row repeats it deliberately: a value the released schema never constrained is a
-    value a released database can hold twice.
+    Primary key and unique indexes, read from the database rather than from the migration
+    that created them, and kept as groups because a group is what the schema constrains: a
+    composite index demands a distinct *tuple* and says nothing about its members. Union
+    the members into one set of columns and the fixture is built from a stronger rule than
+    the schema states, which costs exactly the case worth testing -- released rows sharing
+    a platform, a kind, a status -- and with it every migration that would add a unique
+    index over one of those columns and fail in the field.
     """
-    columns = {str(row[1]) for row in connection.execute(f'pragma table_info("{table}")') if row[5]}
+    groups: list[tuple[str, ...]] = []
+    key = sorted(
+        (int(row[5]), str(row[1])) for row in connection.execute(f'pragma table_info("{table}")') if row[5]
+    )
+    if key:
+        groups.append(tuple(column for _, column in key))
     for index in connection.execute(f'pragma index_list("{table}")'):
         if index[2]:
-            columns |= {str(row[2]) for row in connection.execute(f'pragma index_info("{index[1]}")') if row[2]}
-    return columns
+            members = tuple(
+                str(row[2]) for row in connection.execute(f'pragma index_info("{index[1]}")') if row[2]
+            )
+            if members:
+                groups.append(members)
+    return groups
 
 
-def varied(value: object) -> object:
-    """``value`` changed into something of the same type that is not equal to it."""
+def seed_row_count(groups: Iterable[tuple[str, ...]]) -> int:
+    """How many rows it takes for every member of every group in ``groups`` to repeat once.
+
+    One row per member of the widest group, each varying that member alone, plus the row
+    they all vary from. Every member is then equal in at least two rows -- the base and
+    every row that varied a different member -- while the tuples stay pairwise distinct,
+    which is exactly the distinction a composite unique index draws.
+    """
+    return max(SEED_ROWS, 1 + max((len(group) for group in groups), default=0))
+
+
+def varied(value: object, step: int) -> object:
+    """``value`` changed into something of the same type that differs from it and from other steps.
+
+    Indexed by the row rather than merely different, because a group narrower than the
+    widest one has its members varied on more than one row, and two rows carrying the same
+    replacement would collide on the constraint the variation exists to respect.
+    """
     if isinstance(value, bool):
         return not value
     if isinstance(value, int):
-        return value + 1
+        return value + step
     if isinstance(value, float):
-        return value + 1.0
+        return value + float(step)
     if isinstance(value, bytes):
-        return value + b"2"
-    return f"{value}-2"
+        return value + str(step).encode()
+    return f"{value}-{step}"
 
 
 def insert_seed_row(
@@ -884,9 +912,14 @@ def seed_representative_rows(db_path: Path) -> dict[str, str]:
     migration that later makes a nullable column NOT NULL has to survive the NULLs a real
     database has, and the NULL branch is the one a disjunctive CHECK admits.
 
-    ``SEED_ROWS`` rows, not one, and the later ones repeat the first everywhere the schema
-    does not already demand otherwise. One row makes every unique index buildable, which
-    is the property most worth testing and the one a single row silently grants.
+    More than one row, and the later ones repeat the first everywhere the schema does not
+    already demand otherwise -- one member of each distinct-group per row, so every other
+    member of that group goes on repeating. One row makes every unique index buildable,
+    which is the property most worth testing and the one a single row silently grants; a
+    row that differs everywhere grants it just as silently for every column a composite
+    index only constrains jointly. Where the schema leaves no room -- a group whose other
+    members a CHECK pins to a single literal -- the difference lands on the one member that
+    can hold it, which is as much repetition as that table is able to have.
 
     What this proves is that the upgrade runs over rows, not over meaningful ones --
     foreign keys are off, which is SQLite's default and is what lets each table be seeded
@@ -909,21 +942,36 @@ def seed_representative_rows(db_path: Path) -> dict[str, str]:
                 for row in connection.execute(f'pragma table_info("{table}")')
                 if row[3] or row[5]
             ]
-            distinct = distinguishing_columns(connection, table)
-            values = {column: representative_value(column, declared) for column, declared in required}
-            objection = ""
-            for attempt in range(SEED_ROWS):
-                if attempt:
-                    values = {
-                        column: varied(value) if column in distinct else value
-                        for column, value in values.items()
-                    }
-                objection = insert_seed_row(connection, table, ddl, required, values)
+            groups = distinct_column_groups(connection, table)
+            wanted = seed_row_count(groups)
+            # The first row is where the repairs happen, so every later row varies the
+            # values the schema has already accepted rather than the ones it rejected.
+            base = {column: representative_value(column, declared) for column, declared in required}
+            objection = insert_seed_row(connection, table, ddl, required, base)
+            for row in range(1, wanted):
                 if objection:
                     break
+                # Which member can carry the difference is the schema's call, not this
+                # loop's: a member a CHECK pins to one literal cannot vary at all, and the
+                # repair inside `insert_seed_row` puts it back, so the row arrives as a
+                # duplicate. SQLite says so, and the next turn offers a different member.
+                for turn in range(max(len(group) for group in groups) if groups else 1):
+                    changing = {group[(row - 1 + turn) % len(group)] for group in groups}
+                    objection = insert_seed_row(
+                        connection,
+                        table,
+                        ddl,
+                        required,
+                        {
+                            column: varied(value, row) if column in changing else value
+                            for column, value in base.items()
+                        },
+                    )
+                    if not objection:
+                        break
             rows = connection.execute(f'select count(*) from "{table}"').fetchone()[0]
-            if rows < SEED_ROWS:
-                short[table] = f"{rows} of {SEED_ROWS} rows; {objection or 'the schema accepted no more'}"
+            if rows < wanted:
+                short[table] = f"{rows} of {wanted} rows; {objection or 'the schema accepted no more'}"
         connection.commit()
     return short
 
@@ -934,6 +982,19 @@ def schema_gap_after_upgrade(tag: str) -> tuple[str | None, dict[str, str]]:
     ``gap`` is ``None`` when the database comes out ready. ``short`` is the tables the
     upgrade therefore ran over with fewer rows than intended; both are failures, because
     a property proved over less than its subject is not the property.
+
+    What the rows are *for* is the run, not the tally afterwards. Adding a NOT NULL column,
+    tightening a nullable one, backfilling from a column being dropped, and building a
+    unique index each fail loudly over data and succeed unconditionally over an empty
+    database, and every one of those failures arrives here as an exception or a schema that
+    came out short. Counting the rows again on the far side would assert something else --
+    that the graph never removes any -- and that is not a property this repository has:
+    ``20260601_0011`` deduplicates sessions to one row per (scope, anchor) by design, and
+    ``20260703_0026`` discards legacy scope-shaped vault grants the new model cannot
+    express. Which removals are intended is a question about one migration's purpose, so it
+    belongs to that migration's own test, where the purpose is known; asking it here would
+    make the guard carry a list of known-good deletions -- the hand-maintained list of cases
+    it exists not to have.
 
     The second stage runs ``storage.migrations.run_migrations`` rather than Alembic
     directly, and the verdict comes from ``background_tables_ready``. Both are deliberate:
