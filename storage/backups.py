@@ -763,9 +763,18 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
     # displaced generation already holds its own copy of them, and the database
     # arriving under this name must not inherit them. The database itself stays
     # until the rename below replaces it.
-    for sidecar in live_sidecars:
-        sidecar.unlink(missing_ok=True)
+    #
+    # The unlinks happen inside the guard, not ahead of it. Removing the log and
+    # removing the shared-memory file are two calls, so a failure of the second
+    # would leave the live database at its own path with its log already gone --
+    # complete only to its last checkpoint, and silently so, because the restore
+    # raises and an operator reasonably reads a failed restore as "nothing moved".
+    # The recovery below is the same answer for a failed unlink as for a failed
+    # rename, so it covers both rather than only the one that was thought of
+    # first.
     try:
+        for sidecar in live_sidecars:
+            sidecar.unlink(missing_ok=True)
         os.replace(replacement, db_path)
     except Exception:
         # The live generation goes back exactly as it was. Its database never

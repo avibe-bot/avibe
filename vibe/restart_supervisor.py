@@ -9,6 +9,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 from config import paths
 
@@ -38,6 +39,52 @@ _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
 # times out is recorded as failed, which is a diagnosable state; a rollback that
 # waits without a bound is not.
 _ROLLBACK_INSTALL_TIMEOUT_SECONDS = 600.0
+# A cold UI process has an interpreter to start and an ASGI app to import before
+# it answers, so the 5s default of `wait_for_ui_server` -- sized for a UI started
+# next to an already-warm CLI -- is not the right bound here. This one is only
+# ever paid in full when the UI is genuinely not coming.
+_ROLLBACK_UI_READY_TIMEOUT_SECONDS = 60.0
+
+
+class StartedRuntime(NamedTuple):
+    """What a start actually launched, and where its UI can be checked.
+
+    The health target travels with the pids because `_start_runtime_processes` is
+    the only place that resolves it -- it loads the config to decide the bind host
+    and port -- and a caller that recomputed it would become a second answer to
+    "where is the UI", free to drift from the one the UI was actually started on.
+    It is `None` when this job does not own the UI, which is also the answer to
+    whether this job is in a position to judge the UI at all.
+    """
+
+    service_pid: int
+    ui_pid: int | None
+    ui_health_target: tuple[str, int] | None
+
+
+def _live_ui_pid(candidate: object) -> int | None:
+    """The UI pid a `running` status may carry, or None.
+
+    Publishing the pid of a UI that has already exited makes the status file say
+    the Web UI is serving when nothing is listening, and every reader of that
+    file -- doctor, the dashboard, the CLI -- repeats it. Liveness is checked at
+    the moment of the claim rather than assumed from the moment of the spawn.
+    """
+
+    if not isinstance(candidate, int) or candidate <= 0:
+        return None
+    return candidate if runtime.pid_alive(candidate) else None
+
+
+def _ui_is_serving(started: StartedRuntime) -> bool:
+    """Whether the UI this job started is answering its health endpoint."""
+
+    if not started.ui_pid or started.ui_health_target is None:
+        return False
+    if not runtime.pid_alive(started.ui_pid):
+        return False
+    host, port = started.ui_health_target
+    return runtime.wait_for_ui_server(host, port, timeout=_ROLLBACK_UI_READY_TIMEOUT_SECONDS)
 
 
 def _now_iso() -> str:
@@ -183,7 +230,7 @@ def _runtime_ready_for_config(config) -> bool:
 def _start_runtime_processes(
     start_ui: bool = True,
     launcher: runtime.ServiceLauncher | None = None,
-) -> tuple[int, int | None]:
+) -> StartedRuntime:
     """Start the service, and the UI when this job owns it.
 
     `launcher` is the install to start them from, and `None` means this one --
@@ -220,8 +267,10 @@ def _start_runtime_processes(
         memory_ui_secret=memory_ui_secret,
         launcher=launcher,
     )
+    ui_health_target: tuple[str, int] | None = None
     if start_ui:
         bind_host = runtime.effective_ui_bind_host(config)
+        ui_health_target = (bind_host, config.ui.setup_port)
         ui_pid = runtime.start_ui(
             bind_host,
             config.ui.setup_port,
@@ -243,7 +292,7 @@ def _start_runtime_processes(
         runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
         raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
-    return service_pid, ui_pid
+    return StartedRuntime(service_pid, ui_pid, ui_health_target)
 
 
 def _stop_ui_for_restart() -> tuple[bool, dict[str, float | bool], float, int | None]:
@@ -459,21 +508,46 @@ def _roll_back_failed_upgrade(
     record(rollback)
 
     try:
-        service_pid, ui_pid = _start_runtime_processes(start_ui=start_ui, launcher=rollback_to.launcher)
+        started = _start_runtime_processes(start_ui=start_ui, launcher=rollback_to.launcher)
     except Exception as exc:
         rollback.update(state="failed", error=f"starting {version} failed: {exc}")
         record(rollback)
         return rollback
-    ready_pid = runtime.wait_for_service_ready(service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    ready_pid = runtime.wait_for_service_ready(started.service_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
     if ready_pid is None:
         rollback.update(
             state="failed",
-            service_pid=service_pid,
-            error=f"{version} started but service pid {service_pid} did not finish starting",
+            service_pid=started.service_pid,
+            error=f"{version} started but service pid {started.service_pid} did not finish starting",
         )
         record(rollback)
         return rollback
-    runtime.write_status("running", f"pid={ready_pid}", ready_pid, ui_pid)
+
+    # The UI is checked too, and only here. It is started with
+    # `wait_for_ready=False` so a slow asset load cannot stall the service's own
+    # readiness, but not waiting for it is not the same as not checking it: this
+    # rollback is unattended and is the last line of defence, so "the machine is
+    # back" has to mean every process this job took down came back. An ordinary
+    # `vibe restart` deliberately does not gate on this -- a human is watching it,
+    # and failing a restart on a slow UI would be a worse answer than reporting
+    # it (see the PR's known-by-design ledger).
+    ui_serving: bool | None = None
+    if start_ui:
+        ui_serving = _ui_is_serving(started)
+        rollback["ui"] = {"pid": started.ui_pid, "serving": ui_serving}
+    runtime.write_status("running", f"pid={ready_pid}", ready_pid, _live_ui_pid(started.ui_pid))
+    if ui_serving is False:
+        rollback.update(
+            state="failed",
+            service_pid=ready_pid,
+            error=(
+                f"rolled back to {version} and the service is running as pid {ready_pid}, "
+                f"but the Web UI this rollback restarted never started serving"
+            ),
+        )
+        record(rollback)
+        write(f"rolled back to {version} but the Web UI did not come back; service pid={ready_pid}")
+        return rollback
     rollback.update(state="succeeded", service_pid=ready_pid, error=None)
     record(rollback)
     write(f"rolled back to {version}; service pid={ready_pid}")
@@ -656,7 +730,8 @@ def _run_restart_job(
         write("starting service")
         start_runtime_started_at = time.monotonic()
         try:
-            new_pid, ui_pid = _start_runtime_processes(start_ui=restart_ui)
+            started = _start_runtime_processes(start_ui=restart_ui)
+            new_pid, ui_pid = started.service_pid, started.ui_pid
         except Exception as exc:
             return fail(f"start runtime failed: {exc}", 1, started_at=restart_started_at)
         mark_duration("start_runtime_seconds", start_runtime_started_at)
@@ -690,7 +765,7 @@ def _run_restart_job(
         new_pid = resolved_pid
         mark_duration("wait_service_lock_seconds", wait_lock_started_at)
         recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid
-        runtime.write_status("running", f"pid={new_pid}", new_pid, recorded_ui_pid if isinstance(recorded_ui_pid, int) else None)
+        runtime.write_status("running", f"pid={new_pid}", new_pid, _live_ui_pid(recorded_ui_pid))
 
         mark_duration("restart_total_seconds", restart_started_at)
         payload.update(ok=True, state="succeeded", new_pid=new_pid, error=None)

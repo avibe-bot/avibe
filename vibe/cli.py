@@ -14338,13 +14338,11 @@ def build_parser():
         default=0,
         help="Schedule the restart to run asynchronously after N seconds, then exit immediately.",
     )
-    supervisor_parser = subparsers.add_parser("__restart-supervisor", help=argparse.SUPPRESS)
-    supervisor_parser.add_argument("--job-id", required=True)
-    supervisor_parser.add_argument("--delay-seconds", type=_non_negative_float, default=0)
-    supervisor_parser.add_argument("--trigger", default="cli")
-    supervisor_parser.add_argument("--scope", default="all", choices=("all", "service"))
-    supervisor_parser.add_argument("--vibe-path")
-    supervisor_parser.add_argument("--prepare-show-runtime", action="store_true")
+    # `__restart-supervisor` is deliberately absent here. It is never typed: this
+    # program spawns it, and `vibe/restart_supervisor.py` owns both the argv it
+    # builds and the parser that reads it back. Restating those flags here made
+    # this parser a second, silently authoritative owner -- and the one that runs
+    # first. See `_dispatch_restart_supervisor`.
     subparsers.add_parser("status", help="Show service status")
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -16039,8 +16037,32 @@ def build_parser():
     return parser
 
 
+def _dispatch_restart_supervisor(argv: list[str]) -> int:
+    """Hand a spawned restart job's own argv straight to its own parser.
+
+    `__restart-supervisor` is not a command a person types; `schedule_restart`
+    builds this argv and `vibe/restart_supervisor.py` parses it back. Declaring
+    those flags on the top-level parser as well made two owners for one command,
+    with a hand-copied translation between them -- and the top-level one runs
+    first, so a flag added only to the supervisor's parser was not merely
+    unavailable, it was rejected. That is how the rollback flags shipped dead:
+    every unit test called `restart_supervisor.main([...])` directly, and the one
+    path that goes through this file was the one path nothing exercised.
+
+    Passing the tail through leaves a single parser for the command, so the two
+    can no longer disagree.
+    """
+
+    from vibe.restart_supervisor import main as restart_supervisor_main
+
+    return restart_supervisor_main(argv)
+
+
 def main():
     cache_running_vibe_path()
+    argv = sys.argv[1:]
+    if argv and argv[0] == "__restart-supervisor":
+        sys.exit(_dispatch_restart_supervisor(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 
@@ -16050,24 +16072,6 @@ def main():
         sys.exit(cmd_start())
     if args.command == "restart":
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
-    if args.command == "__restart-supervisor":
-        from vibe.restart_supervisor import main as restart_supervisor_main
-
-        sys.exit(
-            restart_supervisor_main(
-                [
-                    "--job-id",
-                    args.job_id,
-                    "--delay-seconds",
-                    str(args.delay_seconds),
-                    "--trigger",
-                    args.trigger,
-                    *(["--scope", args.scope] if args.scope != "all" else []),
-                    *(["--prepare-show-runtime"] if args.prepare_show_runtime else []),
-                    *(["--vibe-path", args.vibe_path] if args.vibe_path else []),
-                ]
-            )
-        )
     if args.command == "status":
         sys.exit(cmd_status())
     if args.command == "memory":

@@ -5,6 +5,7 @@ import inspect
 import io
 import os
 import sqlite3
+import sys
 import textwrap
 import threading
 from types import SimpleNamespace
@@ -38,7 +39,7 @@ def _rollback_target(version: str = "3.0.10") -> RollbackTarget:
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
-    return service_pid, ui_pid
+    return restart_supervisor.StartedRuntime(service_pid, ui_pid, ("127.0.0.1", 5123))
 
 
 def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=True):
@@ -154,6 +155,72 @@ def test_schedule_restart_passes_memory_ui_secret_only_through_stdin(monkeypatch
         MEMORY_UI_SECRET_STDIN_ENV: "1",
     }
     assert secret not in calls["kwargs"]["env"].values()
+
+
+def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch, tmp_path):
+    """One command, one parser, proved by running the built argv through the CLI.
+
+    `schedule_restart` builds a command line and a detached `vibe` process parses
+    it back. For a while both ends were owned by different parsers -- this module
+    built the `--rollback-*` flags, `vibe/cli.py` declared the ones it knew about,
+    and the top-level parser ran first. So the flags were not merely unsupported,
+    they were rejected: the child exited on `unrecognized arguments`, the seeded
+    "scheduled" record was never overwritten by anyone, and the machine stayed on
+    the release that could not start. Every test in this file called
+    `restart_supervisor.main([...])` directly, so nothing crossed that seam.
+
+    Asserted as a round trip rather than as a list of flags: the spawned argv is
+    taken exactly as `Popen` received it and handed to the real entry point, so a
+    flag added to the builder later is covered without touching this test.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    spawned = {}
+
+    monkeypatch.setattr(restart_supervisor, "get_restart_invocation_command", lambda vibe_path=None: ["/bin/vibe", "restart"])
+    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+
+    def fake_popen(command, **kwargs):
+        spawned["command"] = command
+        return SimpleNamespace(pid=45678)
+
+    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
+
+    rollback_to = _rollback_target("3.0.10")
+    restart_supervisor.schedule_restart(
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        scope="service",
+        prepare_show_runtime=True,
+        rollback_to=rollback_to,
+    )
+
+    from vibe import cli
+
+    ran = {}
+
+    def fake_run_restart_job(**kwargs):
+        ran.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", fake_run_restart_job)
+    monkeypatch.setattr(sys, "argv", list(spawned["command"]))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+
+    assert exit_info.value.code == 0
+    # Not just "it parsed": the rollback target has to arrive whole, because a
+    # partially-carried one is the failure this whole path exists to prevent.
+    assert ran["rollback_to"] == rollback_to
+    assert ran["trigger"] == "upgrade"
+    assert ran["scope"] == "service"
+    assert ran["prepare_show_runtime"] is True
 
 
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
@@ -467,10 +534,13 @@ def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
             paths.get_runtime_pid_path().unlink()
         except FileNotFoundError:
             pass
-        return 222, 333
+        return restart_supervisor.StartedRuntime(222, 333, ("127.0.0.1", 5123))
 
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", slow_start_runtime)
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    # Both halves of the generation this start launched are alive: the status
+    # carries a UI pid only for a UI that is still there, so a stub that answered
+    # for the service alone would be describing a different machine.
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {222, 333})
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 222 if pid == 222 else None)
 
@@ -598,10 +668,14 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
 
-    service_pid, ui_pid = restart_supervisor._start_runtime_processes()
+    started = restart_supervisor._start_runtime_processes()
 
-    assert service_pid == 222
-    assert ui_pid == 333
+    assert started.service_pid == 222
+    assert started.ui_pid == 333
+    # The health target is resolved here or nowhere: this is the only place that
+    # loads the config to decide the bind host and port, so it is the only answer
+    # to "where is the UI" that cannot disagree with where the UI was started.
+    assert started.ui_health_target == ("0.0.0.0", 5123)
     assert calls[:2] == ["ensure_data_dirs", "load_config"]
     assert calls[2][:3] == ("start_service", False, 0)
     assert calls[3] == ("bind_host", config)
@@ -750,7 +824,13 @@ def _payload_rows(db_path) -> list[str]:
         return [row[0] for row in conn.execute("select value from payload order by rowid")]
 
 
-def _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, *, service_running: bool):
+def _upgrade_restart_that_dies_after_migrating(
+    monkeypatch,
+    tmp_path,
+    *,
+    service_running: bool,
+    ui_serving: bool = True,
+):
     """Arm the incident this whole path exists for, and hand back what it did.
 
     The new version stops the old one, starts, takes its pre-migration backup,
@@ -802,14 +882,54 @@ def _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, *, service
     # a test may not read and must never depend on.
     monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", list)
     monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: False)
+    # The UI the rollback restarts, and whether it answers. Both are stubbed
+    # rather than left to the host: `_ui_is_serving` opens a real socket, and a
+    # test that let it would wait out the timeout against whatever happens to be
+    # listening on the developer's machine.
+    ui_probes: list[tuple[str, int]] = []
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 333)
+    monkeypatch.setattr(
+        runtime,
+        "wait_for_ui_server",
+        lambda host, port, timeout=None: ui_probes.append((host, port)) or ui_serving,
+    )
 
     return SimpleNamespace(
         db_path=db_path,
         calls=calls,
         installs=installs,
         launchers=launchers,
+        ui_probes=ui_probes,
         observed_by_the_rolled_back_version=observed_by_the_rolled_back_version,
     )
+
+
+def test_a_rollback_whose_ui_never_serves_is_not_reported_as_recovered(monkeypatch, tmp_path):
+    """A live pid is not a serving UI, and this job is the one that cannot guess.
+
+    The service came back and holds the lock; the UI process was started and is
+    alive, and never answers. Everything a pid-based check can see says the
+    machine is up, which is exactly the evidence this record must not accept:
+    nobody is watching an unattended rollback, so the half that is dark has to be
+    the half that is reported. The service pid is still recorded either way --
+    the run failed, it did not vanish.
+    """
+
+    armed = _upgrade_restart_that_dies_after_migrating(
+        monkeypatch, tmp_path, service_running=False, ui_serving=False
+    )
+
+    restart_supervisor._run_restart_job(
+        job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()
+    )
+
+    rollback = runtime.read_json(runtime.get_restart_status_path())["rollback"]
+    assert rollback["state"] == "failed"
+    assert rollback["ui"] == {"pid": 333, "serving": False}
+    assert rollback["service_pid"] == 222
+    assert "Web UI" in rollback["error"]
+    # It reached the UI at all, rather than failing for want of a probe.
+    assert armed.ui_probes
 
 
 def test_a_restart_that_leaves_nothing_running_puts_the_old_version_back(monkeypatch, tmp_path):
@@ -911,7 +1031,7 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     installs: list[list[str]] = []
     launchers: list = []
     observed_by_the_rolled_back_version: list[list[str]] = []
-    alive = {222: True, 444: True}
+    alive = {222: True, 333: True, 444: True}
 
     def start(start_ui=True, launcher=None):
         calls.append("start_runtime")
@@ -923,7 +1043,7 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
             with sqlite3.connect(db_path) as conn:
                 conn.execute("insert into payload (value) values ('committed by the new version')")
             runtime.write_status("running", "pid=222", 222, 333)
-            return 222, 333
+            return restart_supervisor.StartedRuntime(222, 333, ("127.0.0.1", 5123))
         observed_by_the_rolled_back_version.append(_payload_rows(db_path))
         return _fake_start_runtime([], service_pid=444, ui_pid=333)
 
@@ -947,6 +1067,7 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(runtime, "service_instance_started", started)
     monkeypatch.setattr(runtime, "verified_service_running", lambda: False)
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port, timeout=None: True)
 
     rc = restart_supervisor._run_restart_job(
         job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to=_rollback_target()

@@ -34,6 +34,31 @@ def _reap_child(pid: int | None) -> None:
         return
 
 
+def _adoptable_service_pid(pid: int | None) -> bool:
+    """Whether a replacement pid may be tracked as this supervisor's service.
+
+    Two questions, and both have to be answered yes. `service_pid_recorded` asks
+    whether this is the process the system considers the service: alive, named by
+    the pid file, holding the instance lock. `service_instance_started` asks the
+    one the lock cannot answer -- whether it finished starting. A restart that
+    takes the lock and then hangs in migration satisfies the first for as long as
+    it stays alive, so adopting on that alone is exactly how a hung generation
+    gets tracked as healthy: the supervisor keeps looping, never exits nonzero,
+    and the unit's `Restart=on-failure` never gets its chance.
+
+    Deferring adoption is not refusing it. A healthy replacement is still
+    starting for a moment, fails this on that iteration, and is adopted on a
+    later one; the only case that never converges is the one that never starts,
+    which is the case that must reach the recovery exit.
+    """
+
+    return bool(
+        pid
+        and runtime.service_pid_recorded(pid)
+        and runtime.service_instance_started(pid)
+    )
+
+
 def _restart_in_progress() -> bool:
     status = runtime.read_json(runtime.get_restart_status_path()) or {}
     # Only the active stop/start phase ("running") should suppress the supervisor's
@@ -107,13 +132,14 @@ def main() -> int:
         # snapshotted here: a managed restart can begin mid-iteration, and a stale
         # snapshot would let the supervisor kill a healthy restart.
         current_service_pid = _read_pid_file(paths.get_runtime_pid_path())
-        # Only track a *ready* service pid (recorded and holding the service lock).
-        # Adopting a pid just because the file changed would let a hung restart
-        # that never becomes ready masquerade as healthy and block recovery.
+        # Only track a service pid that has reported it finished starting --
+        # see `_adoptable_service_pid`. Adopting a pid just because the file
+        # changed, or just because it holds the lock, would let a hung restart
+        # masquerade as healthy and block recovery.
         if (
             current_service_pid
             and current_service_pid != service_pid
-            and runtime.service_pid_recorded(current_service_pid)
+            and _adoptable_service_pid(current_service_pid)
         ):
             _reap_child(service_pid)
             service_pid = current_service_pid
@@ -138,7 +164,7 @@ def main() -> int:
             if (
                 current_service_pid
                 and current_service_pid != service_pid
-                and runtime.service_pid_recorded(current_service_pid)
+                and _adoptable_service_pid(current_service_pid)
             ):
                 service_pid = current_service_pid
                 time.sleep(1)

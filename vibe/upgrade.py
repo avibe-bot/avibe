@@ -537,29 +537,39 @@ def installed_metadata_describes_running_code() -> bool:
 
     Measured by comparing our own two answers rather than by trusting either --
     the version this process bound at import against the version the metadata
-    records for the distribution providing it. Unknown answers `True`: only a
-    disagreement between two published releases is evidence, so a source
-    checkout, an editable install, or an environment exposing two distributions
-    for this package is never forced on a guess.
+    records for each distribution providing it. Unknown answers `True`: only a
+    disagreement between two published releases is evidence, so a source checkout
+    or an editable install is never forced on a guess.
+
+    Every provider is asked, not just a single one, because the rename pair is
+    the state this exists for: after a rollback across `vibe-remote` ->
+    `avibe-os` the tree holds BOTH, and only one of them can be describing the
+    files on disk. Treating "more than one provider" as unknown would have made
+    the exact state described above the one state that answers `True` -- the
+    check declining to fire on its own scenario.
     """
 
     distributions = _distributions_providing_this_package()
-    if len(distributions) != 1:
+    if not distributions:
         return True
 
     from vibe import __version__
 
+    if not _names_a_published_release(__version__):
+        return True
+
     try:
         from importlib.metadata import version as distribution_version
 
-        recorded = distribution_version(distributions[0])
+        recorded = [distribution_version(name) for name in distributions]
     except Exception:  # pragma: no cover - a broken environment answers nothing
         logger.debug("Failed to read the installed distribution version", exc_info=True)
         return True
 
-    if not _names_a_published_release(recorded) or not _names_a_published_release(__version__):
+    published = [version for version in recorded if _names_a_published_release(version)]
+    if not published:
         return True
-    return recorded == __version__
+    return all(version == __version__ for version in published)
 
 
 def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:

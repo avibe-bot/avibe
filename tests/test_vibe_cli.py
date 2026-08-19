@@ -288,6 +288,79 @@ def test_render_status_keeps_a_recorded_error_when_the_service_is_stopped(tmp_pa
     assert "stale" not in payload["internal_server"]
 
 
+def _age_status_record(seconds: float) -> None:
+    """Backdate the persisted status by `seconds`, leaving everything else alone."""
+
+    path = paths.get_runtime_status_path()
+    status = runtime.read_json(path) or {}
+    status["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+    runtime.write_json(path, status)
+
+
+def test_render_status_keeps_a_recent_starting_record_over_a_stopped_service(tmp_path, monkeypatch):
+    """The window `starting` exists to cover, and it must still be covered.
+
+    Between the spawn and the moment the child takes the instance lock nothing
+    resolves as running. Reporting that window as `stopped` would make every
+    healthy start look like a failure, so a resolved `stopped` does not overwrite
+    a fresh `starting`.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "starting"
+
+
+def test_render_status_stops_believing_a_starting_record_that_outlived_its_start(tmp_path, monkeypatch):
+    """`starting` is a claim about a process expected to arrive, so it expires.
+
+    Unlike `setup` and `error`, which describe a machine deliberately not
+    running, `starting` describes one in flight -- and a release that dies inside
+    its own startup leaves that record behind with nothing coming to replace it.
+    Believing it forever is how an instance with no service reports that it is
+    coming up, for eight days. The deadline is `wait_for_service_ready`'s own:
+    past the point where the waiter gives up, the record no longer describes a
+    machine coming up.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    _age_status_record(runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS + 30)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "stopped"
+    assert payload["running"] is False
+
+
+def test_render_status_treats_an_undatable_starting_record_as_expired(tmp_path, monkeypatch):
+    """An undatable `starting` that is believed lasts forever.
+
+    Every status write stamps `updated_at`, so a record without a readable one
+    cannot be dated at all -- and the whole point of the deadline is that this
+    state must not be permanent. Defaulting the other way would restore the
+    original bug through the one input the deadline cannot measure.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    status_path = paths.get_runtime_status_path()
+    runtime.write_json(status_path, {**(runtime.read_json(status_path) or {}), "updated_at": "not a timestamp"})
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "stopped"
+
+
 def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
     monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
 

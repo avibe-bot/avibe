@@ -230,6 +230,38 @@ def test_a_forward_upgrade_forces_the_install_once_metadata_stops_describing_the
     assert "--force-reinstall" in plan.command
 
 
+def test_the_rename_pair_left_by_a_rollback_forces_the_next_install(monkeypatch):
+    """The state this check exists for is the one where two distributions are present.
+
+    A rollback across the rename installs `vibe-remote==3.0.10` over a tree whose
+    forward upgrade installed `avibe-os==3.0.11`, and pip does not uninstall the
+    distribution it replaced. So both are recorded and only one of them can be
+    describing the files under `vibe/`. Asking a single distribution -- or
+    treating "more than one" as unreadable -- would make this exact machine the
+    one machine that answers "metadata agrees", which is how the no-op ships:
+    the next upgrade asks pip for a version `avibe-os` already claims, pip does
+    nothing, and the instance keeps running the rolled-back code forever.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    recorded = {"avibe-os": "3.0.11", "vibe-remote": "3.0.10"}
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
+    monkeypatch.setattr("vibe.__version__", "3.0.10")
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert "--force-reinstall" in plan.command
+
+
 def test_a_forward_upgrade_on_an_undamaged_install_is_left_to_the_installer(monkeypatch):
     """Forcing is the exception, and has to stay one.
 
@@ -260,9 +292,10 @@ def test_a_forward_upgrade_on_an_undamaged_install_is_left_to_the_installer(monk
     [
         # A source checkout or an editable install: nothing published to compare.
         ("no distribution provides the package", [], "3.0.11", "3.0.11"),
-        # Mid-rename, or a vendored environment: which one is authoritative is not
-        # a question this has the standing to answer.
-        ("two distributions provide it", ["avibe-os", "vibe-remote"], "3.0.11", "3.0.11"),
+        # Mid-rename, or a vendored environment. Both are asked, and here both
+        # agree with the code, so there is nothing to force -- the count of
+        # distributions is not by itself a disagreement.
+        ("two distributions provide it and both agree", ["avibe-os", "vibe-remote"], "3.0.11", "3.0.11"),
         # A regression build. Its version describes a tree, not a release, so a
         # disagreement with published metadata is expected rather than evidence.
         ("the running version names no release", ["avibe-os"], "3.0.11", "0.0.0.dev0+abc1234"),

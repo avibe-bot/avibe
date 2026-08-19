@@ -1,3 +1,4 @@
+import calendar
 import getpass
 import ipaddress
 import json
@@ -1377,6 +1378,35 @@ def resolve_service_state(*, detect_extra_processes: bool = True) -> ServiceStat
     return ServiceState("stopped", "process not running", None, None, [])
 
 
+def _starting_record_outlived_its_start(status: dict) -> bool:
+    """Whether a persisted `starting` has outlived the start it describes.
+
+    `starting` survives a resolved `stopped` on purpose: between the spawn and
+    the moment the child takes the instance lock there is a window where nothing
+    resolves as running, and reporting that window as `stopped` would make every
+    healthy start look like a failure. But unlike `setup` and `error`, `starting`
+    is a claim about a process that is expected to arrive, so it holds only for
+    as long as that arrival is still possible. `wait_for_service_ready` gives up
+    after SERVICE_SLOW_START_TIMEOUT_SECONDS; past that same deadline a
+    `starting` record no longer describes a machine coming up, it describes one
+    that died on the way -- which is the exact failure this change exists to stop
+    reporting as healthy.
+    """
+
+    updated_at = status.get("updated_at")
+    if not isinstance(updated_at, str):
+        return True
+    try:
+        written_at = calendar.timegm(time.strptime(updated_at, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        # Every status write stamps `updated_at`, so a record without a readable
+        # one cannot be dated at all. Treat it as expired rather than as fresh:
+        # an undatable `starting` that is believed lasts forever, and the whole
+        # point of the deadline is that this state must not be permanent.
+        return True
+    return time.time() - written_at > SERVICE_SLOW_START_TIMEOUT_SECONDS
+
+
 def render_status(*, detect_extra_processes: bool = True):
     status = read_status()
     resolved = resolve_service_state(detect_extra_processes=detect_extra_processes)
@@ -1385,8 +1415,13 @@ def render_status(*, detect_extra_processes: bool = True):
     running = resolved.running
     # A resolved `stopped` does not overwrite a persisted `setup`, `starting` or
     # `error`: those describe a machine with nothing running on purpose, and this
-    # function reports what is running, not what was meant to.
-    if resolved.state != "stopped" or status.get("state") in {"running", "degraded"}:
+    # function reports what is running, not what was meant to. `starting` is the
+    # exception with a deadline -- see above -- because it is the only one of the
+    # three that describes something in flight.
+    overwritable = {"running", "degraded"}
+    if status.get("state") == "starting" and _starting_record_outlived_its_start(status):
+        overwritable.add("starting")
+    if resolved.state != "stopped" or status.get("state") in overwritable:
         status["state"] = resolved.state
         status["detail"] = resolved.detail
         status["service_pid"] = resolved.service_pid
