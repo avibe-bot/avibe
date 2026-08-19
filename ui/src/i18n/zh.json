@@ -951,7 +951,8 @@
         "blank": "—",
         "tokens": {
           "label": "Tokens",
-          "detail": "输入 {{input}} · 输出 {{output}}"
+          "detail": "输入 {{input}} · 输出 {{output}}",
+          "none": "这个区间没有请求回报 token"
         },
         "requests": {
           "label": "请求数",
@@ -984,7 +985,8 @@
           "column": "{{day}} · {{tokens}} tokens · {{requests}} 次请求",
           "peak": "峰值 {{tokens}}，出现在 {{day}}",
           "quiet": "这个区间没有任何一天有计量数据",
-          "unreported": "有请求，但没有任何一天回报了 token"
+          "unreported": "有请求，但没有任何一天回报了 token",
+          "zero": "有回报 token 的日子，回报的都是 0"
         }
       },
       "supplyTooltip": {

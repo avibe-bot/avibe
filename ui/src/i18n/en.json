@@ -951,7 +951,8 @@
         "blank": "—",
         "tokens": {
           "label": "Tokens",
-          "detail": "{{input}} in · {{output}} out"
+          "detail": "{{input}} in · {{output}} out",
+          "none": "No request in this window reported its tokens"
         },
         "requests": {
           "label": "Requests",
@@ -984,7 +985,8 @@
           "column": "{{day}} · {{tokens}} tokens · {{requests}} requests",
           "peak": "Peak {{tokens}} on {{day}}",
           "quiet": "No day in this window carried a metered turn",
-          "unreported": "Requests ran, but no day reported its tokens"
+          "unreported": "Requests ran, but no day reported its tokens",
+          "zero": "Every day that reported its tokens reported zero"
         }
       },
       "supplyTooltip": {

@@ -24,7 +24,7 @@ import { useTranslation } from 'react-i18next';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { formatCount, formatDayTime, formatPercent } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import type { UsageByModel, UsageBySource, UsageSummary } from './types';
+import type { UsageByModel, UsageBySource, UsageCounters, UsageSummary } from './types';
 import {
   USAGE_WINDOW_OPTIONS,
   formatLocalDay,
@@ -35,6 +35,8 @@ import {
   usageDayIsMetered,
   usageIsEmpty,
   usageReportShortfall,
+  usageTokensAreKnown,
+  usageTokensAreReported,
   usageTotalTokens,
   type UsageDayColumn,
   type UsageIdentity,
@@ -45,6 +47,44 @@ import {
 const useCount = () => {
   const { i18n } = useTranslation();
   return (value: number) => formatCount(value, i18n.language);
+};
+
+/** Anything a token figure is derived from: a totals bucket, a row, or a day. */
+type TokenCoverage = Pick<UsageCounters, 'requests' | 'token_reports'>;
+
+/**
+ * The one way this tab turns a token count into text.
+ *
+ * A rendered `0` cannot say which of three things it means — a cost reported as
+ * nothing, a cost nobody reported, or nothing having run at all — and every panel
+ * this tab draws states token figures, so wording any single one of them correctly
+ * leaves all the others to be found one review round at a time. The figure asks
+ * its own bucket first: for calls that no upstream ever costed there is no
+ * measurement to print, and the blank marker the cached share and the metering
+ * timestamp already use says exactly that.
+ *
+ * Coverage travels with the value rather than being checked by the caller, so a
+ * new token figure cannot be written without naming the counters it came from.
+ */
+const useTokenText = () => {
+  const { t } = useTranslation();
+  const count = useCount();
+  return (counters: TokenCoverage, value: number) =>
+    usageTokensAreKnown(counters) ? count(value) : (t('settings.models.usage.blank') as string);
+};
+
+/**
+ * A token figure standing on its own, as a cell or a card value.
+ *
+ * `data-usage-token` is not styling: it is what lets a test enumerate every token
+ * figure on screen and assert they all went through the door, which is a claim
+ * about completeness that a per-site test cannot make. A figure interpolated into
+ * a translated sentence has no element of its own and uses `useTokenText`
+ * directly; its sentence is then the asserted unit.
+ */
+const TokenFigure: React.FC<{ counters: TokenCoverage; value: number }> = ({ counters, value }) => {
+  const tokenText = useTokenText();
+  return <span data-usage-token="">{tokenText(counters, value)}</span>;
 };
 
 /**
@@ -101,7 +141,7 @@ const Cell: React.FC<{ column: SourceColumn; children: React.ReactNode }> = ({ c
   );
 };
 
-const StatCard: React.FC<{ label: string; value: string; note: string }> = ({ label, value, note }) => (
+const StatCard: React.FC<{ label: string; value: React.ReactNode; note: string }> = ({ label, value, note }) => (
   <div className="model-hub-usage-stat flex flex-col rounded-xl border border-border bg-background">
     <span className="model-hub-usage-stat-label">{label}</span>
     <span className="model-hub-usage-stat-value font-semibold text-foreground">{value}</span>
@@ -119,8 +159,13 @@ const StatGrid: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
     <div className="grid gap-4 sm:grid-cols-3">
       <StatCard
         label={t('settings.models.usage.tokens.label') as string}
-        value={count(usageTotalTokens(totals))}
-        note={t('settings.models.usage.tokens.detail', { input: count(totals.input_tokens), output: count(totals.output_tokens) }) as string}
+        value={<TokenFigure counters={totals} value={usageTotalTokens(totals)} />}
+        // The input/output split is a reading of the same unreported total, so it
+        // cannot survive on its own once the total is blank: it says what nobody
+        // reported instead.
+        note={(usageTokensAreKnown(totals)
+          ? t('settings.models.usage.tokens.detail', { input: count(totals.input_tokens), output: count(totals.output_tokens) })
+          : t('settings.models.usage.tokens.none')) as string}
       />
       <StatCard
         label={t('settings.models.usage.requests.label') as string}
@@ -134,9 +179,15 @@ const StatGrid: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
       <StatCard
         label={t('settings.models.usage.cached.label') as string}
         value={cachedShare === null ? (t('settings.models.usage.blank') as string) : formatPercent(cachedShare, i18n.language)}
-        note={(cachedShare === null
-          ? t('settings.models.usage.cached.none')
-          : t('settings.models.usage.cached.detail', { cached: count(totals.cached_input_tokens), input: count(totals.input_tokens) })) as string}
+        // 「No input tokens in this window」 is the same defect one card over: with
+        // nothing reported there were no input tokens WE KNOW OF, and an absence of
+        // reports is not an absence of usage. Coverage is asked before the share, so
+        // the card states the missing reports rather than an empty input.
+        note={(!usageTokensAreKnown(totals)
+          ? t('settings.models.usage.tokens.none')
+          : cachedShare === null
+            ? t('settings.models.usage.cached.none')
+            : t('settings.models.usage.cached.detail', { cached: count(totals.cached_input_tokens), input: count(totals.input_tokens) })) as string}
       />
     </div>
   );
@@ -151,7 +202,7 @@ const ModelRow: React.FC<{ model: UsageByModel }> = ({ model }) => {
       <span role="rowheader" className="model-hub-usage-model flex min-w-0 items-baseline">
         <RowIdentity identity={modelIdentity(model)} goneKey="settings.models.usage.bySource.goneModel" />
       </span>
-      <Cell column="tokens">{count(usageTotalTokens(model))}</Cell>
+      <Cell column="tokens"><TokenFigure counters={model} value={usageTotalTokens(model)} /></Cell>
       <Cell column="requests">{count(model.requests)}</Cell>
       <Cell column="cached">
         {share === null ? (t('settings.models.usage.blank') as string) : formatPercent(share, i18n.language)}
@@ -176,7 +227,7 @@ const SourceRows: React.FC<{ source: UsageBySource }> = ({ source }) => {
         <span role="rowheader" className="model-hub-usage-source flex min-w-0 items-baseline font-semibold text-foreground">
           <RowIdentity identity={sourceIdentity(source)} goneKey="settings.models.usage.bySource.goneSource" />
         </span>
-        <Cell column="tokens">{count(usageTotalTokens(source))}</Cell>
+        <Cell column="tokens"><TokenFigure counters={source} value={usageTotalTokens(source)} /></Cell>
         <Cell column="requests">{count(source.requests)}</Cell>
         <Cell column="cached">
           {share === null ? (t('settings.models.usage.blank') as string) : formatPercent(share, i18n.language)}
@@ -227,14 +278,23 @@ const BySourcePanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
  *
  * Which day ran is `usageDayIsMetered`'s answer and never a token total: an
  * upstream can serve a call and report nothing about it, so a window of those has
- * bars to draw and a peak it cannot name.
+ * bars to draw and a peak it cannot name. Whether a day's cost is known at all is
+ * `usageTokensAreReported`'s separate answer — asked of the very same zero.
  */
 const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
   const { t, i18n } = useTranslation();
   const count = useCount();
+  const tokenText = useTokenText();
   const columns = React.useMemo(() => usageDayColumns(summary), [summary]);
-  const peak = columns.reduce<UsageDayColumn | null>((best, column) => (column.tokens > (best?.tokens ?? 0) ? column : best), null);
+  // Only a day whose tokens were reported can be the busiest one. A day with no
+  // report has no measured cost to compare, so naming it the peak would put a
+  // superlative on a number the report never carried.
+  const peak = columns.reduce<UsageDayColumn | null>(
+    (best, column) => (usageTokensAreReported(column) && column.tokens > (best?.tokens ?? 0) ? column : best),
+    null,
+  );
   const metered = columns.some(usageDayIsMetered);
+  const reported = columns.some(usageTokensAreReported);
   const day = (value: string) => formatLocalDay(value, i18n.language);
   // One day's figures as a hover readout. The table below states the same three
   // values in cells, and MH-USAGE-023 derives its expectation from this sentence
@@ -242,7 +302,7 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
   const readout = (column: UsageDayColumn) =>
     t('settings.models.usage.byDay.column', {
       day: day(column.day),
-      tokens: count(column.tokens),
+      tokens: tokenText(column, column.tokens),
       requests: count(column.requests),
     }) as string;
   return (
@@ -291,7 +351,7 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
             {columns.map((column) => (
               <tr key={column.day}>
                 <th scope="row">{day(column.day)}</th>
-                <td>{count(column.tokens)}</td>
+                <td><TokenFigure counters={column} value={column.tokens} /></td>
                 <td>{count(column.requests)}</td>
               </tr>
             ))}
@@ -301,12 +361,19 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
           <span className="truncate">{day(summary.from_day)}</span>
           <span className="model-hub-usage-peak truncate">
             {peak !== null
-              ? t('settings.models.usage.byDay.peak', { tokens: count(peak.tokens), day: day(peak.day) })
-              // No peak is two different windows: one nobody used, and one whose
-              // upstreams never reported what they cost. Only the first is quiet.
-              : metered
-                ? t('settings.models.usage.byDay.unreported')
-                : t('settings.models.usage.byDay.quiet')}
+              ? t('settings.models.usage.byDay.peak', { tokens: tokenText(peak, peak.tokens), day: day(peak.day) })
+              // No peak is three different windows, and the tokens cannot tell them
+              // apart: one nobody used, one whose upstreams never reported what the
+              // calls cost, and one that was measured and really did cost nothing.
+              // Coverage is asked before activity, because a window with any report
+              // in it can state what its reports said — the calls that came back
+              // without one are the requests card's shortfall to name, not this
+              // sentence's.
+              : reported
+                ? t('settings.models.usage.byDay.zero')
+                : metered
+                  ? t('settings.models.usage.byDay.unreported')
+                  : t('settings.models.usage.byDay.quiet')}
           </span>
           <span className="truncate">{day(summary.to_day)}</span>
         </div>

@@ -79,6 +79,36 @@ export function usageReportShortfall(counters: UsageCounters): number {
   return Math.max(0, counters.requests - counters.token_reports);
 }
 
+/**
+ * Whether an upstream said what anything in this bucket cost.
+ *
+ * Three independent facts share one payload, and only one counter answers each:
+ * `requests` says calls happened, `token_reports` says an upstream told us what
+ * they cost, and the token counts say how much. A total of zero is therefore
+ * several different readings, and only this counter can find the one where a cost
+ * was actually reported — which is the only reading allowed to speak for the
+ * report, as a peak or as a claim about what the reports said.
+ */
+export function usageTokensAreReported(counters: Pick<UsageCounters, 'token_reports'>): boolean {
+  return counters.token_reports > 0;
+}
+
+/**
+ * Whether the token counts are a measurement, and so printable as a number.
+ *
+ * Wider than `usageTokensAreReported` by exactly one case, and it is not a
+ * concession: a bucket where nothing ran cost nothing, and that zero is measured
+ * by our own request counter rather than promised by an upstream. Blanking it
+ * would trade the defect this answers — an unreported cost read as free — for its
+ * mirror image, an idle day read as unknowable.
+ *
+ * So the two questions stay apart. Every token figure the tab prints asks this
+ * one; whether the report itself has anything to say about tokens is the other.
+ */
+export function usageTokensAreKnown(counters: Pick<UsageCounters, 'requests' | 'token_reports'>): boolean {
+  return usageTokensAreReported(counters) || counters.requests === 0;
+}
+
 /** Share of input tokens served from cache, or null when there is no input to
  *  take a share of. Clamped to [0, 1] because the subset relation is the
  *  server's promise, not something this view can verify. */
@@ -97,6 +127,8 @@ export type UsageDayColumn = {
   day: string;
   /** Calls metered on this day, whether or not their tokens came back. */
   requests: number;
+  /** Calls whose upstream said what they cost — what makes `tokens` a measurement. */
+  token_reports: number;
   tokens: number;
   /** Height against the busiest rendered day, in [0, 1]. */
   ratio: number;
@@ -136,11 +168,18 @@ export function usageDayColumns(summary: UsageSummary): UsageDayColumn[] {
   const reportedByDay = new Map(summary.days.map((day: UsageByDay) => [day.day, day]));
   const span = windowSpan(summary.from_day, summary.to_day);
   const days = span ?? summary.days.map((day) => day.day);
-  // Both counters travel, because tokens alone cannot tell a day nobody used
-  // from a day whose upstream never said what it cost.
+  // All three counters travel, because tokens alone cannot tell a day nobody
+  // used from a day whose upstream never said what it cost — nor either of those
+  // from a day that really did cost nothing. Dropping `token_reports` here is
+  // what made a rendered 0 ambiguous no matter how carefully the copy was worded.
   const counted = days.map((day) => {
     const reported = reportedByDay.get(day);
-    return { day, requests: reported?.requests ?? 0, tokens: reported ? usageTotalTokens(reported) : 0 };
+    return {
+      day,
+      requests: reported?.requests ?? 0,
+      token_reports: reported?.token_reports ?? 0,
+      tokens: reported ? usageTotalTokens(reported) : 0,
+    };
   });
   // Scaled against the days on screen, not every day reported: a stray row
   // outside the window would otherwise flatten every bar the user can see.

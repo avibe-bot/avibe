@@ -276,6 +276,18 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-024
+  - id: MH-USAGE-025
+    name: A window whose upstreams reported zero tokens reads as measured rather than unreported
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-025
+  - id: MH-USAGE-026
+    name: Every token figure the usage report states names the coverage it was measured from
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-026
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

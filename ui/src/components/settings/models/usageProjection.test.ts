@@ -12,6 +12,8 @@ import {
   usageDayIsMetered,
   usageIsEmpty,
   usageReportShortfall,
+  usageTokensAreKnown,
+  usageTokensAreReported,
   usageTotalTokens,
 } from './usageProjection';
 
@@ -86,6 +88,41 @@ describe('usageReportShortfall', () => {
   });
 });
 
+describe('usageTokensAreReported', () => {
+  // The same rendered zero, three payloads apart. Only `token_reports` says
+  // whether it is a measurement, which is why no caller may read the total.
+  it('separates a reported zero from calls nobody reported', () => {
+    expect(usageTokensAreReported(counters({ requests: 4, token_reports: 4 }))).toBe(true);
+    expect(usageTokensAreReported(counters({ requests: 4, token_reports: 0 }))).toBe(false);
+    expect(usageTokensAreReported(counters())).toBe(false);
+  });
+
+  it('asks about coverage and never about size', () => {
+    expect(usageTokensAreReported(counters({ requests: 1, token_reports: 1, input_tokens: 900_000 }))).toBe(true);
+    expect(usageTokensAreReported(counters({ requests: 1, token_reports: 0, input_tokens: 900_000 }))).toBe(false);
+  });
+});
+
+describe('usageTokensAreKnown', () => {
+  // Wider than reported by exactly one case, and that case is the honest one:
+  // nothing ran, so nothing was spent, and our own request counter is the evidence.
+  // Refusing it would trade an unreported cost read as free for an idle window read
+  // as unknowable.
+  it('prints the zero nothing ran to earn, and refuses the one nobody costed', () => {
+    expect(usageTokensAreKnown(counters({ requests: 0, token_reports: 0 }))).toBe(true);
+    expect(usageTokensAreKnown(counters({ requests: 4, token_reports: 0 }))).toBe(false);
+    expect(usageTokensAreKnown(counters({ requests: 4, token_reports: 4 }))).toBe(true);
+  });
+
+  // A partial report is a real measurement of the calls it covered; the calls it
+  // did not cover are the shortfall's sentence to say, not this figure's.
+  it('treats a partial report as a measurement and leaves the gap to the shortfall', () => {
+    const partial = counters({ requests: 12, token_reports: 9, input_tokens: 400 });
+    expect(usageTokensAreKnown(partial)).toBe(true);
+    expect(usageReportShortfall(partial)).toBe(3);
+  });
+});
+
 describe('usageCachedInputShare', () => {
   it('is the cached share of reported input', () => {
     expect(usageCachedInputShare(counters({ input_tokens: 200, cached_input_tokens: 50 }))).toBe(0.25);
@@ -150,8 +187,13 @@ describe('formatLocalDay', () => {
 
 describe('usageDayColumns', () => {
   // A reported day exists because a call was metered on it, so it carries one
-  // unless the case is about a day that carried several.
-  const day = (value: string, tokens: number, requests = 1) => ({ ...counters({ requests, input_tokens: tokens }), day: value });
+  // unless the case is about a day that carried several. Tokens imply the report
+  // they were summed from — the server only totals what an upstream told it — so
+  // the coverage counter follows the tokens unless a case sets it apart.
+  const day = (value: string, tokens: number, requests = 1, token_reports = tokens > 0 ? requests : 0) => ({
+    ...counters({ requests, token_reports, input_tokens: tokens }),
+    day: value,
+  });
 
   it('spans the whole window and zero-fills the days that carried no turn', () => {
     const columns = usageDayColumns(summary({ from_day: '2026-08-14', to_day: '2026-08-18', days: [day('2026-08-16', 40)] }));
@@ -175,6 +217,25 @@ describe('usageDayColumns', () => {
   it('carries the calls of every reported day through, and gives a filled-in day none', () => {
     const columns = usageDayColumns(summary({ from_day: '2026-08-14', to_day: '2026-08-16', days: [day('2026-08-15', 40, 3)] }));
     expect(columns.map((column) => column.requests)).toEqual([0, 3, 0]);
+  });
+
+  // And so does coverage, for the same reason one step further in: four calls that
+  // were measured at nothing and four whose upstreams said nothing carry identical
+  // tokens and identical requests. Only this counter tells the series apart, so a
+  // column that lost it could not be drawn or described honestly at any zero.
+  it('carries the token reports of every reported day through, and gives a filled-in day none', () => {
+    const columns = usageDayColumns(summary({
+      from_day: '2026-08-14',
+      to_day: '2026-08-16',
+      days: [day('2026-08-14', 0, 4, 4), day('2026-08-16', 0, 4, 0)],
+    }));
+    expect(columns.map((column) => column.tokens)).toEqual([0, 0, 0]);
+    expect(columns.map((column) => column.requests)).toEqual([4, 0, 4]);
+    expect(columns.map((column) => column.token_reports)).toEqual([4, 0, 0]);
+    // Three identical zeroes, three different facts — a measured nothing, a day
+    // nobody used, and a day nobody costed.
+    expect(columns.map(usageTokensAreReported)).toEqual([true, false, false]);
+    expect(columns.map(usageTokensAreKnown)).toEqual([true, true, false]);
   });
 
   // The distinction the whole series exists to draw. A day whose upstreams never

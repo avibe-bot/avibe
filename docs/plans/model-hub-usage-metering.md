@@ -1383,3 +1383,84 @@ What proved it: `npm test -- UsageTab.test.tsx` now runs 1 file / 14 cases, and 
 fails with the resolver's own message when `MEMORY-LIST-006`'s citation is rotted to a
 nonexistent ID (reverted after checking). Full suite 231 files / 2943 tests, CLI gate 22
 citations across 22 rows, `tsc` clean, `eslint` clean, `npm run build` ✓.
+
+### Stage 2, round 7 (head `f5991f2a6`) — breaker tripped: a token figure states a number without saying it was measured
+
+One P2 finding, and it is a **class repeat on a second reviewed head** (`5957182` →
+`f5991f2a6`), so the breaker trips mechanically. As the orchestrator in a user-started
+session I recorded the scope decision and continued: the smallest complete action is clear,
+reversible, and changes no contract.
+
+The finding is about the copy round 2 introduced. `byDay.zero` claims 「这个区间的 token 用量
+是 0」 for a window whose upstreams never reported anything, because `usageDayColumns`
+carried `requests` and `tokens` and **dropped `token_reports`** — so no site in the day
+series could ask the coverage question even if its copy wanted to.
+
+**Why this is the same class, and why round 2's closure could not have held.** Round 2 named
+the class *the day series asks tokens a question only requests can answer* and closed it with
+`usageDayIsMetered`. That predicate is about activity, and it is still right about activity.
+What round 2 missed is that a bucket carries **three independent facts, not two**:
+
+| Counter | The question it alone answers |
+| --- | --- |
+| `requests` | did calls happen |
+| `token_reports` | did an upstream say what they cost |
+| `input_tokens + output_tokens` | how much |
+
+A rendered `0` is therefore three different readings — a cost reported as nothing, a cost
+nobody reported, and nothing having run at all — and round 2's projection could distinguish
+only the third. Round 2 also explicitly ruled the stat cards *out* of the class, on the
+evidence that they 「each state a token figure they really do own」. Ownership was the wrong
+test: owning the figure says nothing about whether the figure is a measurement.
+
+**The inventory, which is what makes this a class and not a line.** Every token figure the
+tab states, found by grepping every token expression in `UsageTab.tsx` rather than by
+recalling the panels — **8 members**, one of which round 2's ruling had cleared:
+
+1. the tokens stat card's value
+2. its input/output split note
+3. the cached-input card's note — 「No input tokens in this window」, the same defect one card
+   over: with nothing reported there were no input tokens *we know of*, and an absence of
+   reports is not an absence of usage
+4. the by-model row cell
+5. the by-source row cell
+6. the day bar's tooltip readout
+7. the sr-only day table cell
+8. the peak / no-peak sentence
+
+**The fix is one door plus an enumerable marker.** `useTokenText(counters, value)` is the only
+path from a token count to text, and coverage travels *with* the value rather than being
+checked by the caller, so a new token figure cannot be written without naming the counters it
+came from. `TokenFigure` wraps it in `<span data-usage-token="">`, which is not styling: it is
+what lets a test enumerate every node-shaped token figure on screen and assert they all went
+through the door — completeness by construction, which a per-site test cannot claim. Figures
+interpolated into translated sentences have no element of their own and call `useTokenText`
+directly; their sentence is then the asserted unit.
+
+**Two predicates, deliberately not one.** The first draft was `token_reports > 0` alone, and
+it would have shipped the mirror image of the defect it fixes: a day where nothing ran cost
+nothing, and that zero is measured by *our own* request counter rather than promised by an
+upstream. Blanking it reads an idle day as unknowable. So:
+
+- `usageTokensAreReported` = `token_reports > 0` — an upstream costed something. Used by peak
+  selection and by the claim about what the reports said.
+- `usageTokensAreKnown` = `usageTokensAreReported(c) || c.requests === 0` — the number is a
+  measurement, so printable. Used by the figure door.
+
+Only a day whose tokens were reported can be the busiest one: a day with no report has no
+measured cost to compare, so naming it the peak puts a superlative on a number the report
+never carried. And the no-peak copy becomes four-way with **`reported` ordered before
+`metered`** — a window with any report in it can state what its reports said, and the calls
+that came back without one are the requests card's shortfall to name, not this sentence's.
+
+**The backend premise, verified rather than assumed.** A reported zero really does exist on
+the wire: `extract_protocol_usage` (`core/handlers/model_hub/stream_wire.py:533`) returns a
+non-null report for an explicit all-zero usage block — `_usage_sum` returns `0`, not `None` —
+and `usage.py:464` sets `token_reports = call.requests if usage is not None else 0`. So
+MH-USAGE-025 draws a window that exists, not a hypothetical.
+
+**What proved it, by breaking it.** Rotting `usageTokensAreKnown` to `return true` fails
+MH-USAGE-021 and MH-USAGE-026 and nothing else; swapping the `reported`/`metered` branch order
+fails MH-USAGE-025 and only it. Both restored. Full suite 231 files / 2950 tests, catalog gate
+24 citations across 24 rows, model_hub catalog pytest ✓, `tsc` clean, `eslint` clean,
+`npm run build` ✓.

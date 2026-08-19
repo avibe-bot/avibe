@@ -154,17 +154,91 @@ describe('UsageTab', () => {
 
     expect(container.textContent).toContain(en.settings.models.usage.byDay.unreported);
     expect(container.textContent).not.toContain(en.settings.models.usage.byDay.quiet);
+    expect(container.textContent).not.toContain(en.settings.models.usage.byDay.zero);
     // Every column says what its day carried, so a bar the report could not
     // measure still reads as a day that ran rather than as an unexplained sliver.
     // (Whether it is floored to one is CSS the DOM cannot answer for; the decision
     // behind it is `usageDayIsMetered`, asserted over columns in
     // `usageProjection.test.ts`.)
+    //
+    // The two kinds of day in this window state their tokens differently, which is
+    // the point: a day of uncosted calls has no number to print, while the day
+    // between them ran nothing and so really did cost zero.
     const readouts = [...container.querySelectorAll('.model-hub-usage-track')].map((track) => track.getAttribute('title'));
     expect(readouts).toEqual([
-      'Aug 16, 2026 · 0 tokens · 4 requests',
+      'Aug 16, 2026 · — tokens · 4 requests',
       'Aug 17, 2026 · 0 tokens · 0 requests',
-      'Aug 18, 2026 · 0 tokens · 4 requests',
+      'Aug 18, 2026 · — tokens · 4 requests',
     ]);
+  });
+
+  it('MH-USAGE-025: reads a window whose reports all came back zero as measured, not as missing', () => {
+    // The mirror of MH-USAGE-021, one question over. Every call here WAS costed and
+    // the answer was nothing — an explicit all-zero usage block, which
+    // `extract_protocol_usage` forwards as a report rather than as an absence, so
+    // `token_reports` equals `requests` while every token count is 0. Reading that
+    // as 「no day reported its tokens」 would call a valid upstream answer missing
+    // evidence, and blanking the figures would hide a cost the report does state.
+    const free = counters({ requests: 4, token_reports: 4, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 });
+    const { container } = draw(readyRegion(summary({
+      from_day: '2026-08-17',
+      to_day: '2026-08-18',
+      window_days: 2,
+      totals: free,
+      sources: [source({ ...free, models: [model(free)] })],
+      days: [{ ...free, day: '2026-08-18' }],
+    })));
+
+    expect(container.textContent).toContain(en.settings.models.usage.byDay.zero);
+    expect(container.textContent).not.toContain(en.settings.models.usage.byDay.unreported);
+    expect(container.textContent).not.toContain(en.settings.models.usage.byDay.quiet);
+    // A measured zero is a number, and the requests card has no shortfall to state
+    // about it either — nothing went unreported.
+    expect(container.textContent).toContain(en.settings.models.usage.requests.reported);
+    expect(container.textContent).not.toContain(en.settings.models.usage.tokens.none);
+    // And the cached card may say what MH-USAGE-026 forbids it to say, because here
+    // it is true: these calls were costed, and the cost included no input.
+    expect(container.textContent).toContain(en.settings.models.usage.cached.none);
+    const tokenFigures = [...container.querySelectorAll('[data-usage-token]')];
+    expect(tokenFigures.length).toBeGreaterThan(0);
+    for (const figure of tokenFigures) expect(figure.textContent).toBe('0');
+  });
+
+  it('MH-USAGE-026: every token figure on screen states its own coverage, whatever states it', () => {
+    // The class MH-USAGE-021 and MH-USAGE-025 are two members of: a token figure
+    // printed without asking whether anything reported it. Asked of every figure the
+    // tab renders rather than of a list of the seven known ones — the marker is
+    // emitted by the single door they all go through, so a card, cell, or column
+    // added later is covered by existing rather than by an edit here.
+    const uncosted = counters({ requests: 6, token_reports: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 });
+    const { container } = draw(readyRegion(summary({
+      from_day: '2026-08-17',
+      to_day: '2026-08-18',
+      window_days: 2,
+      totals: uncosted,
+      sources: [source({ ...uncosted, models: [model(uncosted)] })],
+      // Both reported days carried calls nobody costed, so no day of this window
+      // may print a token number at all.
+      days: [{ ...uncosted, day: '2026-08-17' }, { ...uncosted, day: '2026-08-18' }],
+    })));
+
+    const tokenFigures = [...container.querySelectorAll('[data-usage-token]')];
+    expect(tokenFigures.length).toBeGreaterThan(0);
+    for (const figure of tokenFigures) expect(figure.textContent).toBe(en.settings.models.usage.blank);
+    // …and the sentences that interpolate a figure instead of holding one say the
+    // same thing, since a tooltip and a note have no element of their own to mark.
+    const readouts = [...container.querySelectorAll('.model-hub-usage-track')].map((track) => track.getAttribute('title'));
+    expect(readouts).toEqual([
+      'Aug 17, 2026 · — tokens · 6 requests',
+      'Aug 18, 2026 · — tokens · 6 requests',
+    ]);
+    // The notes go the same way. The tokens card replaces the input/output split
+    // rather than blanking both halves of it — 「— in · — out」 states a breakdown of
+    // a number nobody gave — and the cached card must not read an absence of reports
+    // as an absence of input.
+    expect(container.textContent).toContain(en.settings.models.usage.tokens.none);
+    expect(container.textContent).not.toContain(' in · ');
+    expect(container.textContent).not.toContain(en.settings.models.usage.cached.none);
   });
 
   it('MH-USAGE-023: states every day of the window in text, not only in a pointer tooltip', () => {
