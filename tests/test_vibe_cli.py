@@ -300,6 +300,107 @@ def test_write_status_survives_a_restart_record_that_cannot_be_removed(tmp_path,
     assert runtime.read_json(restart_path) == payload
 
 
+@pytest.fixture
+def release_service_lock_after_test():
+    """Release the process-wide lock handle so it cannot leak into another test."""
+
+    try:
+        yield
+    finally:
+        runtime.release_service_instance_lock()
+
+
+def test_a_service_taking_the_lock_retires_a_failure_nobody_reported(
+    tmp_path, monkeypatch, release_service_lock_after_test
+):
+    """Becoming the lock owner retires the failure, with no status write involved.
+
+    This is the start that outlived its supervisor: `wait_for_service_ready` gave
+    up, recorded the failure with nothing alive, and left the child running
+    unwatched, so the child acquires the lock a moment later and no `running`
+    status is ever written for it. The instance recovered; the only thing that
+    knows is the service itself. Left on disk, the record would sit harmless
+    while the service ran and then blame the next deliberate stop for downtime it
+    did not cause.
+
+    Nothing is stubbed here -- a real flock against a redirected home, so the
+    assertion covers the lock path a service actually takes.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"ok": False, "state": "failed", "job_id": "job-1", "service_alive": False})
+    assert tmp_path in runtime.get_service_lock_path().parents
+
+    runtime.acquire_service_instance_lock()
+
+    assert runtime.verified_service_running()
+    assert not restart_path.exists()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        None,
+        {"ok": None, "state": "scheduled", "job_id": "job-1"},
+        {"ok": None, "state": "running", "job_id": "job-1"},
+        {"ok": True, "state": "succeeded", "job_id": "job-1"},
+        {"ok": False},
+        "not a record at all",
+    ],
+    ids=["absent", "scheduled", "in-flight", "succeeded", "failure-without-a-job-id", "unreadable"],
+)
+def test_lock_acquisition_only_retires_a_recorded_failure(
+    tmp_path, monkeypatch, release_service_lock_after_test, record
+):
+    """Every shape that is not this call's failure record survives untouched.
+
+    Seeded rather than enumerated as exclusions, so a shape added later is covered
+    without editing this test. The in-flight ones carry the weight: the supervisor
+    spawns the service while its own `ok: null` marker is on disk, so the child
+    retiring it would make `_restart_in_flight()` report no restart running and
+    admit a second supervisor alongside the first. A failure with no `job_id` is a
+    record from before job ids existed and is still this call's to retire -- it is
+    listed here only because the identity guard must match it to itself.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    if record is not None:
+        restart_path.write_text(json.dumps(record), encoding="utf-8")
+    before = restart_path.read_bytes() if restart_path.exists() else None
+
+    runtime.acquire_service_instance_lock()
+
+    retired = record == {"ok": False}
+    after = restart_path.read_bytes() if restart_path.exists() else None
+    assert after == (None if retired else before)
+
+
+def test_lock_acquisition_survives_a_restart_record_that_cannot_be_removed(
+    tmp_path, monkeypatch, release_service_lock_after_test
+):
+    """A marker that will not delete must not stop the service from starting."""
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    payload = {"ok": False, "state": "failed", "job_id": "job-1"}
+    runtime.write_json(restart_path, payload)
+
+    def refuse_unlink(*_args, **_kwargs):
+        raise PermissionError("restart marker is locked")
+
+    monkeypatch.setattr(type(restart_path), "unlink", refuse_unlink)
+
+    runtime.acquire_service_instance_lock()
+
+    assert runtime.service_instance_lock_attached_to_process()
+    assert runtime.read_json(restart_path) == payload
+
+
 def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     runtime.ensure_dirs()

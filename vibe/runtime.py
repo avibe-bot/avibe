@@ -276,6 +276,20 @@ def acquire_service_instance_lock() -> None:
         logger.debug("Failed to fsync service instance lock", exc_info=True)
     paths.get_runtime_pid_path().write_text(str(os.getpid()), encoding="utf-8")
     _SERVICE_INSTANCE_LOCK_HANDLE = lock_file
+    # This line is the moment a working service exists, so it is where a recorded
+    # restart failure stops describing the present. Every other observation of
+    # that fact is second-hand: a supervisor writes `running` because it believes
+    # the child came up, and it can be wrong in both directions. It can also
+    # simply never run -- a start that outlives `wait_for_service_ready` leaves
+    # the child alive and unwatched, and the service it becomes is one nobody
+    # reports. Retiring here needs no reporter and no reader.
+    #
+    # Best-effort, for the same reason as in `write_status`: an unremovable or
+    # unreadable marker must not stop the service that just acquired the lock.
+    try:
+        _retire_failed_restart_status()
+    except OSError:
+        logger.warning("Could not retire the recorded restart failure", exc_info=True)
 
 
 def release_service_instance_lock() -> None:
@@ -1136,6 +1150,15 @@ def _retire_failed_restart_status() -> None:
     failure recorded months ago would otherwise become a fresh diagnosis the
     next time the instance is stopped on purpose. A service actually being alive
     is the observation that retires it, whoever started it.
+
+    Two callers reach this, and they are the two ways that fact becomes known.
+    ``acquire_service_instance_lock`` is the authoritative one: it runs inside the
+    service itself, at the instant it becomes the lock owner, so it covers every
+    way a service can come up including the ones no supervisor is still watching.
+    ``write_status`` is opportunistic and covers the other direction -- a service
+    that was already running long before this code shipped, observed by whatever
+    start or refresh path writes its status next, without waiting for a restart.
+    One function owns the decision; those are only the moments worth asking it.
 
     The ``running`` state that brought us here is not that observation. It is a
     string, and callers copy it: ``/api/ui/reload`` carries the previous state
