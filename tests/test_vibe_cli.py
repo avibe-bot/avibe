@@ -247,6 +247,33 @@ def test_write_status_survives_an_unreadable_restart_record(tmp_path, monkeypatc
     assert runtime.read_status()["state"] == "running"
 
 
+def test_retirement_leaves_a_restart_scheduled_while_it_was_deciding(tmp_path, monkeypatch):
+    """Retirement deletes the record it decided about, not whatever is there now.
+
+    The liveness probe is the slow step, so a restart scheduled during it replaces
+    the file underneath -- staged here by having the probe do the replacing, which
+    puts the interleaving exactly where it can happen. Dropping that new marker
+    would make `_restart_in_flight()` report no restart running and let a second
+    supervisor start alongside the first.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"ok": False, "state": "failed", "job_id": "old-job"})
+    scheduled = {"ok": None, "state": "scheduled", "job_id": "new-job"}
+
+    def probe_then_reschedule():
+        runtime.write_json(restart_path, scheduled)
+        return True
+
+    monkeypatch.setattr(runtime, "verified_service_running", probe_then_reschedule)
+
+    runtime.write_status("running", detail="pid=123")
+
+    assert runtime.read_json(restart_path) == scheduled
+
+
 def test_write_status_survives_a_restart_record_that_cannot_be_removed(tmp_path, monkeypatch):
     """A marker that will not delete must not fail the service that just started.
 

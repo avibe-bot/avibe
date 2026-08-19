@@ -1149,12 +1149,28 @@ def _retire_failed_restart_status() -> None:
     and the supervisor writes the running status before it decides the job
     succeeded; anything else -- absent, succeeded, or too corrupt to read as a
     record -- was never the claim being ended.
+
+    What is deleted is the record this call decided about, not whatever occupies
+    the path by the time it deletes. ``schedule_restart`` seeds a new job by
+    replacing this file atomically, and UI control requests can reach it while a
+    ``running`` status write is in flight, so an unconditional unlink could drop a
+    marker that a restart scheduled in the meantime still needs:
+    ``_restart_in_flight`` reads it, and its absence reads as "no restart running"
+    -- which would let a second supervisor start alongside the first.
     """
 
     path = get_restart_status_path()
     payload = read_json(path)
-    if isinstance(payload, dict) and payload.get("ok") is False and verified_service_running():
-        path.unlink(missing_ok=True)
+    if not (isinstance(payload, dict) and payload.get("ok") is False):
+        return
+    if not verified_service_running():
+        return
+    current = read_json(path)
+    if not isinstance(current, dict) or current.get("ok") is not False:
+        return
+    if current.get("job_id") != payload.get("job_id"):
+        return
+    path.unlink(missing_ok=True)
 
 
 def write_status(state, detail=None, service_pid=None, ui_pid=None):
