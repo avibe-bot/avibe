@@ -166,14 +166,19 @@ describe('ChatPage transcript hydration', () => {
   let bootstrap: Deferred<never>;
 
   beforeEach(() => {
-    vi.stubGlobal(
-      'ResizeObserver',
-      class {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      },
-    );
+    // The transcript drives its scroll anchor and its older-page trigger from
+    // these two; jsdom implements neither, and nothing here depends on what they
+    // would report.
+    for (const name of ['ResizeObserver', 'IntersectionObserver']) {
+      vi.stubGlobal(
+        name,
+        class {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        },
+      );
+    }
     sessionRow = deferred();
     bootstrap = deferred();
     mocks.events = null;
