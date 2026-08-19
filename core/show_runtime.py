@@ -812,35 +812,95 @@ class ShowRuntimeManager:
     def _release_preview_guard(self) -> None:
         fd = getattr(self, "_preview_guard_fd", None)
         if fd is not None:
+            if getattr(self, "_preview_guard_msvcrt", False):
+                try:
+                    import msvcrt
+
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except (OSError, ImportError):
+                    pass
+                self._preview_guard_msvcrt = False
             try:
                 os.close(fd)
             except OSError:
                 pass
             self._preview_guard_fd = None
 
+    @staticmethod
+    def _fcntl_available() -> bool:
+        try:
+            import fcntl  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @staticmethod
+    def _try_windows_preview_lock(fd: int) -> bool:
+        """Non-blocking exclusive probe on an already-open Windows lock fd."""
+        try:
+            import msvcrt
+        except ImportError:
+            return False
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    def _windows_preview_busy_reason(self) -> str | None:
+        """Read-only Windows busy probe covering the pre-staging interval.
+
+        A leftover ``.install.lock`` is not itself busy — Windows never
+        deletes it. An installer that already holds ``msvcrt.locking`` on
+        that file (archive validation, before ``manifest-*`` exists) is.
+        Staging remains an additional crash-leftover signal.
+        """
+        probe = self._preview_lock_probe()
+        if probe is not None:
+            return probe
+        staging = self._staging_sentinel_reason()
+        if staging:
+            return staging
+        if getattr(self, "_preview_lock_was_absent", False):
+            return None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self._install_guard_path, flags)
+        except OSError:
+            return "runtime_install_guard_unavailable"
+        try:
+            if not self._try_windows_preview_lock(fd):
+                os.close(fd)
+                return "runtime_install_already_running"
+            self._preview_guard_fd = fd
+            self._preview_guard_msvcrt = True
+            return None
+        except OSError:
+            os.close(fd)
+            return "runtime_install_guard_unavailable"
+
     def _preview_busy_reason(self) -> str | None:
-        """Read-only busy probe for previews: never creates or locks files.
+        """Read-only busy probe for previews: never creates or rewrites files.
 
         Detects an active install (same process via the RLock depth, another
-        process via flock on an existing ``.install.lock``) so a preview never
-        advertises a live staging directory (``manifest-*``) as removable.
-        On POSIX an unopenable-but-existing guard reports unavailable (an
-        inspection problem); where flock does not exist (native Windows) a
-        staging sentinel — a fresh ``manifest-*``/``prebuilt-*`` directory
-        modified within the install guard window — is used instead.
+        process via an advisory lock on an existing ``.install.lock``) so a
+        preview never advertises a live in-use archive or staging directory
+        as removable. On POSIX an unopenable-but-existing guard reports
+        unavailable (an inspection problem). Native Windows has no flock;
+        the probe instead takes a non-blocking ``msvcrt.locking`` on the
+        existing lock file (never creating it) and still treats a fresh
+        ``manifest-*``/``prebuilt-*`` directory as busy.
 
-        On POSIX success the probe fd is kept open with the shared lock held
+        On success the probe fd is kept open with the advisory lock held
         (stored on the instance) so the caller can hold the guard through
-        planning; ``_release_preview_guard`` closes it.
+        planning; ``_release_preview_guard`` unlocks and closes it.
         """
         if self._install_guard_depth > 0:
             return "runtime_install_already_running"
-        try:
-            import fcntl
-        except ImportError:
-            # Windows: no flock probe; fall back to the staging sentinel.
-            self._preview_lock_was_absent = self._preview_lock_missing()
-            return self._staging_sentinel_reason()
+        if not self._fcntl_available():
+            return self._windows_preview_busy_reason()
+        import fcntl
+
         probe = self._preview_lock_probe()
         if probe is not None:
             return probe
