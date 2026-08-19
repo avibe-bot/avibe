@@ -103,6 +103,7 @@ import {
   recordSessionRowWrite,
   releaseSessionRowWrite,
   sessionRowWithBootstrapFallback,
+  sessionWriteStandsAlone,
   useChatSessionRow,
   type SessionRowRefreshGate,
   type SessionWriteGroup,
@@ -936,12 +937,14 @@ export const ChatPage: React.FC = () => {
 
   // Within ONE group the clicks made while a request is in flight are transit
   // rather than intent, so they fold into a single follow-up PATCH: an effort
-  // clicked behind an Agent switch was composed against that switch. If the
-  // request fails, the follow-up goes with it (see ``drain``) and the re-read
-  // below shows what the server actually holds — a half-applied route is worse
-  // than a visible rollback. Across groups nothing folds, because they no longer
-  // share a writer at all. The newest gate wins: it belongs to the mount that is
-  // on screen now and whose reads the reconcile below has to fence.
+  // clicked behind an Agent switch was composed against that switch, so if the
+  // request fails the follow-up goes with it and the re-read below shows what the
+  // server actually holds — a half-applied route is worse than a visible
+  // rollback. A merged payload that ends up carrying the whole route depended on
+  // nothing, and ``sessionWriteStandsAlone`` is what keeps it from being dropped
+  // for a failure that says nothing about it. Across groups nothing folds, because
+  // they no longer share a writer at all. The newest gate wins: it belongs to the
+  // mount that is on screen now and whose reads the reconcile below has to fence.
   const mergeSessionPatch = useCallback(
     (prev: SessionPatchWrite, next: SessionPatchWrite): SessionPatchWrite => ({
       changes: { ...prev.changes, ...next.changes },
@@ -992,11 +995,21 @@ export const ChatPage: React.FC = () => {
   // let a refused rename drop a route pick that had never been sent, and revert
   // it. They share the sender: the request is the same PATCH either way, and the
   // server writes only the columns it was given.
+  // Whether a refused request takes the write behind it down with it is read off
+  // that write's own fields, by the group that owns them — never assumed for the
+  // key as a whole (a whole-route pick waiting behind a refused effort click
+  // depends on nothing that was refused).
+  const patchStandsAlone = useCallback(
+    ({ changes, group }: SessionPatchWrite) => sessionWriteStandsAlone(group, changes),
+    [],
+  );
+
   const { write: writeRoutePatch, isSaving: isRoutePatchSaving } = useCoalescedWrite<SessionPatchWrite>(
     'session-route',
     sendSessionPatch,
     {
       merge: mergeSessionPatch,
+      standsAlone: patchStandsAlone,
       onSettled: useCallback(
         (patchedId: string, committed: boolean) => settleSessionPatch(patchedId, committed, 'route'),
         [settleSessionPatch],
@@ -1008,6 +1021,7 @@ export const ChatPage: React.FC = () => {
     sendSessionPatch,
     {
       merge: mergeSessionPatch,
+      standsAlone: patchStandsAlone,
       onSettled: useCallback(
         (patchedId: string, committed: boolean) => settleSessionPatch(patchedId, committed, 'meta'),
         [settleSessionPatch],

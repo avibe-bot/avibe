@@ -6,6 +6,7 @@ import { useLatestRef } from './useLatestRef';
 type Owner = {
   send: (patch: unknown, key: string) => Promise<boolean>;
   merge: (prev: unknown, next: unknown) => unknown;
+  standsAlone: (patch: unknown) => boolean;
   onSettled: ((key: string, committed: boolean) => void | Promise<void>) | undefined;
 };
 
@@ -69,7 +70,14 @@ const drain = async (scope: string, scopedKey: string, key: string) => {
     // request and the settle after it belong to the view that is mounted when
     // they happen.
     entry.owner = owners.get(scope) ?? entry.owner;
-    const next = committed ? entry.pending : undefined;
+    // A failure ends the burst UNLESS what waits stands on its own. Whether it
+    // does is a property of the payload, and the owner is the only one that can
+    // read it — the writer never inspects a payload's fields — so it answers,
+    // and the default answer is the safe one. See the block below the send.
+    const next =
+      entry.pending && (committed || entry.owner.standsAlone(entry.pending.patch))
+        ? entry.pending
+        : undefined;
     if (next) {
       entry.pending = undefined;
       try {
@@ -80,15 +88,20 @@ const drain = async (scope: string, scopedKey: string, key: string) => {
       continue;
     }
     // Nothing more goes out in this burst — either nothing is waiting, or a send
-    // failed. A FAILURE ENDS THE BURST: everything clicked while that request was
-    // in flight was composed against the state it was installing, and the server
-    // has just refused that state. Those patches are partial by nature (the
-    // picker emits an effort click as `{reasoning_effort}` alone), so sending one
-    // now would apply it to a route that never existed — an effort chosen for the
-    // Agent the failed write was switching to, landing on the Agent the row still
-    // holds. Dropping it is what makes the rollback whole: the reconcile below
-    // reverts the burst together, so the user sees the row the server holds
-    // instead of a combination nobody picked.
+    // failed and what waits was COMPOSED AGAINST the state that request was
+    // installing. Those patches are partial by nature (the picker emits an effort
+    // click as `{reasoning_effort}` alone), so sending one now would apply it to a
+    // route that never existed — an effort chosen for the Agent the failed write
+    // was switching to, landing on the Agent the row still holds. Dropping it is
+    // what makes the rollback whole: the reconcile below reverts the burst
+    // together, so the user sees the row the server holds instead of a
+    // combination nobody picked.
+    //
+    // A payload that carries its whole resource was composed against nothing, so
+    // a refusal says nothing about it: it is the user's newest intent, still
+    // coherent on its own, and dropping it would lose a click for no reason. Those
+    // keep the burst going above, and `committed` then reports whichever send
+    // ended it.
     entry.pending = undefined;
     // Reconcile BEFORE releasing the key, so a pick made during a rollback read
     // coalesces into this writer instead of starting a fresh burst against state
@@ -137,16 +150,20 @@ export type CoalescedWrite<P> = {
  *
  * What is waiting is COALESCED rather than queued: the clicks a user makes while
  * a request is in flight are transit, not intent, so `merge` folds them into one
- * payload and only the result is sent. That is what makes the writer safe to
- * share between fields: a title save and a route pick land in one request
- * instead of taking each other hostage.
+ * payload and only the result is sent. Serializing, coalescing and ending a burst
+ * are all per KEY, so a key is a claim that its payloads overwrite each other:
+ * fields that are composed against nothing in common belong to different keys, or
+ * a refused write for one would discard a write for the other (the session row
+ * splits its route from its title for exactly this reason).
  *
  * `send` reports its own failure (banner / toast) and returns false; a throw
- * counts as false too. A failure ENDS the burst and drops what was waiting — it
- * was composed against the state the server just refused (see `drain`).
- * `onSettled` then runs once per burst, for the owner to reconcile its optimistic
- * state with the server (a re-read, or a revert), and the resource stays
- * `isSaving` until that reconciliation finishes.
+ * counts as false too. A failure ends the burst and drops what was waiting, which
+ * was composed against the state the server just refused — unless the owner's
+ * `standsAlone` says that payload carries its whole resource, in which case the
+ * refusal says nothing about it and the burst goes on (see `drain`). `onSettled`
+ * then runs once per burst, for the owner to reconcile its optimistic state with
+ * the server (a re-read, or a revert), and the resource stays `isSaving` until
+ * that reconciliation finishes.
  *
  * `committed` is the outcome of the burst's LAST send, not a claim that nothing
  * was persisted: a burst commits in parts when one request lands and the patch
@@ -167,12 +184,21 @@ export function useCoalescedWrite<P>(
   options?: {
     /** Fold a new patch into the one already waiting. Defaults to "the newer one wins", which is right for whole-snapshot payloads. */
     merge?: (prev: P, next: P) => P;
+    /**
+     * Whether a payload waiting behind a REFUSED request may still be sent: true
+     * when it was composed against nothing that request was installing, so it is
+     * coherent whatever the server just did. Defaults to false — a partial patch
+     * applied to state the server kept would persist a combination nobody picked,
+     * and that is the failure worth being conservative about.
+     */
+    standsAlone?: (pending: P) => boolean;
     onSettled?: (key: string, committed: boolean) => void | Promise<void>;
   },
 ): CoalescedWrite<P> {
   const savingKeys = useSyncExternalStore(subscribe, getSavingSnapshot, getSavingSnapshot);
   const sendRef = useLatestRef(send);
   const mergeRef = useLatestRef(options?.merge);
+  const standsAloneRef = useLatestRef(options?.standsAlone);
   const settledRef = useLatestRef(options?.onSettled);
 
   // One owner object per mount, whose methods read THIS mount's newest closures.
@@ -182,9 +208,10 @@ export function useCoalescedWrite<P>(
     () => ({
       send: (patch, key) => sendRef.current(patch as P, key),
       merge: (prev, next) => (mergeRef.current ? mergeRef.current(prev as P, next as P) : next),
+      standsAlone: (patch) => standsAloneRef.current?.(patch as P) ?? false,
       onSettled: (key, committed) => settledRef.current?.(key, committed),
     }),
-    [sendRef, mergeRef, settledRef],
+    [sendRef, mergeRef, standsAloneRef, settledRef],
   );
 
   useEffect(() => {

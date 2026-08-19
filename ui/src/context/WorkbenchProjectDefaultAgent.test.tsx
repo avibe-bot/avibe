@@ -314,7 +314,7 @@ describe('project default Agent route', () => {
     expect(calls[2].payload).toMatchObject({ expected_agent_id: 'agt_codex', model: 'gpt-5-codex' });
   });
 
-  it('drops the pick waiting behind a rejected write, rolling the whole burst back', async () => {
+  it('sends the pick waiting behind a rejected write, because a project route stands on its own', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const getWorkbenchProjectsBootstrap = vi.fn()
       .mockResolvedValueOnce({ projects: [project], sessions: {} })
@@ -343,24 +343,76 @@ describe('project default Agent route', () => {
     });
     await settle();
 
-    // The waiting pick was composed against the route this request was
-    // installing, and the server has just refused that route. Sending it would
-    // persist a model chosen for an Agent the row never took, so it goes with
-    // the burst.
-    expect(calls).toHaveLength(1);
-    // The rollback is the re-read, and it takes the burst back as a whole: the
-    // user sees the row the server holds rather than a combination nobody picked.
-    expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
-    expect(tree()!.projects?.[0].default_agent).toBeNull();
-    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+    // The waiting pick is a COMPLETE route with its own send-time token: it was
+    // never composed against the route the server just refused, so the refusal
+    // says nothing about it. It is also the user's newest choice, so it goes out
+    // rather than being dropped — and it expects what the server confirmed
+    // (nothing yet), not the route that was refused.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].payload).toMatchObject({ expected_agent_id: null, model: 'opus' });
+    // The burst is still going, so nothing has been rolled back and nothing re-read.
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(true);
 
-    // Picking again after the rollback expects what that read found, not the
-    // route the server refused.
+    await act(async () => {
+      gates[1].resolve({ ...project, default_agent: route({ agent_backend: 'claude', model: 'opus' }) });
+    });
+    await settle();
+
+    // It landed, so the burst ends committed: the cache shows what the server took
+    // and there is nothing to revert to.
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
+    expect(tree()!.projects?.[0].default_agent).toMatchObject({ agent_backend: 'claude', model: 'opus' });
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
+  it('reverts the whole burst when the pick that stood alone is refused too', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [project], sessions: {} })
+      .mockResolvedValueOnce({ projects: [project], sessions: {} });
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route());
+    });
     act(() => {
       tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
     });
+
+    await act(async () => {
+      gates[0].reject(new Error('boom'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+    await act(async () => {
+      gates[1].reject(new Error('boom'));
+      await gates[1].promise.catch(() => undefined);
+    });
+    await settle();
+
     expect(calls).toHaveLength(2);
-    expect(calls[1].payload).toMatchObject({ expected_agent_id: null, model: 'opus' });
+    // Continuing past the first failure must not fragment the reconcile: the burst
+    // settles ONCE, on the outcome of the send that ended it, and reverts to the
+    // last route the server confirmed — which is still no route at all.
+    expect(tree()!.projects?.[0].default_agent).toBeNull();
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+
+    // And the extra request has not poisoned the next pick's token.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    expect(calls).toHaveLength(3);
+    expect(calls[2].payload).toMatchObject({ expected_agent_id: null, model: 'opus' });
   });
 
   it('does not let a rename response revert the route or poison the next write', async () => {
@@ -497,10 +549,21 @@ describe('project default Agent route', () => {
     });
     await settle();
 
-    // A's failure ends A's burst, taking the pick that was waiting behind it with
-    // it — so there is no third request — and A rolls back to the server route.
-    // B's pick survives a failure it had no part in.
-    expect(calls.map((c) => c.projectId)).toEqual([project.id, other.id]);
+    // A's refused request does not take the pick behind it down — a project route
+    // stands on its own — so A sends a third request. It is still A's writer alone:
+    // B settled long ago and is not touched again.
+    expect(calls.map((c) => c.projectId)).toEqual([project.id, other.id, project.id]);
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(true);
+    expect(tree()!.isSavingDefaultAgent(other.id)).toBe(false);
+
+    await act(async () => {
+      gates[2].reject(new Error('project_agent_conflict'));
+      await gates[2].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // Now A's burst is over and rolls back to the server route, while B's pick
+    // survives a failure it had no part in.
     expect(tree()!.projects?.[0].default_agent).toBeNull();
     expect(tree()!.projects?.[1].default_agent).toEqual(route({ model: 'sonnet' }));
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);

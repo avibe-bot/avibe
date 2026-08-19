@@ -52,6 +52,27 @@ export const bySessionWriteGroup = <T extends object>(
   return [...groups.entries()];
 };
 
+/** Whether a write may still be sent after an earlier request for its OWN group
+ *  was refused — i.e. whether it was composed against that refused state or
+ *  stands on its own.
+ *
+ *  Route fields are chosen against each other: a model belongs to an Agent, an
+ *  effort to a model. So `{reasoning_effort}` alone was composed against the Agent
+ *  the refused write was installing, and applying it to the Agent the row still
+ *  holds would persist a combination nobody picked — while a payload carrying the
+ *  WHOLE route (what the picker emits for an Agent pick, and for a model or effort
+ *  pick on an inherited route) names every field it depends on and is coherent
+ *  whatever the server just did. Nothing in `meta` is chosen against another
+ *  field. Read off the fields present, never claimed by a caller. */
+export const sessionWriteStandsAlone = (
+  group: SessionWriteGroup,
+  changes: object,
+): boolean => {
+  if (group !== 'route') return true;
+  for (const field of ROUTE_FIELDS) if (!(field in changes)) return false;
+  return true;
+};
+
 // ── What a row's OPEN writes are holding, keyed by session id and group ─────
 //
 // The gate below orders reads against writes within one chat's lifetime: it is

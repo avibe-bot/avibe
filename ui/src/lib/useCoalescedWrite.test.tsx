@@ -219,9 +219,9 @@ describe('useCoalescedWrite', () => {
 
     // The write in flight is rejected. What was clicked behind it was composed
     // against the state that request was installing — the state the server has
-    // just refused — and these patches are partial, so sending one now would
-    // persist a combination nobody picked. The failure ends the burst, and the
-    // owner's reconcile takes the whole burst back.
+    // just refused — so sending it now would persist a combination nobody picked.
+    // This owner declares no `standsAlone`, which is the conservative default: the
+    // failure ends the burst, and the owner's reconcile takes the whole burst back.
     await act(async () => {
       pending.get('s1:title')!.resolve(false);
       await Promise.resolve();
@@ -229,6 +229,100 @@ describe('useCoalescedWrite', () => {
     await settle();
     expect(started).toEqual(['s1:title']);
     // One settle per burst, reporting the burst's outcome.
+    expect(settled).toEqual([['s1', false]]);
+    expect(result.current.isSaving('s1')).toBe(false);
+  });
+
+  // A payload that carries its whole resource was composed against nothing, so a
+  // refusal says nothing about it: it is the user's newest intent and still
+  // coherent. Dropping it would lose a click to protect against a mismatch that
+  // cannot happen — while the burst's shape is unchanged, because `committed`
+  // already means "the outcome of the last send".
+  const standsAloneWhenWhole = (patch: string) => patch.startsWith('whole');
+
+  it('sends what is waiting past a failure when that patch stands on its own', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const settled: Array<[string, boolean]> = [];
+    const { result } = renderHook(() =>
+      useCoalescedWrite<string>('t', send, {
+        merge: joinMerge,
+        standsAlone: standsAloneWhenWhole,
+        onSettled: (key, committed) => {
+          settled.push([key, committed]);
+        },
+      }),
+    );
+
+    act(() => {
+      result.current.write('s1', 'partial');
+    });
+    await settle();
+    act(() => {
+      result.current.write('s1', 'whole');
+    });
+
+    await act(async () => {
+      pending.get('s1:partial')!.resolve(false);
+      await Promise.resolve();
+    });
+    await settle();
+    // Sent, not dropped — and nothing has settled yet, because the burst is still
+    // going: the resource is still mid-write.
+    expect(started).toEqual(['s1:partial', 's1:whole']);
+    expect(settled).toEqual([]);
+    expect(result.current.isSaving('s1')).toBe(true);
+
+    await act(async () => {
+      pending.get('s1:whole')!.resolve(true);
+      await Promise.resolve();
+    });
+    await settle();
+    // One settle for the burst, reporting the send that ended it: the server holds
+    // the user's newest pick, so the owner converges instead of reverting.
+    expect(settled).toEqual([['s1', true]]);
+    expect(result.current.isSaving('s1')).toBe(false);
+  });
+
+  it('ends the burst as refused when the patch that stood alone is refused too', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const settled: Array<[string, boolean]> = [];
+    const { result } = renderHook(() =>
+      useCoalescedWrite<string>('t', send, {
+        merge: joinMerge,
+        standsAlone: standsAloneWhenWhole,
+        onSettled: (key, committed) => {
+          settled.push([key, committed]);
+        },
+      }),
+    );
+
+    act(() => {
+      result.current.write('s1', 'whole-a');
+    });
+    await settle();
+    act(() => {
+      result.current.write('s1', 'whole-b');
+    });
+
+    await act(async () => {
+      pending.get('s1:whole-a')!.resolve(false);
+      await Promise.resolve();
+    });
+    await settle();
+    await act(async () => {
+      pending.get('s1:whole-b')!.resolve(false);
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(started).toEqual(['s1:whole-a', 's1:whole-b']);
+    // Still ONE settle for the burst, still reporting the last send — continuing
+    // past a failure must not turn one burst into two reconciles, or the owner
+    // would revert, re-read, and revert again.
     expect(settled).toEqual([['s1', false]]);
     expect(result.current.isSaving('s1')).toBe(false);
   });

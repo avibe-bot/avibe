@@ -1223,6 +1223,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     'project-route',
     sendProjectRoute,
     {
+      // Every pick stands on its own, so a refused request never takes the pick
+      // waiting behind it down with it: ``sendProjectRoute`` composes the full
+      // 5-field route itself, and derives the compare-and-set token at SEND time
+      // from the last route the server confirmed. So a pick made while an earlier
+      // one was in flight names every field it needs and expects the route that is
+      // actually there — it was never composed against the route the server just
+      // refused, and dropping it would discard the user's newest choice to protect
+      // against a mismatch that cannot occur.
+      standsAlone: () => true,
       onSettled: useCallback(
         (projectId: string, committed: boolean) => {
           latestProjectRouteRef.current.delete(projectId);

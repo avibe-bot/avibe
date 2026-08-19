@@ -440,6 +440,61 @@ describe('the chat row under an optimistic write', () => {
     expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
   });
 
+  it('sends the pick waiting behind a refused write when it carries the whole route', async () => {
+    const gates = [deferred<unknown>(), deferred<unknown>()];
+    let call = 0;
+    mocks.api.updateSession.mockImplementation(() => gates[call++].promise);
+    await mountChat();
+
+    // An effort click, then an Agent pick behind it while that request is still
+    // deciding. The picker emits an Agent pick as the WHOLE route — the Agent, its
+    // default model, its default effort — so it names every field it depends on.
+    act(() => {
+      mocks.onPatch!({ reasoning_effort: 'high' });
+      mocks.onPatch!({
+        agent_name: 'codex',
+        agent_id: 'ag_codex',
+        agent_backend: 'codex',
+        agent_variant: 'codex',
+        model: 'gpt-5',
+        reasoning_effort: 'medium',
+      });
+    });
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: 'medium', saving: 'yes' });
+
+    await act(async () => {
+      gates[0].reject(new Error('nope'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // The refusal says nothing about the pick behind it: that pick replaces every
+    // field the refused one carried, so it is coherent against the route the server
+    // kept. Dropping it would revert the header to an Agent the user has moved off,
+    // for a failure that never touched the Agent.
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, {
+      agent_name: 'codex',
+      agent_id: 'ag_codex',
+      agent_backend: 'codex',
+      agent_variant: 'codex',
+      model: 'gpt-5',
+      reasoning_effort: 'medium',
+    });
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: 'medium', saving: 'yes' });
+
+    const committedRow = { ...sessionRow, agent_name: 'codex', model: 'gpt-5', reasoning_effort: 'medium' };
+    mocks.api.getSession.mockResolvedValue(committedRow);
+    await act(async () => {
+      gates[1].resolve(committedRow);
+      await gates[1].promise;
+    });
+    await settle();
+
+    // One burst, one settle: the send that ENDED it committed, so nothing reverts.
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: 'medium', saving: 'no' });
+  });
+
   it('keeps the fields a partly committed burst persisted, reverting only the refused ones', async () => {
     const gates = [deferred<unknown>(), deferred<unknown>()];
     let call = 0;
