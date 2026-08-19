@@ -1156,10 +1156,11 @@ class MemoryRuntime:
         self.module.replace_provider(self._provider)
         try:
             meta = await asyncio.to_thread(self._store.ensure_meta)
+            active_metadata = self._active_provider_root_metadata()
             await run_blocking(
                 self._provider_root_owner.ensure,
                 meta,
-                self._active_provider_root_metadata(),
+                active_metadata,
             )
         except Exception:
             self._runtime_error = "memory_clear_failed"
@@ -1172,7 +1173,14 @@ class MemoryRuntime:
             call_log_db_path=self._call_log_db_path,
         )
         try:
-            started = await self._sidecar.start(python, settings)
+            started = await self._sidecar.start(
+                python,
+                settings,
+                provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                    meta,
+                    active_metadata,
+                ),
+            )
         except BaseException:
             raise
         if not started:
@@ -2286,7 +2294,7 @@ class MemoryRuntime:
             def reset_provider_root() -> None:
                 meta = self._store.ensure_meta()
                 if self._provider_root.exists():
-                    self._provider_root_owner.recreate_empty(
+                    self._provider_root_owner.recreate_empty_for_clear(
                         meta,
                         self._active_provider_root_metadata(),
                     )
@@ -2899,10 +2907,11 @@ class MemoryRuntime:
             self.module.replace_provider(self._provider)
             try:
                 meta = await asyncio.to_thread(self._store.ensure_meta)
+                active_metadata = self._active_provider_root_metadata()
                 await run_blocking(
                     self._provider_root_owner.ensure,
                     meta,
-                    self._active_provider_root_metadata(),
+                    active_metadata,
                 )
             except Exception:
                 self._runtime_error = "memory_clear_failed"
@@ -2915,6 +2924,10 @@ class MemoryRuntime:
                     _process_settings(
                         self._config,
                         call_log_db_path=self._call_log_db_path,
+                    ),
+                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                        meta,
+                        active_metadata,
                     ),
                 )
             except Exception:
@@ -3096,11 +3109,30 @@ class MemoryRuntime:
             self.module.replace_provider(self._provider)
 
             if has_data:
+                try:
+                    meta = await asyncio.to_thread(self._store.ensure_meta)
+                    active_metadata = self._active_provider_root_metadata()
+                    await run_blocking(
+                        self._provider_root_owner.ensure,
+                        meta,
+                        active_metadata,
+                    )
+                except Exception:
+                    self._runtime_error = "memory_rebuild_failed"
+                    return {
+                        "ok": False,
+                        "error": self._runtime_error,
+                        "result": "failed",
+                    }
                 rebuild_process = EverOSRebuildProcess(
                     python,
                     effective_home=self._effective_home,
                     provider_root=self._provider_root,
                     settings=rebuild_settings,
+                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                        meta,
+                        active_metadata,
+                    ),
                 )
                 child_result = await rebuild_process.run()
                 mapped = _rebuild_public_result(child_result)
@@ -3185,10 +3217,11 @@ class MemoryRuntime:
 
             try:
                 meta = await asyncio.to_thread(self._store.ensure_meta)
+                active_metadata = self._active_provider_root_metadata()
                 await run_blocking(
                     self._provider_root_owner.ensure,
                     meta,
-                    self._active_provider_root_metadata(),
+                    active_metadata,
                 )
             except Exception:
                 self._runtime_error = "memory_restart_failed"
@@ -3207,6 +3240,10 @@ class MemoryRuntime:
                     _process_settings(
                         self._config,
                         call_log_db_path=self._call_log_db_path,
+                    ),
+                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                        meta,
+                        active_metadata,
                     ),
                 )
             except Exception:

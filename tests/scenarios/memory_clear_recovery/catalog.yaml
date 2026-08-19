@@ -38,3 +38,19 @@ scenarios:
     given: Processing Record projects a failed clear marker and Memory remains fenced
     when: The next runtime reconcile runs
     then: The marker returns to deleting, all four primitives are retried idempotently, and the marker is removed on success
+  - id: MEMORY-CLEAR-203
+    name: Boot Clear recovery repairs Avibe's released unsentinelled first-start root
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/test_memory_runtime.py::test_memory_clear_203_recovers_released_unsentinelled_root_on_boot
+    actor: Memory runtime
+    trigger: A released sidecar start populated the provider root before its ownership sentinel existed
+    given: The queue is fenced at the target epoch, the durable Clear marker failed, and the root contains only matching Avibe controls plus the EverOS first-start layout
+    when: The next runtime reconcile retries the durable Clear
+    then: Clear claims the proven released root, empties it, releases the fence, removes the marker, and starts an owned sidecar
+    expected_outputs:
+      - Missing ownership never permits an ordinary sidecar or rebuild write
+      - Clear recovery accepts only the bounded released first-start shape with matching generated controls
+      - Unknown or mismatched unsentinelled roots remain untouched and fail closed
+      - The target epoch remains current and ordinary Memory activation resumes

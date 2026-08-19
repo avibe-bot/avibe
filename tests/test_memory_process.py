@@ -56,6 +56,7 @@ from core.memory.process import (
     _processes_syncing_owned_root,
     _REBUILD_TIMEOUT_SECONDS,
 )
+from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
 from core.memory.sync_process import SYNC_NONCE_ENV, SYNC_ROLE, SYNC_ARGV
 from core.memory.sidecar import _request_rejection
 from core.memory.types import (
@@ -215,6 +216,33 @@ def _settings() -> EverOSProcessSettings:
     )
 
 
+def _claim_provider_root(
+    process: EverOSProcess | EverOSRebuildProcess,
+    *,
+    eager: bool = True,
+) -> None:
+    owner = ProviderRoot(
+        process.provider_root
+        if isinstance(process, EverOSProcess)
+        else process._provider_root,
+        effective_home=process._effective_home,
+    )
+    meta = SimpleNamespace(provider_root_id="test-provider-root")
+    metadata = ProviderRootMetadata(
+        provider_root_format="everos-1.2.3",
+        compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+        artifact_fingerprint="test-artifact",
+    )
+
+    def claim() -> None:
+        owner.ensure(meta, metadata)
+        owner.require_owned(meta, metadata)
+
+    process._provider_root_guard = claim
+    if eager:
+        claim()
+
+
 def test_processing_probe_timeout_is_derived_from_largest_provider_group() -> None:
     independent = replace(
         _settings(),
@@ -356,6 +384,7 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
         effective_home=tmp_path,
         settings=replace(_settings(), timezone="UTC"),
     )
+    _claim_provider_root(process)
     process._prepare_owned_directories()
     process._write_generated_config()
     environment = process._child_environment()
@@ -416,6 +445,7 @@ def test_configured_multimodal_stays_env_only_and_independent_from_llm(tmp_path:
         effective_home=tmp_path,
         settings=settings,
     )
+    _claim_provider_root(process)
     process._prepare_owned_directories()
     process._write_generated_config()
 
@@ -447,6 +477,7 @@ def test_configured_rerank_stays_env_only_when_env_overrides_toml(tmp_path: Path
         effective_home=tmp_path,
         settings=settings,
     )
+    _claim_provider_root(process)
     process._prepare_owned_directories()
     process._write_generated_config()
 
@@ -478,12 +509,48 @@ def test_configured_rerank_provider_is_injected_into_child_env(tmp_path: Path) -
         effective_home=tmp_path,
         settings=settings,
     )
+    _claim_provider_root(process)
     process._prepare_owned_directories()
     process._write_generated_config()
 
     environment = process._child_environment()
     assert environment["EVEROS_RERANK__PROVIDER"] == "dashscope"
     assert environment["EVEROS_RERANK__MODEL"] == "gte-rerank-v2"
+
+
+async def test_sidecar_refuses_unclaimed_provider_root_before_write_or_spawn(
+    tmp_path: Path,
+) -> None:
+    host = _FakeProcessHost()
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        socket_path=Path(f"/tmp/avibe-1574-{os.getpid()}-{id(host)}.sock"),
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.start() is False
+    assert process.last_error == "memory_sidecar_unavailable"
+    assert not process.provider_root.exists()
+    assert host.spawn_calls == []
+    await process.stop()
+
+
+async def test_rebuild_refuses_unclaimed_provider_root_before_write_or_spawn(
+    tmp_path: Path,
+) -> None:
+    host = _FakeProcessHost()
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.FAILED
+    assert not (tmp_path / "memory" / "everos-root").exists()
+    assert host.spawn_calls == []
 
 
 def test_sidecar_child_home_preparation_hardens_every_created_directory(
@@ -494,6 +561,7 @@ def test_sidecar_child_home_preparation_hardens_every_created_directory(
         effective_home=tmp_path,
         settings=_settings(),
     )
+    _claim_provider_root(process)
     previous_umask = os.umask(0o022)
     try:
         process._prepare_owned_directories()
@@ -617,6 +685,7 @@ def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_pat
         settings=replace(_settings(), call_log_db_path=call_log),
     )
 
+    _claim_provider_root(process)
     process._prepare_owned_directories()
     environment = process._child_environment()
 
@@ -672,6 +741,7 @@ async def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(m
         settings=_settings(),
         _host=host,
     )
+    _claim_provider_root(process)
     monkeypatch.setattr(process, "_prepare_owned_directories", lambda: None)
     monkeypatch.setattr(process, "_write_generated_config", lambda: None)
     monkeypatch.setattr(process, "_remove_owned_socket", lambda: None)
@@ -1254,6 +1324,7 @@ def test_generated_timezone_stays_with_existing_provider_root(tmp_path: Path) ->
         effective_home=tmp_path,
         settings=_settings(),
     )
+    _claim_provider_root(process)
     process._prepare_owned_directories()
     (tmp_path / "memory" / "everos-root" / "everos.toml").write_text(
         "[memory]\ntimezone = \"Asia/Shanghai\"\n",
@@ -1272,13 +1343,15 @@ def _orphan_process(
     host: _ProcessHost | None = None,
     **overrides,
 ) -> EverOSProcess:
-    return EverOSProcess(
+    process = EverOSProcess(
         sys.executable,
         effective_home=tmp_path,
         settings=_settings(),
         _host=host,
         **overrides,
     )
+    _claim_provider_root(process)
+    return process
 
 
 @pytest.fixture
@@ -3015,7 +3088,7 @@ def _rebuild_process(
     timeout_seconds: float = 1.0,
     settings: EverOSProcessSettings | None = None,
 ) -> EverOSRebuildProcess:
-    return EverOSRebuildProcess(
+    process = EverOSRebuildProcess(
         sys.executable,
         effective_home=tmp_path,
         settings=settings or _settings(),
@@ -3023,6 +3096,8 @@ def _rebuild_process(
         stop_timeout_seconds=0.1,
         _host=host,
     )
+    _claim_provider_root(process, eager=False)
+    return process
 
 
 def _runtime_rebuild_candidate() -> MemoryConfig:
@@ -3069,12 +3144,14 @@ def _inject_real_rebuild_process(
         effective_home,
         provider_root,
         settings,
+        provider_root_guard,
     ) -> EverOSRebuildProcess:
         return EverOSRebuildProcess(
             python,
             effective_home=effective_home,
             provider_root=provider_root,
             settings=settings,
+            provider_root_guard=provider_root_guard,
             timeout_seconds=30 * 60,
             stop_timeout_seconds=0.1,
             _host=host,
@@ -3230,6 +3307,7 @@ async def test_rebuild_normalizes_relative_provider_root_before_launch(
     provider_parent = tmp_path / "shared"
     provider_parent.mkdir(mode=0o700)
     expected_root = provider_parent / "everos-root"
+    expected_root.mkdir(mode=0o700)
     child = _RebuildChild(0)
     identities = {child.pid: _ORPHAN_CREATE_TIME}
     host = _FakeProcessHost(
@@ -3242,6 +3320,7 @@ async def test_rebuild_normalizes_relative_provider_root_before_launch(
         effective_home=tmp_path / "home",
         provider_root=Path("shared/everos-root"),
         settings=_settings(),
+        provider_root_guard=lambda: None,
         _host=host,
     )
 
@@ -3273,6 +3352,7 @@ def test_sidecar_and_rebuild_use_one_physical_identity_for_a_symlinked_home(
         effective_home=logical_home,
         settings=_settings(),
     )
+    _claim_provider_root(sidecar)
     memory_process._prepare_memory_child_directories(
         memory_dir=sidecar._memory_dir,
         provider_root=sidecar.provider_root,
@@ -3475,6 +3555,7 @@ async def test_rebuild_normalizes_relative_interpreter_before_child_cwd(
         settings=_settings(),
         _host=host,
     )
+    _claim_provider_root(process, eager=False)
 
     assert await process.run() is RebuildProcessResult.COMPLETED
     assert process._python == interpreter
@@ -4142,6 +4223,7 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
             "            embedding_model='embedding-model',",
             "            embedding_api_key='secret',",
             "        ),",
+            "        provider_root_guard=lambda: None,",
             "    )",
             "    async def hold_lock():",
             "        print('locked', flush=True)",
@@ -4170,7 +4252,7 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
         pytest.fail((await owner.stderr.read()).decode(errors="replace"))
     lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
     assert lock_path.parent.parent == provider_root.parent
-    provider_root.rmdir()
+    assert not provider_root.exists()
     contender_host = _FakeProcessHost()
     contender = EverOSRebuildProcess(
         sys.executable,
@@ -4285,6 +4367,7 @@ async def test_sidecar_start_and_restart_wait_for_shared_rebuild_lock(
         settings=_settings(),
         _host=host,
     )
+    process._provider_root_guard = lambda: provider_root.chmod(0o700)
     lock_attempted = asyncio.Event()
     ownership_scan = asyncio.Event()
     original_acquire = memory_process._ProviderRootLock.acquire
@@ -4486,6 +4569,7 @@ async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
         on_reaped=on_reaped,
         _host=host,
     )
+    process._provider_root_guard = lambda: None
     ready_started = asyncio.Event()
     release_ready = asyncio.Event()
 
@@ -4516,6 +4600,7 @@ async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
             effective_home=tmp_path / "rebuild-home",
             provider_root=provider_root,
             settings=_settings(),
+            provider_root_guard=lambda: None,
             stop_timeout_seconds=0.1,
             _host=contender_host,
         )
@@ -4595,6 +4680,7 @@ async def test_sidecar_start_discovers_recordless_rebuild_before_spawn(
         settings=_settings(),
         _host=host,
     )
+    process._provider_root_guard = lambda: None
     host.identities[_ORPHAN_PID] = _rebuild_identity(process)
     foreign_record = memory_process.sidecar_record_path(foreign_home / "memory")
     foreign_record.parent.mkdir(parents=True, exist_ok=True)
@@ -4649,6 +4735,7 @@ async def test_sidecar_start_fails_closed_on_ambiguous_recordless_rebuilds(
         settings=_settings(),
         _host=host,
     )
+    _claim_provider_root(process)
     try:
         assert await process.start() is False
         assert host.signal_calls == []
@@ -5593,6 +5680,7 @@ async def test_sidecar_start_refuses_live_cross_home_peer_on_shared_root(
 ) -> None:
     provider_root = tmp_path / "shared" / "everos-root"
     provider_root.parent.mkdir(mode=0o700)
+    provider_root.mkdir(mode=0o700)
     peer_socket = tmp_path / "peer" / "everos.sock"
     host = _FakeProcessHost(
         root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
@@ -5619,6 +5707,7 @@ async def test_sidecar_start_refuses_live_cross_home_peer_on_shared_root(
         settings=_settings(),
         _host=host,
     )
+    process._provider_root_guard = lambda: None
 
     assert await process.start() is False
     assert process.consecutive_failures == 0
