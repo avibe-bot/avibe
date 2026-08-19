@@ -449,7 +449,12 @@ class MemoryModule:
         if not self._is_enabled():
             return await operation()
         if self.maintenance_active or self._is_maintenance_open():
-            raise MemorySessionLifecycleBusyError("memory session lifecycle is unavailable")
+            logger.warning(
+                "memory session lifecycle unavailable during maintenance; "
+                "skipping final flush session=%s",
+                raw_session_id,
+            )
+            return await operation()
 
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()

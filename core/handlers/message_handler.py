@@ -194,28 +194,24 @@ class MessageHandler(BaseHandler):
         )
         return capture_task
 
-    async def _schedule_text_only_memory_capture(
+    def _schedule_text_only_memory_capture(
         self,
         context: MessageContext,
         text: str,
         session_id: str,
-        lifecycle_admission: Any,
         *,
         expected_epoch: int,
-    ) -> Any:
+    ) -> None:
         capture_memory = getattr(self.controller, "capture_user_memory", None)
         if not callable(capture_memory) or not text.strip():
-            return lifecycle_admission
-
+            return
         if not self._memory_capture_registration_open:
-            return None
-
+            return
         self._schedule_memory_capture_task(
             session_id=session_id,
             expected_epoch=expected_epoch,
             capture_factory=lambda: capture_memory(context, text, session_id),
         )
-        return None
 
     def _memory_session_lifecycle_epoch(self, session_id: str) -> int:
         manager = getattr(self.controller, "session_turns", None)
@@ -330,11 +326,6 @@ class MessageHandler(BaseHandler):
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
-        payload = context.platform_specific or {}
-        turn_lifecycle_admission = payload.pop(
-            "_turn_lifecycle_admission",
-            None,
-        )
         dispatch_evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
         # Tracks whether we actually dispatched an agent turn (whose reply
         # streams in asynchronously). If we leave this method WITHOUT having
@@ -458,14 +449,11 @@ class MessageHandler(BaseHandler):
             # turns defer only until the shared materializer has produced a
             # descriptor-backed lease.
             if is_human and not context.files:
-                turn_lifecycle_admission = (
-                    await self._schedule_text_only_memory_capture(
-                        context,
-                        control_message,
-                        memory_session_id,
-                        turn_lifecycle_admission,
-                        expected_epoch=memory_session_pre_epoch,
-                    )
+                self._schedule_text_only_memory_capture(
+                    context,
+                    control_message,
+                    memory_session_id,
+                    expected_epoch=memory_session_pre_epoch,
                 )
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
@@ -856,14 +844,11 @@ class MessageHandler(BaseHandler):
                 except Exception:
                     if is_human:
                         try:
-                            turn_lifecycle_admission = (
-                                await self._schedule_text_only_memory_capture(
-                                    context,
-                                    control_message,
-                                    memory_session_id,
-                                    turn_lifecycle_admission,
-                                    expected_epoch=memory_session_pre_epoch,
-                                )
+                            self._schedule_text_only_memory_capture(
+                                context,
+                                control_message,
+                                memory_session_id,
+                                expected_epoch=memory_session_pre_epoch,
                             )
                         except Exception:
                             logger.warning(
@@ -1199,13 +1184,6 @@ class MessageHandler(BaseHandler):
         finally:
             if attachment_lease is not None:
                 attachment_lease.release()
-            release_lifecycle_admission = getattr(
-                turn_lifecycle_admission,
-                "release",
-                None,
-            )
-            if callable(release_lifecycle_admission):
-                release_lifecycle_admission()
             if not agent_dispatched:
                 # Synchronous completion — no async agent reply is coming, so
                 # release any live streaming SSE waiter for this turn now

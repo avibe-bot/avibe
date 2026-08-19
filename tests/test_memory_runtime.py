@@ -2397,6 +2397,30 @@ async def test_session_lifecycle_ticket_barrier_is_bounded() -> None:
     module.cancel_capture_reservation(reservation)
 
 
+async def test_session_scopes_lifecycle_proceeds_during_maintenance() -> None:
+    module = memory_module.MemoryModule(
+        MemoryStore(),
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    module.enter_maintenance()
+    ran = False
+
+    async def archive_session() -> str:
+        nonlocal ran
+        ran = True
+        return "archived"
+
+    assert await module.run_session_scopes_lifecycle(
+        scopes=((PRINCIPAL, PROJECT),),
+        raw_session_id="maintenance-session",
+        operation=archive_session,
+        deadline_seconds=0.01,
+    ) == "archived"
+    assert ran is True
+    module.leave_maintenance()
+
+
 async def test_retired_close_aborts_when_claim_quiescence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

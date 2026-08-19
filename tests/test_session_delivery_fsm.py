@@ -457,6 +457,37 @@ async def test_idle_session_capture_attributes_and_shutdown_drains(
     assert handler._memory_capture_tasks == set()
 
 
+@pytest.mark.anyio
+async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
+    managers,
+) -> None:
+    """A capture registered during reset must not be cancelled on the success bump."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    scheduled: list[asyncio.Task[object]] = []
+
+    async def reset_session() -> str:
+        task = handler._schedule_memory_capture_task(
+            session_id="ses_fsm",
+            expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+            capture_factory=lambda: asyncio.sleep(0),
+        )
+        assert task is not None
+        scheduled.append(task)
+        await asyncio.sleep(0)
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        reset_session,
+        deadline_seconds=1.0,
+    ) == "reset"
+    assert scheduled[0].cancelled() is False
+    await handler.drain_memory_capture_tasks()
+    assert scheduled[0].cancelled() is False
+
+
 async def _activate(
     manager: SessionTurnManager,
     *,

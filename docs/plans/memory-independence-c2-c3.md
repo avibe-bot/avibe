@@ -153,6 +153,19 @@ complete in EverOS after cancel. That write carries the pre-transition
 the Avibe-side decision (no `capture_user_memory` attribution after
 the bump).
 
+Epoch keys and capture buckets share one canonical session id when the
+session handler is present: `/new` passes `memory_session_anchor` from
+`get_base_session_id`, and capture uses `get_session_info`, which
+returns that same `get_base_session_id`. When the fallback path yields
+`memory_session_anchor=None`, `/new` skips the turn-lifecycle fence
+entirely (pre-existing fail-open). Telegram's new-topic branch returns
+before a mismatched pair is used.
+
+Cancellation of in-flight captures happens only on the 5s timeout
+path. A successful `/new`/archive only advances the epoch; the capture
+task's epoch check discards stale work without killing a capture that
+registered during the transition.
+
 ### Dead error surfaces
 
 - `SessionTurnLifecycleBusyError` is no longer raised. The class is

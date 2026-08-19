@@ -698,15 +698,27 @@ class SessionTurnManager:
 
         return self.session_lifecycle_epoch(raw_session_id) == expected_epoch
 
-    def _advance_session_lifecycle_epoch(self, raw_session_id: str) -> int:
-        """Abandon captures admitted against the previous generation."""
+    def _advance_session_lifecycle_epoch(
+        self,
+        raw_session_id: str,
+        *,
+        abandon_captures: bool = False,
+    ) -> int:
+        """Advance the generation token; cancel captures only when asked.
+
+        Cancellation is for the timeout path, where a capture may still hold
+        the lifecycle lock. The success path only needs the epoch bump: the
+        capture task's epoch check discards stale work without killing a
+        capture admitted for the new generation.
+        """
 
         next_epoch = self.session_lifecycle_epoch(raw_session_id) + 1
         self._session_lifecycle_epochs[raw_session_id] = next_epoch
-        handler = getattr(self.controller, "message_handler", None)
-        abandon = getattr(handler, "abandon_memory_captures_for_session", None)
-        if callable(abandon):
-            abandon(raw_session_id)
+        if abandon_captures:
+            handler = getattr(self.controller, "message_handler", None)
+            abandon = getattr(handler, "abandon_memory_captures_for_session", None)
+            if callable(abandon):
+                abandon(raw_session_id)
         return next_epoch
 
     async def run_session_lifecycle(
@@ -737,7 +749,10 @@ class SessionTurnManager:
                 "session=%s",
                 raw_session_id,
             )
-            self._advance_session_lifecycle_epoch(raw_session_id)
+            self._advance_session_lifecycle_epoch(
+                raw_session_id,
+                abandon_captures=True,
+            )
             return await operation()
         try:
             pre_epoch = self.session_lifecycle_epoch(raw_session_id)
@@ -7378,18 +7393,6 @@ class SessionTurnManager:
                         )
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
-        lifecycle_admission = context.platform_specific.get(
-            TURN_LIFECYCLE_ADMISSION_KEY
-        )
-        if lifecycle_admission is not None:
-            def release_unclaimed_admission(_task: asyncio.Task[Any]) -> None:
-                payload = context.platform_specific or {}
-                if payload.get(TURN_LIFECYCLE_ADMISSION_KEY) is not lifecycle_admission:
-                    return
-                payload.pop(TURN_LIFECYCLE_ADMISSION_KEY, None)
-                lifecycle_admission.release()
-
-            task.add_done_callback(release_unclaimed_admission)
         if isinstance(session_id, str) and session_id:
             self.in_flight[session_id] = Turn(
                 task=task,
