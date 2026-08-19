@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -356,15 +357,60 @@ def test_the_window_directory_is_durable_before_the_backup_counts(monkeypatch, t
     # Creating the backup directory also adds an entry to its parent. A crash
     # that keeps the upgraded database but loses that entry leaves no rollback
     # point at all, with every fsync this code makes having succeeded.
+    #
+    # Every attempt syncs, not only the one that created the directory: a
+    # directory whose own entry never reached the disk is indistinguishable from
+    # a durable one, so an attempt that finds the root already there has learned
+    # nothing about it. Skipping the sync then propagates the first attempt's
+    # failure through every later attempt, for as long as the window lives.
     synced: list[Path] = []
     monkeypatch.setattr(backups, "_fsync_directory", lambda path: synced.append(Path(path)))
     db_path = tmp_path / "state" / "vibe.sqlite"
     db_path.parent.mkdir()
     _stamp(db_path, "20260806_0047")
 
+    for _attempt in range(2):
+        synced.clear()
+        create_sqlite_migration_backup(db_path)
+        assert db_path.parent in synced
+
+
+def test_backup_files_are_flushed_through_write_capable_handles(monkeypatch, tmp_path: Path) -> None:
+    # `os.fsync` is not a read-only operation everywhere: on Windows it reaches
+    # `FlushFileBuffers`, which refuses a handle opened without write access. A
+    # read-only descriptor therefore turns every pre-migration backup on that
+    # platform into a failed schema upgrade -- the flush is here to make an
+    # upgrade safe, so it must not be the thing that stops one. Stated over
+    # whatever this code flushes rather than over the call sites it has today.
+    #
+    # Directories are excluded because they are the opposite case: POSIX refuses
+    # to open one for writing, and Windows refuses to open one at all.
+    opened: dict[int, tuple[bool, int]] = {}
+    flushed: list[tuple[bool, int]] = []
+    real_open = os.open
+    real_fsync = os.fsync
+
+    def recording_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        opened[fd] = (Path(path).is_dir(), flags)
+        return fd
+
+    def recording_fsync(fd):
+        if fd in opened:
+            flushed.append(opened[fd])
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    db_path.parent.mkdir()
+    _stamp(db_path, "20260806_0047")
+
     create_sqlite_migration_backup(db_path)
 
-    assert db_path.parent in synced
+    file_flushes = [flags for is_dir, flags in flushed if not is_dir]
+    assert file_flushes
+    assert all(flags & (os.O_WRONLY | os.O_RDWR) for flags in file_flushes)
 
 
 def test_a_fresh_rollback_point_outlives_copies_dated_after_it(tmp_path: Path) -> None:

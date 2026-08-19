@@ -224,9 +224,15 @@ def _fsync_file(path: Path) -> None:
     A failure here is never tolerable: it says the copy may not survive the
     crash it was made for, and raising is what stops the caller from deleting
     the copies it was meant to replace.
+
+    The descriptor is opened for writing because on Windows `os.fsync` reaches
+    `FlushFileBuffers`, which refuses a handle without write access. A
+    read-only descriptor would turn every pre-migration backup on that platform
+    into a failed schema upgrade -- the flush is here to make an upgrade safe,
+    so it must not be the thing that stops one.
     """
 
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, os.O_RDWR)
     try:
         os.fsync(fd)
     finally:
@@ -334,12 +340,15 @@ def create_sqlite_migration_backup(
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
-    if not target_root.exists():
-        target_root.mkdir(parents=True, exist_ok=True)
-        # The entry for the window itself has to be on the disk before anything
-        # in it counts as durable; a crash that keeps the upgrade but loses this
-        # directory leaves no rollback point at all.
-        _fsync_directory(target_root.parent)
+    target_root.mkdir(parents=True, exist_ok=True)
+    # The entry for the window itself has to be on the disk before anything in
+    # it counts as durable; a crash that keeps the upgrade but loses this
+    # directory leaves no rollback point at all. Unconditionally, because the
+    # attempt that created the directory is also the attempt whose sync can
+    # fail: it leaves a root that exists without a durable entry, and every
+    # later attempt that treated an existing root as a synced one would inherit
+    # that silently, for as long as the window lives.
+    _fsync_directory(target_root.parent)
 
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
