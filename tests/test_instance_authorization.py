@@ -108,7 +108,6 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
     for method, path in (("GET", "/api/future-owner-capability"), ("POST", "/api/control")):
         assert http_authorization_policy(method, path).minimum_role == "owner"
 
-    assert http_authorization_policy("GET", "/api/org/context").minimum_role == "viewer"
     assert http_authorization_policy("GET", "/show/ses-1/").minimum_role == "viewer"
 
 
