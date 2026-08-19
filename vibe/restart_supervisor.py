@@ -90,12 +90,16 @@ def _prune_restart_logs(limit: int = _RESTART_LOG_RETENTION) -> None:
 def _write_status(payload: dict) -> None:
     status = {**payload, "updated_at": _now_iso()}
     if status.get("ok") is False:
-        # A failed restart leaves the instance up or down depending on which
-        # stage failed -- the spawn path never stops anything, the stop-failure
-        # paths leave the old service serving, the start paths leave nothing.
-        # Only this moment can tell the difference, so measure it here instead of
-        # leaving a reader to guess later from a record with no such state in it.
-        status["service_alive"] = runtime.service_process_running()
+        # A failed restart leaves the instance with a working service or without
+        # one depending on which stage failed -- the spawn path never stops
+        # anything, the stop-failure paths leave the old service serving, the
+        # start paths leave nothing. Only this moment can tell the difference, so
+        # measure it here instead of leaving a reader to guess later from a record
+        # with no such state in it. The half-started child this job may have just
+        # left behind is not a service, which is why this asks for a lock-verified
+        # one; the `service pid did not acquire the service lock` failure is that
+        # case exactly, and it is downtime.
+        status["service_alive"] = runtime.verified_service_running()
     path = runtime.get_restart_status_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_json(path, status)

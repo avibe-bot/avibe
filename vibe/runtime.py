@@ -762,6 +762,24 @@ def service_process_running() -> bool:
     return resolve_service_owner_pid(include_starting=False) is not None or bool(extra_service_process_pids())
 
 
+def verified_service_running() -> bool:
+    """Report whether a service holding the service lock is running.
+
+    ``service_process_running`` answers a different question -- whether anything at
+    all occupies this data dir -- and ``start_service`` is right to ask that one,
+    because a half-started child must still block a second start. Deciding whether
+    the instance has a working service needs the narrower fact: a process that
+    reserved the pid and never acquired the lock is not a service, it is a failed
+    start, and a restart record describing that failure must not be demoted to
+    history because the wreckage is still running.
+
+    Cheap by construction. The lock file and pidfile answer this between them, so
+    unlike the broader probe it never scans the process table.
+    """
+
+    return resolve_service_owner_pid(include_starting=False) is not None
+
+
 def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERVICE_SLOW_START_TIMEOUT_SECONDS) -> bool:
     try:
         pidfile_mtime = pid_path.stat().st_mtime
@@ -1123,20 +1141,19 @@ def _retire_failed_restart_status() -> None:
     string, and callers copy it: ``/api/ui/reload`` carries the previous state
     forward while it replaces the UI process, so a service that died between the
     supervisor's status write and its liveness check would have its failure
-    record erased by a UI restart. Ask ``service_process_running`` instead -- the
-    state is only the cheap filter that decides whether asking is worth a probe.
+    record erased by a UI restart. Ask instead -- the state is only the cheap
+    filter that decides whether asking is worth it.
 
     Only a recorded failure is retired. A restart in progress carries
     ``ok: None`` and is left alone, because it has not reported an outcome yet
     and the supervisor writes the running status before it decides the job
     succeeded; anything else -- absent, succeeded, or too corrupt to read as a
-    record -- was never the claim being ended, and this runs inside the status
-    chokepoint, so it must not turn a damaged file into a failed status write.
+    record -- was never the claim being ended.
     """
 
     path = get_restart_status_path()
     payload = read_json(path)
-    if isinstance(payload, dict) and payload.get("ok") is False and service_process_running():
+    if isinstance(payload, dict) and payload.get("ok") is False and verified_service_running():
         path.unlink(missing_ok=True)
 
 
@@ -1168,7 +1185,16 @@ def write_status(state, detail=None, service_pid=None, ui_pid=None):
         payload["started_at"] = started_at
     write_json(paths.get_runtime_status_path(), payload)
     if state == "running":
-        _retire_failed_restart_status()
+        # Retiring the marker is cleanup, and this is the write every start path
+        # reaches. An unreadable record, or one that cannot be unlinked because of
+        # ownership, a file attribute, or a Windows lock, must not report the
+        # service that just came up as having failed to start. Leaving the marker
+        # is survivable -- doctor keeps reporting it, and the next successful start
+        # tries again -- so log it and let the status write stand.
+        try:
+            _retire_failed_restart_status()
+        except OSError:
+            logger.warning("Could not retire the recorded restart failure", exc_info=True)
 
 
 def read_status():

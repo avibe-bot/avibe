@@ -12,19 +12,6 @@ from vibe import restart_supervisor
 from vibe import runtime
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_service_liveness(monkeypatch):
-    """Answer the liveness probe from the fixture, never from the real machine.
-
-    Recording a restart failure asks whether a service survived it, and the honest
-    answer costs a full process-table scan (~1s) of whatever the developer happens
-    to be running. Default it to "nothing alive", which is what a tmp_path AVIBE_HOME
-    describes; tests that care about the other answer set it themselves.
-    """
-
-    monkeypatch.setattr(runtime, "service_process_running", lambda: False)
-
-
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
@@ -183,17 +170,22 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
     ids=["failed", "in-flight", "succeeded"],
 )
 def test_a_recorded_failure_carries_what_was_alive_when_it_was_written(monkeypatch, tmp_path, outcome, alive):
-    """Only a failure records liveness, and it records what was actually there.
+    """Only a failure records liveness, and it records a lock-verified service.
 
     Whether a failed restart left the instance down depends on which stage failed,
     and only the moment of failure can tell -- a later reader sees the same empty
     machine whether the restart killed the service or the user stopped it. The
     other outcomes make no downtime claim, so they carry no such observation.
+
+    The down case is stated as the wreckage a failed restart actually leaves: a
+    stray process and no lock owner. Anything reading occupancy rather than the
+    lock would call that alive and erase the failure it just recorded.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
-    monkeypatch.setattr(restart_supervisor.runtime, "service_process_running", lambda: alive)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 4321 if alive else None)
+    monkeypatch.setattr(runtime, "extra_service_process_pids", lambda *_a, **_kw: [] if alive else [7777])
 
     restart_supervisor._write_status({"job_id": "job-1", **outcome})
 

@@ -1210,37 +1210,38 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
         return items
 
-    # A recorded failure explains the current downtime only when no service has
-    # been alive since it was written, which takes an observation at both ends.
-    # At the near end the supervisor records `service_alive`, because a failed
-    # restart leaves the instance up or down depending on which stage failed and
-    # only that moment can tell: the spawn path never stops anything, so the old
-    # service is still serving and this record never described downtime at all.
-    # At the far end a service observed alive retires the record outright (see
-    # `runtime._retire_failed_restart_status`), so a surviving record means
-    # nothing has come up since -- the instance never recovered, rather than
-    # having been stopped deliberately some time later. Records written before
-    # `service_alive` existed carry no such claim and keep the old reading.
+    # A recorded failure explains the current downtime only when no working
+    # service has existed since it was written, which takes an observation at both
+    # ends. At the near end the supervisor records `service_alive`, because a
+    # failed restart can leave the old service untouched and serving -- the spawn
+    # path never stops anything -- and only that moment can tell. At the far end a
+    # service seen running retires the record outright (see
+    # `runtime._retire_failed_restart_status`), so a surviving record means nothing
+    # has come up since: the instance never recovered, rather than having been
+    # stopped deliberately some time later. Records written before `service_alive`
+    # existed carry no such claim and keep the old reading.
     #
     # This has to be read before the staleness branch below, because terminal
     # metadata goes stale after DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that
     # branch offers a repair that deletes the marker -- on a still-down instance,
     # the reason it is down.
     #
-    # `service_process_running` is the question being asked, so it is the probe
-    # used rather than a liveness rule reassembled here. Both halves of it
-    # matter: a pid reserved by a process that never took the lock is not a
-    # recovery, and a surviving lockless daemon is not downtime -- `start_service`
-    # refuses that one with ServiceAlreadyRunningError, so recommending `vibe
-    # start` there would send the user into a wall. `_service_lifecycle_items`
-    # already owns that state, so this record falls through to history and lets
-    # the lifecycle items report it.
-    if payload.get("ok") is False and payload.get("service_alive") is not True and not runtime.service_process_running():
+    # All three of those observations ask `verified_service_running`, never the
+    # broader `service_process_running`. The broad one reports whatever occupies
+    # this data dir, which is the right question for refusing a second start and
+    # the wrong one here: a pid reserved by a process that never acquired the lock
+    # is the wreckage of a failed start, not a recovery, and reading it as one
+    # would suppress the very failure it came from. What that leaves is a stray
+    # process the user is told to `vibe start` past; `_service_lifecycle_items`
+    # owns detecting it and already reports it with its own repair, so the action
+    # below points there rather than reassembling the scan here.
+    if payload.get("ok") is False and payload.get("service_alive") is not True and not runtime.verified_service_running():
         _add_doctor_item(
             items,
             "fail",
             f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
-            "Run `vibe start` to bring the service back up, then read the restart log named above for the cause.",
+            "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
+            "service already running, apply the extra-service-process repair listed in this report first.",
             code="runtime.restart_failed",
         )
         return items

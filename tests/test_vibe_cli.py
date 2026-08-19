@@ -200,7 +200,7 @@ def test_an_observed_live_service_retires_only_a_recorded_restart_failure(tmp_pa
     """
 
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
-    monkeypatch.setattr(runtime, "service_process_running", lambda: alive)
+    monkeypatch.setattr(runtime, "verified_service_running", lambda: alive)
     runtime.ensure_dirs()
     restart_path = runtime.get_restart_status_path()
     payload = {"ok": ok, "state": "failed" if ok is False else "succeeded", "job_id": "job-1"}
@@ -223,7 +223,7 @@ def test_a_copied_running_state_does_not_retire_a_failure(tmp_path, monkeypatch)
     """
 
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
-    monkeypatch.setattr(runtime, "service_process_running", lambda: False)
+    monkeypatch.setattr(runtime, "verified_service_running", lambda: False)
     runtime.ensure_dirs()
     restart_path = runtime.get_restart_status_path()
     runtime.write_json(restart_path, {"ok": False, "state": "failed", "job_id": "job-1"})
@@ -238,13 +238,39 @@ def test_write_status_survives_an_unreadable_restart_record(tmp_path, monkeypatc
     """Retirement runs inside the status chokepoint, so it cannot fail a write."""
 
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
-    monkeypatch.setattr(runtime, "service_process_running", lambda: True)
+    monkeypatch.setattr(runtime, "verified_service_running", lambda: True)
     runtime.ensure_dirs()
     runtime.get_restart_status_path().write_text("[not a record]", encoding="utf-8")
 
     runtime.write_status("running", detail="pid=123")
 
     assert runtime.read_status()["state"] == "running"
+
+
+def test_write_status_survives_a_restart_record_that_cannot_be_removed(tmp_path, monkeypatch):
+    """A marker that will not delete must not fail the service that just started.
+
+    Ownership, a file attribute, or a Windows lock can all refuse the unlink, and
+    this is the write every start path reaches -- so the cleanup is best-effort and
+    the marker simply stays, to be retired by the next successful start.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    monkeypatch.setattr(runtime, "verified_service_running", lambda: True)
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    payload = {"ok": False, "state": "failed", "job_id": "job-1"}
+    runtime.write_json(restart_path, payload)
+
+    def refuse_unlink(*_args, **_kwargs):
+        raise PermissionError("restart marker is locked")
+
+    monkeypatch.setattr(type(restart_path), "unlink", refuse_unlink)
+
+    runtime.write_status("running", detail="pid=123")
+
+    assert runtime.read_status()["state"] == "running"
+    assert runtime.read_json(restart_path) == payload
 
 
 def test_render_status_includes_restart_status(tmp_path, monkeypatch):
@@ -1442,11 +1468,13 @@ def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
 
 
 def _stub_service_liveness(monkeypatch, *, owner_pid=None, starting_pid=None, extra_pids=()):
-    """Pin the two probes ``runtime.service_process_running`` reads.
+    """Describe a machine state, and let the real predicates read it.
 
-    Stubbing that predicate itself would only assert which helper doctor calls.
-    Stubbing what it reads describes a machine state instead, and asserts the
-    verdict the real predicate produces for it.
+    Stubbing ``verified_service_running`` itself would only assert which helper
+    doctor calls. These are the sources underneath it and underneath the broader
+    ``service_process_running``, so a test can name a machine state -- a lock
+    owner, a pid that only reserved itself, a stray process -- and assert the
+    verdict the real predicates produce for it.
     """
 
     reserved = owner_pid if starting_pid is None else starting_pid
@@ -1492,17 +1520,28 @@ def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatc
     [
         ({}, "fail"),
         ({"starting_pid": 5555}, "fail"),
+        ({"extra_pids": (7777,)}, "fail"),
+        ({"starting_pid": 5555, "extra_pids": (5555,)}, "fail"),
         ({"owner_pid": 4321}, "warn"),
-        ({"extra_pids": (7777,)}, "warn"),
+        ({"owner_pid": 4321, "extra_pids": (7777,)}, "warn"),
     ],
-    ids=["nothing-running", "pid-never-took-the-lock", "lock-owner", "lockless-survivor"],
+    ids=[
+        "nothing-running",
+        "pid-reserved-but-never-locked",
+        "stray-process-holding-no-lock",
+        "half-started-child-both-reserved-and-scanned",
+        "lock-owner",
+        "lock-owner-beside-a-stray-process",
+    ],
 )
-def test_recorded_restart_failure_is_a_doctor_failure_exactly_while_nothing_runs(monkeypatch, liveness, expected):
-    """One record, every liveness shape: down is a failure, up is clearable history.
+def test_a_restart_failure_is_downtime_until_a_lock_verified_service_exists(monkeypatch, liveness, expected):
+    """One record against every liveness shape: only the service lock ends downtime.
 
-    A pid reserved by a process that never took the lock is still downtime, and a
-    lockless survivor is not -- `vibe start` refuses that one, so telling the user
-    to run it would be wrong. `_service_lifecycle_items` owns reporting it.
+    The shapes that are not a lock owner are the wreckage a failed restart leaves:
+    a pid that reserved itself and never acquired the lock, a stray process the
+    scan can see, or one child that is both. Reading any of them as a running
+    service would suppress the very failure that produced it, so each stays a
+    failure until something actually holds the lock.
     """
 
     _seed_restart_status(
