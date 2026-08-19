@@ -14,6 +14,7 @@ properties through the CLI with the full history fetched.
 from __future__ import annotations
 
 import inspect
+import json
 import sqlite3
 from pathlib import Path
 
@@ -457,7 +458,7 @@ def test_the_real_graph_is_wholly_comparable():
 @pytest.mark.parametrize(("problems", "expected_exit"), [([], 0), (["a released revision was rechained"], 1)])
 def test_the_command_line_exit_code_follows_the_verdict(monkeypatch, capsys, problems, expected_exit):
     """The CLI is how a developer runs this outside CI, so its wiring is part of the guard."""
-    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems, []))
+    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems))
 
     assert guard.main([]) == expected_exit
     for problem in problems:
@@ -546,7 +547,56 @@ def test_no_tag_the_publisher_can_build_falls_outside_the_guard():
         assert tag in covered or guard.versions_tree(tag) is None, tag
 
 
-def test_every_table_the_schema_accepts_a_row_for_gets_one(tmp_path):
+@pytest.mark.parametrize(
+    ("gap", "short", "expected"),
+    [
+        (None, {}, []),
+        (None, {"messages": "0 of 2 rows; CHECK constraint failed: ck_messages_type"}, ["could not seed messages"]),
+        ("1 table(s) missing: scopes", {}, ["upgrade left the database not ready"]),
+    ],
+    ids=["reaches-head-over-rows", "a-table-it-could-not-seed", "a-schema-that-came-out-short"],
+)
+def test_a_release_the_property_could_not_cover_is_reported_as_a_failure(monkeypatch, gap, short, expected):
+    """Coverage the run did not reach is a violation, not a note printed beside them.
+
+    A note blocks nothing, so a guard that downgrades its own gaps into notes goes on
+    reporting success over the part of its subject it never touched. That is the same
+    failure as passing over a release that fell outside the window, and it is worse for
+    being visible: the run says both "passed" and "did not look", and only one is read.
+    """
+    monkeypatch.setattr(guard, "released_graphs", lambda: ["v9.9.9"])
+    monkeypatch.setattr(guard, "schema_gap_after_upgrade", lambda tag: (gap, short))
+
+    reasons = guard.unrepairable_releases().get("v9.9.9", [])
+
+    assert len(reasons) == len(expected)
+    assert all(fragment in reason for reason, fragment in zip(reasons, expected))
+
+
+@requires_release_history
+def test_every_release_that_wrote_a_database_is_inside_the_upgrade_window():
+    """The upgrade property's window is an equation about releases, so it is checked as one.
+
+    ``released_tags`` reads "shipped no versions directory" as "left no migrated database
+    in the field". That is true today because state and the graph arrived together --
+    everything before ``storage/`` persisted JSON, which is why ``storage/importer.py``
+    still carries an importer for it rather than a migration -- but it is an equation, and
+    a release breaking it would leave a database no property here builds while every
+    property here goes on passing. Falling out of a window is the failure with no symptom.
+
+    The second assertion is what keeps the first from being a tautology: the denominator is
+    every tag the publisher can build, which is strictly larger than the tags carrying a
+    graph. Read off the graph-carrying set instead, the property could never be violated
+    and the test would pass forever.
+    """
+    universe = guard.release_tag_names()
+    graphed = guard.released_tags()
+
+    assert guard.releases_with_state_but_no_graph() == []
+    assert set(graphed) < set(universe)
+
+
+def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
     """An upgrade proved on an empty database is proved against the one case no user is in.
 
     Empty is where adding a NOT NULL column, tightening a nullable one, and building a
@@ -554,19 +604,28 @@ def test_every_table_the_schema_accepts_a_row_for_gets_one(tmp_path):
     that cannot survive real data still passes.
 
     The claim is a pair, the way the released-revision checks are: a table either carries
-    a row or is named in what the seeder returns. Asserting only that some tables were
-    seeded would pass a seeder that gave up on the awkward ones quietly, and quietly
-    giving up on the awkward ones is the failure that reads most like success.
+    its rows or is named in what the seeder returns, with the schema's own objection.
+    Asserting only that some tables were seeded would pass a seeder that gave up on the
+    awkward ones quietly, and quietly giving up on the awkward ones is the failure that
+    reads most like success.
     """
     db_path = tmp_path / "vibe.sqlite"
     connection = sqlite3.connect(db_path)
     try:
-        connection.execute('create table plain (id text primary key, name text not null)')
+        connection.execute("create table plain (id text primary key, name text not null)")
         connection.execute(
             "create table enumerated (id text primary key, state text not null "
             "constraint ck_enumerated_state check (state in ('waiting', 'active')))"
         )
         connection.execute("create table defaulted (id integer primary key, note text default 'n')")
+        connection.execute(
+            "create table shaped (id text primary key, doc text not null "
+            "constraint ck_shaped_doc check (json_valid(doc) = 1 "
+            "and json_extract(doc, '$.version') = 1 "
+            "and json_type(doc, '$.events') = 'array'))"
+        )
+        connection.execute("create table constrained (id text primary key, slug text not null)")
+        connection.execute("create unique index ux_constrained_slug on constrained (slug)")
         connection.execute(
             "create table impossible (id text primary key, shape text not null "
             "constraint ck_impossible_shape check (shape in ('a', 'b') and shape in ('c', 'd')))"
@@ -575,7 +634,7 @@ def test_every_table_the_schema_accepts_a_row_for_gets_one(tmp_path):
     finally:
         connection.close()
 
-    refused = guard.seed_representative_rows(db_path)
+    short = guard.seed_representative_rows(db_path)
 
     connection = sqlite3.connect(db_path)
     try:
@@ -584,13 +643,23 @@ def test_every_table_the_schema_accepts_a_row_for_gets_one(tmp_path):
             for (name,) in connection.execute("select name from sqlite_master where type = 'table'")
         }
         state = connection.execute("select state from enumerated").fetchone()[0]
+        doc = connection.execute("select doc from shaped").fetchone()[0]
+        slugs = [row[0] for row in connection.execute("select slug from constrained")]
+        names = [row[0] for row in connection.execute("select name from plain")]
     finally:
         connection.close()
 
-    assert refused == {table for table, count in counted.items() if count == 0}
-    assert refused == {"impossible"}
-    # The value came from the constraint that rejected the first one, not from a guess.
+    assert set(short) == {table for table, count in counted.items() if count < guard.SEED_ROWS}
+    assert set(short) == {"impossible"}
+    assert "ck_impossible_shape" in short["impossible"]
+    # Every repair came from the constraint that rejected the row before it, not from a guess.
     assert state in {"waiting", "active"}
+    assert json.loads(doc) == {"version": 1, "events": []}
+    # The two rows differ exactly where the schema already demands it and nowhere else, so a
+    # migration adding a unique index over an unconstrained column meets the duplicates a
+    # released database is free to hold.
+    assert len(set(slugs)) == len(slugs) == guard.SEED_ROWS
+    assert len(set(names)) == 1
 
 
 @requires_release_history
@@ -619,10 +688,10 @@ def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch
         return upgrade(db_path)
 
     monkeypatch.setattr(guard, "run_migrations", counting)
-    _, unseeded = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
+    _, short = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
 
     assert observed
-    assert {table for table, count in observed.items() if count == 0} == unseeded
+    assert {table for table, count in observed.items() if count < guard.SEED_ROWS} == set(short)
 
 
 @requires_release_history
@@ -658,7 +727,7 @@ def test_every_released_database_still_reaches_head():
     replaying the current chain from empty, which produces the schema the current graph
     intends rather than the schema a release actually left behind.
     """
-    assert guard.unrepairable_releases()[0] == {}
+    assert guard.unrepairable_releases() == {}
 
 
 @requires_release_history
