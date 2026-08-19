@@ -16,8 +16,13 @@ during autogenerate, so today's runtime can drive an older ``version_locations``
                                   the property below derives from something measured
     new_slot_collisions()         a change introduces no new duplicated slot number
     rechained_revisions()         a released revision keeps its identity and its parent
-    unrepairable_releases()       a database built by a released graph still reaches the
-                                  full schema when today's graph upgrades it
+    unrepairable_releases()       a database built by a released graph still comes out
+                                  ready when the upgrade users run upgrades it
+
+Readiness is not this module's opinion. The last property drives ``run_migrations`` and
+asks ``background_tables_ready``, so it covers the repair and stamping that run before
+Alembic does, and it means by "ready" exactly what production means -- required columns
+included, not merely a full set of table names.
 
 The first three are metadata only. The fourth builds a database per release and costs
 roughly a fifth of a second each.
@@ -46,7 +51,14 @@ if str(REPO_ROOT) not in sys.path:
 from alembic import command
 from alembic.config import Config
 
-from storage.migrations import HEAD_TABLES, alembic_dir
+from storage.migrations import (
+    HEAD_ONLY_REQUIRED_COLUMNS,
+    HEAD_REQUIRED_COLUMNS,
+    HEAD_TABLES,
+    alembic_dir,
+    background_tables_ready,
+    run_migrations,
+)
 
 VERSIONS_PATH = "storage/alembic/versions"
 
@@ -159,23 +171,54 @@ def slot_collisions(filenames: Iterable[str]) -> dict[str, set[str]]:
 
 
 def new_slot_collisions(baseline: str | None = None) -> dict[str, set[str]]:
-    """Slots that collide now and did not collide in the baseline release.
+    """Slots with a claimant the baseline release did not already ship.
 
     The collisions history already contains are in the baseline itself, so they need no
-    allowlist -- and cannot decay into one that outlives the reason it was written.
+    allowlist -- and cannot decay into one that outlives the reason it was written. What
+    the baseline excuses is those exact filenames, though, not the slot number: excusing
+    the number would let a third claimant join an already-duplicated slot unreported,
+    which is the same fork the guard exists to catch.
     """
     baseline = baseline or latest_released_tag()
     shipped = slot_collisions(released_sources(baseline))
-    return {slot: names for slot, names in slot_collisions(working_tree_sources()).items() if slot not in shipped}
+    return {
+        slot: names
+        for slot, names in slot_collisions(working_tree_sources()).items()
+        if names - shipped.get(slot, set())
+    }
+
+
+class _ComputedMetadata:
+    """A ``revision`` or ``down_revision`` the guard could not read as a literal.
+
+    Never equal to anything, including another instance of itself. Two computed
+    expressions are not evidence that a graph is unchanged, they are the absence of
+    evidence, and a sentinel that compared equal would turn "cannot verify" into
+    "verified unchanged" -- silently, and precisely for the revisions least able to
+    afford it.
+    """
+
+    __slots__ = ()
+    __hash__ = object.__hash__
+
+    def __repr__(self) -> str:
+        return "<computed>"
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+
+COMPUTED = _ComputedMetadata()
 
 
 def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, object]]:
     """``{revision: (filename, down_revision)}``, parsed rather than imported.
 
     Parsing keeps this free of import side effects and lets it read a revision from a
-    release whose modules would no longer import against today's code. A revision that
-    computes either value instead of assigning a literal reads as ``"<computed>"``, which
-    compares unequal to itself and so is reported rather than skipped.
+    release whose modules would no longer import against today's code. A computed value
+    becomes ``COMPUTED``, which compares unequal to everything; a computed *revision*
+    additionally cannot identify its file, so it is keyed by filename and can never be
+    mistaken for a literal revision that happens to render the same way.
     """
     graph: dict[str, tuple[str, object]] = {}
     for name, source in sources.items():
@@ -188,10 +231,22 @@ def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, object]]:
                 try:
                     assigned[target.id] = ast.literal_eval(node.value)
                 except ValueError:
-                    assigned[target.id] = "<computed>"
-        if "revision" in assigned:
-            graph[str(assigned["revision"])] = (name, assigned.get("down_revision"))
+                    assigned[target.id] = COMPUTED
+        if "revision" not in assigned:
+            continue
+        revision = assigned["revision"]
+        key = f"<computed:{name}>" if revision is COMPUTED else str(revision)
+        graph[key] = (name, assigned.get("down_revision"))
     return graph
+
+
+def unverifiable_sources(sources: dict[str, str]) -> list[str]:
+    """Filenames whose revision metadata is computed, and so cannot be compared at all."""
+    return sorted(
+        name
+        for key, (name, down_revision) in revision_graph(sources).items()
+        if down_revision is COMPUTED or key.startswith("<computed:")
+    )
 
 
 def rechained_revisions(baseline: str | None = None) -> list[str]:
@@ -204,11 +259,17 @@ def rechained_revisions(baseline: str | None = None) -> list[str]:
     the graph that replaced it.
     """
     baseline = baseline or latest_released_tag()
-    current = revision_graph(working_tree_sources())
-    problems = []
+    working_tree = working_tree_sources()
+    current = revision_graph(working_tree)
+    problems = [
+        f"{name} computes its migration metadata, so the guard cannot hold it to {baseline}"
+        for name in unverifiable_sources(working_tree)
+    ]
     for revision, (name, down_revision) in sorted(revision_graph(released_sources(baseline)).items()):
         if revision not in current:
             problems.append(f"{revision} ({name}) shipped in {baseline} and is no longer in the graph")
+        elif current[revision][1] is COMPUTED:
+            continue  # already reported above, and reporting it twice describes one defect as two
         elif current[revision][1] != down_revision:
             problems.append(
                 f"{revision} ({name}) shipped in {baseline} with down_revision={down_revision!r} "
@@ -239,10 +300,10 @@ def table_names(db_path: Path) -> set[str]:
 
 
 def fresh_install_tables() -> set[str]:
-    """The tables a database has after today's graph builds it from empty."""
+    """The tables a fresh install actually has, built the way production builds one."""
     with tempfile.TemporaryDirectory() as workspace:
         db_path = Path(workspace) / "vibe.sqlite"
-        command.upgrade(_alembic_config(db_path), "head")
+        run_migrations(db_path)
         return table_names(db_path) - {ALEMBIC_BOOKKEEPING_TABLE}
 
 
@@ -257,12 +318,45 @@ def stamped_revision(db_path: Path) -> str | None:
     return str(rows[0][0]) if len(rows) == 1 else None
 
 
-def missing_tables_after_upgrade(tag: str) -> set[str]:
-    """Tables still absent after a database built by ``tag``'s graph is upgraded by today's.
+def describe_schema_gap(db_path: Path) -> str:
+    """Why ``background_tables_ready`` rejected this database, in one line.
 
-    Whatever Alembic raises when the upgrade itself aborts propagates: a crash and a
-    silently incomplete schema are the same failure of the same property, and the caller
-    records them the same way.
+    The verdict is production's; this only reads the same tables and columns back to say
+    what is missing, because "not ready" alone does not tell anyone what to fix.
+    """
+    tables = table_names(db_path)
+    missing_tables = HEAD_TABLES - tables
+    missing_columns = []
+    connection = sqlite3.connect(db_path)
+    try:
+        for table, required in sorted((HEAD_REQUIRED_COLUMNS | HEAD_ONLY_REQUIRED_COLUMNS).items()):
+            if table in missing_tables or table not in tables:
+                continue
+            present = {str(row[1]) for row in connection.execute(f'pragma table_info("{table}")')}
+            missing_columns.extend(f"{table}.{column}" for column in sorted(required - present))
+    finally:
+        connection.close()
+
+    parts = []
+    if missing_tables:
+        parts.append(f"{len(missing_tables)} table(s) missing: {', '.join(sorted(missing_tables))}")
+    if missing_columns:
+        parts.append(f"{len(missing_columns)} column(s) missing: {', '.join(missing_columns)}")
+    return "; ".join(parts) or "the schema is incomplete in a way HEAD_TABLES and the required columns do not name"
+
+
+def schema_gap_after_upgrade(tag: str) -> str | None:
+    """Why a database built by ``tag``'s graph is not ready after today's upgrade, or ``None``.
+
+    The second stage runs ``storage.migrations.run_migrations`` rather than Alembic
+    directly, and the verdict comes from ``background_tables_ready``. Both are deliberate:
+    the property is about the databases users actually carry through the upgrade users
+    actually run, so a regression in the pre-Alembic repair or stamping path has to fail
+    here too, and readiness has to mean what production means by it -- required columns
+    included, not merely a full set of table names.
+
+    Whatever the upgrade raises when it aborts propagates: a crash and a silently
+    incomplete schema are the same failure of the same property.
     """
     with tempfile.TemporaryDirectory() as workspace:
         root = Path(workspace)
@@ -281,8 +375,8 @@ def missing_tables_after_upgrade(tag: str) -> set[str]:
                 f"one of its revisions; the released graph was not applied"
             )
 
-        command.upgrade(_alembic_config(db_path), "head")
-        return HEAD_TABLES - table_names(db_path)
+        run_migrations(db_path)
+        return None if background_tables_ready(db_path) else describe_schema_gap(db_path)
 
 
 def unrepairable_releases() -> dict[str, str]:
@@ -290,12 +384,12 @@ def unrepairable_releases() -> dict[str, str]:
     failures = {}
     for tag in released_tags():
         try:
-            missing = missing_tables_after_upgrade(tag)
+            gap = schema_gap_after_upgrade(tag)
         except Exception as exc:  # noqa: BLE001 - however the upgrade fails, the verdict is the same
             failures[tag] = f"upgrade aborted with {type(exc).__name__}: {str(exc).splitlines()[0]}"
         else:
-            if missing:
-                failures[tag] = f"upgrade left {len(missing)} table(s) missing: {', '.join(sorted(missing))}"
+            if gap is not None:
+                failures[tag] = f"upgrade left the database not ready: {gap}"
     return failures
 
 

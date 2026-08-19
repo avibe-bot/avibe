@@ -13,9 +13,12 @@ properties through the CLI with the full history fetched.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from scripts import migration_release_guard as guard
+from storage.migrations import background_tables_ready
 
 pytestmark = pytest.mark.no_sqlite_template
 
@@ -124,15 +127,50 @@ def test_a_slot_the_baseline_already_shared_is_not_reported(monkeypatch):
     assert guard.new_slot_collisions("v0.0.0") == {}
 
 
-def test_a_computed_revision_identifier_is_not_silently_skipped(monkeypatch):
-    """A revision that computes its parent cannot be compared, so it must not read as equal."""
-    current = dict(SHIPPED_GRAPH)
-    current["20260102_0002_linear.py"] = '"""a migration"""\n\nrevision = "20260102_0002"\ndown_revision = ROOT\n'
-    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+def test_a_further_claimant_to_an_already_shared_slot_is_reported(monkeypatch):
+    """What history excuses is the filenames it shipped, not the slot number forever.
+
+    Excusing the number would make an already-duplicated slot a permanent blind spot --
+    the one place a third branch could fork the graph without the guard saying anything.
+    """
+    shipped = dict(SHIPPED_GRAPH)
+    shipped["20260105_0004_second_claim.py"] = _revision_file("20260105_0004", '"20260104_0004"')
+    current = dict(shipped)
+    current["20260106_0004_third_claim.py"] = _revision_file("20260106_0004", '"20260105_0004"')
+    _graphs(monkeypatch, shipped, current)
+
+    assert guard.new_slot_collisions("v0.0.0") == {
+        "0004": {
+            "20260104_0004_merge.py",
+            "20260105_0004_second_claim.py",
+            "20260106_0004_third_claim.py",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "shipped_parent",
+    ['"20260101_0001"', "ROOT"],
+    ids=["shipped-a-literal", "shipped-a-computed-expression"],
+)
+def test_computed_revision_metadata_is_reported_rather_than_compared(monkeypatch, shipped_parent):
+    """Metadata the guard cannot read is the absence of evidence, never evidence of equality.
+
+    The second case is the one a normalized ``"<computed>"`` string got wrong: two
+    different computed expressions rendered identically and so compared equal, which read
+    as an unchanged graph precisely where nothing could be verified at all.
+    """
+    shipped = dict(SHIPPED_GRAPH)
+    shipped["20260102_0002_linear.py"] = _revision_file("20260102_0002", shipped_parent)
+    current = dict(shipped)
+    current["20260102_0002_linear.py"] = _revision_file("20260102_0002", "SOME_OTHER_CONSTANT")
+    _graphs(monkeypatch, shipped, current)
 
     problems = guard.rechained_revisions("v0.0.0")
+
     assert len(problems) == 1
-    assert "<computed>" in problems[0]
+    assert "20260102_0002_linear.py" in problems[0]
+    assert "computes its migration metadata" in problems[0]
 
 
 @pytest.mark.parametrize(("problems", "expected_exit"), [([], 0), (["a released revision was rechained"], 1)])
@@ -162,6 +200,28 @@ def test_head_tables_is_what_a_fresh_install_has():
     nobody adds it here, the upgrade property stops asking about it and goes on passing.
     """
     assert guard.fresh_install_tables() == guard.HEAD_TABLES
+
+
+def test_a_complete_set_of_tables_is_not_by_itself_a_complete_schema(tmp_path):
+    """Readiness has to mean what production means by it, columns included.
+
+    An upgrade that creates every table and omits a column leaves a database that starts
+    and then fails on the first query touching it -- indistinguishable from success to
+    anything comparing table names alone.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        for table in guard.HEAD_TABLES:
+            connection.execute(f'create table "{table}" (placeholder integer)')
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert not background_tables_ready(db_path)
+    gap = guard.describe_schema_gap(db_path)
+    assert "table(s) missing" not in gap
+    assert "column(s) missing" in gap
 
 
 @requires_release_history
@@ -201,7 +261,7 @@ def test_a_released_graph_that_applies_nothing_cannot_pass(monkeypatch):
     )
 
     with pytest.raises(guard.MigrationGuardError):
-        guard.missing_tables_after_upgrade(RELEASE_HISTORY[-1])
+        guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
 
 
 @requires_spliced_baseline
