@@ -4219,6 +4219,18 @@
       "title": "处理记录",
       "description": "查看记忆引擎的运行状态、数据更新情况，以及处理中遇到的问题。",
       "refresh": "刷新",
+      "repair": {
+        "action": "修复索引",
+        "running": "正在修复…",
+        "confirmTitle": "修复记忆索引？",
+        "confirmDescription": "修复会重新扫描 Markdown 记忆并排空待处理工作，同时保持记忆 sidecar 可用。此过程可能消耗 Embedding API 配额。",
+        "confirmLabel": "修复索引",
+        "healthResult": "修复后的健康状态",
+        "healthy": "健康",
+        "completed": "记忆索引修复完成。",
+        "completedWithWarnings": "记忆索引修复完成，但健康状态有警告。",
+        "failed": "记忆索引修复失败。"
+      },
       "runtime": {
         "title": "引擎状态",
         "help": "记忆引擎在本机后台运行，负责把你的消息整理成记忆。这里显示它当前的运行情况。",
@@ -4240,18 +4252,6 @@
         "cascade": "处理队列",
         "cascadeHelp": "消息会先进入队列，再由引擎逐条整理成记忆。这里是队列的处理进度和失败统计；可重试的失败会自动重试，永久失败不会。",
         "cascadeHelpLabel": "关于处理队列",
-        "repair": {
-          "action": "修复索引",
-          "running": "正在修复…",
-          "confirmTitle": "修复记忆索引？",
-          "confirmDescription": "修复会重新扫描 Markdown 记忆并排空待处理工作，同时保持记忆 sidecar 可用。此过程可能消耗 Embedding API 配额。",
-          "confirmLabel": "修复索引",
-          "healthResult": "修复后的健康状态",
-          "healthy": "健康",
-          "completed": "记忆索引修复完成。",
-          "completedWithWarnings": "记忆索引修复完成，但健康状态有警告。",
-          "failed": "记忆索引修复失败。"
-        },
         "recorder": "调用记录",
         "recorderHelp": "调用记录正常时会保存模型调用详情，方便排查问题；记录异常或关闭时，新的调用可能不会被记录。",
         "recorderHelpLabel": "关于调用记录",
