@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -27,6 +28,18 @@ _SQLITE_BACKUP_RE = re.compile(
 _LEGACY_SQLITE_REPAIR_RE = re.compile(
     r"^vibe-pre-(?:live-)?\d{4}(?:-release-head)?-repair-"
     r"(?P<timestamp>\d{8}T\d{6}Z)\.sqlite$"
+)
+
+# The schema move a backup was taken for: (from_revisions, to_revisions).
+_Transition = tuple[tuple[str, ...], tuple[str, ...]]
+
+# A platform or filesystem declining to sync a directory is an answer, not a
+# fault. Anything else -- ENOSPC, EIO -- means the data may not be on the disk,
+# so it must reach the caller instead of being logged and forgotten.
+_UNSUPPORTED_SYNC_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EACCES", "EPERM", "EINVAL", "EISDIR", "ENOSYS", "ENOTSUP", "EOPNOTSUPP")
+    if hasattr(errno, name)
 )
 
 
@@ -188,7 +201,11 @@ def _remove_candidate(candidate: _BackupCandidate) -> bool:
     return True
 
 
-def _keep_priority(candidates: Iterable[_BackupCandidate]) -> list[_BackupCandidate]:
+def _keep_priority(
+    candidates: Iterable[_BackupCandidate],
+    *,
+    active: _Transition | None = None,
+) -> list[_BackupCandidate]:
     """Order backups by how much a rollback would want them, best first.
 
     Retries of one unfinished migration are attempts at a single rollback point
@@ -200,6 +217,12 @@ def _keep_priority(candidates: Iterable[_BackupCandidate]) -> list[_BackupCandid
     newest-first is the wrong order here: it fills the window with the newest
     two attempts and discards the only clean one.
 
+    `active` is the migration being attempted right now, and its ends outrank
+    everything else because being newest on disk is not the same as being
+    current. A clock corrected backwards, or state carried from a machine that
+    ran ahead, leaves unrelated copies dated later; spending the window on those
+    would evict the snapshot taken before the upgrade that is failing.
+
     Backups that stand alone are their own group, so for a healthy machine --
     where each backup marks a different completed migration -- this stays the
     familiar newest-first.
@@ -209,9 +232,13 @@ def _keep_priority(candidates: Iterable[_BackupCandidate]) -> list[_BackupCandid
     for candidate in candidates:
         groups.setdefault(candidate.group_key, []).append(candidate)
 
+    def rank(group: list[_BackupCandidate]) -> tuple[bool, tuple[datetime, int, str]]:
+        is_active = active is not None and group[0].transition == active
+        return is_active, max(entry.order_key for entry in group)
+
     ranked: list[_BackupCandidate] = []
     superseded: list[_BackupCandidate] = []
-    for group in sorted(groups.values(), key=lambda item: max(entry.order_key for entry in item), reverse=True):
+    for group in sorted(groups.values(), key=rank, reverse=True):
         members = sorted(group, key=lambda item: item.order_key)
         ranked.append(members[-1])
         if len(members) > 1:
@@ -225,19 +252,16 @@ def prune_state_backups(
     *,
     json_retention: int | None = JSON_STATE_BACKUP_RETENTION,
     sqlite_retention: int | None = SQLITE_BACKUP_RETENTION,
-    protect: Path | None = None,
+    active: _Transition | None = None,
 ) -> list[Path]:
     """Keep a bounded rollback window of backups created by Avibe.
 
     Unknown files, symlinks, incomplete backups, and directories without a
     recognized manifest are intentionally left untouched.
 
-    `protect` names a backup that must survive this call. It takes the first
-    slot of its kind rather than an extra one, so the window stays bounded; it
-    exists because timestamp order is not proof of being newest. A clock
-    corrected backwards, or state moved from a machine whose clock ran ahead,
-    leaves future-dated copies that would otherwise rank above a backup taken
-    seconds ago and delete it.
+    `active` names the migration in progress, whose rollback points get the
+    slots first. Callers that are only reclaiming space leave it unset and get
+    the same order by recency.
     """
 
     limits = {
@@ -246,41 +270,53 @@ def prune_state_backups(
         if retention is not None
     }
     candidates = _managed_candidates(backups_dir)
-    protected = protect.expanduser().resolve() if protect is not None else None
     removed: list[Path] = []
     for kind, limit in limits.items():
         matching = [candidate for candidate in candidates if candidate.kind == kind]
-        ranked = _keep_priority(matching)
-        if protected is not None:
-            ranked.sort(key=lambda candidate: candidate.root != protected)
-        keep = {candidate.root for candidate in ranked[:limit]}
+        keep = {candidate.root for candidate in _keep_priority(matching, active=active)[:limit]}
         for candidate in sorted(matching, key=lambda item: item.order_key):
             if candidate.root not in keep and _remove_candidate(candidate):
                 removed.append(candidate.root)
     return removed
 
 
-def _fsync(path: Path) -> None:
-    """Push a file, or a directory's entries, to stable storage.
+def _fsync_file(path: Path) -> None:
+    """Push a file's contents to stable storage.
 
-    Syncing the directory is what makes a rename durable on POSIX, and a backup
-    is worth nothing if a crash can lose it. Windows has no equivalent and
-    refuses to open a directory at all, so a rejection here is the platform's
-    answer rather than a failure to report.
+    A failure here is never tolerable: it says the copy may not survive the
+    crash it was made for, and raising is what stops the caller from deleting
+    the copies it was meant to replace.
     """
 
-    flags = os.O_RDONLY
-    if path.is_dir():
-        flags |= getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, os.O_RDONLY)
     try:
-        fd = os.open(path, flags)
-    except OSError:
-        logger.debug("Cannot open %s to fsync it on this platform", path, exc_info=True)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Push a directory's own entries to stable storage, where that is a thing.
+
+    Syncing the directory is how a rename becomes durable on POSIX. Windows has
+    no equivalent and refuses to open a directory at all, and some filesystems
+    reject the call; those refusals are the platform answering. A storage error
+    is not an answer, so it propagates like any other.
+    """
+
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError as error:
+        if error.errno not in _UNSUPPORTED_SYNC_ERRNOS:
+            raise
+        logger.debug("Directory sync is unavailable for %s on this platform", path)
         return
     try:
         os.fsync(fd)
-    except OSError:
-        logger.debug("fsync is unavailable for %s on this platform", path, exc_info=True)
+    except OSError as error:
+        if error.errno not in _UNSUPPORTED_SYNC_ERRNOS:
+            raise
+        logger.debug("Directory sync is unavailable for %s on this filesystem", path)
     finally:
         os.close(fd)
 
@@ -321,9 +357,9 @@ def create_sqlite_migration_backup(
     of their own pruning.
 
     Owning it here also means this call is the only thing that can destroy what
-    it just produced, so it never does: the copy is on stable storage before any
-    older one is deleted, and it is named as protected rather than trusted to
-    rank newest by its own timestamp.
+    it just produced, so it never does: the copy reaches stable storage before
+    any older one is deleted, and the prune is told which migration is in
+    progress rather than left to infer it from timestamps it cannot trust.
     """
 
     source_path = db_path.expanduser().resolve()
@@ -344,7 +380,7 @@ def create_sqlite_migration_backup(
                 if check != ("ok",):
                     raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
         os.chmod(temp_db, 0o600)
-        _fsync(temp_db)
+        _fsync_file(temp_db)
         temp_db.replace(backup_db)
         manifest = {
             "schema_version": BACKUP_MANIFEST_VERSION,
@@ -357,20 +393,22 @@ def create_sqlite_migration_backup(
         }
         manifest_path = backup_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        _fsync(manifest_path)
-        _fsync(backup_dir)
-        _fsync(target_root)
+        _fsync_file(manifest_path)
+        _fsync_directory(backup_dir)
+        _fsync_directory(target_root)
     except Exception:
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
 
     # Everything above has to happen before the prune, and each for its own
-    # reason. The fsyncs make the replacement survive a crash first, so the
+    # reason. The fsyncs put the replacement on the disk first, so the
     # filesystem can never persist the deletion of durable copies while losing
-    # the one that replaced them. Being after the try means a failure while
-    # pruning cannot reach the cleanup path and delete the rollback point this
-    # call just made. And it has to follow the manifest write, because a
-    # directory without one is not yet a recognized candidate and would not
-    # count itself against the bound.
-    prune_state_backups(target_root, json_retention=None, protect=backup_dir)
+    # the one that replaced them -- and if a sync reports a storage failure, the
+    # cleanup above runs and nothing is pruned at all. Being after the try means
+    # a failure while pruning cannot reach that cleanup and delete the rollback
+    # point this call just made. And it has to follow the manifest write,
+    # because a directory without one is not yet a recognized candidate: it
+    # would neither count itself against the bound nor be found as the newest
+    # attempt at the migration now in progress.
+    prune_state_backups(target_root, json_retention=None, active=_manifest_transition(manifest))
     return backup_dir

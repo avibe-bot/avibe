@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -293,37 +294,38 @@ def test_retry_window_keeps_the_snapshot_taken_before_a_partial_upgrade(monkeypa
     assert intact, "the snapshot taken before the first partial upgrade must survive the retries"
 
 
-def test_new_backup_survives_future_dated_copies_and_outlives_them(tmp_path: Path) -> None:
+def test_future_dated_copies_do_not_outrank_the_migration_in_progress(monkeypatch, tmp_path: Path) -> None:
     # A clock corrected backwards, or state carried from a machine running
-    # ahead, leaves copies dated after the one being taken right now. Ranking by
-    # timestamp alone would call the fresh backup the oldest and delete it, and
-    # create_sqlite_migration_backup would hand back a path to nothing.
+    # ahead, leaves unrelated copies dated after everything the current
+    # migration produces. Being newest on disk is not the same as being current:
+    # ranked by timestamp those copies take the window, and both ends of the
+    # failing migration -- the clean snapshot and the latest one -- are lost to
+    # backups that have nothing to do with it.
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
-    with sqlite3.connect(db_path) as writer:
-        writer.execute("create table records (value text not null)")
-        writer.execute("insert into records values ('written today')")
+    run_migrations(db_path, revision="20260627_0025")
     backups_dir = state_dir / "backups"
     backups_dir.mkdir()
-    from_the_future = [
-        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-20990{day}01T020000Z.sqlite")
-        for day in (1, 2, 3)
-    ]
+    from_the_future = _legacy_sqlite_backup(backups_dir, "vibe-pre-0026-repair-20990101T020000Z.sqlite")
 
-    backup_dir = create_sqlite_migration_backup(
-        db_path,
-        from_revisions={"old"},
-        to_revisions={"new"},
-        now=datetime(2026, 7, 10, 3, 0, tzinfo=timezone.utc),
-    )
+    def _partially_commit_then_fail(*args, **kwargs):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("create table if not exists half_migrated (value text)")
+        raise RuntimeError("upgrade failed after committing")
 
-    assert (backup_dir / "vibe.sqlite").is_file()
-    with sqlite3.connect(backup_dir / "vibe.sqlite") as backup:
-        assert backup.execute("select value from records").fetchone() == ("written today",)
-    # Protection takes a slot in the window rather than an extra one.
-    assert len(_sqlite_backup_roots(backups_dir)) == SQLITE_BACKUP_RETENTION
-    assert sum(path.exists() for path in from_the_future) == SQLITE_BACKUP_RETENTION - 1
+    monkeypatch.setattr("storage.migrations.command.upgrade", _partially_commit_then_fail)
+
+    for _ in range(SQLITE_BACKUP_RETENTION + 1):
+        with pytest.raises(RuntimeError, match="upgrade failed after committing"):
+            run_migrations(db_path)
+
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert len(surviving) == SQLITE_BACKUP_RETENTION
+    assert from_the_future.name not in surviving, "a future timestamp is not a claim on the window"
+    assert any(
+        not _table_exists(backups_dir / name / "vibe.sqlite", "half_migrated") for name in surviving
+    ), "the snapshot from before the partial upgrade must keep its slot"
 
 
 def test_new_backup_reaches_stable_storage_before_older_ones_are_deleted(monkeypatch, tmp_path: Path) -> None:
@@ -342,9 +344,10 @@ def test_new_backup_reaches_stable_storage_before_older_ones_are_deleted(monkeyp
         _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-2026070{day}T020000Z.sqlite")
 
     journal: list[tuple[str, Path]] = []
-    real_fsync = backups._fsync
+    for name in ("_fsync_file", "_fsync_directory"):
+        real = getattr(backups, name)
+        monkeypatch.setattr(backups, name, lambda path, _real=real: (journal.append(("fsync", path)), _real(path))[1])
     real_remove = backups._remove_candidate
-    monkeypatch.setattr(backups, "_fsync", lambda path: (journal.append(("fsync", path)), real_fsync(path))[1])
     monkeypatch.setattr(
         backups,
         "_remove_candidate",
@@ -359,6 +362,37 @@ def test_new_backup_reaches_stable_storage_before_older_ones_are_deleted(monkeyp
     assert backup_dir / "manifest.json" in synced
     assert backup_dir in synced
     assert backup_dir.parent in synced
+
+
+def test_storage_failure_while_flushing_deletes_nothing(monkeypatch, tmp_path: Path) -> None:
+    # A sync that fails because the disk is full or the device errored says the
+    # new copy may not be on it. Swallowing that and pruning anyway deletes
+    # durable rollback points in exchange for one that might not exist after the
+    # next power loss -- the exact trade this window exists to refuse. A
+    # platform that has no directory sync is a different answer and stays quiet.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    with sqlite3.connect(db_path) as writer:
+        writer.execute("create table records (value text not null)")
+    backups_dir = state_dir / "backups"
+    backups_dir.mkdir()
+    existing = [
+        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-2026070{day}T020000Z.sqlite")
+        for day in (7, 8, 9)
+    ]
+
+    def _out_of_space(fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(backups.os, "fsync", _out_of_space)
+
+    with pytest.raises(OSError) as failure:
+        create_sqlite_migration_backup(db_path, now=datetime(2026, 7, 10, 3, 0, tzinfo=timezone.utc))
+
+    assert failure.value.errno == errno.ENOSPC
+    assert all(path.exists() for path in existing), "a backup that may not be durable prunes nothing"
+    assert not list(backups_dir.glob("avibe-sqlite-migration-*")), "the incomplete backup is cleaned up"
 
 
 def test_startup_keeps_json_rollbacks_when_new_snapshot_fails(monkeypatch, tmp_path: Path) -> None:
