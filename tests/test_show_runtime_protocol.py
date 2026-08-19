@@ -175,7 +175,7 @@ def test_show_runtime_request_aborts_a_response_over_the_caller_budget(monkeypat
         async def __aexit__(self, *_args):
             return None
 
-        async def aiter_bytes(self):
+        async def aiter_bytes(self, **_kwargs):
             yield b"1234"
 
     class _Client:

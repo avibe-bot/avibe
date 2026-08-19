@@ -305,7 +305,8 @@ class ShowRuntimeManager:
                         f"Show Runtime response exceeds {max_response_bytes} bytes"
                     )
                 content = bytearray()
-                async for chunk in response.aiter_bytes():
+                chunk_size = max(1, min(64 * 1024, max_response_bytes or 1))
+                async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                     if len(content) + len(chunk) > max_response_bytes:
                         raise ShowRuntimeResponseTooLarge(
                             f"Show Runtime response exceeds {max_response_bytes} bytes"
