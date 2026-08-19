@@ -77,6 +77,23 @@ class _ArchiveMetadataError(Exception):
 
 class _ArchiveInspectionError(Exception):
     """The archive cache itself could not be inspected; cleanup must abort."""
+
+
+def _is_exclusive_regular_file(info: os.stat_result) -> bool:
+    """True only for a one-link regular file that is not a reparse point."""
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return False
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return not (reparse and attrs & reparse)
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attrs = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse and attrs & reparse)
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PREWARM_IMPORT_RE = re.compile(r"""(?P<quote>["'])(?P<path>[^"']+)(?P=quote)""")
 _PREWARM_MAX_ASSETS = 64
@@ -914,20 +931,23 @@ class ShowRuntimeManager:
                             shutil.rmtree(path, ignore_errors=True)
                         removed.append(str(path))
             removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=dry_run))
-        # A dry run leaves stale install dirs in place, so their metadata would
-        # still read as "protected" below. Skip metadata under the dirs a real
-        # run would remove, so the archive preview matches the real outcome.
-        skip_metadata_under = {Path(path) for path in removed} if dry_run else None
-        return {
-            "ok": True,
-            "dry_run": dry_run,
-            # Paths removed by this run (or that a real run would remove, when dry_run).
-            "removed": removed,
-            "archives": self._clean_downloaded_archives(
-                dry_run=dry_run,
-                skip_metadata_under=skip_metadata_under,
-            ),
-        }
+            # A dry run leaves stale install dirs in place, so their metadata
+            # would still read as "protected" below. Skip metadata under the
+            # dirs a real run would remove, so the archive preview matches
+            # the real outcome. Hold the preview guard through this phase so
+            # an install starting after staging enumeration cannot expose an
+            # in-flight archive as reclaimable.
+            skip_metadata_under = {Path(path) for path in removed} if dry_run else None
+            return {
+                "ok": True,
+                "dry_run": dry_run,
+                # Paths removed by this run (or that a real run would remove, when dry_run).
+                "removed": removed,
+                "archives": self._clean_downloaded_archives(
+                    dry_run=dry_run,
+                    skip_metadata_under=skip_metadata_under,
+                ),
+            }
 
     def archive_cache_status(self, *, keep_previous: int = 1) -> dict[str, Any]:
         """Report reclaimable content-addressed archives without deleting anything.
@@ -1074,7 +1094,7 @@ class ShowRuntimeManager:
         # POSIX tuples pad it so both branches share one unpack shape.
         candidates: list[tuple[Path, int, str, int]] = []
         try:
-            downloads_exists = downloads_dir.stat().st_mode  # error-preserving
+            downloads_stat = downloads_dir.lstat()  # error-preserving, no follow
             exists = True
         except FileNotFoundError:
             exists = False
@@ -1082,20 +1102,30 @@ class ShowRuntimeManager:
             raise _ArchiveInspectionError("downloads directory cannot be inspected") from exc
         if not exists:
             return candidates
-        # A symlinked downloads directory would follow the link and unlink
-        # files outside Avibe's runtime state; fail as an inspection error
-        # rather than traverse it.
-        if downloads_dir.is_symlink() or not stat.S_ISDIR(downloads_exists):
+        # A symlink or reparse-point downloads directory would follow the
+        # link and unlink files outside Avibe's runtime state; fail as an
+        # inspection error rather than traverse it.
+        if _is_reparse_point(downloads_stat) or not stat.S_ISDIR(downloads_stat.st_mode):
             raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
         mtime_floor = time.time() - _ARCHIVE_MTIME_GUARD_SECONDS
         if os.name == "nt":
             # Directory descriptors (dir_fd) are unsupported on native
-            # Windows, so scan/stat/unlink by path. To keep deletion bound to
-            # the directory we validated, the Windows path records each
-            # candidate's (device, inode) at enumeration and revalidates it
-            # immediately before unlinking in the removal phase; a replaced
-            # parent or entry is treated as an inspection failure, not a
-            # deletion into unknown territory.
+            # Windows, so scan/stat/unlink by path. Bind the scan to the
+            # validated directory identity (dev/ino) so a junction swap of
+            # ``downloads`` cannot redirect enumeration or later deletion.
+            downloads_identity = (downloads_stat.st_dev, downloads_stat.st_ino)
+
+            def _require_same_downloads() -> None:
+                try:
+                    current = downloads_dir.lstat()
+                except OSError as exc:
+                    raise _ArchiveInspectionError("downloads directory cannot be inspected") from exc
+                if _is_reparse_point(current) or not stat.S_ISDIR(current.st_mode):
+                    raise _ArchiveInspectionError("downloads directory is a symlink or not a directory")
+                if (current.st_dev, current.st_ino) != downloads_identity:
+                    raise _ArchiveInspectionError("downloads directory was replaced")
+
+            _require_same_downloads()
             iterator = os.scandir(downloads_dir)
             try:
                 for entry in iterator:
@@ -1113,13 +1143,13 @@ class ShowRuntimeManager:
                         continue
                     if entry.name[: -len(".tgz")] in protected:
                         continue
-                    # Record the enumerated identity so the removal phase can
-                    # verify it deletes exactly this entry, not a replacement.
                     candidates.append(
                         (downloads_dir / entry.name, entry_stat.st_size, entry.name, entry_stat.st_ino)
                     )
             finally:
                 iterator.close()
+            _require_same_downloads()
+            self._downloads_dir_identity = downloads_identity
             return candidates
         # POSIX: bind enumeration and unlinking to the directory we validated
         # so a concurrent path swap (symlink replacing ``downloads`` between
@@ -1217,9 +1247,17 @@ class ShowRuntimeManager:
                 # never opens the directory at all.
                 if candidates:
                     if os.name == "nt":
+                        downloads_identity = getattr(self, "_downloads_dir_identity", None)
                         for path, size, name, inode in candidates:
                             claimed = path.with_name(f"{name}.avibe-removing")
                             try:
+                                if downloads_identity is not None:
+                                    dir_stat = path.parent.lstat()
+                                    if _is_reparse_point(dir_stat) or (
+                                        dir_stat.st_dev,
+                                        dir_stat.st_ino,
+                                    ) != downloads_identity:
+                                        raise OSError("downloads directory was replaced")
                                 pre_stat = os.stat(path, follow_symlinks=False)
                                 if inode and pre_stat.st_ino != inode:
                                     raise OSError("entry was replaced after enumeration")
@@ -1498,7 +1536,7 @@ class ShowRuntimeManager:
             # inode with unrelated content. Refuse both before any open.
             try:
                 guard_lstat = self._install_guard_path.lstat()
-                if not stat.S_ISREG(guard_lstat.st_mode) or guard_lstat.st_nlink != 1:
+                if not _is_exclusive_regular_file(guard_lstat):
                     logger.warning(
                         "Show Runtime install guard %s is a symlink or hard link; refusing to lock",
                         self._install_guard_path,
@@ -1541,7 +1579,17 @@ class ShowRuntimeManager:
                 return
             try:
                 open_stat = os.fstat(lock_fd)
-                if not stat.S_ISREG(open_stat.st_mode) or open_stat.st_nlink != 1:
+                try:
+                    path_stat = self._install_guard_path.lstat()
+                except OSError:
+                    os.close(lock_fd)
+                    yield unavailable
+                    return
+                if (
+                    not _is_exclusive_regular_file(open_stat)
+                    or not _is_exclusive_regular_file(path_stat)
+                    or (open_stat.st_dev, open_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino)
+                ):
                     logger.warning(
                         "Show Runtime install guard descriptor is not an exclusive regular file; refusing",
                     )

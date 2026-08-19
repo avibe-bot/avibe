@@ -862,3 +862,80 @@ def test_retained_metadata_without_valid_digest_fails_closed(tmp_path: Path, dig
 
     assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
     assert rollback_archive.exists()
+
+
+def test_preview_guard_covers_archive_planning(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(1), b"current")
+    stale = _write_archive(manager, _sha(2), b"stale")
+    seen: dict[str, object] = {}
+    real_clean = manager._clean_downloaded_archives
+
+    def _observe(*, dry_run=False, skip_metadata_under=None):
+        seen["fd"] = getattr(manager, "_preview_guard_fd", None)
+        return real_clean(dry_run=dry_run, skip_metadata_under=skip_metadata_under)
+
+    manager._clean_downloaded_archives = _observe
+    result = manager.clean(dry_run=True)
+
+    assert result["dry_run"] is True
+    assert stale.exists()
+    assert result["archives"]["candidate_count"] == 1
+    if os.name != "nt":
+        assert seen["fd"] is not None
+    assert getattr(manager, "_preview_guard_fd", None) is None
+
+
+def _stat_with_ino(info: os.stat_result, ino: int) -> os.stat_result:
+    fields = list(info)
+    fields[1] = ino
+    return os.stat_result(fields)
+
+
+def test_windows_downloads_identity_mismatch_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+    monkeypatch.setattr("os.name", "nt")
+    real_lstat = Path.lstat
+    calls = {"n": 0}
+
+    def _lstat(self):
+        result = real_lstat(self)
+        if self.name == "downloads" and self.parent == manager.runtime_dir:
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                return _stat_with_ino(result, result.st_ino + 1)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    result = manager.clean()
+    assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+    assert (manager.runtime_dir / "downloads" / f"{_sha(2)}.tgz").exists()
+
+
+def test_install_guard_refuses_path_fd_identity_mismatch(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    real_lstat = Path.lstat
+    real_fstat = os.fstat
+    mismatch = {"on": False}
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if mismatch["on"] and self == manager.runtime_dir / ".install.lock":
+            return _stat_with_ino(info, info.st_ino + 99)
+        return info
+
+    def _fstat(fd):
+        mismatch["on"] = True
+        return real_fstat(fd)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr(os, "fstat", _fstat)
+    with manager._install_guard_locked() as (acquired, reason):
+        assert acquired is False
+        assert reason == "runtime_install_guard_unavailable"
