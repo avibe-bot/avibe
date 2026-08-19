@@ -76,17 +76,17 @@ const draw = (
 afterEach(cleanup);
 
 describe('UsageTab', () => {
-  it('names the window the report was served over, not the one asked for', () => {
-    // MH-USAGE-016. The server clamps `days` to retention and answers with what
-    // it covered. Printing the request back would caption a 62-day report as 7.
+  it('MH-USAGE-016: names the window the report was served over, not the one asked for', () => {
+    // The server clamps `days` to retention and answers with what it covered.
+    // Printing the request back would caption a 62-day report as 7.
     const { container } = draw(readyRegion(summary({ window_days: 62 })), { windowDays: 7 });
     expect(container.textContent).toContain('trailing 62 days');
     expect(container.textContent).not.toContain('trailing 7 days');
   });
 
-  it('keeps a vanished Source identifiable and a vanished model unnamed', () => {
-    // MH-USAGE-017. Asymmetric by contract: `src_*` is a string the user could
-    // have seen elsewhere, a ledger key is a digest nobody typed.
+  it('MH-USAGE-017: keeps a vanished Source identifiable and a vanished model unnamed', () => {
+    // Asymmetric by contract: `src_*` is a string the user could have seen
+    // elsewhere, a ledger key is a digest nobody typed.
     const key = 'claude-opus-4-6-20260514-thinking#9f2c1d';
     const { container } = draw(
       readyRegion(summary({ sources: [source({ label: null, models: [model({ label: null, model_id: key })] })] })),
@@ -98,9 +98,9 @@ describe('UsageTab', () => {
     expect(container.textContent).not.toContain('9f2c1d');
   });
 
-  it('reads a shortfall as reports that never arrived', () => {
-    // MH-USAGE-018. The schema forbids the other reading outright: the gap
-    // between requests and token reports is missing evidence, never spare quota.
+  it('MH-USAGE-018: reads a shortfall as reports that never arrived', () => {
+    // The schema forbids the other reading outright: the gap between requests
+    // and token reports is missing evidence, never spare quota.
     const { container } = draw(readyRegion(summary({ totals: counters({ requests: 12, token_reports: 9 }) })));
     expect(container.textContent).toContain('3 requests came back with no token report');
     expect(container.textContent).not.toContain(en.settings.models.usage.requests.reported);
@@ -118,9 +118,9 @@ describe('UsageTab', () => {
     expect(container.textContent).not.toContain(en.settings.models.usage.byDay.title);
   });
 
-  it('plots every day of the window, including the ones that carried nothing', () => {
-    // MH-USAGE-019. One reported day inside a 30-day span. Drawing `days[]`
-    // directly would close the gap and read as a month of continuous traffic.
+  it('MH-USAGE-019: plots every day of the window, including the ones that carried nothing', () => {
+    // One reported day inside a 30-day span. Drawing `days[]` directly would
+    // close the gap and read as a month of continuous traffic.
     const { container } = draw(readyRegion(summary()));
     expect(container.querySelectorAll('.model-hub-usage-track')).toHaveLength(30);
     expect(screen.getByRole('img', { name: /Metered tokens per day/ })).toBeTruthy();

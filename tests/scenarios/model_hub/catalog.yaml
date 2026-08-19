@@ -44,6 +44,12 @@ scenarios:
     kind: contract
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_001_scenario_catalog_is_complete_and_executable
+  - id: MH-CATALOG-002
+    name: A UI-evidenced row resolves only to a vitest case that runs under its catalog ID
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_002_ui_evidence_resolves_only_to_an_executable_declaration
   - id: MH-S1-001
     name: Live conditions never change the exact configured hop identity
     status: covered
@@ -218,31 +224,31 @@ scenarios:
     status: covered
     kind: contract
     layer: unit
-    test: ui/src/components/settings/models/UsageTab.test.tsx::names the window the report was served over, not the one asked for
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-016
   - id: MH-USAGE-017
     name: A vanished model's ledger key never reaches the screen, while a vanished Source stays identifiable
     status: covered
     kind: observation
     layer: unit
-    test: ui/src/components/settings/models/UsageTab.test.tsx::keeps a vanished Source identifiable and a vanished model unnamed
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
   - id: MH-USAGE-018
     name: A token-report shortfall reads as missing reports rather than unused capacity
     status: covered
     kind: contract
     layer: unit
-    test: ui/src/components/settings/models/UsageTab.test.tsx::reads a shortfall as reports that never arrived
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-018
   - id: MH-USAGE-019
     name: A day the window covered without a metered turn is drawn as idle rather than closed over
     status: covered
     kind: observation
     layer: unit
-    test: ui/src/components/settings/models/UsageTab.test.tsx::plots every day of the window, including the ones that carried nothing
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-019
   - id: MH-USAGE-020
     name: The usage report is read when its tab is opened, never as part of the routing surface's first paint
     status: covered
     kind: observation
     layer: unit
-    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::leaves the report unread until its tab is opened, then reads the default span
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-020
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

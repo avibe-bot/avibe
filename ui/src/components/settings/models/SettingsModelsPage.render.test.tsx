@@ -926,13 +926,13 @@ describe('SettingsModelsPage surface branches', () => {
 describe('SettingsModelsPage usage region', () => {
   const openUsage = () => userEvent.click(screen.getByRole('tab', { name: /^Usage$|^用量$/ }));
 
-  it('leaves the report unread until its tab is opened, then reads the default span', async () => {
+  it('MH-USAGE-020: leaves the report unread until its tab is opened, then reads the default span', async () => {
     renderPage([retainedSource]);
     await screen.findByText('Retained source');
     const read = vi.mocked(modelsApi.getUsageSummary);
 
-    // MH-USAGE-020. The landing is what decides routing. A report nobody is
-    // looking at may not be part of the read that draws it.
+    // The landing is what decides routing. A report nobody is looking at may
+    // not be part of the read that draws it.
     expect(read).not.toHaveBeenCalled();
     await openUsage();
     await waitFor(() => expect(read).toHaveBeenCalledWith(30));

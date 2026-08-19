@@ -1068,10 +1068,25 @@ own.
 
 **Catalog.** `tests/scenarios/model_hub/test_model_hub_catalog.py` previously
 resolved a row's evidence with `ast.parse`, so the capability's user-visible half
-could not be registered at all. It now resolves a `.ts`/`.tsx` row by slicing the
-named `it(...)` case and requiring the catalog ID inside that case — the same
-per-row greppability the Python docstring rule gives, rather than a per-file
-approximation.
+could not be registered at all. A `.ts`/`.tsx` row now cites its own ID
+(`…/UsageTab.test.tsx::MH-USAGE-018`) and resolves to the single executable
+`it('MH-USAGE-018: …')` declaration that carries it. A vitest case's name is its
+docstring, so that is where the ID belongs — the same per-row greppability the
+Python docstring rule gives, and the evidence is runnable by ID
+(`vitest -t MH-USAGE-018`) rather than only greppable.
+
+The first version of this checker sliced each case's body instead and asked whether
+the ID appeared inside the slice. Two properties are why it was replaced rather than
+patched. Deciding where a case *ends* needs balanced delimiters, and a scan that
+small cannot tell a regex literal from division — so `/Couldn't refresh/i`, ordinary
+in this suite, read as a string opening and the slice swallowed eight sibling cases.
+And its guard against exactly that (re-parse the slice, require one declaration) ran
+the same scan, so the desync agreed with itself and passed. Reading only names
+removes the failure instead of guarding it: a wrong guess can lose a declaration,
+which fails the row loudly, but can never hand a row a neighbour's ID. Verified
+against vitest's own collection over the whole Model Hub UI suite — 873 collected
+cases, every unresolved one a parameterized `it.each` whose name does not exist in
+the source, and nothing resolved that vitest does not run.
 
 **Dead 额度 code removed with the rename.** Copy: `settings.models.usage.monthSpend`,
 `settings.models.usageTab`, and `settings.models.tabs` (a zero-caller duplicate of
