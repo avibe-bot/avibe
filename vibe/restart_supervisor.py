@@ -317,6 +317,14 @@ def _roll_back_failed_upgrade(
     that did not stop, where the old service is still serving and rolling back
     underneath it would be the damage.
 
+    Nothing of the failed generation is left running first. "No service is
+    running" is a statement about the lock, and a process can be alive without it
+    -- one that died before reaching it, or one still on its way there. Left
+    alone that process is not merely litter: `start_service` adopts a live
+    recorded pid instead of launching what was just reinstalled, so the rollback
+    would report success while the failed version is what is running, and the
+    restore would rewrite the database file under a process holding it open.
+
     Install, then restore, then start. The install is the step that needs a
     package index and so the step most likely to fail, and it is the only one
     with no effect on the data: failing there leaves the database exactly as the
@@ -333,6 +341,13 @@ def _roll_back_failed_upgrade(
     rollback: dict = {"target_version": rollback_to, "state": "running", "started_at": _now_iso()}
     record(rollback)
     write(f"rolling back to {rollback_to}: no service is running after the failed restart")
+
+    # `start_ui` is also the answer to whether the UI is this job's to manage: a
+    # service-only restart left the running UI alone on purpose, and quiescing
+    # must not take it down when starting will not bring it back.
+    _stop_runtime_for_restart(stop_ui=start_ui)
+    rollback["quiesced"] = True
+    record(rollback)
 
     try:
         plan = build_upgrade_plan(vibe_path=vibe_path, version=rollback_to)
@@ -584,22 +599,28 @@ def _run_restart_job(
             return fail("start runtime completed but service pid is not alive", 3, started_at=restart_started_at)
         if not runtime.service_pid_recorded(new_pid):
             write(f"start runtime returned while service pid={new_pid} is still acquiring its lock")
-            wait_lock_started_at = time.monotonic()
-            # Resolve the real lock holder: under a delegated user scope the
-            # returned pid may be a launcher that never records itself, so adopt
-            # the authoritative owner instead of waiting on a pid that can't win.
-            resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
-            if resolved_pid is None:
-                mark_duration("wait_service_lock_seconds", wait_lock_started_at)
-                return fail(
-                    f"service pid {new_pid} did not acquire the service lock",
-                    3,
-                    started_at=restart_started_at,
-                )
-            new_pid = resolved_pid
+        wait_lock_started_at = time.monotonic()
+        # Asked unconditionally, and asked of the SERVICE rather than of the lock.
+        # Holding the lock was never the end of starting up -- the database is
+        # migrated and the controller built after it -- so a job that skipped this
+        # whenever the lock had already been taken was skipping it in exactly the
+        # case a bad migration produces: lock acquired, then dead, then a restart
+        # recorded as succeeded over an instance with nothing running.
+        # `wait_for_service_ready` also resolves the real holder, since under a
+        # delegated user scope the returned pid may be a launcher that never
+        # records itself.
+        resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
+        if resolved_pid is None:
             mark_duration("wait_service_lock_seconds", wait_lock_started_at)
-            recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid
-            runtime.write_status("running", f"pid={new_pid}", new_pid, recorded_ui_pid if isinstance(recorded_ui_pid, int) else None)
+            return fail(
+                f"service pid {new_pid} did not finish starting",
+                3,
+                started_at=restart_started_at,
+            )
+        new_pid = resolved_pid
+        mark_duration("wait_service_lock_seconds", wait_lock_started_at)
+        recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid
+        runtime.write_status("running", f"pid={new_pid}", new_pid, recorded_ui_pid if isinstance(recorded_ui_pid, int) else None)
 
         mark_duration("restart_total_seconds", restart_started_at)
         payload.update(ok=True, state="succeeded", new_pid=new_pid, error=None)

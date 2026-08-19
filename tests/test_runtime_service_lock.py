@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -738,6 +739,50 @@ class RuntimeServiceLockTests(unittest.TestCase):
                             runtime.release_service_instance_lock()
 
                         self.assertFalse(runtime.verified_service_running())
+    def test_holding_the_lock_is_not_yet_having_started(self):
+        """Two different facts, and the gap between them is where upgrades fail.
+
+        The lock is taken before the database is migrated, so a holder can be
+        mid-startup or already dead from a migration it never finished. Only the
+        holder can say which, and it says so by rewriting its own record through
+        the handle that holds the lock -- so the claim cannot outlive the process,
+        and cannot be read off a record the PREVIOUS holder left behind.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                        runtime.acquire_service_instance_lock()
+                        try:
+                            self.assertFalse(runtime.service_instance_started(os.getpid()))
+
+                            runtime.mark_service_instance_started()
+                            self.assertTrue(runtime.service_instance_started(os.getpid()))
+                            # Someone else's startup, reported by a record this
+                            # process happens to be able to read.
+                            self.assertFalse(runtime.service_instance_started(os.getpid() + 1))
+                        finally:
+                            runtime.release_service_instance_lock()
+
+    def test_a_release_that_never_reported_startup_reads_as_started(self):
+        """What a rollback target on an older version can offer, kept working.
+
+        Releases predating this distinction wrote ``running`` when they took the
+        lock and never wrote again. Demanding the second write of them would make
+        every rollback report a failed start for a service that is up.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "service.lock"
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "phase": "running"}), encoding="utf-8")
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                self.assertTrue(runtime.service_instance_started(os.getpid()))
 
 
 if __name__ == "__main__":

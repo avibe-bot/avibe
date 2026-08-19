@@ -939,3 +939,46 @@ def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path
     # The last attempt's database is the one kept, and it is the one that held
     # the most work.
     assert ("second attempt",) in _db_contents(rollback_point / backups.REPLACED_DATABASE_NAME)[1][1]
+
+
+def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The property: at no point during a restore does the machine have no
+    # database, and no copy of anyone's data is destroyed before its replacement
+    # is complete. Both are claims about the instants in between, so the test
+    # interrupts the swap at the one instant they can be violated -- a rename
+    # that fails, which is what a crash, a full disk, or a killed process looks
+    # like from here.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("insert into payload (value) values ('first attempt')")
+    backups.restore_sqlite_backup(rollback_point, db_path)
+    displaced = rollback_point / backups.REPLACED_DATABASE_NAME
+    assert ("first attempt",) in _db_contents(displaced)[1][1]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("insert into payload (value) values ('second attempt')")
+
+    real_replace = os.replace
+
+    def replace_once_then_fail(src, dst, *args, **kwargs):
+        monkeypatch.setattr(backups.os, "replace", real_replace)
+        raise OSError(errno.EIO, "interrupted")
+
+    monkeypatch.setattr(backups.os, "replace", replace_once_then_fail)
+    with pytest.raises(OSError):
+        backups.restore_sqlite_backup(rollback_point, db_path)
+
+    # The database the machine is running on is still there, still complete.
+    assert ("second attempt",) in _db_contents(db_path)[1][1]
+    # And the copy the previous attempt displaced was not spent making room for
+    # a displacement that never landed.
+    assert ("first attempt",) in _db_contents(displaced)[1][1]

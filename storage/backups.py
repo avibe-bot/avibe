@@ -641,32 +641,51 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
     recovered. Moving them under the displaced database's own name keeps them
     where SQLite will find them for it instead.
 
-    A previous displacement into this same rollback point is replaced. The bound
-    has to come from somewhere -- a full copy of the database per rollback
-    attempt is the growth `prune_state_backups` exists to prevent -- and the copy
-    it overwrites is one an earlier rollback from this exact point already set
-    aside, which is the only version of this data nothing is still working from.
+    A previous displacement into this same rollback point is replaced, but only
+    once the new one is whole on disk -- staged under its own name, then renamed
+    over. The bound has to come from somewhere: a full copy of the database per
+    rollback attempt is the growth `prune_state_backups` exists to prevent. But
+    the copy being dropped is a working database an operator may still need, and
+    deleting it to make room for one not yet written trades a bounded directory
+    for a window in which neither generation is anywhere.
     """
 
     if not db_path.exists():
         return None
     replaced = into / REPLACED_DATABASE_NAME
+    staging = into / f"{REPLACED_DATABASE_NAME}.incoming"
     sidecar_suffixes = ("-wal", "-shm")
-    for stale in (replaced, *(replaced.with_name(replaced.name + suffix) for suffix in sidecar_suffixes)):
+
+    def sidecars_of(base: Path) -> tuple[Path, ...]:
+        return tuple(base.with_name(base.name + suffix) for suffix in sidecar_suffixes)
+
+    for stale in (staging, *sidecars_of(staging)):
         stale.unlink(missing_ok=True)
     try:
         # A link, so the displaced copy exists before the live path is replaced
         # and no instant passes with no database at all. Across filesystems the
         # link is refused and the move is the only way through; it leaves that
         # instant open, which is why it is the fallback and not the rule.
-        os.link(db_path, replaced)
+        os.link(db_path, staging)
     except OSError:
-        logger.debug("Hard link unavailable for %s; moving it to %s instead", db_path, replaced, exc_info=True)
-        shutil.move(str(db_path), str(replaced))
+        logger.debug("Hard link unavailable for %s; moving it to %s instead", db_path, staging, exc_info=True)
+        shutil.move(str(db_path), str(staging))
     for suffix in sidecar_suffixes:
         sidecar = db_path.with_name(db_path.name + suffix)
         if sidecar.is_file() and not sidecar.is_symlink():
-            shutil.move(str(sidecar), str(replaced.with_name(replaced.name + suffix)))
+            shutil.move(str(sidecar), str(staging.with_name(staging.name + suffix)))
+
+    # The previous displacement's sidecars go first and its database last. A
+    # database briefly without its write-ahead log is still that database; a
+    # write-ahead log briefly without its database is a log SQLite would replay
+    # into whatever arrives under that name next.
+    for stale_sidecar in sidecars_of(replaced):
+        stale_sidecar.unlink(missing_ok=True)
+    os.replace(staging, replaced)
+    for suffix in sidecar_suffixes:
+        staged_sidecar = staging.with_name(staging.name + suffix)
+        if staged_sidecar.exists():
+            os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
     return replaced
 
 

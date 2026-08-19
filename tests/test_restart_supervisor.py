@@ -217,6 +217,7 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
     rc = restart_supervisor._run_restart_job(job_id="jobabc", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
 
@@ -252,6 +253,7 @@ def test_restart_job_uses_lock_holder_when_pidfile_is_missing(monkeypatch, tmp_p
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
     rc = restart_supervisor._run_restart_job(job_id="joblockowner", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
 
@@ -281,6 +283,7 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor.subprocess, "run", fake_run)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
     rc = restart_supervisor._run_restart_job(
         job_id="jobruntime",
@@ -311,6 +314,7 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
     original_schedule_restart = restart_supervisor.schedule_restart
 
@@ -391,6 +395,7 @@ def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path
     monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", lambda: [])
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
     rc = restart_supervisor._run_restart_job(job_id="joboldgone", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
 
@@ -505,6 +510,7 @@ def test_restart_job_waits_for_service_lock_release_before_start(monkeypatch, tm
     monkeypatch.setattr(runtime, "service_instance_lock_available", service_instance_lock_available)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
     monkeypatch.setattr(restart_supervisor.time, "sleep", lambda _seconds: None)
 
     rc = restart_supervisor._run_restart_job(job_id="joblock", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
@@ -675,6 +681,7 @@ def test_restart_job_service_scope_keeps_ui(monkeypatch, tmp_path):
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
 
     rc = restart_supervisor._run_restart_job(
         job_id="jobsvc", delay_seconds=0, vibe_path="/bin/vibe", trigger="web-ui", scope="service"
@@ -781,7 +788,11 @@ def test_a_restart_that_leaves_nothing_running_puts_the_old_version_back(monkeyp
     assert status["ok"] is False
     assert "start runtime failed: service refused to start" in status["error"]
 
-    assert armed.calls == ["stop_runtime", "start_runtime", "install", "start_runtime"]
+    # Nothing of the failed generation is left alive across the install and the
+    # restore: the second stop is the rollback's own, and without it a process
+    # that never reached the lock is still holding the database file open when
+    # the restore rewrites it -- and is what the final start would adopt.
+    assert armed.calls == ["stop_runtime", "start_runtime", "stop_runtime", "install", "start_runtime"]
     assert "avibe-os==3.0.10" in armed.installs[0]
     assert armed.observed_by_the_rolled_back_version == [["before the upgrade"]]
     assert _payload_rows(armed.db_path) == ["before the upgrade"]
@@ -816,6 +827,78 @@ def test_a_service_still_holding_the_lock_is_never_rolled_back_underneath(monkey
     assert _payload_rows(armed.db_path) == ["before the upgrade", "committed by the new version"]
     status = runtime.read_json(runtime.get_restart_status_path())
     assert status["rollback"] == {"target_version": "3.0.10", "state": "skipped", "reason": "service_running"}
+
+
+def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, tmp_path):
+    """The incident this path exists for, in the shape it actually has.
+
+    The lock is taken BEFORE the database is migrated -- it has to be, since the
+    migration is what it excludes. So a release that fails on its migration does
+    hold the lock, for the seconds it takes to get there and die, and a job that
+    stopped at "the pid is recorded" spends those seconds writing
+    `state: succeeded` about an instance that ends them with nothing running.
+
+    Which makes the recorded pid unusable as the finish line, in the one case
+    that matters. What ends the wait is the service saying it is up, which it
+    says after the migration.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
+    db_path = paths.get_sqlite_state_path()
+    _seed_state_database(db_path)
+    calls: list[str] = []
+    installs: list[list[str]] = []
+    observed_by_the_rolled_back_version: list[list[str]] = []
+    alive = {222: True, 444: True}
+
+    def start(start_ui=True):
+        calls.append("start_runtime")
+        if calls.count("start_runtime") == 1:
+            # The new version takes its rollback point, commits, and is now in
+            # the migration that will kill it -- all of it under the lock.
+            create_sqlite_migration_backup(db_path, backups_dir=paths.get_state_backups_dir())
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("insert into payload (value) values ('committed by the new version')")
+            runtime.write_status("running", "pid=222", 222, 333)
+            return 222, 333
+        observed_by_the_rolled_back_version.append(_payload_rows(db_path))
+        return _fake_start_runtime([], service_pid=444, ui_pid=333)
+
+    def started(pid: int) -> bool:
+        # Asking is what finds out: the migration failed, so by the time anyone
+        # looks a second time the holder is gone and the lock with it.
+        alive[pid] = False
+        return pid == 444
+
+    def run(command, **_kwargs):
+        calls.append("install")
+        installs.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor.subprocess, "run", run)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(runtime, "service_instance_started", started)
+    monkeypatch.setattr(runtime, "verified_service_running", lambda: False)
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="jobdark", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+    )
+
+    assert rc == 3
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["ok"] is False
+    assert "did not finish starting" in status["error"]
+    assert status["rollback"]["state"] == "succeeded"
+    assert "avibe-os==3.0.10" in installs[0]
+    assert observed_by_the_rolled_back_version == [["before the upgrade"]]
+    assert _payload_rows(db_path) == ["before the upgrade"]
 
 
 def test_a_restart_with_no_version_to_go_back_to_changes_nothing(monkeypatch, tmp_path):

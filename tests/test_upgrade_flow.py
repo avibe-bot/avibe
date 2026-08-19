@@ -136,6 +136,31 @@ def test_a_pinned_plan_never_asks_for_an_upgrade(monkeypatch):
     assert "--upgrade" not in pip_plan.command
 
 
+def test_a_rollback_pins_the_distribution_the_install_actually_came_from(monkeypatch):
+    # Which distribution published the running version and which one the next
+    # upgrade should ask for are different questions, and on a machine that
+    # predates the rename they have different answers. Going forward wants the
+    # configured spec -- that is what the rename is for. Going back wants this,
+    # because `avibe-os==2.x` names a release that was never published under that
+    # name, so the rollback resolves to nothing and the instance stays dark.
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
+
+    legacy = "/home/ai/.local/share/uv/tools/vibe-remote/bin/python"
+    assert pinned_package_spec("2.9.4", python_executable=legacy) == "vibe-remote==2.9.4"
+    plan = build_upgrade_plan(
+        python_executable=legacy,
+        uv_path="/usr/local/bin/uv",
+        base_env={"PATH": "/usr/bin"},
+        version="2.9.4",
+    )
+    assert "vibe-remote==2.9.4" in plan.command
+    assert not any(argument.startswith("avibe-os") for argument in plan.command)
+
+    # An install whose path says nothing about a distribution -- pip into a shared
+    # environment -- has only the configured spec to go on, and gets it.
+    assert pinned_package_spec("3.0.10", python_executable="/usr/bin/python3") == "avibe-os==3.0.10"
+
+
 def test_a_spec_that_cannot_carry_a_pin_is_refused(monkeypatch):
     # The alternative to refusing is falling back to the unpinned spec, which is
     # the reinstall-the-failure command above. Whoever configured a wheel path or
