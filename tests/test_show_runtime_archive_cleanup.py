@@ -1020,6 +1020,29 @@ def test_install_guard_refuses_path_fd_identity_mismatch(tmp_path: Path, monkeyp
         assert reason == "runtime_install_guard_unavailable"
 
 
+def test_install_guard_refuses_swap_after_lock_acquisition(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    real_lstat = Path.lstat
+    mismatch = {"on": False}
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if mismatch["on"] and self == manager.runtime_dir / ".install.lock":
+            return _stat_with_ino(info, info.st_ino + 77)
+        return info
+
+    def _try_lock(handle):
+        mismatch["on"] = True
+        return True
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr("core.show_runtime.storage_lock_try_lock", _try_lock)
+    with manager._install_guard_locked() as (acquired, reason):
+        assert acquired is False
+        assert reason == "runtime_install_guard_unavailable"
+
+
 def test_preview_discards_plan_when_lock_appears_mid_scan(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))

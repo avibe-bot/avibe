@@ -872,6 +872,9 @@ class ShowRuntimeManager:
             if not self._try_windows_preview_lock(fd):
                 os.close(fd)
                 return "runtime_install_already_running"
+            if not self._guard_path_matches_fd(fd):
+                os.close(fd)
+                return "runtime_install_guard_unavailable"
             self._preview_guard_fd = fd
             self._preview_guard_msvcrt = True
             return None
@@ -915,6 +918,9 @@ class ShowRuntimeManager:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             # Held (shared) until the preview scope ends: an installer's
             # exclusive-lock acquisition now blocks on us and vice versa.
+            if not self._guard_path_matches_fd(fd):
+                os.close(fd)
+                return "runtime_install_guard_unavailable"
             self._preview_guard_fd = fd
             return None
         except OSError:
@@ -959,6 +965,19 @@ class ShowRuntimeManager:
         if _is_reparse_point(info) or not _is_exclusive_regular_file(info):
             return "runtime_install_guard_unavailable"
         return None
+
+    def _guard_path_matches_fd(self, fd: int) -> bool:
+        """True when the live path still names the locked descriptor."""
+        try:
+            open_stat = os.fstat(fd)
+            path_stat = self._install_guard_path.lstat()
+        except OSError:
+            return False
+        return (
+            _is_exclusive_regular_file(open_stat)
+            and _is_exclusive_regular_file(path_stat)
+            and (open_stat.st_dev, open_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+        )
 
     def _preview_raced_busy(self) -> bool:
         """True when an install started after a lock-absent preview probe."""
@@ -1702,18 +1721,7 @@ class ShowRuntimeManager:
                 yield unavailable
                 return
             try:
-                open_stat = os.fstat(lock_fd)
-                try:
-                    path_stat = self._install_guard_path.lstat()
-                except OSError:
-                    os.close(lock_fd)
-                    yield unavailable
-                    return
-                if (
-                    not _is_exclusive_regular_file(open_stat)
-                    or not _is_exclusive_regular_file(path_stat)
-                    or (open_stat.st_dev, open_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino)
-                ):
+                if not self._guard_path_matches_fd(lock_fd):
                     logger.warning(
                         "Show Runtime install guard descriptor is not an exclusive regular file; refusing",
                     )
@@ -1736,6 +1744,13 @@ class ShowRuntimeManager:
                         yield busy
                         return
                     time.sleep(0.1)
+                if not self._guard_path_matches_fd(file_lock._handle.fileno()):
+                    logger.warning(
+                        "Show Runtime install guard path was replaced after lock acquisition; refusing",
+                    )
+                    file_lock.release()
+                    yield unavailable
+                    return
             except OSError:
                 logger.warning(
                     "Show Runtime install guard %s could not be locked",
