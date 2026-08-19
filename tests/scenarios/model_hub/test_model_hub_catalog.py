@@ -38,6 +38,27 @@ def _test_function(path: Path, function_name: str) -> ast.FunctionDef | ast.Asyn
     return function
 
 
+def _vitest_case(path: Path, case_name: str) -> str:
+    """One `it(...)` case's own source.
+
+    A user-visible half of this capability is evidenced by a vitest case rather
+    than a pytest function, and it has to be checkable the same way: the row must
+    resolve to a case that exists, and that case must name its catalog ID where a
+    Python test would carry a docstring. Slicing the case out is what makes the ID
+    check per-row instead of per-file, so a second row cannot ride on the first
+    one's ID.
+    """
+
+    source = path.read_text()
+    start = next(
+        (found for quote in ("'", '"') if (found := source.find(f"it({quote}{case_name}{quote}")) != -1),
+        -1,
+    )
+    assert start != -1, f"Catalog points to missing UI case {path}::{case_name}"
+    end = source.find("\n  it(", start + 1)
+    return source[start:] if end == -1 else source[start:end]
+
+
 def _decorator_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     names: set[str] = set()
     for decorator in function.decorator_list:
@@ -74,10 +95,19 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         path = Path(path_text)
         assert path_text in canonical_tests
         assert path.is_file()
-        function = _test_function(path, function_name)
-        expected_fail = "xfail" in _decorator_names(function)
-        assert expected_fail == status["expected_fail"]
-        assert scenario["id"] in (ast.get_docstring(function) or ""), (
+        if path.suffix in {".ts", ".tsx"}:
+            # This checker cannot read a vitest modifier, so a UI-evidenced row may
+            # not claim an expected failure it has no way to prove.
+            assert not status["expected_fail"], (
+                f"Scenario {scenario['id']} is evidenced by a UI case, which cannot carry an expected failure"
+            )
+            evidence = _vitest_case(path, function_name)
+        else:
+            function = _test_function(path, function_name)
+            expected_fail = "xfail" in _decorator_names(function)
+            assert expected_fail == status["expected_fail"]
+            evidence = ast.get_docstring(function) or ""
+        assert scenario["id"] in evidence, (
             f"Scenario {scenario['id']} is not named inside {test_ref}; "
             "state the catalog ID in the test docstring so the executable evidence is greppable by ID"
         )

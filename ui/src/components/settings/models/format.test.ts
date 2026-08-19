@@ -1,54 +1,47 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, currencySymbol, formatNameList, formatSpend } from './format';
+import { cooldownEtaMinutes, formatCount, formatDayTime, formatNameList, formatPercent } from './format';
 
-describe('currencySymbol', () => {
-  it('falls back to USD when the backend reports no currency', () => {
-    expect(currencySymbol(null)).toBe('$');
-    expect(currencySymbol(undefined)).toBe('$');
-    expect(currencySymbol()).toBe('$');
+describe('formatCount', () => {
+  it('groups so a figure can be read against a vendor console', () => {
+    expect(formatCount(2_968_500, 'en-US')).toBe('2,968,500');
+    expect(formatCount(2_968_500, 'zh-CN')).toBe('2,968,500');
   });
 
-  it('honors an explicitly reported currency', () => {
-    expect(currencySymbol('USD')).toBe('$');
-    expect(currencySymbol('CNY')).toBe('¥');
-    expect(currencySymbol('EUR')).toBe('€');
+  it('leaves a small count ungrouped', () => {
+    expect(formatCount(0, 'en-US')).toBe('0');
+    expect(formatCount(12, 'en-US')).toBe('12');
   });
 
-  it('returns no symbol for a code it cannot map', () => {
-    expect(currencySymbol('JPY')).toBe('');
-  });
-
-  it('agrees with the symbol formatSpend uses, for every currency', () => {
-    for (const currency of [null, undefined, 'USD', 'CNY', 'EUR', 'JPY'] as const) {
-      expect(formatSpend(1240, currency).startsWith(currencySymbol(currency))).toBe(true);
-      const stripped = formatSpend(1240, currency).slice(currencySymbol(currency).length);
-      expect(stripped).toBe('12.4');
-    }
+  // A token count is a count: rounding it up, or rendering a negative one, would
+  // put a claim on screen the ledger never made.
+  it('never renders a fractional or negative count', () => {
+    expect(formatCount(12.9, 'en-US')).toBe('12');
+    expect(formatCount(-5, 'en-US')).toBe('0');
   });
 });
 
-describe('formatSpend', () => {
-  it('falls back to USD when the backend reports no currency', () => {
-    expect(formatSpend(1240, null)).toBe('$12.4');
-    expect(formatSpend(1240, undefined)).toBe('$12.4');
-    expect(formatSpend(1240)).toBe('$12.4');
+describe('formatPercent', () => {
+  it('renders a share as whole percent', () => {
+    expect(formatPercent(0, 'en-US')).toBe('0%');
+    expect(formatPercent(0.647, 'en-US')).toBe('65%');
+    expect(formatPercent(1, 'en-US')).toBe('100%');
+  });
+});
+
+describe('formatDayTime', () => {
+  it('keeps the day and the minute of the instant it was given', () => {
+    // Fixed as an offset-bearing stamp so the assertion is about the formatter
+    // rather than about the machine the test happens to run on.
+    const rendered = formatDayTime('2026-08-18T03:14:00+00:00', 'en-US');
+    const local = new Date('2026-08-18T03:14:00+00:00');
+    expect(rendered).toContain(String(local.getDate()));
+    expect(rendered).toContain(String(local.getMinutes()).padStart(2, '0'));
   });
 
-  it('honors an explicitly reported currency', () => {
-    expect(formatSpend(1240, 'USD')).toBe('$12.4');
-    expect(formatSpend(1240, 'CNY')).toBe('¥12.4');
-    expect(formatSpend(1240, 'EUR')).toBe('€12.4');
-  });
-
-  it('omits the symbol for a currency it cannot map', () => {
-    expect(formatSpend(1240, 'JPY')).toBe('12.4');
-  });
-
-  it('converts cents to one decimal without applying any FX rate', () => {
-    expect(formatSpend(0, null)).toBe('$0.0');
-    expect(formatSpend(5, null)).toBe('$0.1');
-    expect(formatSpend(1234567, null)).toBe('$12345.7');
+  it('renders an unparseable stamp verbatim rather than inventing a time', () => {
+    expect(formatDayTime('never', 'en-US')).toBe('never');
+    expect(formatDayTime('', 'en-US')).toBe('');
   });
 });
 

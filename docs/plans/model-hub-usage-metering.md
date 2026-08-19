@@ -1024,11 +1024,61 @@ verbatim.
 - [x] `ModelHubService.usage_summary` + RPC + `GET /api/models/usage`
 - [x] Contract row, response registry entry, and usage schema
 - [x] Unit and contract coverage
-- [ ] Stage 2: draw the 用量与额度 tab against this data
+- [x] Stage 2: draw the tab against this data, as 用量
 
-## Stage 2 note
+## Stage 2 — what shipped
 
-The tab is currently named 用量与额度 / "Usage and quota". After this stage the
-用量 half is real and the 额度 half is still unobtainable, so the label needs a
-design decision before stage 2 ships — renaming the tab to 用量 is the honest
-option unless a quota source appears.
+**The tab is named 用量 / "Usage".** The label was 用量与额度 / "Usage and quota",
+and the 额度 half has exactly one production writer:
+`core/handlers/model_hub/migration.py` writes `"cycle_used_pct": None`. Every
+non-null value in the repo is a mock or a schema example. So this is not a naming
+preference — a quota reading would be an invention, and the tab is named for what
+it can show. If a quota source ever appears, the label grows back with it.
+
+**Where the data becomes a view.** `usageProjection.ts` owns every derivation the
+tab could get wrong — the trailing local-day window, what a row may display, and
+the densification of a sparse trend — so each one is asserted as a property rather
+than inspected in JSX. `UsageTab.tsx` owns layout and copy and translates nothing
+into numbers. Three properties are worth naming because getting them wrong would
+be a lie rather than a glitch, and each is a catalog row (MH-USAGE-016..020):
+
+- the caption states the `window_days` the server *served*, never the number the
+  control asked for;
+- a `token_reports` shortfall reads as reports that never arrived, never as unused
+  capacity, which the schema forbids in as many words;
+- a model whose label is gone shows no identity at all, because its ledger key is a
+  digest; a gone Source keeps its `src_*` id, which is a string the user has seen.
+
+**The read is the tab's own.** It is deliberately not a member of
+`FIRST_PAINT_REGION_WHITELIST`: the landing decides routing, and a report nobody
+is looking at must not delay it. One effect owns both the open and the window
+change, since a window change is the same read over a different span, and
+`beginRegionRead` keeps the previous figure on screen while the new one lands.
+
+**Geometry.** `design.pen` has no frame for this tab on the local surface, so the
+block adapts `MS/ConfigPanel → cp-usage-body` and otherwise follows the source
+table directly above it — same 18px gutter, 36px head, 11px column labels, 12px
+radius. Importing a second panel's spacing into the middle of this one would read
+as two surfaces stitched together. Two deliberate departures: the day series is a
+column chart because the day count is a window parameter rather than a fixed five,
+and the panels stack because the table carries nested rows. No light-mode branch
+was needed — every ink resolves through a step both light blocks already re-anchor,
+and the chart's two colors are a wash and a `color-mix` accent, which flip on their
+own.
+
+**Catalog.** `tests/scenarios/model_hub/test_model_hub_catalog.py` previously
+resolved a row's evidence with `ast.parse`, so the capability's user-visible half
+could not be registered at all. It now resolves a `.ts`/`.tsx` row by slicing the
+named `it(...)` case and requiring the catalog ID inside that case — the same
+per-row greppability the Python docstring rule gives, rather than a per-file
+approximation.
+
+**Dead 额度 code removed with the rename.** Copy: `settings.models.usage.monthSpend`,
+`settings.models.usageTab`, and `settings.models.tabs` (a zero-caller duplicate of
+`shell.tab`). Formatters: `formatSpend` and `currencySymbol`, which had zero callers
+already on `master` — they render `month_spend_cents`, whose one writer is
+`migration.py`'s `None`, so the amount they format is unobtainable in production and
+keeping them only invites someone to wire it back up. What remains is
+`types.SourceUsage` and the `mockData` 额度 fields: the type mirrors
+`docs/plans/model-hub-contracts/source.schema.json`, which still declares the block,
+and is retired when the contract retires it.

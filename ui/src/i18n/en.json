@@ -633,10 +633,6 @@
       "subtitle": "See whether each agent model can run now and which source serves it; set a route for one model when needed.",
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
-      "tabs": {
-        "sources": "Sources & gateway",
-        "usage": "Usage & quota"
-      },
       "sourceKind": {
         "api_key": "API key",
         "subscription": "Subscription"
@@ -659,7 +655,7 @@
         },
         "tab": {
           "hub": "Sources & gateway",
-          "usage": "Usage & quota"
+          "usage": "Usage"
         }
       },
       "direct": {
@@ -817,10 +813,6 @@
         "unavailable": "Supply paused",
         "note": "Route chains are each backend's configured source order."
       },
-      "usageTab": {
-        "title": "Usage and quota",
-        "detail": "Usage appears after a gateway source serves a request."
-      },
       "status": {
         "allHealthy": "All healthy",
         "needsAction_one": "{{count}} model needs attention",
@@ -948,7 +940,49 @@
         "error": "Needs attention"
       },
       "usage": {
-        "monthSpend": "{{amount}} this month"
+        "title": "Usage",
+        "detail": "Metered tokens from the turns the gateway proxied, by local day.",
+        "window": {
+          "label": "Window",
+          "option": "{{days}}d"
+        },
+        "range": "{{from}} – {{to}} · trailing {{days}} days",
+        "empty": "Nothing metered yet. A window fills once a gateway source serves a request.",
+        "blank": "—",
+        "tokens": {
+          "label": "Tokens",
+          "detail": "{{input}} in · {{output}} out"
+        },
+        "requests": {
+          "label": "Requests",
+          "reported": "Every request reported its tokens",
+          "shortfall_one": "{{count}} request came back with no token report",
+          "shortfall_other": "{{count}} requests came back with no token report"
+        },
+        "cached": {
+          "label": "Cached input",
+          "detail": "{{cached}} of {{input}} input tokens",
+          "none": "No input tokens in this window"
+        },
+        "bySource": {
+          "title": "By source",
+          "col": {
+            "source": "Source",
+            "tokens": "Tokens",
+            "requests": "Requests",
+            "cached": "Cached",
+            "lastMetered": "Last metered"
+          },
+          "goneSource": "deleted",
+          "goneModel": "model no longer listed"
+        },
+        "byDay": {
+          "title": "By day",
+          "chart": "Metered tokens per day, {{from}} to {{to}}",
+          "column": "{{day}} · {{tokens}} tokens",
+          "peak": "Peak {{tokens}} on {{day}}",
+          "quiet": "No day in this window carried a metered turn"
+        }
       },
       "supplyTooltip": {
         "label": "Supplies: "

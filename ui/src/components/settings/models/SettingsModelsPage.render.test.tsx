@@ -12,7 +12,7 @@ import { MANAGE_COMMIT_ACTIONS } from './manage';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
-import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
+import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source, UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -84,6 +84,25 @@ const takeoverChain: AgentChain = {
   supply_state: 'ok',
 };
 
+const usageSummary: UsageSummary = {
+  window_days: 30,
+  from_day: '2026-07-20',
+  to_day: '2026-08-18',
+  totals: { requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 },
+  sources: [{
+    source_id: 'src_retained',
+    label: 'Retained source',
+    last_metered_at: '2026-08-18T03:14:00+00:00',
+    requests: 12,
+    token_reports: 12,
+    input_tokens: 148230,
+    cached_input_tokens: 96010,
+    output_tokens: 4120,
+    models: [{ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
+  }],
+  days: [{ day: '2026-08-18', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
+};
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -101,6 +120,7 @@ const renderPage = (sources: Source[]) => {
   ]);
   vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+  vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
   return render(
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
@@ -897,5 +917,59 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
     expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+});
+
+// How the usage report is READ. What it says once read is `UsageTab.test.tsx`'s
+// subject; the property here is that the read is the tab's own — off the first
+// paint, live on every open, and spanning whatever the control was left on.
+describe('SettingsModelsPage usage region', () => {
+  const openUsage = () => userEvent.click(screen.getByRole('tab', { name: /^Usage$|^用量$/ }));
+
+  it('leaves the report unread until its tab is opened, then reads the default span', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getUsageSummary);
+
+    // MH-USAGE-020. The landing is what decides routing. A report nobody is
+    // looking at may not be part of the read that draws it.
+    expect(read).not.toHaveBeenCalled();
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledWith(30));
+  });
+
+  it('re-reads with the span the control was moved to', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    await openUsage();
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole('radio', { name: /^7d$|^7 天$/ }));
+    await waitFor(() => expect(read).toHaveBeenLastCalledWith(7));
+  });
+
+  it('re-reads on every open, because the figure is live', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^来源与网关$/ }));
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+
+  it('retries the read the tab failed on, at the same span', async () => {
+    renderPage([retainedSource]);
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    read.mockRejectedValueOnce(new TypeError('usage unread'));
+    await screen.findByText('Retained source');
+    await openUsage();
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/ }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(read.mock.calls.map(([days]) => days)).toEqual([30, 30]);
   });
 });
