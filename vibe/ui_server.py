@@ -12712,7 +12712,7 @@ def _is_show_page_markdown_request(asset_path: str, starlette_request: FastAPIRe
     # unusual Accept header. Keep email-shaped history routes (for example
     # ``users/alice@example.com``) as SPA routes.
     final_segment = segments[-1]
-    if "." in final_segment and "@" not in final_segment:
+    if "." in final_segment and not re.fullmatch(r"[^/@\s]+@[^/@\s]+", final_segment):
         return False
     return True
 
@@ -14138,10 +14138,25 @@ def _rewrite_public_show_agent_markdown(
     session_part = quote(session_id, safe="")
     private_prefix = f"/show/{session_part}"
     public_prefix = external_prefix.rstrip("/")
+    absolute_pattern = re.compile(
+        r"https?://[^\s)\]}>,\"]*"
+        + re.escape(private_prefix)
+        + r"(?=$|[/?#\s)\]}>,])",
+        re.IGNORECASE,
+    )
+
+    def replace_absolute(match: re.Match[str]) -> str:
+        value = match.group(0)
+        suffix = value[value.rfind(private_prefix) + len(private_prefix) :]
+        return public_prefix + suffix
+
+    rewritten = absolute_pattern.sub(replace_absolute, text)
     rewritten = re.sub(
-        re.escape(private_prefix) + r"(?=$|[/?#\s)\]}>,])",
+        r"(?<![A-Za-z0-9._~-])"
+        + re.escape(private_prefix)
+        + r"(?=$|[/?#\s)\]}>,])",
         public_prefix,
-        text,
+        rewritten,
     )
     return rewritten.encode("utf-8")
 
@@ -14232,7 +14247,10 @@ async def _show_page_agent_markdown_response(
             session_id=session_id,
             external_prefix=external_prefix,
         )
-        if re.search(r"/show/[^\s)\]}>,]+", content.decode("utf-8")):
+        markdown_text = content.decode("utf-8")
+        if re.search(r"https?://[^\s)\]}>,\"]*/show/[^\s)\]}>,]+", markdown_text, re.IGNORECASE):
+            return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
+        if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", markdown_text):
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
     return FastAPIResponse(
         content=b"" if starlette_request.method == "HEAD" else content,

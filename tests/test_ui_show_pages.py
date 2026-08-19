@@ -1560,6 +1560,7 @@ def test_show_page_agent_markdown_handler_is_the_document_representation(
                 "Cookie": "__Host-vibe_remote_session=secret",
                 "X-Vibe-CSRF-Token": "secret",
                 "X-Avibe-Show-Event-Write-Token": "secret",
+                "Range": "bytes=0-1",
                 "X-Avibe-Show-Protocol": "999",
                 "X-Avibe-Show-Context": "private",
             },
