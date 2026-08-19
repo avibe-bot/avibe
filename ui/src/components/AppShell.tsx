@@ -32,6 +32,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import {
   adminLandingPath,
@@ -271,6 +272,9 @@ export const AppShell: React.FC = () => {
   } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
+  useEffect(() => {
+    forgetMobileProjectsListUnlessPreserved(location.pathname);
+  }, [location.pathname]);
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
   const [memoryNavVisible, setMemoryNavVisible] = useState(false);
@@ -726,6 +730,7 @@ export const AppShell: React.FC = () => {
       )}
 
       <main
+        id={APP_SHELL_SCROLL_ID}
         className={clsx(
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen

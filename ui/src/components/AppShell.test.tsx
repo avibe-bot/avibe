@@ -2,9 +2,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
+import {
+  APP_SHELL_SCROLL_ID,
+  clearMobileProjectsListSnapshot,
+  holdMobileProjectsListForChatReturn,
+  readMobileProjectsListSnapshot,
+} from '../lib/mobileProjectsListMemory';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -99,6 +106,7 @@ vi.mock('react-i18next', () => ({
 
 beforeEach(() => {
   viewport.isDesktop = false;
+  clearMobileProjectsListSnapshot();
   instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
@@ -113,6 +121,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearMobileProjectsListSnapshot();
   vi.clearAllMocks();
 });
 
@@ -160,6 +169,58 @@ describe('AppShell workbench sidebar', () => {
     // The surrounding chrome is unaffected: only the data-reading member of the
     // desktop-only container is gated, not the container.
     expect(screen.getAllByText('appShell.title').length).toBeGreaterThan(0);
+  });
+
+  it('exposes the mobile scroll owner for page-level restoration', async () => {
+    render(
+      <MemoryRouter initialEntries={['/projects']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/projects" element={<div data-testid="projects-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('projects-surface')).toBeTruthy();
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)).not.toBeNull();
+  });
+
+  it('forgets the mobile projects list when leaving chat or projects', async () => {
+    const user = userEvent.setup();
+    holdMobileProjectsListForChatReturn({ visibleCounts: { proj_a: 16 }, scrollTop: 180 });
+
+    const ChatProbe = () => {
+      const navigate = useNavigate();
+      return (
+        <div data-testid="chat-surface">
+          <button type="button" onClick={() => navigate('/inbox')}>
+            leave-chat
+          </button>
+        </div>
+      );
+    };
+
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/chat/:sessionId" element={<ChatProbe />} />
+            <Route path="/inbox" element={<div data-testid="inbox-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat-surface')).toBeTruthy();
+    expect(readMobileProjectsListSnapshot()).toEqual({
+      visibleCounts: { proj_a: 16 },
+      scrollTop: 180,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'leave-chat' }));
+    expect(await screen.findByTestId('inbox-surface')).toBeTruthy();
+    expect(readMobileProjectsListSnapshot()).toEqual({ visibleCounts: {}, scrollTop: 0 });
   });
 });
 
