@@ -2275,12 +2275,10 @@ class SessionTurnManager:
             if context.platform != "avibe" and native_message_id
             else str(delivery["id"])
         )
-        memory_identity = _memory_admission_merge_identity(
-            {"metadata": payload.get("metadata")}
-        )[0]
-        # ``author_id`` owns web-push delivery. Memory capture must use only its
-        # separately persisted principal and fail closed when it is absent.
-        context.user_id = memory_identity
+        # Routing identity only. Memory's principal already travels in
+        # ``platform_specific["message_metadata"]["_memory_user_id"]``.
+        if payload.get("author_id"):
+            context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
         metadata = payload.get("metadata") or {}
