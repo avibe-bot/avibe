@@ -26,6 +26,7 @@ def _remote_authorization_record(
     instance_access_source: str = "email",
     organization: bool = False,
     instance_kind: str | None = None,
+    instance_id: str | None = "inst-push",
 ) -> dict:
     subject = user_key.removeprefix("remote:")
     record = web_push_notifications.web_push_authorization_context_record(
@@ -40,6 +41,7 @@ def _remote_authorization_record(
             organization_id="org_1" if organization else None,
             organization_member_id="member_1" if organization else None,
             organization_role="member" if organization else None,
+            instance_id=instance_id,
             instance_kind=instance_kind,
             is_remote=True,
         ),
@@ -64,7 +66,10 @@ def test_kindless_web_push_snapshot_adopts_current_personal_pairing_kind(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _paired_revision_config(41, instance_kind="personal")
-    record = _remote_authorization_record("remote:personal-user")
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_id="inst-push",
+    )
 
     decision = web_push_notifications._evaluate_record_authorization(
         config,
@@ -75,6 +80,45 @@ def test_kindless_web_push_snapshot_adopts_current_personal_pairing_kind(
     assert decision.authorized
     assert decision.context is not None
     assert decision.context.is_personal_instance
+
+
+def test_unbound_kindless_web_push_snapshot_is_rejected(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_revision_config(41, instance_kind="personal")
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_id=None,
+    )
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+
+    assert not decision.authorized
+    assert decision.disposition == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert decision.reason == (
+        "persisted snapshot lacks a binding to the current paired instance"
+    )
+
+
+def test_kind_specific_web_push_snapshot_requires_known_current_pairing_kind(tmp_path) -> None:
+    config = _paired_revision_config(41, instance_kind="")
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_kind="personal",
+    )
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+
+    assert not decision.authorized
+    assert decision.disposition == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
+    assert decision.reason == "current pairing instance kind is unavailable"
 
 
 def test_web_push_rejects_remote_snapshot_when_pairing_config_is_absent() -> None:
@@ -563,6 +607,7 @@ def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revi
             - remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
             - 3600,
             authorization_revision=41,
+            instance_id="inst-push",
             is_remote=True,
         ),
     )
@@ -2585,6 +2630,7 @@ def test_send_to_enabled_subscriptions_sets_visible_badge_count(monkeypatch, tmp
         subject="user-a",
         email="member@example.com",
         instance_access_source="email",
+        instance_id="inst-push",
         claims_issued_at=int(web_push_notifications.time.time()),
         is_remote=True,
     )

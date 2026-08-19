@@ -281,6 +281,18 @@ def _evaluate_record_authorization(
     record_kind = record.get("vibe_instance_kind")
     if (
         record_kind in {"personal", "organization"}
+        and paired_kind not in {"personal", "organization"}
+    ):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="current pairing instance kind is unavailable",
+        )
+    if (
+        record_kind in {"personal", "organization"}
         and paired_kind in {"personal", "organization"}
         and record_kind != paired_kind
     ):
@@ -298,6 +310,15 @@ def _evaluate_record_authorization(
         and paired_instance_id
         and paired_kind in {"personal", "organization"}
     ):
+        if record_instance_id != paired_instance_id:
+            return OwnerAuthorizationDecision(
+                user_key=user_key,
+                policy=policy,
+                context=None,
+                authorized=False,
+                disposition=WEB_PUSH_DISPOSITION_REVOKED,
+                reason="persisted snapshot lacks a binding to the current paired instance",
+            )
         context = replace(context, instance_kind=paired_kind)
     if policy == "personal":
         return OwnerAuthorizationDecision(
