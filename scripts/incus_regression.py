@@ -660,7 +660,7 @@ def ensure_office_converter(
         root_exec(
             target,
             "set -euo pipefail; "
-            "if ! command -v soffice >/dev/null 2>&1; then "
+            "if ! PATH=/usr/bin:/bin command -v soffice >/dev/null 2>&1; then "
             "export DEBIAN_FRONTEND=noninteractive; "
             "apt-get update; "
             "apt-get install -y --no-install-recommends libreoffice-nogui; "

@@ -490,7 +490,7 @@ def test_existing_instance_proxy_device_is_refreshed() -> None:
     assert any("incus --project avr-master config device add avibe-master ui proxy listen=tcp:127.0.0.1:15131" in command for command in rendered)
     assert not any(" init " in f" {command} " for command in rendered)
     assert any(
-        "command -v soffice" in command
+        "PATH=/usr/bin:/bin command -v soffice" in command
         and "apt-get install -y --no-install-recommends libreoffice-nogui" in command
         for command in rendered
     )
