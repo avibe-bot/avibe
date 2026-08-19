@@ -688,3 +688,59 @@ async def test_cancel_keeps_live_memory_task_on_interrupt_path(tmp_path: Path) -
         ).mappings().one()
     assert turn["state"] == "active"
     assert session["agent_status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_cancel_keeps_restored_native_runtime_on_interrupt_path(
+    tmp_path: Path,
+) -> None:
+    """A restored native poll is live even when in_flight is empty."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-restored")
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses-restored")
+            .values(agent_status="running")
+        )
+        _delivery(conn, "delivery-restored", "ses-restored")
+        delivery_store.insert_turn(
+            conn,
+            turn_id="trn-restored",
+            session_id="ses-restored",
+            initial_delivery_id="delivery-restored",
+            state="active",
+            backend="opencode",
+            dispatch_text="restored",
+        )
+
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    manager._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        "opencode:native-restored:1",
+    )
+    seen = {}
+
+    async def _deliver(request, *, context=None):
+        seen["priority"] = request.priority
+        seen["turn_id"] = request.expected_turn_id
+        return SimpleNamespace(state="waiting_terminal", reason=None)
+
+    manager.deliver = _deliver
+    result = await manager.cancel("ses-restored")
+
+    assert result == {
+        "ok": True,
+        "session_id": "ses-restored",
+        "status": "cancel_requested",
+    }
+    assert seen == {"priority": "p0", "turn_id": "trn-restored"}
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, "trn-restored")
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == "ses-restored")
+        ).mappings().one()
+    assert turn["state"] == "active"
+    assert session["agent_status"] == "running"

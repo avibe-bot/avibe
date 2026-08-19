@@ -7999,25 +7999,32 @@ class SessionTurnManager:
             }
         memory_dead = turn is None or turn.task.done()
         if owner is not None and memory_dead and not agent_run_id:
-            terminal = self._terminalize_durable_turn(
-                str(owner["id"]),
-                "canceled",
-                settled_by=SETTLED_BY_STOPPED,
-                evidence_kind="runtime_gone",
-                evidence={"reason": "stop_with_no_live_runtime"},
+            owner_id = str(owner["id"])
+            restored_identity = self._active_identity(
+                str(owner["backend"]),
+                session_id,
+                owner_id,
             )
-            if terminal.get("changed"):
-                logger.info(
-                    "Released durable Turn=%s for Session=%s after Stop found no live runtime",
-                    owner["id"],
-                    session_id,
+            if restored_identity is None or restored_identity[0] != owner_id:
+                terminal = self._terminalize_durable_turn(
+                    owner_id,
+                    "canceled",
+                    settled_by=SETTLED_BY_STOPPED,
+                    evidence_kind="runtime_gone",
+                    evidence={"reason": "stop_with_no_live_runtime"},
                 )
-                return {
-                    "ok": True,
-                    "session_id": session_id,
-                    "status": "stale_released",
-                    "reason": "runtime_gone",
-                }
+                if terminal.get("changed"):
+                    logger.info(
+                        "Released durable Turn=%s for Session=%s after Stop found no live runtime",
+                        owner_id,
+                        session_id,
+                    )
+                    return {
+                        "ok": True,
+                        "session_id": session_id,
+                        "status": "stale_released",
+                        "reason": "runtime_gone",
+                    }
         result = await self.deliver(
             DeliveryRequest(
                 session_id=session_id,
