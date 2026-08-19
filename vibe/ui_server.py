@@ -12980,6 +12980,22 @@ def _show_public_authenticated_context(config: V2Config | None):
     return context_from_session_payload(session) if session is not None else None
 
 
+def _show_limited_viewer_is_allowed(context: Any, access: Any, page_id: str) -> bool:
+    from core.show_pages import normalize_show_access_email
+
+    allowlisted = False
+    if context.email:
+        try:
+            allowlisted = (
+                access is not None
+                and normalize_show_access_email(context.email)
+                in access.normalized_emails
+            )
+        except (TypeError, ValueError):
+            allowlisted = False
+    return allowlisted or context.can_use_show_page(page_id)
+
+
 async def _show_public_request_author() -> dict[str, str] | None:
     context = await asyncio.to_thread(_show_public_editor_context)
     if context is None:
@@ -14951,14 +14967,44 @@ async def serve_public_show_page(share_id, asset_path):
             # Already-rendered pages are not proactively closed, but every
             # subsequent request must match the current local access record.
             access = store.get_access(page.session_id)
-            if (
-                access is None
-                or page.visibility != "limited"
-                or access.access_mode != "limited"
-                or access.share_id != share_id
-                or lease.normalized_email not in access.normalized_emails
-            ):
-                return _show_limited_not_found_response()
+            lease_is_current = (
+                access is not None
+                and page.visibility == "limited"
+                and access.access_mode == "limited"
+                and access.share_id == share_id
+                and lease.normalized_email in access.normalized_emails
+            )
+            if not lease_is_current:
+                current_limited_binding = (
+                    access is not None
+                    and page.visibility == "limited"
+                    and access.access_mode == "limited"
+                    and access.share_id == share_id
+                )
+                if current_limited_binding:
+                    authenticated_context = await asyncio.to_thread(
+                        _show_public_authenticated_context,
+                        config,
+                    )
+                    if authenticated_context is not None:
+                        if not _show_limited_viewer_is_allowed(
+                            authenticated_context,
+                            access,
+                            page.session_id,
+                        ):
+                            return _show_page_access_denied_response(
+                                include_back_link=(
+                                    authenticated_context.instance_access_source
+                                    != "show_page_email"
+                                )
+                            )
+                        # The current identity may be allowed again, but the
+                        # old lease must not be treated as valid guest access.
+                        limited_guest = False
+                    else:
+                        return _show_limited_not_found_response()
+                else:
+                    return _show_limited_not_found_response()
         if page.visibility == "limited":
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
@@ -14969,18 +15015,11 @@ async def serve_public_show_page(share_id, asset_path):
                 )
                 if authenticated_context is not None:
                     access = store.get_access(page.session_id)
-                    allowlisted = False
-                    if authenticated_context.email:
-                        try:
-                            allowlisted = (
-                                access is not None
-                                and normalize_show_access_email(authenticated_context.email)
-                                in access.normalized_emails
-                            )
-                        except (TypeError, ValueError):
-                            allowlisted = False
-                    page_scoped = authenticated_context.can_use_show_page(page.session_id)
-                    if not allowlisted and not page_scoped:
+                    if not _show_limited_viewer_is_allowed(
+                        authenticated_context,
+                        access,
+                        page.session_id,
+                    ):
                         return _show_page_access_denied_response(
                             include_back_link=(
                                 authenticated_context.instance_access_source != "show_page_email"
