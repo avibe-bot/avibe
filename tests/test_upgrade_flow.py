@@ -31,6 +31,28 @@ from vibe.upgrade import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _tree_is_not_an_installed_distribution(monkeypatch):
+    """Every test here describes a machine, not the machine running the tests.
+
+    `installed_package_name()` asks this process's own metadata which
+    distribution provides `vibe`, and the answer differs by checkout: a developer
+    running from a source tree gets nothing, while CI installs the package first
+    and gets `avibe-os`. Tests written against the first answer pass locally and
+    then fail on a runner for a reason that has nothing to do with the change --
+    `test_a_spec_that_cannot_carry_a_pin_is_refused` did exactly that, because an
+    installed name outranks the configured spec whose refusal it was asserting.
+
+    Answering `[]` here is the honest state for a checkout, and it is the state
+    every test in this module was already written against. Only the ambient
+    metadata is removed; the interpreter-path heuristic stays live, so a test can
+    still hand in a uv tool path and be answered from it, and a test that wants a
+    measured name sets one explicitly.
+    """
+
+    monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
+
+
 def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
