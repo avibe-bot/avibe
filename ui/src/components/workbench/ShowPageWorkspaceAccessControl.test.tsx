@@ -30,16 +30,16 @@ vi.mock('@/features/permissions/api', async (importOriginal) => ({
 }));
 
 const translations: Record<string, string> = {
-  'chat.showPage.workspaceAccess': 'Workspace access',
-  'chat.showPage.workspaceAccessDesc': 'Controls authenticated access inside this Avibe. Link access remains separate.',
-  'chat.showPage.loadingWorkspaceAccess': 'Loading Workspace access...',
+  'chat.showPage.workspaceAccess': 'Organization access',
+  'chat.showPage.workspaceAccessDesc': 'Controls authenticated access inside this Organization. Link access remains separate.',
+  'chat.showPage.loadingWorkspaceAccess': 'Loading Organization access...',
   'chat.showPage.workspacePersonal': 'This Show Page belongs to a Personal Avibe.',
-  'chat.showPage.workspaceUnmanaged': 'Workspace access is unavailable until this Avibe is paired.',
+  'chat.showPage.workspaceUnmanaged': 'Organization access is unavailable until this Avibe is paired.',
   'chat.showPage.workspacePending': 'Organization ownership is known, but its exact binding is temporarily unavailable. Access remains private.',
-  'chat.showPage.workspaceConfigurationUnavailable': 'Workspace access cannot be verified while Avibe configuration is unavailable. Access remains private.',
+  'chat.showPage.workspaceConfigurationUnavailable': 'Organization access cannot be verified while Avibe configuration is unavailable. Access remains private.',
   'chat.showPage.workspaceOwnershipConflict': 'This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.',
   'chat.showPage.workspaceModes.private': 'Private',
-  'chat.showPage.workspaceModes.organization': 'Organization',
+  'chat.showPage.workspaceModes.organization': 'Organization members',
   'chat.showPage.workspaceModes.scope': 'Selected groups',
   'chat.showPage.workspaceHelp.private': 'Only the page owner and Instance Owner can use it.',
   'chat.showPage.workspaceHelp.public': 'Authenticated members of this Organization can use it.',
@@ -48,12 +48,12 @@ const translations: Record<string, string> = {
   'chat.showPage.workspaceArchived': 'Archived',
   'chat.showPage.workspaceNoGroups': 'No active groups are available.',
   'chat.showPage.workspaceGroupRequired': 'Select at least one group.',
-  'chat.showPage.workspaceRevisionConflict': 'Workspace access changed elsewhere. Your draft was kept on the latest revision.',
-  'chat.showPage.workspaceOffline': 'The last known policy is shown while Permissions is offline. Editing is disabled.',
-  'chat.showPage.workspaceReadOnly': 'Avibe Cloud owns this policy. Edit it in Avibe Cloud.',
-  'chat.showPage.workspaceOwnerOnly': 'Only the Instance Owner can change Workspace access.',
-  'chat.showPage.workspaceLoadError': 'Workspace access could not be loaded.',
-  'chat.showPage.workspaceNarrowTitle': 'Narrow Workspace access?',
+  'chat.showPage.workspaceRevisionConflict': 'Organization access changed elsewhere. Your draft was kept on the latest revision.',
+  'chat.showPage.workspaceOffline': 'The last known Organization policy is shown while Permissions is offline. Editing is disabled.',
+  'chat.showPage.workspaceReadOnly': 'Avibe Cloud owns this Organization policy. Edit it in Avibe Cloud.',
+  'chat.showPage.workspaceOwnerOnly': 'Only the Instance Owner can change Organization access.',
+  'chat.showPage.workspaceLoadError': 'Organization access could not be loaded.',
+  'chat.showPage.workspaceNarrowTitle': 'Narrow Organization access?',
   'chat.showPage.workspaceNarrowBody': 'Some people may lose access as soon as this policy is applied.',
   'chat.showPage.applyWorkspaceAccess': 'Apply',
   'chat.showPage.workspaceSync.pending': 'The policy is waiting for this Avibe to apply it.',
@@ -222,6 +222,17 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(api.getResourceAccess).not.toHaveBeenCalled();
   });
 
+  it('keeps the requested policy order while narrowing stays owner-aware', async () => {
+    renderControl();
+
+    const radios = await screen.findAllByRole('radio');
+    expect(radios.map((radio) => radio.textContent)).toEqual([
+      'Private',
+      'Selected groups',
+      'Organization members',
+    ]);
+  });
+
   it('polls a pending Resource until the exact instance reports a terminal sync state', async () => {
     vi.useFakeTimers();
     try {
@@ -249,7 +260,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     }
   });
 
-  it('classifies every Workspace policy reduction at the shared boundary', () => {
+  it('classifies every Organization policy reduction at the shared boundary', () => {
     expect(requiresResourcePolicyNarrowing('public', [], 'private', [])).toBe(true);
     expect(requiresResourcePolicyNarrowing('public', [], 'scope', ['group-active'])).toBe(true);
     expect(requiresResourcePolicyNarrowing('scope', ['group-active'], 'private', [])).toBe(true);
@@ -278,7 +289,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     )).toBe(false);
   });
 
-  it('confirms a Workspace policy reduction before sending it', async () => {
+  it('confirms an Organization policy reduction before sending it', async () => {
     api.getResourceAccess.mockResolvedValue({
       resource: resource({ level: 'public' }),
     });
@@ -292,7 +303,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(await screen.findByRole('radio', { name: 'Private' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
 
-    const dialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    const dialog = screen.getByText('Narrow Organization access?').closest('[role="dialog"]');
     expect(dialog).toBeTruthy();
     expect(api.updateResourceAccess).not.toHaveBeenCalled();
 
@@ -316,7 +327,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(await screen.findByRole('radio', { name: 'Private' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
 
-    const dialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    const dialog = screen.getByText('Narrow Organization access?').closest('[role="dialog"]');
     expect(dialog?.getAttribute('data-window-owner-id')).toBe('window-42');
   });
 
@@ -330,7 +341,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     const user = userEvent.setup();
     const view = renderControl();
 
-    await user.click(await screen.findByRole('radio', { name: 'Organization' }));
+    await user.click(await screen.findByRole('radio', { name: 'Organization members' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
     expect(api.updateResourceAccess).toHaveBeenLastCalledWith(
       { resource_kind: 'show_page', resource_id: 'ses-1' },
@@ -343,7 +354,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(screen.getByRole('radio', { name: 'Selected groups' }));
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
-    const narrowingDialog = screen.getByText('Narrow Workspace access?').closest('[role="dialog"]');
+    const narrowingDialog = screen.getByText('Narrow Organization access?').closest('[role="dialog"]');
     await user.click(within(narrowingDialog as HTMLElement).getByRole('button', { name: 'Apply' }));
     expect(api.updateResourceAccess).toHaveBeenLastCalledWith(
       { resource_kind: 'show_page', resource_id: 'ses-1' },
@@ -375,7 +386,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
 
-    expect(screen.queryByText('Narrow Workspace access?')).toBeNull();
+    expect(screen.queryByText('Narrow Organization access?')).toBeNull();
     expect(api.updateResourceAccess).toHaveBeenCalledWith(
       { resource_kind: 'show_page', resource_id: 'ses-1' },
       'scope',
@@ -404,7 +415,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
 
-    expect(screen.getByText('Narrow Workspace access?')).toBeTruthy();
+    expect(screen.getByText('Narrow Organization access?')).toBeTruthy();
     expect(api.updateResourceAccess).not.toHaveBeenCalled();
   });
 
@@ -432,7 +443,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     expect(screen.getByText('Archived')).toBeTruthy();
     expect(screen.queryByText('Former Operations')).toBeNull();
 
-    await user.click(screen.getByRole('radio', { name: 'Organization' }));
+    await user.click(screen.getByRole('radio', { name: 'Organization members' }));
     await user.click(screen.getByRole('radio', { name: 'Selected groups' }));
     expect(screen.getByRole('checkbox', { name: 'Retired Team' }).getAttribute('aria-checked')).toBe('true');
 
@@ -505,10 +516,10 @@ describe('ShowPageWorkspaceAccessControl', () => {
     const user = userEvent.setup();
     renderControl();
 
-    await user.click(await screen.findByRole('radio', { name: 'Organization' }));
+    await user.click(await screen.findByRole('radio', { name: 'Organization members' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
 
-    expect(await screen.findByText('Workspace access could not be loaded.')).toBeTruthy();
+    expect(await screen.findByText('Organization access could not be loaded.')).toBeTruthy();
     expect((screen.getByRole('radio', { name: 'Private' }) as HTMLButtonElement).disabled).toBe(true);
     const apply = screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement;
     expect(apply.disabled).toBe(true);
@@ -530,7 +541,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
-    expect(await screen.findByText('Workspace access could not be loaded.')).toBeTruthy();
+    expect(await screen.findByText('Organization access could not be loaded.')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByRole('checkbox', { name: 'Design' });
@@ -560,7 +571,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
     await user.click(await screen.findByRole('radio', { name: 'Selected groups' }));
     await user.click(screen.getByRole('checkbox', { name: 'Design' }));
     await user.click(screen.getByRole('button', { name: 'Apply' }));
-    expect(await screen.findByText('Workspace access could not be loaded.')).toBeTruthy();
+    expect(await screen.findByText('Organization access could not be loaded.')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByRole('checkbox', { name: 'Design' });
@@ -610,7 +621,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
   it('renders offline, Cloud-owned, and non-owner policy as read-only', async () => {
     api.getPermissions.mockResolvedValue(permissions({ offline: true }));
     const offline = renderControl();
-    expect(await screen.findByText(/last known policy/)).toBeTruthy();
+    expect(await screen.findByText(/last known Organization policy/)).toBeTruthy();
     expect((screen.getByRole('radio', { name: 'Private' }) as HTMLButtonElement).disabled).toBe(true);
     offline.unmount();
 
@@ -619,7 +630,7 @@ describe('ShowPageWorkspaceAccessControl', () => {
       localMutationAllowed: false,
     }));
     const cloud = renderControl();
-    expect(await screen.findByText(/Avibe Cloud owns this policy/)).toBeTruthy();
+    expect(await screen.findByText(/Avibe Cloud owns this Organization policy/)).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
     cloud.unmount();
 

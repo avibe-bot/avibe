@@ -117,7 +117,7 @@ export function ShowPageWorkspaceAccessControl({
         !organizationMatches(nextPermissions, instanceId, organizationId)
         || !resourceIdentityMatches(nextResource.resource, requestSessionId, instanceId)
       ) {
-        throw new Error('Show Page Workspace identity mismatch');
+        throw new Error('Show Page Organization identity mismatch');
       }
       const directoryGroups = [...nextPermissions.projection.directory.groups];
       const knownIds = new Set(directoryGroups.map((group) => group.id));
@@ -299,7 +299,7 @@ export function ShowPageWorkspaceAccessControl({
         || requestSessionId !== sessionIdRef.current
       ) return;
       if (!resourceIdentityMatches(result.resource, requestSessionId, instanceId)) {
-        throw new Error('Show Page Workspace identity mismatch');
+        throw new Error('Show Page Organization identity mismatch');
       }
       adopt(result.resource, groups);
       setGate('ready');
@@ -393,10 +393,11 @@ export function ShowPageWorkspaceAccessControl({
             disabled={!editable}
             ariaLabel={t('chat.showPage.workspaceAccess')}
             tone="muted"
+            className="max-w-full [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:px-1.5 [&>button]:text-center [&>button]:leading-tight"
             options={[
               { id: 'private', label: t('chat.showPage.workspaceModes.private') },
-              { id: 'public', label: t('chat.showPage.workspaceModes.organization') },
               { id: 'scope', label: t('chat.showPage.workspaceModes.scope') },
+              { id: 'public', label: t('chat.showPage.workspaceModes.organization') },
             ]}
           />
           <p className="text-[11px] leading-snug text-muted">
