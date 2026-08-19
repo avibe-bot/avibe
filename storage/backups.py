@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import json
 import logging
 import os
@@ -31,11 +30,6 @@ _LEGACY_SQLITE_REPAIR_RE = re.compile(
     r"(?P<timestamp>\d{8}T\d{6}Z)\.sqlite$"
 )
 
-# What a backup's database actually was: the revisions it was stamped with, and
-# a fingerprint of the schema those revisions claim to describe. Two copies are
-# the same rollback point only if they agree on both.
-_State = tuple[tuple[str, ...], str]
-
 # A platform or filesystem declining to sync a directory is an answer, not a
 # fault. Anything else -- ENOSPC, EIO -- means the data may not be on the disk,
 # so it must reach the caller instead of being logged and forgotten.
@@ -53,33 +47,19 @@ class _BackupCandidate:
     kind: str
     timestamp: datetime
     suffix: int
-    sequence: int | None = None
-    state: _State | None = None
+    revisions: tuple[str, ...] | None = None
 
     @property
-    def order_key(self) -> tuple[bool, int, datetime, int, str]:
-        """Creation order, measured by us where possible.
+    def order_key(self) -> tuple[datetime, int, str]:
+        """Creation order, as the backup's own name records it.
 
-        The sequence is a counter this module writes and increments from its own
-        previous writes, so it is the one ordering input nothing outside the
-        process can move. Wall-clock time can: an NTP correction, a manual
-        change, or state carried from a machine running ahead all reorder
-        timestamps after the fact, and a copy that lands out of order takes the
-        slot of the one that actually holds more of the user's writes.
-
-        Backups written before the counter existed have no sequence, and sort
-        below every backup that has one -- which is simply true, since the
-        counter only started being written later. Among themselves the timestamp
-        is the best evidence available.
+        A movable clock can reorder this, and that is tolerable here, because
+        ordering only decides which of the older copies to drop first. The copy
+        a call just made is not defended by outranking them -- it is handed to
+        `prune_state_backups` as protected, which no clock can undo.
         """
 
-        return (
-            self.sequence is not None,
-            self.sequence or 0,
-            self.timestamp,
-            self.suffix,
-            self.root.name,
-        )
+        return (self.timestamp, self.suffix, self.root.name)
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -144,33 +124,23 @@ def _directory_candidate(path: Path) -> _BackupCandidate | None:
         kind=kind,
         timestamp=timestamp,
         suffix=int(match.group("suffix") or 0),
-        sequence=_manifest_sequence(manifest),
-        state=_manifest_state(manifest),
+        revisions=_manifest_revisions(manifest),
     )
 
 
-def _manifest_sequence(manifest: dict) -> int | None:
-    value = manifest.get("sequence")
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+def _manifest_revisions(manifest: dict) -> tuple[str, ...] | None:
+    """The revisions the backup's own copy of the database was stamped with.
 
-
-def _manifest_state(manifest: dict) -> _State | None:
-    """What the database was, as the manifest recorded it.
-
-    Both halves are required, because either one alone mistakes a different
-    rollback point for the same one: a partially applied upgrade moves the
-    schema while the revisions stand still, and a data-only migration moves the
-    revisions while the schema stands still.
-
-    Manifests written before the fingerprint existed have no state, and a backup
-    with no state can only be compared to itself.
+    A manifest that does not record them, or records them in a shape this
+    version does not understand, yields `None` -- which never matches anything,
+    so such a backup can never be mistaken for the rollback point a caller is
+    about to look for.
     """
 
-    revisions = manifest.get("from_revisions")
-    digest = manifest.get("schema_digest")
-    if not isinstance(revisions, list) or not isinstance(digest, str) or not digest:
+    value = manifest.get("from_revisions")
+    if not isinstance(value, list):
         return None
-    return tuple(sorted(str(revision) for revision in revisions)), digest
+    return tuple(sorted(str(revision) for revision in value))
 
 
 def _legacy_sqlite_candidate(path: Path) -> _BackupCandidate | None:
@@ -226,57 +196,21 @@ def _remove_candidate(candidate: _BackupCandidate) -> bool:
     return True
 
 
-def _keep_priority(candidates: Iterable[_BackupCandidate]) -> list[_BackupCandidate]:
-    """Order backups by how much a rollback would want them, best first.
-
-    Two copies of the same database in the same state are the same rollback
-    point taken twice, and the newer one dominates: it holds every write the
-    older one holds, plus the writes made since. So the window keeps the newest
-    copy of each distinct state, newest state first. That is the whole policy --
-    there is no second rule for it to disagree with.
-
-    It is what makes a retry storm survivable. An upgrade can commit part of its
-    work and then raise -- a SQLite table rebuild inside an autocommit block
-    that fails a later check is exactly that shape -- and from the next attempt
-    on, every copy is of the half-migrated database. Those retries are all one
-    state, so they hold one slot between them instead of crowding out the
-    snapshot taken before the damage, which is a state nothing else can produce.
-
-    Reading the state off the database instead of inferring it from the events
-    around the backup is the point. Earlier revisions of this code tried to
-    recognise a run of retries from wall-clock time, and then from the schema
-    transition each attempt recorded; the environment moves both. A clock
-    correction reorders the attempts. `command.upgrade` walks several revisions
-    in one call, and entering an autocommit block commits the version stamps
-    already earned, so the transition an attempt reports is not the one the
-    attempt before it reported. A fingerprint taken from the copy moves only
-    when the database moves -- including backwards, which is what an operator
-    restoring a rollback point does, and why a post-restore snapshot correctly
-    reads as the state it was restored to rather than as one more retry.
-
-    On a healthy machine every migration finishes and every backup is a state of
-    its own, so this is the familiar newest-first. Backups too old to record a
-    state stand alone, for the same reason: nothing about them can be compared.
-    """
-
-    best: dict[object, _BackupCandidate] = {}
-    superseded: list[_BackupCandidate] = []
-    for candidate in sorted(candidates, key=lambda item: item.order_key, reverse=True):
-        key = candidate.state if candidate.state is not None else candidate.root
-        if key in best:
-            superseded.append(candidate)
-        else:
-            best[key] = candidate
-    return list(best.values()) + superseded
-
-
 def prune_state_backups(
     backups_dir: Path,
     *,
     json_retention: int | None = JSON_STATE_BACKUP_RETENTION,
     sqlite_retention: int | None = SQLITE_BACKUP_RETENTION,
+    protect: Path | None = None,
 ) -> list[Path]:
     """Keep a bounded rollback window of backups created by Avibe.
+
+    Newest first, and `protect` -- the backup its caller has just finished
+    writing -- is kept ahead of all of them. Ranking it there rather than
+    trusting it to sort highest is the difference between a bound and a bug: a
+    copy left behind by a machine whose clock ran ahead is dated into the future
+    forever, and every ordering rule that decides the fresh copy's fate by
+    comparing timestamps hands the slot to that stale one instead.
 
     Unknown files, symlinks, incomplete backups, and directories without a
     recognized manifest are intentionally left untouched.
@@ -291,7 +225,10 @@ def prune_state_backups(
     removed: list[Path] = []
     for kind, limit in limits.items():
         matching = [candidate for candidate in candidates if candidate.kind == kind]
-        keep = {candidate.root for candidate in _keep_priority(matching)[:limit]}
+        ordered = sorted(matching, key=lambda item: item.order_key, reverse=True)
+        if protect is not None:
+            ordered.sort(key=lambda item: item.root != protect)
+        keep = {candidate.root for candidate in ordered[:limit]}
         for candidate in sorted(matching, key=lambda item: item.order_key):
             if candidate.root not in keep and _remove_candidate(candidate):
                 removed.append(candidate.root)
@@ -339,47 +276,28 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _next_sequence(backups_dir: Path) -> int:
-    """One past the highest sequence any backup on disk carries.
+def _stamped_revisions(connection: sqlite3.Connection) -> tuple[str, ...]:
+    """The alembic revisions the database behind `connection` is stamped with.
 
-    Counting from what survives rather than from a stored high-water mark is
-    what keeps the counter honest across pruning: the new backup only has to
-    outrank the backups that still exist, and reusing a number whose backup was
-    deleted costs nothing. It cannot collide with a live one by construction.
+    A database with no `alembic_version` table yields the empty tuple, which is
+    a state like any other: it is what an unversioned database is, and two
+    copies of it are the same rollback point.
     """
 
-    return max(
-        (
-            candidate.sequence
-            for candidate in _managed_candidates(backups_dir)
-            if candidate.sequence is not None
-        ),
-        default=0,
-    ) + 1
+    try:
+        rows = connection.execute("select version_num from alembic_version").fetchall()
+    except sqlite3.DatabaseError:
+        return ()
+    return tuple(sorted({str(row[0]) for row in rows}))
 
 
-def _schema_digest(connection: sqlite3.Connection) -> str:
-    """Fingerprint the schema of the database behind `connection`.
+def _rollback_point_held(backups_dir: Path, revisions: tuple[str, ...]) -> Path | None:
+    """A surviving backup of the database as it is stamped now, if there is one."""
 
-    Taken from the copy this call just wrote, so it describes the bytes being
-    preserved rather than anything reported about them. That is what makes it
-    usable as an identity: a partially applied upgrade changes the schema
-    without changing the revision the database is stamped with, and restoring a
-    rollback point changes it back.
-
-    `sqlite_master` is a handful of rows next to a copy of the whole database,
-    so the measurement is free in the only place it is taken.
-    """
-
-    digest = hashlib.sha256()
-    for row in connection.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name, tbl_name"
-    ):
-        for column in row:
-            digest.update(b"\x00" if column is None else str(column).encode("utf-8"))
-            digest.update(b"\x1f")
-        digest.update(b"\x1e")
-    return digest.hexdigest()
+    for candidate in sorted(_managed_candidates(backups_dir), key=lambda item: item.order_key, reverse=True):
+        if candidate.kind == "sqlite" and candidate.revisions == revisions:
+            return candidate.root
+    return None
 
 
 def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
@@ -402,11 +320,10 @@ def create_sqlite_migration_backup(
     db_path: Path,
     *,
     backups_dir: Path | None = None,
-    from_revisions: Iterable[str] = (),
     to_revisions: Iterable[str] = (),
     now: datetime | None = None,
 ) -> Path:
-    """Add a consistent, self-identifying SQLite backup to a bounded rollback window.
+    """Hold a rollback point for the database as it stands, in a bounded window.
 
     Bounding the window belongs here rather than at the call sites. A backup is
     a rollback point the moment it is durable, so whether the migration that
@@ -417,22 +334,45 @@ def create_sqlite_migration_backup(
     the bound true for callers not yet written, including the ones that opt out
     of their own pruning.
 
-    Owning it here also means this call is the only thing that can destroy what
-    it just produced, so it never does: the copy reaches stable storage before
-    any older one is deleted, and it is stamped with the next sequence, which
-    puts it ahead of every backup on disk without having to trust a clock.
+    The copy is skipped entirely when the window already holds one stamped with
+    the revisions the database is stamped with now. That is the same rollback
+    point, and taking it again is what created the problem this function exists
+    to solve: a migration failing partway is retried by every service entry
+    point that touches the store, and the copies pile up faster than any
+    retention rule can sort them out. Not making them is cheaper than deciding
+    which to keep, and safer -- earlier revisions of this code tried to rank the
+    copies by wall-clock adjacency, then by the schema transition each attempt
+    recorded, then by a fingerprint of each copy's schema, and each rule in turn
+    was defeated by something the environment could move or by damage the copy
+    could not show. A migration that commits row changes and then fails leaves a
+    half-migrated database that is byte-comparable to the clean one in every
+    respect a backup can measure. So the clean copy is the one kept, by never
+    being displaced.
 
-    The manifest also records what the copy actually is -- the revisions it was
-    stamped with and a fingerprint of its schema -- which is what lets the window
-    tell a fresh rollback point from another copy of one it already holds.
+    A copy that is taken reaches stable storage before any older one is deleted,
+    and is protected from its own prune, so this call can never destroy what it
+    just produced.
+
+    The manifest records the revisions read back from the copy rather than
+    anything the caller reported, because between a caller sampling them and
+    this function running, another process can advance the database.
     """
 
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
-    target_root.mkdir(parents=True, exist_ok=True)
-    # Read before anything is written, so the count is of finished backups only.
-    sequence = _next_sequence(target_root)
+    if not target_root.exists():
+        target_root.mkdir(parents=True, exist_ok=True)
+        # The entry for the window itself has to be on the disk before anything
+        # in it counts as durable; a crash that keeps the upgrade but loses this
+        # directory leaves no rollback point at all.
+        _fsync_directory(target_root.parent)
+
+    with sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True) as probe:
+        held = _rollback_point_held(target_root, _stamped_revisions(probe))
+    if held is not None:
+        return held
+
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
     temp_db = backup_dir / "vibe.sqlite.tmp"
@@ -446,7 +386,7 @@ def create_sqlite_migration_backup(
                 check = destination.execute("PRAGMA quick_check").fetchone()
                 if check != ("ok",):
                     raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
-                schema_digest = _schema_digest(destination)
+                from_revisions = _stamped_revisions(destination)
         os.chmod(temp_db, 0o600)
         _fsync_file(temp_db)
         temp_db.replace(backup_db)
@@ -456,9 +396,7 @@ def create_sqlite_migration_backup(
             "kind": "sqlite-migration",
             "created_at": created_at.astimezone(timezone.utc).isoformat(),
             "database": "vibe.sqlite",
-            "sequence": sequence,
-            "schema_digest": schema_digest,
-            "from_revisions": sorted(set(from_revisions)),
+            "from_revisions": list(from_revisions),
             "to_revisions": sorted(set(to_revisions)),
         }
         manifest_path = backup_dir / "manifest.json"
@@ -478,7 +416,7 @@ def create_sqlite_migration_backup(
     # a failure while pruning cannot reach that cleanup and delete the rollback
     # point this call just made. And it has to follow the manifest write,
     # because a directory without one is not yet a recognized candidate: it
-    # would neither count itself against the bound nor carry the sequence and
-    # state that decide which copies the bound keeps.
-    prune_state_backups(target_root, json_retention=None)
+    # would neither count itself against the bound nor be findable as the
+    # rollback point that lets the next attempt skip its copy.
+    prune_state_backups(target_root, json_retention=None, protect=backup_dir)
     return backup_dir
