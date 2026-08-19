@@ -9,7 +9,7 @@ from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages
 from storage.settings_service import upsert_scope
 from vibe import remote_access
-from vibe.authorization import AuthorizationContext
+from vibe.authorization import AuthorizationContext, context_from_session_payload
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +25,7 @@ def _remote_authorization_record(
     authorization_revision: int | None = None,
     instance_access_source: str = "email",
     organization: bool = False,
+    instance_kind: str | None = None,
 ) -> dict:
     subject = user_key.removeprefix("remote:")
     record = web_push_notifications.web_push_authorization_context_record(
@@ -39,11 +40,22 @@ def _remote_authorization_record(
             organization_id="org_1" if organization else None,
             organization_member_id="member_1" if organization else None,
             organization_role="member" if organization else None,
+            instance_kind=instance_kind,
             is_remote=True,
         ),
     )
     assert record is not None
     return record
+
+
+def test_web_push_authorization_snapshot_preserves_instance_kind() -> None:
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_kind="personal",
+    )
+
+    assert record["vibe_instance_kind"] == "personal"
+    assert context_from_session_payload(record).is_personal_instance
 
 
 def _paired_revision_config(revision: int, *, instance_kind: str = ""):
@@ -595,6 +607,7 @@ def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, 
         "remote:user-a",
         claims_age_seconds=remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS + 3600,
         authorization_revision=41,
+        instance_kind="personal",
     )
 
     with engine.begin() as conn:
@@ -2317,6 +2330,160 @@ def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkey
         }
     )
     assert [send[0]["endpoint"] for send in sends] == ["https://push.example.test/a"]
+
+
+def test_send_to_enabled_subscriptions_personal_editor_ignores_restricted_project_acl(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-06-04T00:00:00Z"
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="personal-user",
+        email="personal@example.com",
+        instance_access_source="email",
+        instance_kind="personal",
+        claims_issued_at=int(web_push_notifications.time.time()),
+        is_remote=True,
+    )
+    authorization_record = web_push_notifications.web_push_authorization_context_record(
+        "remote:personal-user",
+        context,
+    )
+    assert authorization_record is not None
+
+    with engine.begin() as conn:
+        primary_scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_personal_acl",
+            now=now,
+        )
+        other_scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_push_personal_other",
+            now=now,
+        )
+        for session_id, scope_id in (
+            ("ses_push_personal_acl", primary_scope_id),
+            ("ses_push_personal_other", other_scope_id),
+        ):
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=session_id,
+                    scope_id=scope_id,
+                    agent_backend="claude",
+                    agent_variant="default",
+                    session_anchor=session_id,
+                    native_session_id="",
+                    title=session_id,
+                    status="active",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+        for project_id in ("proj_push_personal_acl", "proj_push_personal_other"):
+            assert project_access_service.apply_project_access_intent(
+                conn,
+                {
+                    "project_id": project_id,
+                    "revision": 1,
+                    "mode": "restricted",
+                    "bindings": [
+                        {
+                            "principal_kind": "email",
+                            "principal_value": "someone-else@example.com",
+                            "access_role": "editor",
+                        }
+                    ],
+                },
+            ).outcome == "applied"
+        messages_service.append(
+            conn,
+            scope_id=primary_scope_id,
+            session_id="ses_push_personal_acl",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:personal-user",
+            metadata={
+                "_web_push_user_key": "remote:personal-user",
+                "_web_push_authorization_contexts": [authorization_record],
+            },
+            message_type="user",
+            text="Please finish",
+        )
+        primary_message = messages_service.append(
+            conn,
+            scope_id=primary_scope_id,
+            session_id="ses_push_personal_acl",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done",
+        )
+        messages_service.append(
+            conn,
+            scope_id=other_scope_id,
+            session_id="ses_push_personal_other",
+            platform="avibe",
+            author="user",
+            source="user",
+            author_id="remote:personal-user",
+            message_type="user",
+            text="Please finish another project",
+        )
+        messages_service.append(
+            conn,
+            scope_id=other_scope_id,
+            session_id="ses_push_personal_other",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done another",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:personal-user",
+            payload={
+                "endpoint": "https://push.example.test/personal-acl",
+                "keys": {"p256dh": "personal-key", "auth": "personal-auth"},
+            },
+        )
+
+    sends = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Personal ACL Push",
+            "body": "Done",
+            "session_id": "ses_push_personal_acl",
+            "message_id": primary_message["id"],
+        }
+    )
+
+    assert [send[0]["endpoint"] for send in sends] == [
+        "https://push.example.test/personal-acl"
+    ]
+    assert [send[1]["badge_count"] for send in sends] == [2]
+    recent = web_push_notifications.recent_delivery_dispositions(user_key="remote:personal-user")
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
+    engine.dispose()
 
 
 def test_send_to_enabled_subscriptions_sets_visible_badge_count(monkeypatch, tmp_path):

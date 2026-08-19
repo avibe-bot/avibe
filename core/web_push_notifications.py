@@ -626,6 +626,7 @@ def web_push_authorization_context_record(
         "sub": context.subject,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "vibe_instance_kind": context.instance_kind,
         "vibe_group_ids": sorted(context.group_ids),
         "claims_issued_at": context.claims_issued_at,
     }
