@@ -3469,10 +3469,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // the scroll handler + observer read it synchronously with no re-render.
   const suppressAnchorRef = useRef(false);
   // ``true`` while the viewport is FOLLOWING the bottom (at/near it) — drives the
-  // auto-follow of new content and hides the jump button. A ref, not state, so the
-  // scroll handler + ResizeObserver read it without stale closures or extra renders.
-  // Owned by ChatPage (see followingTailRef) so its retained-window trim can read
-  // the same follow state; every pinnedRef.current access below drives it.
+  // auto-follow of new content and hides the jump button. A ref so the scroll
+  // handler + ResizeObserver read it mid-layout without stale closures, and owned
+  // by ChatPage (see followingTailRef) so its retained-window trim reads the same
+  // follow state. It is the shadow of ``followingTail`` below and is written ONLY
+  // by that state's setter — see the note there for why.
   const pinnedRef = followingTailRef;
   // While the user has scrolled UP to read history (not pinned), remember the
   // topmost row still in view and how far its top sits below the viewport top, so
@@ -3491,6 +3492,38 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // adds no content, so nothing moves and the trigger below has no change to react
   // to. The explicit retry is the affordance for a reader who stays put.
   const [olderLoadFailed, setOlderLoadFailed] = useState(false);
+  // The older-page trigger below is a question about the PRESENT, and every one
+  // of its inputs has to be able to re-ask it. The sentinel's intersection does
+  // so by itself, and so does anything the component renders from — props and
+  // state re-create the observer through the effect's dependency list. A ref
+  // does not: it changes silently, so a guard that goes false behind a ref is a
+  // deadlock exactly like a latch that never re-arms, which is the defect this
+  // change exists to remove, one layer down.
+  //
+  // So the only ref the trigger reads is the intersection itself, which arrives
+  // with its own re-ask. Where the scroll handler and the ResizeObserver also
+  // need to read a guard synchronously mid-layout, the ref is kept as a shadow
+  // of the state and written ONLY through the setter beside it; where a prop
+  // already says the same thing, the prop is read directly rather than mirrored.
+  // What matters is that the trigger reads reactive values, so
+  // react-hooks/exhaustive-deps fails the build on an input left out of the
+  // dependency list — completeness enforced rather than remembered.
+
+  // Whether an older page WE started is still outstanding. ``loadingOlder``
+  // reports the same thing but lags: it only arrives after ChatPage has
+  // re-rendered, and until it does the trigger would happily start a second
+  // request for the page already on the wire. Owning it here closes that window,
+  // and settling is also the honest moment to re-ask — a page has landed, so the
+  // level condition has a new answer.
+  const [loadInFlight, setLoadInFlight] = useState(false);
+  const [followingTail, setFollowingTailState] = useState(true);
+  const setFollowingTail = useCallback(
+    (next: boolean) => {
+      pinnedRef.current = next;
+      setFollowingTailState(next);
+    },
+    [pinnedRef],
+  );
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
   // Older pages are triggered by whether a zero-height sentinel at the head of the
@@ -3513,12 +3546,6 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // window, and loading again is the correct answer rather than a cascade.
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const atTopRef = useRef(false);
-  // A failed page adds no content, so the sentinel stays exactly where it is and
-  // every later re-evaluation would see the same "reader wants more" answer and
-  // re-ask — a retry storm against a server that is still failing. Latch the
-  // failure to hold the automatic trigger off; it clears when the reader leaves
-  // the band (so coming back retries once) or when a retry starts explicitly.
-  const loadFailedRef = useRef(false);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -3604,10 +3631,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-    pinnedRef.current = true;
+    setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
-  }, []);
+  }, [setFollowingTail]);
 
   // Jump-to-latest handler behind the down-arrow button. A search result that
   // was not already loaded installs a centered historical window; its loaded
@@ -3626,15 +3653,22 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // The one path that starts an older-page load, so the sentinel trigger and the
   // retry affordance cannot drift apart on how a failure is recorded.
   const runLoadOlder = useCallback(() => {
-    loadFailedRef.current = false;
+    setLoadInFlight(true);
     setOlderLoadFailed(false);
     void Promise.resolve(loadOlderRef.current()).then((ok) => {
-      // Offer the retry line rather than re-asking (see loadFailedRef): a reader
-      // who stays put needs a way forward that isn't a doomed retry loop.
-      if (ok === false) {
-        loadFailedRef.current = true;
-        setOlderLoadFailed(true);
-      }
+      setLoadInFlight(false);
+      // A failed page adds no content, so the sentinel stays exactly where it
+      // was and every later re-evaluation would see the same "reader wants more"
+      // answer and re-ask — a retry storm against a server that is still
+      // failing. Recording the failure both holds the automatic trigger off and
+      // offers the retry line, which is the way forward for a reader who stays
+      // put.
+      //
+      // Only if they DID stay put. A reader who left the band while the request
+      // was in flight never saw this failure, and latching it behind their back
+      // would refuse the automatic retry they are owed on returning — the exit
+      // that would have cleared it happened before there was anything to clear.
+      if (ok === false && atTopRef.current) setOlderLoadFailed(true);
     });
   }, []);
 
@@ -3642,32 +3676,49 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // load. Reads props directly — the effect below re-creates the observer when
   // they change — so it can never act on a stale snapshot.
   const maybeLoadOlder = useCallback(() => {
-    if (!atTopRef.current || !hasOlder || loadingOlder || loadFailedRef.current) return;
+    if (!atTopRef.current || !hasOlder || loadingOlder || loadInFlight || olderLoadFailed) return;
     // Sentinel in view is only a REQUEST for older history if the reader went
     // looking for it. A transcript that fits its viewport — tall display, zoomed
     // out, enlarged window — puts the sentinel in the band while the reader is
     // still following the live tail, and paging there would walk backwards
     // through history nobody asked to see, on open and on every resize.
-    if (pinnedRef.current) return;
-    // A programmatic deep-link jump owns scrollTop right now, and the anchor
-    // restore is suppressed along with it. Prepending under the jump would have
-    // nothing holding the reader's row in place.
-    if (suppressAnchorRef.current) return;
+    if (followingTail) return;
+    // A pending deep-link jump owns scrollTop, and the anchor restore is
+    // suppressed along with it. Prepending under the jump would have nothing
+    // holding the reader's row in place. A jump that lands near the head of the
+    // loaded window arrives IN the band, so this is a real state to leave rather
+    // than a momentary one — and ``jumpTarget`` IS that state: the effect below
+    // acks the jump at the same moment it lifts suppression, which clears the
+    // prop and re-asks. Reading it directly is why there is no mirror to keep in
+    // step, and it holds from the moment the jump is requested rather than from
+    // the frame the effect happens to run in.
+    if (jumpTarget) return;
     runLoadOlder();
-  }, [hasOlder, loadingOlder, pinnedRef, runLoadOlder]);
+  }, [
+    followingTail,
+    hasOlder,
+    jumpTarget,
+    loadInFlight,
+    loadingOlder,
+    olderLoadFailed,
+    runLoadOlder,
+  ]);
 
   // Older-page trigger. The observer answers "is the reader within
   // OLDER_TRIGGER_BAND_PX of the top of the loaded window?" and re-answers on
-  // every geometry change the browser already tracks. The other two inputs — is
-  // there more history, is a page already in flight — are not geometry, so they
-  // arrive as deps of ``maybeLoadOlder``: re-creating the observer re-observes the
-  // sentinel, and ``observe()`` always reports the CURRENT state instead of
-  // waiting for the next crossing. That is what makes the loader level-triggered.
-  // In particular the ``loadingOlder`` true→false edge re-evaluates the settled
-  // geometry after each page (React has committed the prepended rows and the
-  // ResizeObserver has restored the anchor by the time this passive effect runs),
-  // so a reader who is still at the top gets the next page without having to
-  // produce a scroll event they may be unable to produce at all.
+  // every geometry change the browser already tracks. Every OTHER input — more
+  // history to fetch, a page already in flight, following the tail, a jump
+  // holding scrollTop, a failure already recorded — is not geometry, so it
+  // arrives as a dep of ``maybeLoadOlder``: re-creating the observer re-observes
+  // the sentinel, and ``observe()`` always reports the CURRENT state instead of
+  // waiting for the next crossing. That is what makes the loader level-triggered
+  // in ALL of its inputs rather than only in the one the browser watches.
+  // In particular a settled page re-evaluates the settled geometry (React has
+  // committed the prepended rows and the ResizeObserver has restored the anchor
+  // by the time this passive effect runs), so a reader who is still at the top
+  // gets the next page without having to produce a scroll event they may be
+  // unable to produce at all. That edge is ``loadInFlight``, which we own, not
+  // the ``loadingOlder`` prop, which only mirrors it.
   // ``empty`` is in the deps for the same reason as the ResizeObserver below: the
   // scroll container mounts when the empty state goes away.
   useEffect(() => {
@@ -3681,7 +3732,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         // Leaving the band is the reader telling us they moved on. Drop the
         // failure latch so returning to the top retries once, instead of leaving
         // the retry line as the only way forward for the rest of the session.
-        if (!atTop) loadFailedRef.current = false;
+        if (!atTop) setOlderLoadFailed(false);
         maybeLoadOlder();
       },
       { root, rootMargin: `${OLDER_TRIGGER_BAND_PX}px 0px 0px 0px` },
@@ -3698,7 +3749,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // historical search window cannot be considered pinned to live tail until
     // the explicit latest reload succeeds.
     const pinned = distance < 80 && !needsLatestReload;
-    pinnedRef.current = pinned;
+    setFollowingTail(pinned);
     setShowJump(distance > 240 || needsLatestReload);
     // Only track an anchor while reading history; following needs none (the bottom
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
@@ -3714,18 +3765,17 @@ export const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     if (lastSessionRef.current === session.id) return;
     lastSessionRef.current = session.id;
-    pinnedRef.current = true;
+    setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
     // Paging state belongs to the session that was open, not to the transcript:
     // the component stays mounted across a switch, so a load that failed in the
     // previous session would otherwise greet the next one with a retry line for
     // a page it never asked for, and hold its loader off with it.
-    loadFailedRef.current = false;
     setOlderLoadFailed(false);
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
-  }, [session.id, scrollToBottom]);
+  }, [session.id, scrollToBottom, setFollowingTail]);
 
   // Deep-link jump (P5): once ChatPage has put the target message into
   // ``messages`` (either it was already loaded or the around-window was fetched
@@ -3753,9 +3803,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
     }
     let raf2 = 0;
     suppressAnchorRef.current = true;
-    pinnedRef.current = false;
     anchorRef.current = null;
     const raf1 = requestAnimationFrame(() => {
+      // Unpin with the scroll that actually leaves the tail, not a frame ahead
+      // of it: until this runs the transcript has not moved anywhere.
+      setFollowingTail(false);
       const row = el.querySelector(`[data-message-id="${CSS.escape(jumpTarget)}"]`);
       if (row) {
         row.scrollIntoView({ block: 'center' });
@@ -3775,7 +3827,15 @@ export const Transcript: React.FC<TranscriptProps> = ({
       if (raf2) cancelAnimationFrame(raf2);
       suppressAnchorRef.current = false;
     };
-  }, [jumpTarget, messages, needsLatestReload, captureAnchor, onJumpHandled, scrollToBottom]);
+  }, [
+    jumpTarget,
+    messages,
+    needsLatestReload,
+    captureAnchor,
+    onJumpHandled,
+    scrollToBottom,
+    setFollowingTail,
+  ]);
 
   // The one place scroll position reacts to content size changes — two modes,
   // never conflated. (Conflating them WAS the bug: any resize while "at bottom"
