@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,16 +54,47 @@ class MigrationImportReport:
     counts: dict[str, int] = field(default_factory=dict)
 
 
+_ensured_lock = threading.Lock()
+_ensured_targets: dict[tuple[Path, Path], MigrationImportReport] = {}
+
+
+def reset_ensured_sqlite_state() -> None:
+    """Forget which targets this process already ensured.
+
+    Production relies on process lifetime: a target is ensured once and stays
+    ensured. Tests call this around isolated homes so a rebuilt database is
+    migrated again instead of trusting a previous test's result.
+    """
+
+    with _ensured_lock:
+        _ensured_targets.clear()
+
+
 def ensure_sqlite_state(
     *,
     db_path: Path | None = None,
     state_dir: Path | None = None,
     primary_platform: str | None = None,
 ) -> MigrationImportReport:
-    """Create/migrate the SQLite DB and import existing JSON state once."""
+    """Create/migrate the SQLite DB and import existing JSON state once.
+
+    Callers treat this as a cheap precondition and put it in front of ordinary
+    operations, so repeating it must cost nothing. The full body takes a
+    cross-process migration lock and re-runs the whole Alembic upgrade
+    pipeline; running that per request serializes unrelated work machine-wide
+    and turns any transient SQLite contention into a user-visible failure. Once
+    a target is ensured, this process is done with it.
+    """
 
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
+    ensured_key = (target_db, target_state_dir)
+    with _ensured_lock:
+        ensured = _ensured_targets.get(ensured_key)
+    # The database file is the evidence; a caller that removed it out from
+    # under us gets a real migration rather than a stale promise.
+    if ensured is not None and target_db.exists():
+        return ensured
     guard_source_checkout_default_state_migration(target_db)
     _ensure_sqlite_target_dirs(
         target_state_dir=target_state_dir,
@@ -134,6 +166,8 @@ def ensure_sqlite_state(
         if report is None:
             raise RuntimeError("SQLite state initialization completed without a report")
         prune_state_backups(target_state_dir / "backups")
+        with _ensured_lock:
+            _ensured_targets[ensured_key] = report
         return report
 
 
