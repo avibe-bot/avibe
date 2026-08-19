@@ -220,4 +220,27 @@ describe('Memory UI copy contracts', () => {
       expect(zh.memory.clear.confirmDescription).toContain('Avibe 在本机上管理的记忆数据');
     }
   });
+
+  it.each(['en', 'zh'] as const)('keeps Repair copy on the Processing Record path the UI reads in %s', (language) => {
+    const processingRecord = BUNDLES[language].memory.processingRecord;
+    const repair = processingRecord.repair;
+
+    expect(repair).toEqual({
+      action: language === 'en' ? 'Repair index' : '修复索引',
+      running: language === 'en' ? 'Repairing…' : '正在修复…',
+      confirmTitle: language === 'en' ? 'Repair the Memory index?' : '修复记忆索引？',
+      confirmDescription: language === 'en'
+        ? 'Repair rescans Markdown memory and drains pending work while the live Memory sidecar stays available. Embedding work may use API quota.'
+        : '修复会重新扫描 Markdown 记忆并排空待处理工作，同时保持记忆 sidecar 可用。此过程可能消耗 Embedding API 配额。',
+      confirmLabel: language === 'en' ? 'Repair index' : '修复索引',
+      healthResult: language === 'en' ? 'Health after repair' : '修复后的健康状态',
+      healthy: language === 'en' ? 'Healthy' : '健康',
+      completed: language === 'en' ? 'Memory index repair completed.' : '记忆索引修复完成。',
+      completedWithWarnings: language === 'en'
+        ? 'Memory index repair completed with health warnings.'
+        : '记忆索引修复完成，但健康状态有警告。',
+      failed: language === 'en' ? 'Memory index repair failed.' : '记忆索引修复失败。',
+    });
+    expect('repair' in processingRecord.runtime).toBe(false);
+  });
 });

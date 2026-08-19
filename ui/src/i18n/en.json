@@ -4219,6 +4219,18 @@
       "title": "Processing Record",
       "description": "How the Memory engine is running, how fresh its data is, and any issues it hit while processing.",
       "refresh": "Refresh",
+      "repair": {
+        "action": "Repair index",
+        "running": "Repairing…",
+        "confirmTitle": "Repair the Memory index?",
+        "confirmDescription": "Repair rescans Markdown memory and drains pending work while the live Memory sidecar stays available. Embedding work may use API quota.",
+        "confirmLabel": "Repair index",
+        "healthResult": "Health after repair",
+        "healthy": "Healthy",
+        "completed": "Memory index repair completed.",
+        "completedWithWarnings": "Memory index repair completed with health warnings.",
+        "failed": "Memory index repair failed."
+      },
       "runtime": {
         "title": "Engine status",
         "help": "The Memory engine runs in the background on this machine and turns your messages into memories. This shows how it's doing.",
@@ -4240,18 +4252,6 @@
         "cascade": "Processing queue",
         "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; retryable failures retry automatically, while permanently failed items do not.",
         "cascadeHelpLabel": "About the processing queue",
-        "repair": {
-          "action": "Repair index",
-          "running": "Repairing…",
-          "confirmTitle": "Repair the Memory index?",
-          "confirmDescription": "Repair rescans Markdown memory and drains pending work while the live Memory sidecar stays available. Embedding work may use API quota.",
-          "confirmLabel": "Repair index",
-          "healthResult": "Health after repair",
-          "healthy": "Healthy",
-          "completed": "Memory index repair completed.",
-          "completedWithWarnings": "Memory index repair completed with health warnings.",
-          "failed": "Memory index repair failed."
-        },
         "recorder": "Call log",
         "recorderHelp": "When recording is active, the call log keeps model-call details for troubleshooting. Degraded or off recording may omit new calls.",
         "recorderHelpLabel": "About the call log",
