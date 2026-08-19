@@ -185,6 +185,44 @@ def test_status_written(tmp_path, monkeypatch):
     assert payload["detail"] == "pid=123"
 
 
+@pytest.mark.parametrize("state", ["running", "starting", "stopped", "error", "degraded"])
+@pytest.mark.parametrize("ok", [False, None, True], ids=["failed", "in-flight", "succeeded"])
+def test_a_running_service_retires_only_a_recorded_restart_failure(tmp_path, monkeypatch, state, ok):
+    """A restart record survives every status write except the one that ends it.
+
+    The failure record claims "this instance is down because a restart failed",
+    and a service reaching running is the only observation that ends that claim
+    -- so every other combination of recorded outcome and written state has to
+    leave the file byte-identical, including a stop, which is the case that would
+    otherwise resurrect an old failure as a fresh diagnosis.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    payload = {"ok": ok, "state": "failed" if ok is False else "succeeded", "job_id": "job-1"}
+    runtime.write_json(restart_path, payload)
+
+    runtime.write_status(state, detail="pid=123")
+
+    retired = ok is False and state == "running"
+    assert restart_path.exists() is not retired
+    if not retired:
+        assert runtime.read_json(restart_path) == payload
+
+
+def test_write_status_survives_an_unreadable_restart_record(tmp_path, monkeypatch):
+    """Retirement runs inside the status chokepoint, so it cannot fail a write."""
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.get_restart_status_path().write_text("[not a record]", encoding="utf-8")
+
+    runtime.write_status("running", detail="pid=123")
+
+    assert runtime.read_status()["state"] == "running"
+
+
 def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     runtime.ensure_dirs()
@@ -1379,6 +1417,23 @@ def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
     return restart_path
 
 
+def _stub_service_liveness(monkeypatch, *, owner_pid=None, starting_pid=None, extra_pids=()):
+    """Pin the two probes ``runtime.service_process_running`` reads.
+
+    Stubbing that predicate itself would only assert which helper doctor calls.
+    Stubbing what it reads describes a machine state instead, and asserts the
+    verdict the real predicate produces for it.
+    """
+
+    reserved = owner_pid if starting_pid is None else starting_pid
+
+    def resolve_owner(*, include_starting=False, **_kwargs):
+        return reserved if include_starting else owner_pid
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
+
+
 @pytest.mark.parametrize(
     "age_seconds",
     [0.0, cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60],
@@ -1394,7 +1449,7 @@ def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatc
     """
 
     _seed_restart_status(_restart_status_payload(), age_seconds=age_seconds)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: None)
+    _stub_service_liveness(monkeypatch)
 
     items = cli._restart_state_items()
 
@@ -1408,25 +1463,41 @@ def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatc
     assert "stale-restart-state" not in item.get("action", "")
 
 
-def test_recorded_restart_failure_with_a_running_service_stays_clearable_history(monkeypatch):
-    """Once something is running again the same record is history, not a failure."""
+@pytest.mark.parametrize(
+    ("liveness", "expected"),
+    [
+        ({}, "fail"),
+        ({"starting_pid": 5555}, "fail"),
+        ({"owner_pid": 4321}, "warn"),
+        ({"extra_pids": (7777,)}, "warn"),
+    ],
+    ids=["nothing-running", "pid-never-took-the-lock", "lock-owner", "lockless-survivor"],
+)
+def test_recorded_restart_failure_is_a_doctor_failure_exactly_while_nothing_runs(monkeypatch, liveness, expected):
+    """One record, every liveness shape: down is a failure, up is clearable history.
+
+    A pid reserved by a process that never took the lock is still downtime, and a
+    lockless survivor is not -- `vibe start` refuses that one, so telling the user
+    to run it would be wrong. `_service_lifecycle_items` owns reporting it.
+    """
 
     _seed_restart_status(
         _restart_status_payload(),
         age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
     )
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 4321)
+    _stub_service_liveness(monkeypatch, **liveness)
 
     items = cli._restart_state_items()
 
-    assert [item["status"] for item in items] == ["warn"]
-    assert items[0]["repair"]["target"] == "stale-restart-state"
+    assert [item["status"] for item in items] == [expected]
+    if expected == "warn":
+        assert items[0]["repair"]["target"] == "stale-restart-state"
 
 
 def test_restart_state_items_classify_non_failures_without_probing_the_service(monkeypatch):
     """A record the supervisor did not fail keeps the classification it always had.
 
-    The probe raises instead of returning a pid so this also pins the
+    The probes raise instead of returning a pid so this also pins the
     short-circuit: only a recorded failure may cost doctor a process probe.
     """
 
@@ -1434,6 +1505,7 @@ def test_restart_state_items_classify_non_failures_without_probing_the_service(m
         raise AssertionError("classifying a non-failure must not probe the service")
 
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
     succeeded = _restart_status_payload(ok=True, state="succeeded", error=None, new_pid=222)
 
     _seed_restart_status(succeeded)

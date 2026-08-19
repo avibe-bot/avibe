@@ -1210,18 +1210,30 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
         return items
 
-    # `_fail` in the restart supervisor is the only writer of ok=False, and most
-    # of its call sites run after the old service was already stopped. Which
-    # ones leave the instance down is not worth enumerating -- one of them fires
-    # precisely because the old service would not stop -- so observe the result
-    # instead: a recorded failure with no service owner means this metadata is
-    # the record of why the instance is down. It has to be read before the
-    # staleness branch below, because terminal metadata goes stale after
+    # `_fail` in the restart supervisor is the only writer of ok=False, and a
+    # failed restart can leave the instance either up or down -- some of its
+    # sites fire after the old service was stopped, one fires precisely because
+    # it would not stop. Rather than enumerate them, observe the result: a
+    # recorded failure with nothing running means this metadata is the record of
+    # why the instance is down. It has to be read before the staleness branch
+    # below, because terminal metadata goes stale after
     # DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that branch offers a repair
     # that deletes the marker -- on a still-down instance, the reason it is down.
-    # Once a service is running the same metadata is history, so it falls
-    # through to the ordinary branches and stays clearable.
-    if payload.get("ok") is False and not runtime.resolve_service_owner_pid(include_starting=True):
+    #
+    # `service_process_running` is the question being asked, so it is the probe
+    # used rather than a liveness rule reassembled here. Both halves of it
+    # matter: a pid reserved by a process that never took the lock is not a
+    # recovery, and a surviving lockless daemon is not downtime -- `start_service`
+    # refuses that one with ServiceAlreadyRunningError, so recommending `vibe
+    # start` there would send the user into a wall. `_service_lifecycle_items`
+    # already owns that state, so this record falls through to history and lets
+    # the lifecycle items report it.
+    #
+    # A running service retires the record outright (see
+    # `runtime._retire_failed_restart_status`), so an ok=False record surviving
+    # here means nothing has come up since it was written: the instance never
+    # recovered, rather than having been stopped deliberately some time later.
+    if payload.get("ok") is False and not runtime.service_process_running():
         _add_doctor_item(
             items,
             "fail",

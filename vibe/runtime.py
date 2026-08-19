@@ -1110,6 +1110,29 @@ def stop_process(pid_path, timeout=5):
     return stopped
 
 
+def _retire_failed_restart_status() -> None:
+    """Drop a recorded restart failure once a service is running again.
+
+    The record exists to say why this instance is down, and nothing else ends
+    that claim: neither ``vibe start`` nor ``vibe stop`` touches the file, so a
+    failure recorded months ago would otherwise become a fresh diagnosis the
+    next time the instance is stopped on purpose. A service reaching "running"
+    is the observation that retires it, whoever started it.
+
+    Only a recorded failure is retired. A restart in progress carries
+    ``ok: None`` and is left alone, because it has not reported an outcome yet
+    and the supervisor writes the running status before it decides the job
+    succeeded; anything else -- absent, succeeded, or too corrupt to read as a
+    record -- was never the claim being ended, and this runs inside the status
+    chokepoint, so it must not turn a damaged file into a failed status write.
+    """
+
+    path = get_restart_status_path()
+    payload = read_json(path)
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        path.unlink(missing_ok=True)
+
+
 def write_status(state, detail=None, service_pid=None, ui_pid=None):
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     # Preserve started_at across consecutive "running" writes so the UI can
@@ -1137,6 +1160,8 @@ def write_status(state, detail=None, service_pid=None, ui_pid=None):
     if started_at:
         payload["started_at"] = started_at
     write_json(paths.get_runtime_status_path(), payload)
+    if state == "running":
+        _retire_failed_restart_status()
 
 
 def read_status():
