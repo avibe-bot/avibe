@@ -216,6 +216,20 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
             reason="paired configuration could not be read; instance binding cannot be validated",
         )
+    paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    if (
+        paired_kind in {"personal", "organization"}
+        and cloud is not None
+        and cloud.runtime_credentials() is None
+    ):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="current pairing lacks complete runtime credentials",
+        )
     context = context_from_session_payload(record)
     if not (
         context.subject
@@ -250,7 +264,6 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_REVOKED,
             reason="persisted snapshot was issued for a different paired instance",
         )
-    paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
     record_kind = record.get("vibe_instance_kind")
     if (
         record_kind in {"personal", "organization"}

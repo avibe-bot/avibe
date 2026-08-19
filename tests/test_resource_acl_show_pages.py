@@ -73,6 +73,7 @@ def _paired_config(tmp_path, *, instance_kind: str):
     cloud.instance_secret = "device-secret"
     cloud.instance_kind = instance_kind
     config.save()
+    remote_access._replace_authorization_revision(config, 0)
     return config
 
 

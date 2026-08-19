@@ -77,6 +77,25 @@ def test_kindless_web_push_snapshot_adopts_current_personal_pairing_kind(
     assert decision.context.is_personal_instance
 
 
+def test_personal_web_push_requires_runtime_valid_pairing(tmp_path) -> None:
+    config = _paired_revision_config(41, instance_kind="personal")
+    config.remote_access.vibe_cloud.instance_secret = ""
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_kind="personal",
+    )
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+
+    assert not decision.authorized
+    assert decision.disposition == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
+    assert decision.reason == "current pairing lacks complete runtime credentials"
+
+
 def test_web_push_snapshot_with_stale_instance_kind_is_rejected(tmp_path) -> None:
     config = _paired_revision_config(41, instance_kind="organization")
     record = _remote_authorization_record(

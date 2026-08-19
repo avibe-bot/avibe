@@ -58,6 +58,9 @@ def _organization_cookie(
         "vibe_instance_id": "inst_123",
         "vibe_instance_role": instance_role,
         "vibe_instance_access_source": "organization_group",
+        "vibe_instance_authorization_revision": (
+            remote_access.current_authorization_revision(config) or 0
+        ),
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
         "vibe_organization_role": organization_role,
@@ -166,7 +169,7 @@ def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path)
 
 def test_owner_can_create_agent_without_a_trusted_local_identity(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = _save_config(tmp_path, paired=True, instance_kind="organization")
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -419,7 +422,7 @@ def test_missing_agent_selector_fails_closed_for_editor_only(monkeypatch, tmp_pa
 
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store = VibeAgentStore()
     try:
         agent = store.create(
@@ -467,7 +470,7 @@ def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_p
 
 def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
     store.set_default_agent_name(private_agent.name)
@@ -776,7 +779,7 @@ def test_project_runtime_uses_acls_while_harness_remains_editor_wide(monkeypatch
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
-    config = _save_config(tmp_path)
+    config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store, agents = _seed_agents_with_policies()
     engine = get_cached_sqlite_engine()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
