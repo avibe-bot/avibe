@@ -264,20 +264,39 @@ def test_repeated_migration_failures_keep_the_rollback_window_bounded(monkeypatc
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
     run_migrations(db_path, revision="20260627_0025")
-    monkeypatch.setattr(
-        "storage.migrations.command.upgrade",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("migration boom")),
-    )
+    before_the_storm = _db_contents(db_path)
+
+    def failing_upgrade(*args, **kwargs):
+        # Committing before failing is the ordinary shape, not a contrived one:
+        # each attempt leaves the database a little further from where the storm
+        # started, which is exactly what makes the earliest copy the valuable one
+        # and every later copy a worse answer to the same question.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("create table if not exists boom (attempt integer)")
+            conn.execute("insert into boom (attempt) values ((select count(*) from boom))")
+        raise RuntimeError("migration boom")
+
+    monkeypatch.setattr("storage.migrations.command.upgrade", failing_upgrade)
 
     for _ in range(SQLITE_BACKUP_RETENTION + 3):
         with pytest.raises(RuntimeError, match="migration boom"):
             ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
 
     surviving = _sqlite_backup_roots(state_dir / "backups")
-    assert 0 < len(surviving) <= SQLITE_BACKUP_RETENTION
+    assert 0 < len(surviving) <= SQLITE_BACKUP_RETENTION * 2
     for name in surviving:
         with sqlite3.connect(state_dir / "backups" / name / "vibe.sqlite") as backup:
             assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
+    # Bounded is half the promise. The attempts all copy a database sitting at
+    # the same revisions, so a window counting copies fills with them and evicts
+    # the one copy taken before the first attempt -- the only one predating
+    # whatever the failing migration did on its way down, and the one an operator
+    # reaches for. Counting rollback positions instead keeps it here for as long
+    # as the storm lasts.
+    assert any(
+        _db_contents(state_dir / "backups" / name / "vibe.sqlite") == before_the_storm
+        for name in surviving
+    )
 
 
 def _db_contents(path: Path) -> list[tuple[str, list[tuple]]]:
@@ -331,7 +350,122 @@ def test_every_call_holds_the_database_as_it_stands_at_that_call(tmp_path: Path)
     rollback_point()
 
     assert len(set(taken)) == len(taken)
-    assert len(_sqlite_backup_roots(backups_dir)) == SQLITE_BACKUP_RETENTION
+    # Two stamps were visited, so the window holds two positions, and of each the
+    # first and the last copy taken there. The pre-restore original is the first
+    # copy at its position and survives; the copy holding the writes accepted
+    # after the restore is the last one there and survives too. Neither rule
+    # alone gets both -- that is why the pair is what a position keeps.
+    assert set(_sqlite_backup_roots(backups_dir)) == {taken[0].name, taken[3].name, taken[4].name}
+
+
+def test_the_first_copy_at_a_position_survives_however_the_clock_moves(tmp_path: Path) -> None:
+    # A position keeps its first and its last copy, and "first" was read back out
+    # of the backup's timestamp -- the same mistake, one layer down, as every
+    # rule this change already discarded: a label standing in for a fact only the
+    # writer knew. A clock corrected backwards between two attempts dates the
+    # later copy earlier, so the retry after a partial migration becomes both the
+    # first and the last copy of its position and evicts the clean one it was
+    # supposed to bracket. Stated as the property -- the database as it stood
+    # when the position was first copied stays restorable -- because the clock
+    # can be wrong in more ways than a test can list.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('clean')")
+    before_the_storm = _db_contents(db_path)
+
+    # Each attempt is stamped earlier than the one before it, and none of them
+    # moves the revision, so all three copies belong to one position.
+    taken: list[Path] = []
+    for moment, damage in (
+        (datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc), "first retry"),
+        (datetime(2026, 8, 6, 11, 59, tzinfo=timezone.utc), "second retry"),
+        (datetime(2026, 8, 6, 11, 58, tzinfo=timezone.utc), None),
+    ):
+        taken.append(create_sqlite_migration_backup(db_path, backups_dir=backups_dir, now=moment))
+        if damage is not None:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("update payload set value = ?", (damage,))
+
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert surviving == sorted({taken[0].name, taken[2].name})
+    assert any(_db_contents(backups_dir / name / "vibe.sqlite") == before_the_storm for name in surviving)
+
+
+def _as_pre_sequence_backup(backup_dir: Path) -> Path:
+    """Turn a backup into one the previous release would have written.
+
+    Produced by the current writer and then stripped, rather than hand-built, so
+    a change to the manifest cannot leave this fixture describing a shape no
+    release ever wrote.
+    """
+
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["backup_sequence"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return backup_dir
+
+
+def test_backups_from_before_the_counter_still_come_first(tmp_path: Path) -> None:
+    # A window is mixed for exactly as long as it takes the copies an older
+    # release wrote to age out, and during that time the counter cannot order it
+    # by itself. Falling back to the stamps for the whole group puts the clock
+    # back in charge of the one decision it was just taken off -- with a clock
+    # corrected backwards, a retry dated earlier than the clean copy from the
+    # previous release becomes the first copy of the position and evicts it.
+    #
+    # The fact that settles it is not in the timestamps: a copy without a
+    # counter was written by a release that did not have one, so it precedes
+    # every counted copy no matter what either name says.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('clean')")
+    before_the_storm = _db_contents(db_path)
+
+    from_the_previous_release = _as_pre_sequence_backup(
+        create_sqlite_migration_backup(
+            db_path, backups_dir=backups_dir, now=datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+        )
+    )
+    retries: list[Path] = []
+    for moment, damage in (
+        (datetime(2026, 8, 6, 11, 0, tzinfo=timezone.utc), "first retry"),
+        (datetime(2026, 8, 6, 10, 0, tzinfo=timezone.utc), "second retry"),
+    ):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("update payload set value = ?", (damage,))
+        retries.append(create_sqlite_migration_backup(db_path, backups_dir=backups_dir, now=moment))
+
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert surviving == sorted({from_the_previous_release.name, retries[-1].name})
+    assert any(_db_contents(backups_dir / name / "vibe.sqlite") == before_the_storm for name in surviving)
+
+
+def test_a_position_dated_in_the_future_does_not_evict_a_newer_one(tmp_path: Path) -> None:
+    # The window ranks positions against each other too, and that ranking read
+    # the same timestamps. State carried from a machine running ahead is dated
+    # into the future permanently, so ranking by the stamp parks it at the top
+    # of the window forever and every genuinely newer position falls out beneath
+    # it. Same class as the copies inside a position, so it reads the same
+    # recorded order.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    taken: list[Path] = []
+    for revision, moment in (
+        ("20260806_0047", datetime(2099, 1, 1, tzinfo=timezone.utc)),
+        ("20260809_0049", datetime(2026, 8, 9, 1, 0, tzinfo=timezone.utc)),
+        ("20260811_0050", datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)),
+    ):
+        _stamp(db_path, revision)
+        taken.append(create_sqlite_migration_backup(db_path, backups_dir=backups_dir, now=moment))
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({taken[1].name, taken[2].name})
 
 
 def test_the_manifest_records_the_revisions_read_from_the_copy(tmp_path: Path) -> None:

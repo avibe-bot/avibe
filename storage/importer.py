@@ -22,9 +22,9 @@ from config.v2_sessions import (
     migrate_session_state_mappings,
 )
 from config.v2_settings import SettingsState, load_settings_state_from_json
-from storage.backups import BACKUP_MANIFEST_VERSION, prune_state_backups
+from storage.backups import BACKUP_MANIFEST_VERSION, next_backup_sequence, prune_state_backups
 from storage.db import create_sqlite_engine
-from storage.lock import MigrationFileLock
+from storage.lock import MigrationFileLock, migration_lock_path_for
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import (
     agents,
@@ -101,9 +101,12 @@ def ensure_sqlite_state(
         target_db=target_db,
         use_default_dirs=db_path is None and state_dir is None,
     )
-    lock_path = target_state_dir / "migration.lock"
-
-    with MigrationFileLock(lock_path):
+    # The same lock `run_migrations` takes, re-entered rather than duplicated,
+    # and derived from the database so the two can never resolve differently.
+    # Held across the JSON import as well: the import is the other half of
+    # establishing this database, and a second process must not start migrating
+    # it in between.
+    with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
         run_migrations(target_db, prune_backups_after_upgrade=False)
         engine = create_sqlite_engine(target_db)
         report: MigrationImportReport | None = None
@@ -294,6 +297,12 @@ def _backup_json_state(state_dir: Path) -> Path:
             "managed_by": "avibe",
             "kind": "json-state-migration",
             "created_at": _utc_now_iso(),
+            # Recorded here for the same reason the sqlite window records it:
+            # nothing reading this directory later can tell what a clock did
+            # between two snapshots. Written by both kinds so that reading the
+            # order off the timestamps stays a compatibility path for backups an
+            # older release made, rather than a rule still in use.
+            "backup_sequence": next_backup_sequence(backups_dir),
             "files": {},
         }
         for name in (

@@ -122,6 +122,7 @@ def copy_bounded_log(
     lock = MigrationFileLock(path.with_name(f".{path.name}.sink.lock"), timeout_seconds=0.25)
     lock_ready = threading.Event()
     lock_stop = threading.Event()
+    lock_done = threading.Event()
     lock_acquired = False
     pending: deque[bytes] = deque()
     pending_bytes = 0
@@ -129,20 +130,33 @@ def copy_bounded_log(
     source_failed = False
     pending_ready = threading.Condition()
 
-    def _acquire_lock() -> None:
+    def _hold_lock() -> None:
+        """Take the sink lock, then hold it here until the copy is finished.
+
+        The release stays on this thread because the lock is re-entrant, and a
+        re-entrant lock belongs to the thread that took it: handing the release
+        to the draining thread is the one thing thread ownership cannot express.
+        The retry loop is what keeps the wait cancellable -- an unbounded acquire
+        could not be given up when the source ends before the peer sink does.
+        """
+
         nonlocal lock_acquired
         while not lock_stop.is_set():
             try:
                 lock.acquire()
-                lock_acquired = True
-                break
             except MigrationLockTimeout:
                 continue
             except OSError:
                 break
+            lock_acquired = True
+            break
         lock_ready.set()
+        if not lock_acquired:
+            return
+        lock_done.wait()
+        lock.release()
 
-    lock_thread = threading.Thread(target=_acquire_lock, name=f"log-sink-lock-{path.name}", daemon=True)
+    lock_thread = threading.Thread(target=_hold_lock, name=f"log-sink-lock-{path.name}", daemon=True)
     lock_thread.start()
 
     def _read_source() -> None:
@@ -211,9 +225,8 @@ def copy_bounded_log(
         return False
     finally:
         lock_stop.set()
+        lock_done.set()
         lock_thread.join(timeout=1.0)
-        if lock_acquired:
-            lock.release()
 
 
 def main(argv: list[str] | None = None) -> int:

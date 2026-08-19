@@ -15,13 +15,16 @@ from alembic.script import ScriptDirectory
 from config import paths
 from storage.backups import create_sqlite_migration_backup, prune_state_backups
 from storage.db import create_sqlite_engine, sqlite_url
+from storage.lock import MigrationFileLock, migration_lock_path_for
 
 
 logger = logging.getLogger(__name__)
 
 # Alembic's EnvironmentContext installs module-level proxies while an upgrade
 # runs. Concurrent store initialization can otherwise tear down another
-# thread's proxy and surface errors such as KeyError("config").
+# thread's proxy and surface errors such as KeyError("config"). This owns that
+# hazard and nothing else: the proxies are per interpreter, not per database, so
+# it must stay global, and it says nothing about other processes.
 _MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
@@ -226,14 +229,43 @@ def run_migrations(
     revision: str = "head",
     prune_backups_after_upgrade: bool = True,
 ) -> None:
+    """Bring one SQLite state database to `revision`, one migrator at a time.
+
+    Exclusion belongs here rather than at the call sites, because "at most one
+    migrator per database" is a property of the database, and a call site can
+    only promise it for itself. It was previously promised by `ensure_sqlite_state`
+    alone, which left every other entry point -- the discovery helpers, a store
+    constructed with an explicit `db_path`, the background-table bootstrap --
+    running `command.upgrade` against a file another process could be upgrading
+    at the same moment. The controller and the Web UI are separate processes on
+    one state directory, so that pairing is the ordinary case, not a corner.
+
+    Both locks are load-bearing and neither substitutes for the other: the file
+    lock is machine-wide and per database, and `_MIGRATION_LOCK` is per
+    interpreter and global, guarding Alembic's module-level proxies.
+
+    The file lock is taken first, and always first, which is what makes the pair
+    deadlock-free. Taking the global one first would also let a thread hold every
+    database's migrations in this process while it waits on a foreign process --
+    a remote stall propagating into unrelated local work.
+
+    The wait is deliberately unbounded. A file lock is released by the OS when
+    its holder dies, so the only way to wait forever is for a live process to
+    still be migrating -- and a migration's duration is bounded by the data, not
+    by anything we could name here. Any deadline would be a guess that turns a
+    slow, correct upgrade into a failed startup for every other entry point.
+    Waiting is logged with the holder's pid so the wait stays diagnosable.
+    """
+
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     guard_source_checkout_default_state_migration(target_db)
-    with _MIGRATION_LOCK:
-        _run_migrations_locked(
-            target_db,
-            revision=revision,
-            prune_backups_after_upgrade=prune_backups_after_upgrade,
-        )
+    with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
+        with _MIGRATION_LOCK:
+            _run_migrations_locked(
+                target_db,
+                revision=revision,
+                prune_backups_after_upgrade=prune_backups_after_upgrade,
+            )
 
 
 def _run_migrations_locked(

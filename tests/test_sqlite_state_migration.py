@@ -23,7 +23,7 @@ from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state, reset_ensured_sqlite_state
-from storage.lock import MigrationFileLock
+from storage.lock import migration_lock_path_for
 from storage import importer, message_deliveries, messages_service, migrations
 from storage.background import SQLiteBackgroundTaskStore
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
@@ -5632,7 +5632,9 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
     }
 
 
-def test_ensure_sqlite_state_short_circuits_after_first_success(tmp_path: Path, monkeypatch) -> None:
+def test_ensure_sqlite_state_short_circuits_after_first_success(
+    tmp_path: Path, monkeypatch, hold_migration_lock_elsewhere
+) -> None:
     # Callers put ensure_sqlite_state in front of ordinary operations (a login,
     # a read-only query, a skill delete), so a repeat call must cost nothing.
     # Re-running the pipeline per request serialized unrelated work on the
@@ -5655,11 +5657,26 @@ def test_ensure_sqlite_state_short_circuits_after_first_success(tmp_path: Path, 
     monkeypatch.setattr(importer, "run_migrations", counting_run_migrations)
 
     # An already-held migration lock is exactly the contention that failed the
-    # login. The repeat call must not queue behind it, so holding it here would
-    # deadlock the test if the short-circuit regressed.
-    with MigrationFileLock(state_dir / "migration.lock", timeout_seconds=1.0):
-        second = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    # login, and only another thread can hold it against this one: the lock is
+    # re-entrant per path and thread, so taking it here would let the repeat call
+    # take it again and pass whether or not it short-circuits. The call runs on
+    # its own thread for the same reason the wait behind that lock is unbounded --
+    # a regression has to fail this test rather than hang it.
+    outcome: list = []
 
+    def repeat_call() -> None:
+        outcome.append(
+            ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+        )
+
+    with hold_migration_lock_elsewhere(migration_lock_path_for(db_path)):
+        caller = threading.Thread(target=repeat_call, daemon=True)
+        caller.start()
+        caller.join(30)
+        assert not caller.is_alive(), "the repeat call queued behind the held migration lock"
+
+    assert outcome, "the repeat call raised instead of short-circuiting"
+    second = outcome[0]
     assert second is first
     assert migrations_run == 0
 

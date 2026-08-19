@@ -218,10 +218,6 @@ def get_sqlite_state_path() -> Path:
     return get_state_dir() / "vibe.sqlite"
 
 
-def get_sqlite_migration_lock_path() -> Path:
-    return get_state_dir() / "migration.lock"
-
-
 def get_state_backups_dir() -> Path:
     return get_state_dir() / "backups"
 

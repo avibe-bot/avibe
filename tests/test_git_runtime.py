@@ -13,7 +13,6 @@ import pytest
 
 from core import git_runtime, managed_runtime
 from core.git_runtime import GitRuntimeManager
-from storage.lock import MigrationFileLock
 
 
 def _write_git_archive(tmp_path: Path, *, version: str = "2.55.0") -> Path:
@@ -213,18 +212,18 @@ def test_managers_for_same_runtime_share_install_lock(tmp_path: Path) -> None:
 def test_install_and_clean_refuse_runtime_file_lock_held_elsewhere(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    hold_migration_lock_elsewhere,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     archive = _write_git_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)
     manager = GitRuntimeManager(manifest_path=manifest)
-    external_lock = MigrationFileLock(manager._install_file_lock_path)
-    external_lock.acquire()
-    try:
+    # "Elsewhere" has to mean another thread. The lock is re-entrant per path and
+    # thread, so holding it here would let ensure() take it again and report a
+    # refusal that never happened.
+    with hold_migration_lock_elsewhere(manager._install_file_lock_path):
         install_result = manager.ensure()
         clean_result = manager.clean()
-    finally:
-        external_lock.release()
 
     assert install_result["ok"] is False
     assert install_result["reason"] == "git_install_already_running"
