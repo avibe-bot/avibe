@@ -1321,14 +1321,7 @@ def create_app(
             )
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            from core.memory.runtime import MemorySessionLifecycleBusyError
-
-            code = (
-                error.code
-                if isinstance(error, MemorySessionLifecycleBusyError)
-                else "session_archive_unavailable"
-            )
+        except Exception:
             logger.debug(
                 "internal Workbench session archive failed for %s",
                 payload["session_id"],
@@ -1336,7 +1329,7 @@ def create_app(
             )
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": code},
+                content={"ok": False, "error": "session_archive_unavailable"},
             )
         if not isinstance(session, dict):
             return JSONResponse(

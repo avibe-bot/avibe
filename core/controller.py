@@ -2110,7 +2110,7 @@ class Controller:
         *,
         deadline_seconds: float = 5.0,
     ) -> _MemorySessionLifecycleResult:
-        """Run an IM session reset behind Memory's exact capture fence."""
+        """Run an IM session reset, skipping Memory flush if capture is busy."""
 
         scope = self._memory_scope_for_im_session(context, raw_session_id)
         if scope is None:

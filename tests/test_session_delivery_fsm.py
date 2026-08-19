@@ -35,6 +35,7 @@ from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
     TURN_LIFECYCLE_ADMISSION_KEY,
+    TURN_LIFECYCLE_EPOCH_KEY,
     DeliveryRequest,
     DeliveryResult,
     SessionTurnManager,
@@ -204,28 +205,36 @@ def managers(tmp_path: Path):
     engine_b.dispose()
 
 
+def _capture_handler(manager: SessionTurnManager) -> MessageHandler:
+    handler = MessageHandler.__new__(MessageHandler)
+    handler.controller = manager.controller
+    handler._memory_capture_tasks = set()
+    handler._memory_capture_tasks_by_session = {}
+    handler._memory_capture_registration_open = True
+    manager.controller.session_turns = manager
+    manager.controller.message_handler = handler
+    return handler
+
+
 @pytest.mark.anyio
 async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
-    handler = MessageHandler.__new__(MessageHandler)
-    handler._memory_capture_tasks = set()
+    handler = _capture_handler(manager)
     capture_entered = asyncio.Event()
     release_capture = asyncio.Event()
     lifecycle_entered = asyncio.Event()
 
     async def run_turn(_session_id, context, _text, **_kwargs):
-        admission = context.platform_specific.pop(
-            TURN_LIFECYCLE_ADMISSION_KEY
-        )
+        expected_epoch = context.platform_specific.get(TURN_LIFECYCLE_EPOCH_KEY, 0)
 
         async def capture() -> None:
             capture_entered.set()
             await release_capture.wait()
 
-        capture_task = asyncio.create_task(capture())
-        handler._track_memory_capture_task(
-            capture_task,
-            lifecycle_admission=admission,
+        handler._schedule_memory_capture_task(
+            session_id="ses_fsm",
+            expected_epoch=expected_epoch,
+            capture=capture(),
         )
 
     async def lifecycle_operation() -> str:
@@ -294,6 +303,229 @@ async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> Non
         assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
     finally:
         admission.release()
+
+
+@pytest.mark.anyio
+async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-001."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    capture_holding = asyncio.Event()
+    never_resolves = asyncio.Event()
+    lifecycle_busy = False
+    dispatched: list[str] = []
+
+    async def hung_capture() -> None:
+        capture_holding.set()
+        await never_resolves.wait()
+
+    handler._schedule_memory_capture_task(
+        session_id="ses_fsm",
+        expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+        capture=hung_capture(),
+    )
+    await asyncio.wait_for(capture_holding.wait(), timeout=1.0)
+
+    async def run_turn(_session_id, _context, text, **_kwargs):
+        dispatched.append(text)
+
+    manager._run = run_turn
+    started = await asyncio.wait_for(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="next turn",
+            ),
+            context=_context(),
+        ),
+        timeout=1.0,
+    )
+    assert started.turn_id
+    assert dispatched == ["next turn"]
+
+    async def reset_session() -> str:
+        return "reset"
+
+    async def archive_session() -> str:
+        return "archived"
+
+    try:
+        assert await asyncio.wait_for(
+            manager.run_session_lifecycle(
+                "ses_fsm",
+                reset_session,
+                deadline_seconds=0.05,
+            ),
+            timeout=1.0,
+        ) == "reset"
+        assert await asyncio.wait_for(
+            manager.run_session_lifecycle(
+                "ses_fsm",
+                archive_session,
+                deadline_seconds=0.05,
+            ),
+            timeout=1.0,
+        ) == "archived"
+    except Exception as error:
+        lifecycle_busy = getattr(error, "code", None) == "memory_session_lifecycle_busy"
+        raise
+    assert lifecycle_busy is False
+    never_resolves.set()
+    await handler.drain_memory_capture_tasks()
+
+
+@pytest.mark.anyio
+async def test_capture_admitted_before_new_is_discarded_after_transition(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-002."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    attributed: list[str] = []
+    admitted = asyncio.Event()
+    finish_capture = asyncio.Event()
+    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+
+    async def capture_write() -> None:
+        attributed.append("wrote")
+
+    async def delayed_capture() -> None:
+        admitted.set()
+        await finish_capture.wait()
+        await handler._run_memory_capture(
+            "ses_fsm",
+            sampled_epoch,
+            capture_write(),
+        )
+
+    capture_task = asyncio.create_task(delayed_capture())
+    handler._track_memory_capture_task(capture_task, session_id="ses_fsm")
+    await asyncio.wait_for(admitted.wait(), timeout=1.0)
+
+    async def reset_session() -> str:
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        reset_session,
+        deadline_seconds=0.05,
+    ) == "reset"
+    assert not manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+
+    finish_capture.set()
+    await handler.drain_memory_capture_tasks()
+    assert attributed == []
+
+
+@pytest.mark.anyio
+async def test_idle_session_capture_attributes_and_shutdown_drains(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-003."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    attributed: list[str] = []
+
+    async def capture_write() -> None:
+        attributed.append("wrote")
+
+    await handler._run_memory_capture(
+        "ses_fsm",
+        manager.session_lifecycle_epoch("ses_fsm"),
+        capture_write(),
+    )
+    assert attributed == ["wrote"]
+
+    never_resolves = asyncio.Event()
+
+    async def accepted_capture() -> None:
+        await never_resolves.wait()
+
+    pending = asyncio.create_task(accepted_capture(), name="memory-capture")
+    handler._track_memory_capture_task(pending, session_id="ses_fsm")
+    drain = asyncio.create_task(handler.drain_memory_capture_tasks())
+    await asyncio.sleep(0)
+    assert not drain.done()
+    never_resolves.set()
+    await asyncio.wait_for(drain, timeout=1.0)
+    assert handler._memory_capture_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
+    managers,
+) -> None:
+    """A capture registered during reset must not be cancelled on the success bump."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    scheduled: list[asyncio.Task[object]] = []
+
+    async def reset_session() -> str:
+        task = handler._schedule_memory_capture_task(
+            session_id="ses_fsm",
+            expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+            capture=asyncio.sleep(0),
+        )
+        assert task is not None
+        scheduled.append(task)
+        await asyncio.sleep(0)
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        reset_session,
+        deadline_seconds=1.0,
+    ) == "reset"
+    assert scheduled[0].cancelled() is False
+    await handler.drain_memory_capture_tasks()
+    assert scheduled[0].cancelled() is False
+
+
+@pytest.mark.anyio
+async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
+    managers,
+) -> None:
+    """A failed /new after the 5s deadline must not cancel accepted captures."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    never_resolves = asyncio.Event()
+    holding = asyncio.Event()
+
+    async def hung_capture() -> None:
+        holding.set()
+        await never_resolves.wait()
+
+    handler._schedule_memory_capture_task(
+        session_id="ses_fsm",
+        expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+        capture=hung_capture(),
+    )
+    await asyncio.wait_for(holding.wait(), timeout=1.0)
+    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+
+    async def reset_session() -> str:
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.run_session_lifecycle(
+            "ses_fsm",
+            reset_session,
+            deadline_seconds=0.05,
+        )
+
+    assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+    assert handler._memory_capture_tasks
+    assert all(not task.cancelled() for task in handler._memory_capture_tasks)
+    never_resolves.set()
+    await handler.drain_memory_capture_tasks()
 
 
 async def _activate(
@@ -4838,49 +5070,35 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
 
 
-def test_persisted_start_revalidation_failure_releases_lifecycle_admission(
+def test_persisted_start_does_not_acquire_lifecycle_admission(
     managers,
     monkeypatch,
 ) -> None:
-    manager, _other, _engine, _engine_b, _starts = managers
-    original_begin = manager._sqlite_engine().begin
-    acquired = False
+    """Scenario: MEMORY-INDEP-001. Dispatch must not wait on Memory."""
 
+    manager, _other, _engine, _engine_b, _starts = managers
+    acquired = False
     original_acquire = manager.acquire_lifecycle_admission
 
     async def track_acquire(raw_session_id):
         nonlocal acquired
-        admission = await original_acquire(raw_session_id)
         acquired = True
-        return admission
+        return await original_acquire(raw_session_id)
 
     monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
-
-    def failing_begin():
-        if acquired:
-            raise OSError("temporary sqlite outage")
-        return original_begin()
-
-    engine = manager._sqlite_engine()
-    monkeypatch.setattr(
-        manager,
-        "_sqlite_engine",
-        lambda: SimpleNamespace(connect=engine.connect, begin=failing_begin),
-    )
-    with pytest.raises(OSError, match="temporary sqlite outage"):
-        asyncio.run(
-            manager.deliver(
-                DeliveryRequest(
-                    session_id="ses_fsm",
-                    priority="p3",
-                    content="release the lock",
-                ),
-                context=_context(),
-            )
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not fence dispatch",
+            ),
+            context=_context(),
         )
+    )
 
-    assert acquired
-    assert not manager._session_lifecycle_locks["ses_fsm"].locked()
+    assert acquired is False
+    assert "ses_fsm" not in manager._session_lifecycle_locks
 
 
 @pytest.mark.parametrize(
