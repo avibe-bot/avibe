@@ -14196,7 +14196,6 @@ async def _show_page_agent_markdown_response(
         }
     }
     envelope = ShowRuntimeProtocolEnvelope(context)
-    body = await starlette_request.body()
     try:
         proxied = await asyncio.wait_for(
             get_show_runtime_manager().request(
@@ -14204,7 +14203,7 @@ async def _show_page_agent_markdown_response(
                 runtime_path,
                 envelope=envelope,
                 headers=request_headers,
-                body=body or None,
+                body=None,
                 max_response_bytes=SHOW_PAGE_AGENT_MARKDOWN_MAX_BYTES,
             ),
             timeout=SHOW_PAGE_AGENT_MARKDOWN_TIMEOUT_SECONDS,
@@ -14266,8 +14265,11 @@ async def _show_page_agent_markdown_response(
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
         if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", normalized_text):
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
+    if starlette_request.method == "HEAD":
+        response_headers["Content-Length"] = str(len(content))
+        content = b""
     return FastAPIResponse(
-        content=b"" if starlette_request.method == "HEAD" else content,
+        content=content,
         status_code=200,
         headers=response_headers,
     )

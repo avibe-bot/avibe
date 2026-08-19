@@ -1584,6 +1584,7 @@ def test_show_page_agent_markdown_handler_is_the_document_representation(
     assert manager.calls[0][2]["accept"] == "text/markdown"
     assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
     assert manager.calls[0][2]["X-Avibe-Show-Context"] == expected_context
+    assert manager.calls[0][3] is None
     assert "authorization" not in manager.calls[0][2]
     assert "cookie" not in manager.calls[0][2]
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
@@ -1766,6 +1767,7 @@ def test_show_page_agent_markdown_honors_head_without_calling_head_handler(monke
     assert response.status_code == 200
     assert response.content == b""
     assert response.headers["content-type"] == "text/markdown; charset=utf-8"
+    assert response.headers["content-length"] == str(len(b"# Status\n"))
     assert manager.calls[0][0] == "GET"
 
 
