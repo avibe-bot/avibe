@@ -169,7 +169,11 @@ turn ends because you armed a watch and are waiting, say exactly that.
 
 - The Codex bot usually auto-reviews new pushes, but not reliably. After every
   push, confirm a review of the new head is in flight within a few minutes; if
-  none appears, comment `@codex review`.
+  none appears, comment `@codex review`. An auto-review announces its verdict
+  only through the PR-body reaction; the sha-bearing pass comment is produced by
+  an explicit trigger and by nothing else. So `@codex review` is not only how a
+  stalled review is restarted — it is the only way to obtain comment-shaped
+  head-bound pass evidence.
 - A trigger only counts once the bot reacts 👀 (`eyes`) to that comment — but
   **the bot withdraws the reaction when the review completes**, so 👀 is
   evidence only inside its own window. Capture the URL returned by
@@ -244,15 +248,25 @@ turn ends because you armed a watch and are waiting, say exactly that.
   workflow name at the exact SHA and branch. A workflow name is not a unique
   run identity; do not declare CI complete while a second matching run is
   pending or failed.
-- A `+1` reaction carries no commit sha by itself. Do not push another head while
-  the current review is pending. Accept the reaction only when the durable Watch
-  reports it as new after the current head epoch began, the prior-head review was
-  already terminal, and the PR head is unchanged. Never reseed to manufacture that
-  boundary. If those facts cannot be established, require the bot-authored
-  exact-head pass comment instead.
-- Keep reaction meanings distinct: 👀 only says a trigger was picked up; the
-  Codex bot's PR-body `+1` says the review completed without comments. Reactions
-  from other authors or on other comments are not verdicts.
+- The bot's PR-body reaction is one state slot, not an append-only log: 👀 while
+  a review runs, `+1` once one completes with no comments, each write withdrawing
+  the last. The `+1` names no sha, but its `created_at` is not stale either — it
+  is when the most recent completed review passed, and the only open question is
+  which head that review ran against. Do not push another head while a review is
+  pending. Accept the reaction when the durable Watch reports it as new after the
+  current head epoch began, the prior-head review was already terminal, and the
+  PR head is unchanged. Never reseed to manufacture that boundary. When the
+  timeline cannot settle it — an intervening head that was never reviewed, say —
+  force the binding rather than infer it: comment `@codex review` on the
+  unchanged head and watch the slot flip 👀 → `+1`. Both transitions inside one
+  head epoch bind the pass to that head, and the same trigger produces the
+  sha-bearing comment that says so outright. Waiting for that comment instead of
+  triggering waits forever.
+- Keep the two 👀 apart by location. On your trigger comment it says the trigger
+  was picked up, and it is withdrawn on completion, so it is evidence only inside
+  its own window. On the PR body it is the slot's in-flight value: a review is
+  running right now — the more durable of the two as a liveness probe. Reactions
+  from other authors, or on any other comment, are not verdicts.
 - Do not treat `Reviewed commit:` alone as a pass signal. A findings verdict is
   a `COMMENTED` review whose body also opens
   `### 💡 Codex Review … **Reviewed commit:** <sha>`, so a gate that merely
