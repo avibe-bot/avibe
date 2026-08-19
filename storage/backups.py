@@ -714,10 +714,35 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
     for stale_sidecar in sidecars_of(replaced):
         stale_sidecar.unlink(missing_ok=True)
     os.replace(staging, replaced)
-    for suffix in sidecar_suffixes:
-        staged_sidecar = staging.with_name(staging.name + suffix)
-        if staged_sidecar.exists():
-            os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
+    try:
+        for suffix in sidecar_suffixes:
+            staged_sidecar = staging.with_name(staging.name + suffix)
+            if staged_sidecar.exists():
+                os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
+    except OSError:
+        # Three files cannot be renamed atomically, so one instant is unavoidable:
+        # the displaced database is committed and its write-ahead log is not. What
+        # that instant holds is a complete database as of its last checkpoint --
+        # readable, self-consistent, and missing only what the failed release
+        # committed after it. Not torn, but quieter than it should be, so it is
+        # said out loud and the log is left where it can still be recovered by
+        # hand.
+        #
+        # Neither other ordering is available. Renaming the log in first pairs
+        # generation N+1's log with generation N's database, which is the one
+        # pairing SQLite will silently replay into corruption. Unlinking the
+        # displaced database to keep the set whole-or-absent destroys BOTH
+        # generations, because the rename above has already consumed the previous
+        # displacement -- `test_no_rename_a_swap_performs_can_cost_the_live_generation`
+        # fails on exactly that, which is how this comment came to be written.
+        logger.warning(
+            "Displaced database %s committed without its %s sidecars; it is complete only to its "
+            "last checkpoint. The staged sidecars are left beside it for manual recovery.",
+            replaced.name,
+            ", ".join(sidecar_suffixes),
+            exc_info=True,
+        )
+        raise
 
     # The displacement is made durable BEFORE the live path commits, and that
     # ordering is the same invariant as the one above, stated against power loss

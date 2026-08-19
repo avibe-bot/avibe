@@ -519,6 +519,49 @@ def _distributions_providing_this_package() -> list[str]:
         return []
 
 
+def installed_metadata_describes_running_code() -> bool:
+    """Whether the installed distribution's recorded version matches the files.
+
+    pip decides whether to act by reading metadata, and a rollback is the one
+    operation that makes metadata stop describing the code. Installing `avibe-os`
+    over a `vibe-remote` machine never uninstalls the older distribution, so
+    after the rollback reinstalls `vibe-remote==3.0.10` the tree holds two: the
+    files under `vibe/` are 3.0.10, and `avibe-os` still records 3.0.11 with
+    nothing on disk to back it.
+
+    The next forward upgrade is then a silent no-op. `vibe upgrade` compares this
+    process's 3.0.10 against the published 3.0.11 and decides to install; pip
+    reads `avibe-os==3.0.11` as already satisfied and does nothing; the command
+    reports success and the machine keeps running 3.0.10. Same shape as the
+    rollback no-op, one release later and with a person watching it happen.
+
+    Measured by comparing our own two answers rather than by trusting either --
+    the version this process bound at import against the version the metadata
+    records for the distribution providing it. Unknown answers `True`: only a
+    disagreement between two published releases is evidence, so a source
+    checkout, an editable install, or an environment exposing two distributions
+    for this package is never forced on a guess.
+    """
+
+    distributions = _distributions_providing_this_package()
+    if len(distributions) != 1:
+        return True
+
+    from vibe import __version__
+
+    try:
+        from importlib.metadata import version as distribution_version
+
+        recorded = distribution_version(distributions[0])
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read the installed distribution version", exc_info=True)
+        return True
+
+    if not _names_a_published_release(recorded) or not _names_a_published_release(__version__):
+        return True
+    return recorded == __version__
+
+
 def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     current_vibe = get_running_vibe_path(vibe_path=vibe_path)
     if not current_vibe:
@@ -699,18 +742,23 @@ def build_upgrade_plan(
         )
 
     command = [executable, "-m", "pip", "install"]
-    if version:
-        # A pin alone does not make pip act. The forward install of `avibe-os`
-        # never uninstalls the differently named `vibe-remote` distribution, so
-        # its metadata still stands and still claims the old version -- while the
-        # files under `vibe/` are the new release's, having been written over the
-        # top. `pip install vibe-remote==<old>` then reads as already satisfied,
-        # pip does nothing, and the supervisor starts the failed generation again
-        # and reports the rollback a success. Forcing it is what the uv branch
-        # above has always done for a pinned plan; this branch quietly did not.
-        command.append("--force-reinstall")
-    else:
+    if not version:
         command.append("--upgrade")
+    # Neither a pin nor `--upgrade` makes pip act; metadata does, and a rollback
+    # is what makes metadata stop describing the code. So the command forces
+    # whenever the version being asked for is not already the version on disk --
+    # measured here, never read off the metadata that is the thing in doubt.
+    #
+    # A pinned plan always forces: it IS the rollback, running on a machine where
+    # `avibe-os` was just installed over `vibe-remote`, so `pip install
+    # vibe-remote==<old>` reads as already satisfied, pip does nothing, and the
+    # supervisor starts the failed generation again and reports success. The uv
+    # branch above has always forced a pinned install; this branch quietly did
+    # not. A forward plan forces only once that has happened -- the leftover
+    # `avibe-os==3.0.11` metadata would otherwise make the next upgrade a no-op
+    # too, silently, with a person watching it report success.
+    if version or not installed_metadata_describes_running_code():
+        command.append("--force-reinstall")
     command.append(package_spec)
     return UpgradePlan(
         command=command,

@@ -1435,6 +1435,26 @@ class Controller:
         except Exception:
             logger.error("Background IM message callback failed", exc_info=True)
 
+    def _publish_readiness_unless_im_runtime_failed(self) -> None:
+        """Announce a started service instance, unless the IM runtime already died.
+
+        Readiness is what the upgrade supervisor waits for before it decides an
+        upgrade worked, so publishing it is the one irreversible statement this
+        startup makes: after it, nothing rolls back. The IM runtime is the piece
+        most likely to fail on a bad release and the only piece that fails on
+        another thread, which is why this asks it rather than assuming.
+
+        It asks for the recorded exception and not `Thread.is_alive()`. A Web-only
+        install with no IM platform configured has `im_client.run()` return
+        immediately and legitimately, so a liveness check would refuse readiness
+        forever on a service that is working perfectly.
+        """
+
+        if self._im_run_exception is not None:
+            logger.error("Not publishing service readiness: the IM runtime failed during startup")
+            return
+        mark_service_instance_started()
+
     def _run_im_runtime(self) -> None:
         try:
             self.im_client.run()
@@ -1443,8 +1463,21 @@ class Controller:
             logger.error("IM runtime thread exited with error: %s", exc, exc_info=True)
         finally:
             loop = self._loop
-            if loop and loop.is_running():
-                loop.call_soon_threadsafe(loop.stop)
+            if loop is not None:
+                try:
+                    # Scheduled whether or not the loop has started yet. The
+                    # `is_running()` guard that used to stand here dropped the
+                    # stop in exactly the case that matters: this thread is
+                    # started just before `run_forever()`, so an adapter that
+                    # fails immediately -- the shape a bad release takes -- lands
+                    # here while the loop is merely created, and the stop was
+                    # discarded. `run_forever()` then ran forever with no IM
+                    # runtime and nothing left to ask it to stop. A callback
+                    # queued before the loop starts runs as soon as it does.
+                    loop.call_soon_threadsafe(loop.stop)
+                except RuntimeError:
+                    # A closed loop has already stopped; nothing left to ask.
+                    logger.debug("IM runtime could not signal the event loop to stop", exc_info=True)
 
     async def _restore_active_polls(self, platforms: set[str]) -> None:
         opencode_agent = self.agent_service.agents.get("opencode")
@@ -3053,17 +3086,34 @@ class Controller:
             self._im_thread.start()
             if self._shutdown_requested:
                 self._ensure_shutdown_task("pre-loop request")
-            # Readiness is published here because here is where it becomes true,
-            # and by this function because this function is what makes it true.
-            # Every step above can still fail structurally on a new release, and
-            # each one is caught below and returns rather than crashing, so a
-            # caller announcing readiness before calling this has announced a
-            # service that may never serve -- which is what let a release dying
-            # in its own startup be read, for days, as an upgrade that worked.
+            # Readiness is published by this function because this function is
+            # what makes it true. Every step above can still fail structurally on
+            # a new release, and each one is caught below and returns rather than
+            # crashing, so a caller announcing readiness before calling this has
+            # announced a service that may never serve -- which is what let a
+            # release dying in its own startup be read, for days, as an upgrade
+            # that worked.
+            #
+            # Scheduled onto the loop rather than called here, because "the IM
+            # thread started" and "the IM runtime is up" are not the same claim.
+            # The thread is started two lines above; an adapter that raises while
+            # constructing its client or reading its config -- the shape a bad
+            # release takes -- is still failing, and a straight-line call
+            # publishes readiness for a service that is already dead, so the
+            # rollback never fires.
+            #
+            # This narrows that window rather than closing it. An adapter that
+            # fails synchronously has recorded the exception before the loop's
+            # first pass reaches the callback, and is caught. An adapter that
+            # fails seconds later, after a connect times out, is not: readiness
+            # is already published by then. Closing that case needs a per-adapter
+            # "connected" signal, which does not exist and is a contract change
+            # across all five adapters -- out of scope here, recorded in the PR's
+            # known-by-design ledger.
             #
             # A no-op in any process that does not hold the service lock, so the
             # embedded and test paths that run a controller are unaffected.
-            mark_service_instance_started()
+            self._loop.call_soon(self._publish_readiness_unless_im_runtime_failed)
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception

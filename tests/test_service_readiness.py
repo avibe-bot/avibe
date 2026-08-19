@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -118,6 +119,83 @@ def test_a_release_that_dies_in_its_own_startup_never_publishes_readiness(startu
     assert "published ready" not in startup.events
     assert "serving" not in startup.events
     startup.controller.cleanup_sync.assert_called_once()
+
+
+def test_readiness_is_withheld_when_the_im_runtime_already_failed(startup):
+    """The IM runtime is the one startup step that fails on another thread.
+
+    Every other step `run()` performs fails in `run()`'s own `try`, so reaching
+    the publish at all is proof they succeeded. The IM runtime does not: it is
+    handed to a thread, and the publish runs whether or not that thread is still
+    alive. So the publish asks, and a recorded failure withholds the claim -- the
+    supervisor then sees no readiness, and the rollback it exists for fires.
+    """
+
+    startup.controller._loop = asyncio.new_event_loop()
+    startup.controller._im_run_exception = RuntimeError("slack adapter is not constructible on this release")
+    try:
+        Controller._publish_readiness_unless_im_runtime_failed(startup.controller)
+    finally:
+        startup.controller._loop.close()
+
+    assert startup.events == []
+
+
+def test_readiness_asks_for_a_recorded_failure_and_not_for_a_live_thread(startup):
+    """A Web-only install has no IM platform to keep a thread alive.
+
+    `im_client.run()` returns immediately and correctly when nothing is
+    configured, so a liveness check would refuse readiness forever on a service
+    that is working -- turning the rollback into the outage it prevents. The
+    predicate is therefore the recorded exception, and this pins that: a finished
+    IM runtime that recorded nothing still publishes.
+    """
+
+    startup.controller._loop = asyncio.new_event_loop()
+    startup.controller._im_run_exception = None
+    startup.controller._im_thread = SimpleNamespace(is_alive=lambda: False)
+    try:
+        Controller._publish_readiness_unless_im_runtime_failed(startup.controller)
+        startup.controller._loop.run_forever()
+    finally:
+        startup.controller._loop.close()
+
+    assert startup.events == ["published ready", "serving"]
+
+
+def test_an_im_runtime_that_fails_before_the_loop_starts_still_stops_it(startup):
+    """The stop has to survive being sent to a loop that has not started yet.
+
+    `run()` starts this thread on the line before `run_forever()`, so the whole
+    reason the IM runtime fails early -- a bad release -- is also what makes it
+    fail into a loop that exists and is not running. Guarding the stop with
+    `is_running()` discarded it in exactly that case, and `run_forever()` then ran
+    forever: no IM runtime, no service, and nothing left that could ask it to
+    stop. A callback queued beforehand runs as soon as the loop starts.
+
+    Driven from this thread rather than from a real one so the ordering under test
+    is the ordering the test produces, and asserted by whether the loop returns.
+    """
+
+    startup.controller._loop = asyncio.new_event_loop()
+    startup.controller.im_client = SimpleNamespace(
+        run=Mock(side_effect=RuntimeError("adapter died on its first connect"))
+    )
+
+    # Records the failure and asks the not-yet-running loop to stop.
+    Controller._run_im_runtime(startup.controller)
+    assert isinstance(startup.controller._im_run_exception, RuntimeError)
+
+    # A daemon thread, because the assertion for a lost stop is a `run_forever()`
+    # that never returns -- which must fail this test rather than hang the suite.
+    ran = threading.Thread(target=startup.controller._loop.run_forever, daemon=True)
+    ran.start()
+    ran.join(timeout=10)
+    stopped = not ran.is_alive()
+    if stopped:
+        startup.controller._loop.close()
+
+    assert stopped, "the loop never stopped: the IM runtime's stop was dropped"
 
 
 def _readiness_calls_in(path: Path) -> int:

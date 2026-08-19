@@ -12281,17 +12281,24 @@ def cmd_start():
             language = normalize_language(getattr(config, "language", None))
             print(i18n_t("memory.cli.partialRestartWarning", language))
             print("")
-    # Asked unconditionally. The predicate that used to guard this wait is the
-    # lock, which is taken before the database is migrated -- so it is already
-    # true of a process that has not finished starting and may never, and
+    # The WAIT below is asked unconditionally. The predicate that used to guard
+    # it is the lock, which is taken before the database is migrated -- so it is
+    # already true of a process that has not finished starting and may never, and
     # guarding with it skipped the wait in exactly the case the wait exists for.
     # Nothing is paid for asking: a service that is up answers on the first probe.
     #
-    # It also resolves the authoritative service.lock holder rather than waiting
+    # The provisional "starting" WRITE is guarded, and the difference is the
+    # point: `write_status` carries `started_at` forward only across consecutive
+    # `running` writes, so announcing a transition for a service this command did
+    # not start resets its recorded uptime to now and briefly shows a starting
+    # service to every status consumer. `vibe start` against a live instance is
+    # idempotent and must stay observably so.
+    if not service_reused:
+        runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
+    # The wait resolves the authoritative service.lock holder rather than waiting
     # on the raw pid start_service handed back: under a delegated user scope that
     # pid can be a launcher that never takes the lock, so wait_for_service_ready
     # adopts and returns the real owner instead of stalling the full timeout.
-    runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
     resolved_pid = runtime.wait_for_service_ready(
         service_pid,
         timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,

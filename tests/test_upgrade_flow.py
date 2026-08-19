@@ -185,6 +185,114 @@ def test_a_pinned_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         assert FORCES_THE_INSTALL[plan.method] in plan.command
 
 
+def _metadata_records(monkeypatch, distribution: str, version: str) -> None:
+    """One distribution provides `vibe`, and its metadata records `version`."""
+
+    monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [distribution])
+    monkeypatch.setattr("importlib.metadata.version", lambda name: version if name == distribution else "0")
+
+
+def test_a_forward_upgrade_forces_the_install_once_metadata_stops_describing_the_code(monkeypatch):
+    """The rollback's own no-op, one release later and with a person watching.
+
+    A rollback installs `vibe-remote==3.0.10` over a machine whose forward upgrade
+    installed `avibe-os==3.0.11`, and pip never uninstalls the distribution it
+    replaced. So the tree ends up holding both: the files under `vibe/` are 3.0.10,
+    and `avibe-os` still records 3.0.11 with nothing on disk behind it.
+
+    Then `vibe upgrade` runs. It compares this process's 3.0.10 against the
+    published 3.0.11 and decides to install; pip reads `avibe-os==3.0.11` as
+    already satisfied and does nothing; the command reports success and the
+    machine keeps running 3.0.10 -- silently, indefinitely, and now on the path a
+    user invokes by hand.
+
+    So `--force-reinstall` is not a property of pinned plans, it is a property of
+    asking for a version that is not the version on disk. Measured from our own
+    two answers, never read off the metadata that is the thing in doubt.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    _metadata_records(monkeypatch, "avibe-os", "3.0.11")
+    monkeypatch.setattr("vibe.__version__", "3.0.10")
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.method == "pip"
+    # Still an upgrade: the version being asked for is whatever the index has
+    # newest. Forced as well, because the metadata pip would consult to decide is
+    # describing a release that is not what is running.
+    assert "--upgrade" in plan.command
+    assert "--force-reinstall" in plan.command
+
+
+def test_a_forward_upgrade_on_an_undamaged_install_is_left_to_the_installer(monkeypatch):
+    """Forcing is the exception, and has to stay one.
+
+    `--force-reinstall` makes pip rebuild and rewrite every dependency in the
+    tree, so making it unconditional turns each routine upgrade into a much longer
+    and much wider write on a machine nobody is watching. The ordinary case is an
+    install whose metadata and files agree, and there the installer's own
+    already-satisfied judgement is correct and cheaper.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    _metadata_records(monkeypatch, "avibe-os", "3.0.11")
+    monkeypatch.setattr("vibe.__version__", "3.0.11")
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert "--upgrade" in plan.command
+    assert "--force-reinstall" not in plan.command
+
+
+@pytest.mark.parametrize(
+    ("case", "distributions", "recorded", "running"),
+    [
+        # A source checkout or an editable install: nothing published to compare.
+        ("no distribution provides the package", [], "3.0.11", "3.0.11"),
+        # Mid-rename, or a vendored environment: which one is authoritative is not
+        # a question this has the standing to answer.
+        ("two distributions provide it", ["avibe-os", "vibe-remote"], "3.0.11", "3.0.11"),
+        # A regression build. Its version describes a tree, not a release, so a
+        # disagreement with published metadata is expected rather than evidence.
+        ("the running version names no release", ["avibe-os"], "3.0.11", "0.0.0.dev0+abc1234"),
+        ("the recorded version names no release", ["avibe-os"], "0.0.0.dev0+abc1234", "3.0.11"),
+    ],
+)
+def test_an_unknown_install_shape_is_never_forced_on_a_guess(monkeypatch, case, distributions, recorded, running):
+    """Only a disagreement between two published releases is evidence.
+
+    Every other answer is an environment this measurement cannot read, and the
+    honest response to one is to leave the installer alone rather than to force a
+    full reinstall on a machine whose shape we guessed at. Stated as the property
+    -- unknown means unforced -- so a shape nobody has met yet inherits it.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: distributions)
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded)
+    monkeypatch.setattr("vibe.__version__", running)
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert "--force-reinstall" not in plan.command, case
+
+
 def test_a_rollback_pins_the_distribution_the_install_actually_came_from(monkeypatch):
     # Which distribution published the running version and which one the next
     # upgrade should ask for are different questions, and on a machine that

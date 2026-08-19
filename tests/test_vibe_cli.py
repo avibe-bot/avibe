@@ -775,6 +775,53 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     assert ("runtime_status", ("starting", "service process is still starting", 1234, 5678)) in calls
 
 
+def test_cmd_start_against_a_live_service_neither_resets_its_uptime_nor_skips_the_wait(monkeypatch):
+    """`vibe start` is idempotent, and has to be observably idempotent.
+
+    `write_status` carries `started_at` forward only across consecutive `running`
+    writes, so announcing a `starting` transition for a service this command did
+    not start resets the recorded uptime to now -- every status consumer, the
+    dashboard included, then reads a service that has been up for weeks as one
+    that just began starting.
+
+    The wait is the other half, and it is the half that was broken the other way:
+    the predicate that used to guard it was the service lock, taken before the
+    database is migrated, so it read true for a process that had not finished
+    starting and skipped the wait in exactly the case the wait exists for. So
+    only the provisional write is conditional; the wait is always asked, and a
+    service that is already up answers it on the first probe.
+    """
+
+    calls = []
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    # The live pair: `start_service` hands back the pid that already holds the
+    # lock, which is what makes this a reuse rather than a start.
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "wait_for_service_ready",
+        lambda pid, timeout=None: calls.append(("wait", pid)) or pid,
+    )
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
+
+    assert cli.cmd_start() == 0
+
+    assert ("wait", 1234) in calls, "the readiness wait must be asked even for a service already up"
+    announced = [args[0] for kind, args in calls if kind == "runtime_status"]
+    assert "starting" not in announced, f"a reused service was announced as starting: {announced}"
+
+
 def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     config = SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
