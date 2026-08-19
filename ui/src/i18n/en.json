@@ -2953,6 +2953,8 @@
   "agents": {
     "title": "Agents",
     "subtitle": "{{count}} agents registered across all backends.",
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "This resource is read-only in remote mode.",
     "tabs": {
       "definitions": "Definitions",
       "running": "Runs"
@@ -3237,6 +3239,8 @@
   "skills": {
     "title": "Skills",
     "subtitle": "Manage global and project skills across your agent backends · powered by askill.",
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "Skills are read-only in remote mode.",
     "scopeGlobal": "Global",
     "scopeProject": "Project",
     "searchPlaceholder": "Search installed skills…",
@@ -3811,6 +3815,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "Vaults are read-only in remote mode.",
     "title": "Vaults",
     "subtitle": "Give your AI agents secrets — their values never enter the context.",
     "add": "Add secret",

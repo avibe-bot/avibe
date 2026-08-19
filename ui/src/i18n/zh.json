@@ -2953,6 +2953,8 @@
   "agents": {
     "title": "Agents",
     "subtitle": "已登记 {{count}} 个 Agent。",
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程模式下此资源为只读。",
     "tabs": {
       "definitions": "定义",
       "running": "运行"
@@ -3237,6 +3239,8 @@
   "skills": {
     "title": "技能",
     "subtitle": "跨各 Agent 后端管理全局与项目级技能 · 基于 askill。",
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程模式下技能为只读。",
     "scopeGlobal": "全局",
     "scopeProject": "项目",
     "searchPlaceholder": "搜索已安装技能…",
@@ -3811,6 +3815,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程模式下 Vaults 为只读。",
     "title": "保险库",
     "subtitle": "为你的 AI Agent 提供密钥，永不进入上下文。",
     "add": "添加密钥",
