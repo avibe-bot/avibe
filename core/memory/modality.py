@@ -30,6 +30,8 @@ import shutil
 import zipfile
 from pathlib import Path
 
+import olefile
+
 from core.memory.types import MemoryContentKind
 
 
@@ -111,6 +113,14 @@ _OFFICE_ZIP_MARKERS: dict[str, frozenset[str]] = {
     "numbers": frozenset({"Index/Document.iwa"}),
 }
 _OFFICE_OLE_EXTENSIONS = frozenset({"doc", "ppt", "xls"})
+_OFFICE_OLE_REQUIRED_STREAM_GROUPS: dict[str, tuple[frozenset[str], ...]] = {
+    "doc": (
+        frozenset({"WordDocument"}),
+        frozenset({"0Table", "1Table"}),
+    ),
+    "ppt": (frozenset({"PowerPoint Document"}),),
+    "xls": (frozenset({"Book", "Workbook"}),),
+}
 _OFFICE_RTF_EXTENSIONS = frozenset({"rtf"})
 _OFFICE_MIMES_BY_EXTENSION: dict[str, frozenset[str]] = {
     "docx": frozenset(
@@ -286,10 +296,37 @@ def _office_container_matches(
     if extension in _OFFICE_ZIP_MARKERS:
         return _office_zip_matches(extension, path, file_fd)
     if extension in _OFFICE_OLE_EXTENSIONS:
-        return sample.startswith(_OLE_MAGIC)
+        return _office_ole_matches(extension, path, file_fd, sample)
     if extension in _OFFICE_RTF_EXTENSIONS:
         return sample.startswith(_RTF_MAGIC)
     return False
+
+
+def _office_ole_matches(
+    extension: str,
+    path: Path,
+    file_fd: int | None,
+    sample: bytes,
+) -> bool:
+    if not sample.startswith(_OLE_MAGIC):
+        return False
+    try:
+        with _open_attachment_file(path, file_fd) as file_obj:
+            file_obj.seek(0)
+            with olefile.OleFileIO(
+                file_obj,
+                raise_defects=olefile.DEFECT_INCORRECT,
+            ) as archive:
+                return all(
+                    any(
+                        archive.exists(stream_name)
+                        and archive.get_size(stream_name) > 0
+                        for stream_name in alternatives
+                    )
+                    for alternatives in _OFFICE_OLE_REQUIRED_STREAM_GROUPS[extension]
+                )
+    except Exception:
+        return False
 
 
 def _office_zip_matches(extension: str, path: Path, file_fd: int | None) -> bool:

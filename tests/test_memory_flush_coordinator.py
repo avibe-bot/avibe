@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import errno
 import gc
+import io
 import sqlite3
 import threading
+import zipfile
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -149,12 +151,20 @@ def _pin_attachment_bundle() -> tuple[AttachmentPinStore, PinnedBundle, Path]:
     return attachment_store, bundle, pinned_path
 
 
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
+
+
 def _pin_office_bundle(*, include_pdf: bool) -> tuple[AttachmentPinStore, PinnedBundle]:
     home = paths.get_vibe_remote_dir()
     source_root = home / "attachments" / "avibe"
     source_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     source_root.chmod(0o700)
-    specs = [("report.xlsx", "doc", b"pinned office document")]
+    specs = [("report.xlsx", "doc", _xlsx_bytes())]
     if include_pdf:
         specs.append(("evidence.pdf", "pdf", b"%PDF-1.7\npinned sibling"))
     attachments = []
@@ -3595,6 +3605,11 @@ async def test_delivery_rechecks_soffice_and_preserves_non_office_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_conversion_available",
+        lambda: True,
+    )
     attachment_store, bundle = _pin_office_bundle(include_pdf=True)
     original = _enqueue_attachment_bundle(
         store,
@@ -3633,6 +3648,11 @@ async def test_delivery_settles_captionless_office_when_soffice_disappears(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_conversion_available",
+        lambda: True,
+    )
     attachment_store, bundle = _pin_office_bundle(include_pdf=False)
     original = _enqueue_attachment_bundle(
         store,

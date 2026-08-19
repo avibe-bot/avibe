@@ -297,15 +297,16 @@ class AttachmentPinStore:
                 pinned: list[PinnedAttachment] = []
                 total_bytes = 0
                 try:
-                    for index, source in enumerate(source_items):
-                        source_fd, source_info, source_sha256 = self._open_source(
-                            source,
-                            source_root=source_root,
-                            allowed_records=allowed_records,
-                            source_lease=source_lease,
-                        )
+                    for source in source_items:
+                        filename = _bundle_filename(len(pinned), source.ext)
+                        source_fd: int | None = None
                         try:
-                            filename = _bundle_filename(index, source.ext)
+                            source_fd, source_info, source_sha256 = self._open_source(
+                                source,
+                                source_root=source_root,
+                                allowed_records=allowed_records,
+                                source_lease=source_lease,
+                            )
                             size_bytes, digest = _copy_source_file(
                                 source_fd,
                                 source_info,
@@ -314,18 +315,51 @@ class AttachmentPinStore:
                                 total_before=total_bytes,
                                 expected_sha256=source_sha256,
                             )
+                            if (
+                                source.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                                and not _pinned_office_matches(
+                                    stage_fd,
+                                    filename,
+                                    source.name,
+                                    source.kind,
+                                    source.ext,
+                                )
+                            ):
+                                raise AttachmentPinError(
+                                    "memory_invalid_input",
+                                    "Office attachment changed before it was pinned",
+                                )
+                        except AttachmentPinError as error:
+                            if (
+                                source.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                                and error.error
+                                in {"memory_invalid_input", "memory_input_too_large"}
+                            ):
+                                _discard_staged_file(stage_fd, filename)
+                                continue
+                            raise
                         finally:
-                            os.close(source_fd)
+                            if source_fd is not None:
+                                os.close(source_fd)
                         total_bytes += size_bytes
                         pinned.append(
                             PinnedAttachment(
                                 kind=source.kind,
                                 name=source.name,
                                 ext=source.ext,
-                                storage_key=_storage_key(bundle_id, index, source.ext),
+                                storage_key=_storage_key(
+                                    bundle_id,
+                                    len(pinned),
+                                    source.ext,
+                                ),
                                 size_bytes=size_bytes,
                                 sha256=digest,
                             )
+                        )
+                    if not pinned:
+                        raise AttachmentPinError(
+                            "memory_invalid_input",
+                            "no attachment remained valid while pinning",
                         )
                     _fsync_fd(stage_fd, "attachment staging bundle")
                 finally:
@@ -408,16 +442,18 @@ class AttachmentPinStore:
                 )
                 try:
                     projected: list[CaptureAttachment] = []
-                    office_available = not any(
-                        pinned.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
-                        for pinned in checked.attachments
-                    ) or memory_modality.office_conversion_available()
                     for index, pinned in enumerate(checked.attachments):
                         filename = _bundle_filename(index, pinned.ext)
                         _verify_pinned_file(bundle_fd, filename, pinned)
                         if (
                             pinned.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
-                            and not office_available
+                            and not _pinned_office_matches(
+                                bundle_fd,
+                                filename,
+                                pinned.name,
+                                pinned.kind,
+                                pinned.ext,
+                            )
                         ):
                             continue
                         projected.append(
@@ -990,6 +1026,38 @@ def _require_safe_source_file(info: os.stat_result) -> None:
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022:
         raise AttachmentPinError("memory_invalid_input", "attachment source is unsafe")
     _require_current_owner(info, "attachment source", storage=False)
+
+
+def _pinned_office_matches(
+    directory_fd: int,
+    filename: str,
+    display_name: str,
+    kind: MemoryContentKind,
+    extension: str,
+) -> bool:
+    try:
+        descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
+    except OSError as error:
+        raise _storage_failure(error, "pinned Office attachment is unavailable") from error
+    try:
+        _require_private_file(os.fstat(descriptor), "pinned Office attachment")
+        return memory_modality.classify_pinned_attachment(
+            display_name,
+            "application/octet-stream",
+            Path(filename),
+            file_fd=descriptor,
+        ) == (kind, extension)
+    finally:
+        os.close(descriptor)
+
+
+def _discard_staged_file(directory_fd: int, filename: str) -> None:
+    try:
+        os.unlink(filename, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _storage_failure(error, "invalid Office attachment could not be discarded") from error
 
 
 def _copy_source_file(

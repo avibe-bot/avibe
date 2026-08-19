@@ -650,6 +650,26 @@ def ensure_proxy_device(runner: Runner, target: RegressionTarget, *, remote: str
     runner.run(incus(*proxy_device_args(target, remote=remote), project=target.project))
 
 
+def ensure_office_converter(
+    runner: Runner,
+    target: RegressionTarget,
+    *,
+    remote: str | None,
+) -> None:
+    runner.run(
+        root_exec(
+            target,
+            "set -euo pipefail; "
+            "if ! command -v soffice >/dev/null 2>&1; then "
+            "export DEBIAN_FRONTEND=noninteractive; "
+            "apt-get update; "
+            "apt-get install -y --no-install-recommends libreoffice-nogui; "
+            "fi",
+            remote=remote,
+        )
+    )
+
+
 def ensure_project_and_instance(
     runner: Runner,
     target: RegressionTarget,
@@ -700,6 +720,7 @@ def ensure_project_and_instance(
             remote=remote,
         )
     )
+    ensure_office_converter(runner, target, remote=remote)
     runner.run(
         root_exec(
             target,

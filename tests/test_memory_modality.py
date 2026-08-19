@@ -1,4 +1,5 @@
 import io
+import struct
 import sys
 import zipfile
 from pathlib import Path
@@ -118,8 +119,95 @@ def test_pinned_modality_admission_script_accepts_supported_upstream_containers(
     exec(pinned_modality_contract_script(), {})
 
 
-_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1office"
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _RTF_MAGIC = b"{\\rtf office"
+_FREE_SECTOR = 0xFFFFFFFF
+_END_OF_CHAIN = 0xFFFFFFFE
+_FAT_SECTOR = 0xFFFFFFFD
+
+
+def _ole_document(*stream_names: str) -> bytes:
+    def directory_entry(
+        name: str,
+        object_type: int,
+        *,
+        start_sector: int = _END_OF_CHAIN,
+        size: int = 0,
+        child: int = _FREE_SECTOR,
+        right: int = _FREE_SECTOR,
+    ) -> bytes:
+        entry = bytearray(128)
+        encoded_name = (name + "\0").encode("utf-16le")
+        entry[: len(encoded_name)] = encoded_name
+        struct.pack_into(
+            "<HBBIII",
+            entry,
+            64,
+            len(encoded_name),
+            object_type,
+            1,
+            _FREE_SECTOR,
+            right,
+            child,
+        )
+        struct.pack_into("<I", entry, 116, start_sector)
+        struct.pack_into("<Q", entry, 120, size)
+        return bytes(entry)
+
+    header = bytearray(512)
+    header[:8] = _OLE_MAGIC
+    struct.pack_into("<HHHHH", header, 24, 0x3E, 3, 0xFFFE, 9, 6)
+    struct.pack_into(
+        "<IIIIIIIII",
+        header,
+        40,
+        0,
+        1,
+        0,
+        0,
+        4096,
+        _END_OF_CHAIN,
+        0,
+        _END_OF_CHAIN,
+        0,
+    )
+    struct.pack_into(
+        "<109I",
+        header,
+        76,
+        1,
+        *([_FREE_SECTOR] * 108),
+    )
+
+    entries = [directory_entry("Root Entry", 5, child=1)]
+    streams: list[bytes] = []
+    fat = [_FREE_SECTOR] * 128
+    fat[0] = _END_OF_CHAIN
+    fat[1] = _FAT_SECTOR
+    for index, stream_name in enumerate(stream_names):
+        start_sector = 2 + (8 * index)
+        right = index + 2 if index + 1 < len(stream_names) else _FREE_SECTOR
+        entries.append(
+            directory_entry(
+                stream_name,
+                2,
+                start_sector=start_sector,
+                size=4096,
+                right=right,
+            )
+        )
+        for sector in range(start_sector, start_sector + 7):
+            fat[sector] = sector + 1
+        fat[start_sector + 7] = _END_OF_CHAIN
+        streams.append(stream_name.encode("ascii").ljust(4096, b"\0"))
+
+    directory = b"".join(entries).ljust(512, b"\0")
+    return bytes(
+        header
+        + directory
+        + struct.pack("<128I", *fat)
+        + b"".join(streams)
+    )
 
 
 def _office_zip(*entries: str, mimetype: str | None = None) -> bytes:
@@ -304,21 +392,67 @@ def test_classifier_requires_the_registered_odf_package_mimetype(
 
 
 @pytest.mark.parametrize(
+    ("filename", "mimetype", "streams"),
+    [
+        (
+            "legacy.doc",
+            "application/msword",
+            ("WordDocument", "1Table"),
+        ),
+        (
+            "slides.ppt",
+            "application/vnd.ms-powerpoint",
+            ("PowerPoint Document",),
+        ),
+        (
+            "budget.xls",
+            "application/vnd.ms-excel",
+            ("Workbook",),
+        ),
+    ],
+)
+def test_classifier_accepts_structurally_valid_legacy_office_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    mimetype: str,
+    streams: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / filename, _ole_document(*streams))
+
+    assert classify_pinned_attachment(filename, mimetype, path) == (
+        "doc",
+        Path(filename).suffix.lstrip("."),
+    )
+
+
+@pytest.mark.parametrize(
     ("filename", "mimetype", "payload"),
     [
         (
             "legacy.doc",
             "application/msword",
-            _OLE_MAGIC,
+            _OLE_MAGIC + b"truncated",
         ),
         (
-            "notes.rtf",
-            "application/rtf",
-            _RTF_MAGIC,
+            "legacy.doc",
+            "application/msword",
+            _ole_document("Workbook"),
+        ),
+        (
+            "slides.ppt",
+            "application/vnd.ms-powerpoint",
+            _ole_document("WordDocument", "1Table"),
+        ),
+        (
+            "budget.xls",
+            "application/vnd.ms-excel",
+            _ole_document("PowerPoint Document"),
         ),
     ],
 )
-def test_classifier_accepts_closed_office_containers(
+def test_classifier_rejects_invalid_or_wrong_application_ole_containers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     filename: str,
@@ -328,8 +462,19 @@ def test_classifier_accepts_closed_office_containers(
     monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / filename, payload)
 
-    assert classify_pinned_attachment(filename, mimetype, path) == (
-        "doc",
-        Path(filename).suffix.lstrip("."),
-    )
-    assert Path(filename).suffix.lstrip(".") in OFFICE_ATTACHMENT_EXTENSIONS
+    assert classify_pinned_attachment(filename, mimetype, path) is None
+
+
+def test_classifier_accepts_rtf_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / "notes.rtf", _RTF_MAGIC)
+
+    assert classify_pinned_attachment(
+        "notes.rtf",
+        "application/rtf",
+        path,
+    ) == ("doc", "rtf")
+    assert "rtf" in OFFICE_ATTACHMENT_EXTENSIONS

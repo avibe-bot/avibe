@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import os
 import sqlite3
 import stat
+import zipfile
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +57,14 @@ def _attachment(path: Path, *, name: str | None = None) -> CaptureAttachment:
         uri=path.as_uri(),
         ext=extension,
     )
+
+
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
 
 
 def _assert_pin_error(error: pytest.ExceptionInfo[AttachmentPinError], expected: str) -> None:
@@ -155,6 +165,55 @@ def test_workbench_conversion_preserves_symlink_for_pin_rejection(attachment_roo
     with pytest.raises(AttachmentPinError) as error:
         AttachmentPinStore().pin(converted)
     _assert_pin_error(error, "memory_invalid_input")
+
+
+@pytest.mark.parametrize("replacement", ["regular", "symlink"])
+def test_pin_revalidates_workbench_office_copy_without_losing_siblings(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
+    notes = _source_file(source_root, "notes.txt", b"keep this sibling")
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name="report.xlsx",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(office),
+            ),
+            SimpleNamespace(
+                name="notes.txt",
+                mimetype="text/plain",
+                local_path=str(notes),
+            ),
+        ]
+    )
+    assert [attachment.name for attachment in converted] == [
+        "report.xlsx",
+        "notes.txt",
+    ]
+
+    if replacement == "regular":
+        office.write_bytes(b"not an Office container")
+    else:
+        office.unlink()
+        office.symlink_to(notes)
+
+    store = AttachmentPinStore()
+    bundle = store.pin(converted)
+
+    assert [attachment.name for attachment in bundle.attachments] == ["notes.txt"]
+    assert bundle.attachments[0].storage_key.endswith("/00.txt")
+    assert store.provider_attachments(bundle)[0].name == "notes.txt"
+    staged = home / "memory" / "attachments" / "staging"
+    assert list(staged.iterdir()) == []
+    store.release(bundle.bundle_id)
 
 
 @pytest.mark.parametrize(
