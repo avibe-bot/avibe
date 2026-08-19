@@ -1243,12 +1243,20 @@ def _restart_state_items() -> list[dict]:
     # one here: a pid reserved by a process that never acquired the lock is the
     # wreckage of a failed start, not a recovery, and reading it as one would
     # suppress the very failure it came from. What that leaves is a stray process
-    # the user is told to `vibe start` past, because `start_service` asks the broad
-    # question and refuses. `_service_lifecycle_items` owns detecting that process,
-    # so this does not reassemble the scan -- but it names the repair rather than
-    # deferring to it, because that item is behind `--deep` and the default run is
-    # exactly where a reader lands. An action is only actionable if it works on its
-    # own; pointing at a sibling item is a dependency on what else got rendered.
+    # `start_service` refuses to start past, because it asks the broad question --
+    # so the action has to cover it, and `_service_lifecycle_items` cannot be the
+    # one to do that here: its extra-process item is behind `--deep` and the
+    # default run is exactly where a reader of this lands.
+    #
+    # Which is the whole discipline for the text below. Every sentence of procedure
+    # is a claim about control flow this item does not own, and each one is
+    # separately falsifiable: earlier revisions deferred to an item that is not
+    # rendered by default, and then told the reader to start again after a repair
+    # that starts the service itself. So it names the two commands, in order, and
+    # says the one thing the reader cannot see -- that the repair brings the
+    # service up -- because that is what stops them from running start twice and
+    # reading `ServiceAlreadyRunningError` as a failed recovery. Anything beyond
+    # that is a prediction, and the commands report their own outcomes.
     if payload.get("ok") is False and not runtime.verified_service_running():
         _add_doctor_item(
             items,
@@ -1256,7 +1264,7 @@ def _restart_state_items() -> list[dict]:
             f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
             "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
             "service already running, the failed restart left a process holding no lock: run "
-            "`vibe doctor repair duplicate-service-processes` to stop it, then start again.",
+            "`vibe doctor repair duplicate-service-processes`, which stops it and brings the service up.",
             code="runtime.restart_failed",
         )
         return items

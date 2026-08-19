@@ -773,11 +773,22 @@ def verified_service_running() -> bool:
     start, and a restart record describing that failure must not be demoted to
     history because the wreckage is still running.
 
-    Cheap by construction. The lock file and pidfile answer this between them, so
-    unlike the broader probe it never scans the process table.
+    The held lock *is* that fact, so this asks for nothing else. Reading the holder
+    pid out of the lock record and requiring it to parse would be strictly weaker
+    than the signal already in hand: the record is written just after the lock is
+    taken, so a service caught in that window -- or one whose record was corrupted
+    -- holds the lock while answering no pid, and calling that "no service" both
+    contradicts the lock and disagrees with ``start_service``, which refuses on
+    ``lock_available`` alone and does not care whether a holder pid could be read.
+    A dead holder cannot keep the lock either, since the kernel drops it when the
+    process goes, so liveness needs no separate check.
+
+    Cheap by construction: one open and one non-blocking lock attempt, and unlike
+    the broader probe it never scans the process table.
     """
 
-    return resolve_service_owner_pid(include_starting=False) is not None
+    lock_available, _holder_pid = service_instance_lock_available()
+    return not lock_available
 
 
 def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERVICE_SLOW_START_TIMEOUT_SECONDS) -> bool:

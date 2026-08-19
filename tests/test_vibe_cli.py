@@ -1403,7 +1403,7 @@ def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
     return restart_path
 
 
-def _stub_service_liveness(monkeypatch, *, owner_pid=None, starting_pid=None, extra_pids=()):
+def _stub_service_liveness(monkeypatch, *, owner_pid=None, starting_pid=None, extra_pids=(), lock_held=None):
     """Describe a machine state, and let the real predicates read it.
 
     Stubbing ``verified_service_running`` itself would only assert which helper
@@ -1411,15 +1411,23 @@ def _stub_service_liveness(monkeypatch, *, owner_pid=None, starting_pid=None, ex
     ``service_process_running``, so a test can name a machine state -- a lock
     owner, a pid that only reserved itself, a stray process -- and assert the
     verdict the real predicates produce for it.
+
+    ``lock_held`` defaults to whether a lock owner was named, which is the usual
+    case. Pass it True with no ``owner_pid`` for the one state where the two come
+    apart: the lock is held but its record answers no pid, either because the
+    service has not written it yet or because it was corrupted. The lock is what
+    ``start_service`` refuses on, so that state is a running service.
     """
 
     reserved = owner_pid if starting_pid is None else starting_pid
+    holds_lock = owner_pid is not None if lock_held is None else lock_held
 
     def resolve_owner(*, include_starting=False, **_kwargs):
         return reserved if include_starting else owner_pid
 
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
     monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda: (not holds_lock, owner_pid))
 
 
 @pytest.mark.parametrize(
@@ -1478,6 +1486,13 @@ def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypat
 
     assert "vibe doctor repair duplicate-service-processes" in commands
 
+    # No command twice. `duplicate-service-processes` starts a clean service on
+    # the no-owner path it is prescribed for, so a trailing "then start again"
+    # earns `ServiceAlreadyRunningError` and reads as a recovery that failed --
+    # which is why this asserts the shape rather than that one wording: any
+    # repair that already does what a later step repeats fails here.
+    assert len(commands) == len(set(commands)), f"the action asks for a command twice: {commands}"
+
 
 @pytest.mark.parametrize(
     ("liveness", "expected"),
@@ -1488,6 +1503,7 @@ def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypat
         ({"starting_pid": 5555, "extra_pids": (5555,)}, "fail"),
         ({"owner_pid": 4321}, "warn"),
         ({"owner_pid": 4321, "extra_pids": (7777,)}, "warn"),
+        ({"lock_held": True}, "warn"),
     ],
     ids=[
         "nothing-running",
@@ -1496,6 +1512,7 @@ def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypat
         "half-started-child-both-reserved-and-scanned",
         "lock-owner",
         "lock-owner-beside-a-stray-process",
+        "lock-held-but-its-record-answers-no-pid",
     ],
 )
 def test_a_restart_failure_is_downtime_until_a_lock_verified_service_exists(monkeypatch, liveness, expected):
@@ -1506,6 +1523,12 @@ def test_a_restart_failure_is_downtime_until_a_lock_verified_service_exists(monk
     scan can see, or one child that is both. Reading any of them as a running
     service would suppress the very failure that produced it, so each stays a
     failure until something actually holds the lock.
+
+    The last shape is the one that discriminates the lock from its record. A held
+    lock with no readable holder pid is a service -- caught between acquiring the
+    lock and writing the record, or holding a corrupted one -- and it is exactly
+    what ``start_service`` refuses to start past. Calling it downtime would report
+    a running instance as down and then prescribe a start that cannot succeed.
     """
 
     _seed_restart_status(

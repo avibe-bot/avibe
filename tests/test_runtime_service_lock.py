@@ -703,5 +703,42 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             self.assertFalse(runtime.current_process_owns_service_instance())
 
+    def test_verified_service_running_follows_the_lock_not_the_lock_record(self):
+        """The held lock is the fact; a readable holder pid is not required.
+
+        ``start_service`` refuses on ``lock_available`` alone and does not care
+        whether a holder pid can be read, so the doctor predicate that decides
+        whether an instance has a working service has to agree with it. Corrupting
+        the record while the lock stays held is the state where those two can
+        disagree: it is what a service looks like in the window between taking the
+        lock and writing its record, and answering "no service is running" there
+        would report downtime for a running instance and prescribe a start that
+        cannot succeed.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                        self.assertFalse(runtime.verified_service_running())
+
+                        runtime.acquire_service_instance_lock()
+                        try:
+                            self.assertTrue(runtime.verified_service_running())
+
+                            lock_path.write_text("", encoding="utf-8")
+                            self.assertIsNone(runtime.service_instance_lock_available()[1])
+                            self.assertTrue(runtime.verified_service_running())
+                        finally:
+                            runtime.release_service_instance_lock()
+
+                        self.assertFalse(runtime.verified_service_running())
+
+
 if __name__ == "__main__":
     unittest.main()
