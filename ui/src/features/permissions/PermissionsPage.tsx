@@ -590,8 +590,8 @@ function AccessEntryDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={saving}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={!editable || saving || !candidate.value} onClick={() => void save()}>
+          <Button type="button" variant="ghost" onClick={() => handleOpenChange(false)} disabled={saving}>{t('common.cancel')}</Button>
+          <Button type="button" variant="brand" disabled={!editable || saving || !candidate.value} onClick={() => void save()}>
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
             {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
           </Button>
@@ -812,7 +812,7 @@ function ProjectAccessDialog({
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <Label>{t('permissions.projects.bindings')}</Label>
-                  <Button size="sm" variant="outline" onClick={addBinding}><Plus className="size-4" />{t('permissions.actions.addBinding')}</Button>
+                  <Button type="button" size="sm" variant="outline" onClick={addBinding}><Plus className="size-4" />{t('permissions.actions.addBinding')}</Button>
                 </div>
                 {bindings.map((binding, index) => {
                   const archivedGroup = binding.principal_kind === 'organization_group'
@@ -859,7 +859,7 @@ function ProjectAccessDialog({
                         <option value="viewer">{t('permissions.roles.viewer')}</option>
                         <option value="editor">{t('permissions.roles.editor')}</option>
                       </Select>
-                      <Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeBinding')} onClick={() => setBindings((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 className="size-4" /></Button>
+                      <Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.removeBinding')} onClick={() => setBindings((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 className="size-4" /></Button>
                     </div>
                   );
                 })}
@@ -868,8 +868,8 @@ function ProjectAccessDialog({
             ) : null}
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={saving}>{t('common.cancel')}</Button>
-            <Button variant="brand" disabled={!editable || saving || invalid} onClick={() => void save()}>
+            <Button type="button" variant="ghost" onClick={() => handleOpenChange(false)} disabled={saving}>{t('common.cancel')}</Button>
+            <Button type="button" variant="brand" disabled={!editable || saving || invalid} onClick={() => void save()}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : null}
               {t(conflict ? 'permissions.actions.retrySave' : 'permissions.actions.save')}
             </Button>
@@ -1066,7 +1066,7 @@ export function PermissionsPage() {
     return (
       <div className="space-y-5">
         <EmptyState icon={state.offline ? WifiOff : CloudOff} title={t('permissions.states.unavailableTitle')} body={t('permissions.states.unavailableBody')} />
-        <div className="flex justify-center"><Button variant="outline" onClick={() => void loadPage()}><RefreshCw className="size-4" />{t('common.retry')}</Button></div>
+        <div className="flex justify-center"><Button type="button" variant="outline" onClick={() => void loadPage()}><RefreshCw className="size-4" />{t('common.retry')}</Button></div>
       </div>
     );
   }
@@ -1214,7 +1214,7 @@ export function PermissionsPage() {
           title={t('permissions.states.offlineTitle')}
           body={t('permissions.states.offlineBody')}
           action={(
-            <Button size="sm" variant="outline" onClick={() => void refreshReady()}>
+            <Button type="button" size="sm" variant="outline" onClick={() => void refreshReady()}>
               <RefreshCw className="size-3.5" />
               {t('permissions.actions.refresh')}
             </Button>
@@ -1242,7 +1242,7 @@ export function PermissionsPage() {
           title={t('permissions.states.applyingTitle')}
           body={t('permissions.states.applyingBody')}
           action={policyRefreshExhausted ? (
-            <Button size="sm" variant="outline" onClick={() => void refreshPolicyStatus()}>
+            <Button type="button" size="sm" variant="outline" onClick={() => void refreshPolicyStatus()}>
               <RefreshCw className="size-3.5" />
               {t('permissions.actions.refresh')}
             </Button>
@@ -1276,7 +1276,7 @@ export function PermissionsPage() {
               <h2 className="text-[15px] font-semibold">{t('permissions.access.title')}</h2>
               <p className="mt-0.5 text-[12px] text-muted">{t('permissions.access.description')}</p>
             </div>
-            {editable ? <Button variant="brand" size="sm" onClick={() => setEditingAccess(null)}><Plus className="size-4" />{t('permissions.actions.addAccess')}</Button> : null}
+            {editable ? <Button type="button" variant="brand" size="sm" onClick={() => setEditingAccess(null)}><Plus className="size-4" />{t('permissions.actions.addAccess')}</Button> : null}
           </div>
           <div className="flex items-center gap-3 rounded-lg border border-violet/35 bg-violet/10 px-4 py-3">
             <ShieldCheck className="size-5 shrink-0 text-violet-ink" />
@@ -1318,7 +1318,7 @@ export function PermissionsPage() {
                     <Badge variant="secondary">{t(`permissions.principals.${entry.kind}`)}</Badge>
                     <Badge variant={entry.role === 'editor' ? 'success' : 'secondary'}>{entry.role === 'editor' ? <Pencil className="size-3" /> : <Eye className="size-3" />}{t(`permissions.roles.${entry.role}`)}</Badge>
                     <div className="flex justify-end gap-1">
-                      {editable ? <><Button size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalInstanceId(projection.instance.id); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
+                      {editable ? <><Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalInstanceId(projection.instance.id); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
                     </div>
                   </div>
                 );
@@ -1347,7 +1347,7 @@ export function PermissionsPage() {
                     <Badge variant={mode === 'owner_only' ? 'warning' : mode === 'restricted' ? 'info' : 'secondary'}>{mode === 'owner_only' ? <LockKeyhole className="size-3" /> : mode === 'restricted' ? <ShieldCheck className="size-3" /> : <Users className="size-3" />}{t(`permissions.projects.modes.${mode}`)}</Badge>
                     <span className="truncate text-[12px] text-muted">{mode === 'restricted' ? t('permissions.projects.bindingCount', { count: project.access.bindings.length }) : t(`permissions.projects.audience.${mode}`)}</span>
                     <SyncBadge status={project.sync.status} />
-                    {editable ? <Button size="sm" variant="outline" onClick={() => setEditingProject(project)}>{t('permissions.actions.manage')}</Button> : <span />}
+                    {editable ? <Button type="button" size="sm" variant="outline" onClick={() => setEditingProject(project)}>{t('permissions.actions.manage')}</Button> : <span />}
                   </div>
                 );
               })}

@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { FormEvent } from 'react';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
@@ -124,6 +125,40 @@ afterEach(() => {
 });
 
 describe('PermissionsPage state model', () => {
+  it('keeps permission controls from submitting an enclosing form', async () => {
+    const onSubmit = vi.fn((event: FormEvent<HTMLFormElement>) => event.preventDefault());
+    api.updateProjectAccess.mockResolvedValueOnce({
+      ok: true,
+      instance_id: 'inst-123',
+      authorization_revision: 5,
+      project: response().projection.projects[0]!,
+    });
+
+    render(
+      <form onSubmit={onSubmit}>
+        <InstanceAuthorizationContext.Provider value={{
+          remote: true,
+          instanceKind: 'organization',
+          instanceRole: 'owner',
+          capabilities: OWNER_INSTANCE_CAPABILITIES,
+        }}>
+          <PermissionsPage />
+        </InstanceAuthorizationContext.Provider>
+      </form>,
+    );
+
+    await screen.findByRole('heading', { name: 'permissions.title' });
+    fireEvent.click(screen.getByRole('tab', { name: 'permissions.tabs.projects' }));
+    expect(screen.getByRole('button', { name: 'permissions.actions.manage' }).getAttribute('type')).toBe('button');
+
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.manage' }));
+    expect(screen.getByRole('button', { name: 'permissions.actions.save' }).getAttribute('type')).toBe('button');
+    fireEvent.click(screen.getByRole('button', { name: 'permissions.actions.save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it('uses the full settings content width instead of a page-specific max width', async () => {
     renderPage();
 
