@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
+import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
@@ -183,13 +184,17 @@ describe('SettingsModelsPage surface branches', () => {
     expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
   });
 
-  it('renders Frame 09 without tabs when every backend is direct and no source exists', async () => {
+  it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
     renderPage([]);
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
     expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeTruthy();
-    expect(screen.queryByRole('tab')).toBeNull();
+    // Frame 09 is what the `sources` tab shows here — not what the Hub shows
+    // instead of its tabs. It is still Frame 09's body: none of the gateway
+    // overview leaks in beside it.
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
   });
 
   it('renders the no-backend state when every authoritative CLI is absent', async () => {
@@ -925,6 +930,32 @@ describe('SettingsModelsPage surface branches', () => {
 // paint, live on every open, and spanning whatever the control was left on.
 describe('SettingsModelsPage usage region', () => {
   const openUsage = () => userEvent.click(screen.getByRole('tab', { name: /^Usage$|^用量$/ }));
+
+  // The ledger outlives the Sources it metered — 62 days of retention, and a
+  // vanished Source still named by its id — so the route to it cannot be a branch
+  // of currently having one. Deleting the last source may not delete the only way
+  // to read what it cost, and a user reading the report may not be thrown off it
+  // by their own deletion.
+  it('MH-USAGE-022: reaches the report from every landing the Hub can draw', async () => {
+    // Keyed by the landing itself: a `Record<ModelsSurfaceKind, …>` cannot omit
+    // one, so a landing added later fails to compile here rather than quietly
+    // shipping without a route. The loop stays inside one case because a row's
+    // evidence has to be a case the catalog can resolve by name.
+    const landings: Record<ModelsSurfaceKind, Source[]> = {
+      direct_empty: [],
+      gateway: [retainedSource],
+    };
+
+    for (const [landing, sources] of Object.entries(landings)) {
+      cleanup();
+      vi.restoreAllMocks();
+      renderPage(sources);
+
+      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(2));
+      await openUsage();
+      await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith(30));
+    }
+  });
 
   it('MH-USAGE-020: leaves the report unread until its tab is opened, then reads the default span', async () => {
     renderPage([retainedSource]);

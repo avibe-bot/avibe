@@ -979,9 +979,10 @@
         "byDay": {
           "title": "按日",
           "chart": "每日计量 token，{{from}} 至 {{to}}",
-          "column": "{{day}} · {{tokens}} tokens",
+          "column": "{{day}} · {{tokens}} tokens · {{requests}} 次请求",
           "peak": "峰值 {{tokens}}，出现在 {{day}}",
-          "quiet": "这个区间没有任何一天有计量数据"
+          "quiet": "这个区间没有任何一天有计量数据",
+          "unreported": "有请求，但没有任何一天回报了 token"
         }
       },
       "supplyTooltip": {

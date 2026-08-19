@@ -32,6 +32,7 @@ import {
   sourceIdentity,
   usageCachedInputShare,
   usageDayColumns,
+  usageDayIsMetered,
   usageIsEmpty,
   usageReportShortfall,
   usageTotalTokens,
@@ -190,12 +191,17 @@ const BySourcePanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
  * makes the zero-fill legible. A bar of zero height in an empty row is
  * indistinguishable from a missing bar, and the difference — an idle day versus a
  * day the report does not cover — is the whole reason the series is drawn.
+ *
+ * Which day ran is `usageDayIsMetered`'s answer and never a token total: an
+ * upstream can serve a call and report nothing about it, so a window of those has
+ * bars to draw and a peak it cannot name.
  */
 const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
   const { t, i18n } = useTranslation();
   const count = useCount();
   const columns = React.useMemo(() => usageDayColumns(summary), [summary]);
   const peak = columns.reduce<UsageDayColumn | null>((best, column) => (column.tokens > (best?.tokens ?? 0) ? column : best), null);
+  const metered = columns.some(usageDayIsMetered);
   const day = (value: string) => formatLocalDay(value, i18n.language);
   return (
     <section className="model-hub-usage-card overflow-hidden rounded-xl border border-border bg-background">
@@ -212,21 +218,27 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
             <div
               key={column.day}
               className="model-hub-usage-track flex flex-1 items-end"
-              title={t('settings.models.usage.byDay.column', { day: day(column.day), tokens: count(column.tokens) }) as string}
+              title={t('settings.models.usage.byDay.column', { day: day(column.day), tokens: count(column.tokens), requests: count(column.requests) }) as string}
             >
               {/* A metered day is floored to a visible sliver so the quietest one
-                  still reads as activity; a day with nothing keeps zero height
-                  and shows only the track. */}
-              <div className="model-hub-usage-column w-full" style={{ height: column.tokens > 0 ? `max(2px, ${column.ratio * 100}%)` : 0 }} />
+                  still reads as activity — including one whose tokens never came
+                  back, which is why the floor asks about calls and not about
+                  tokens. Only a day that carried nothing keeps zero height and
+                  shows the track alone. */}
+              <div className="model-hub-usage-column w-full" style={{ height: usageDayIsMetered(column) ? `max(2px, ${column.ratio * 100}%)` : 0 }} />
             </div>
           ))}
         </div>
         <div className="model-hub-usage-axis flex items-baseline justify-between gap-3">
           <span className="truncate">{day(summary.from_day)}</span>
           <span className="model-hub-usage-peak truncate">
-            {peak === null
-              ? t('settings.models.usage.byDay.quiet')
-              : t('settings.models.usage.byDay.peak', { tokens: count(peak.tokens), day: day(peak.day) })}
+            {peak !== null
+              ? t('settings.models.usage.byDay.peak', { tokens: count(peak.tokens), day: day(peak.day) })
+              // No peak is two different windows: one nobody used, and one whose
+              // upstreams never reported what they cost. Only the first is quiet.
+              : metered
+                ? t('settings.models.usage.byDay.unreported')
+                : t('settings.models.usage.byDay.quiet')}
           </span>
           <span className="truncate">{day(summary.to_day)}</span>
         </div>

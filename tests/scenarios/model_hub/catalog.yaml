@@ -249,6 +249,18 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-020
+  - id: MH-USAGE-021
+    name: A day whose calls carried no token report reads as metered rather than idle
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-021
+  - id: MH-USAGE-022
+    name: The usage report stays reachable from every Model Hub landing, including one with no Source left
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-022
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

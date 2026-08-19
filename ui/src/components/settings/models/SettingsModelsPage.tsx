@@ -1058,10 +1058,19 @@ export const SettingsModelsPage: React.FC = () => {
                 onMutationCommitted={sourceMutationReport.present}
               />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
-          : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
-            : <div className="space-y-[22px]">
+          : <div className="space-y-[22px]">
+                  {/* The tab strip belongs to the Hub, not to the source
+                      inventory. The ledger outlives the Sources it metered — it
+                      retains its window and the report names a deleted Source by
+                      its id — so deleting the last one may not take the only route
+                      to that history with it. Frame 09 is drawn without tabs
+                      because it predates this tab, not because usage stops
+                      existing once the inventory is empty; what the frame decides
+                      is the body of `sources`, which is still Frame 09 there. */}
                   <HubTabs tab={tab} onChange={setTab} />
-                  {tab === 'sources' ? <div className="model-hub-overview">
+                  {tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
+                    : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
+                    : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
                         <Popover
@@ -1157,7 +1166,7 @@ export const SettingsModelsPage: React.FC = () => {
                     </div>
                     <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     <AdvancedRow />
-                  </div> : <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />}
+                  </div>}
                 </div>}
       <SourceMutationReport
         report={sourceMutationReport.report}

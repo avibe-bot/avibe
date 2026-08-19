@@ -126,6 +126,37 @@ describe('UsageTab', () => {
     expect(screen.getByRole('img', { name: /Metered tokens per day/ })).toBeTruthy();
   });
 
+  it('MH-USAGE-021: draws a day of calls whose tokens never came back, and names the window unreported', () => {
+    // Every request in the window answered without a token report, which the
+    // schema permits and the requests card already states as a shortfall. The
+    // series has nothing to scale, so every bar sits on its floor — but the days
+    // ran, and folding them into 「no metered turn」 would report our own missing
+    // evidence as the user's idleness.
+    const unreported = counters({ requests: 4, token_reports: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 });
+    const { container } = draw(readyRegion(summary({
+      from_day: '2026-08-16',
+      to_day: '2026-08-18',
+      window_days: 3,
+      totals: unreported,
+      sources: [source({ ...unreported, models: [model(unreported)] })],
+      days: [{ ...unreported, day: '2026-08-16' }, { ...unreported, day: '2026-08-18' }],
+    })));
+
+    expect(container.textContent).toContain(en.settings.models.usage.byDay.unreported);
+    expect(container.textContent).not.toContain(en.settings.models.usage.byDay.quiet);
+    // Every column says what its day carried, so a bar the report could not
+    // measure still reads as a day that ran rather than as an unexplained sliver.
+    // (Whether it is floored to one is CSS the DOM cannot answer for; the decision
+    // behind it is `usageDayIsMetered`, asserted over columns in
+    // `usageProjection.test.ts`.)
+    const readouts = [...container.querySelectorAll('.model-hub-usage-track')].map((track) => track.getAttribute('title'));
+    expect(readouts).toEqual([
+      'Aug 16, 2026 · 0 tokens · 4 requests',
+      'Aug 17, 2026 · 0 tokens · 0 requests',
+      'Aug 18, 2026 · 0 tokens · 4 requests',
+    ]);
+  });
+
   it('keeps the last report on screen while a new one is read, and claims no failure', () => {
     const { container } = draw(degradedRegion(summary(), 'refreshing', false));
     expect(container.textContent).toContain('Contract source');

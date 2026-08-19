@@ -979,9 +979,10 @@
         "byDay": {
           "title": "By day",
           "chart": "Metered tokens per day, {{from}} to {{to}}",
-          "column": "{{day}} · {{tokens}} tokens",
+          "column": "{{day}} · {{tokens}} tokens · {{requests}} requests",
           "peak": "Peak {{tokens}} on {{day}}",
-          "quiet": "No day in this window carried a metered turn"
+          "quiet": "No day in this window carried a metered turn",
+          "unreported": "Requests ran, but no day reported its tokens"
         }
       },
       "supplyTooltip": {

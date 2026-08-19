@@ -9,6 +9,7 @@ import {
   sourceIdentity,
   usageCachedInputShare,
   usageDayColumns,
+  usageDayIsMetered,
   usageIsEmpty,
   usageReportShortfall,
   usageTotalTokens,
@@ -148,7 +149,9 @@ describe('formatLocalDay', () => {
 });
 
 describe('usageDayColumns', () => {
-  const day = (value: string, tokens: number) => ({ ...counters({ input_tokens: tokens }), day: value });
+  // A reported day exists because a call was metered on it, so it carries one
+  // unless the case is about a day that carried several.
+  const day = (value: string, tokens: number, requests = 1) => ({ ...counters({ requests, input_tokens: tokens }), day: value });
 
   it('spans the whole window and zero-fills the days that carried no turn', () => {
     const columns = usageDayColumns(summary({ from_day: '2026-08-14', to_day: '2026-08-18', days: [day('2026-08-16', 40)] }));
@@ -165,6 +168,22 @@ describe('usageDayColumns', () => {
     for (const entry of reported) expect(byDay.get(entry.day)).toBe(usageTotalTokens(entry));
     const total = columns.reduce((sum, column) => sum + column.tokens, 0);
     expect(total).toBe(reported.reduce((sum, entry) => sum + usageTotalTokens(entry), 0));
+  });
+
+  // Both counters travel, because they answer different questions: what a day
+  // cost, and whether it ran at all.
+  it('carries the calls of every reported day through, and gives a filled-in day none', () => {
+    const columns = usageDayColumns(summary({ from_day: '2026-08-14', to_day: '2026-08-16', days: [day('2026-08-15', 40, 3)] }));
+    expect(columns.map((column) => column.requests)).toEqual([0, 3, 0]);
+  });
+
+  // The distinction the whole series exists to draw. A day whose upstreams never
+  // reported their tokens still served the calls the user made, so it is a metered
+  // day with nothing to scale — not an idle one.
+  it('reads a day of calls with no token report as metered rather than idle', () => {
+    const columns = usageDayColumns(summary({ from_day: '2026-08-17', to_day: '2026-08-18', days: [day('2026-08-18', 0, 4)] }));
+    expect(columns.map(usageDayIsMetered)).toEqual([false, true]);
+    expect(columns.map((column) => column.tokens)).toEqual([0, 0]);
   });
 
   it('scales every bar against the busiest day on screen', () => {

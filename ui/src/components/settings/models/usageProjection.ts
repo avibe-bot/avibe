@@ -95,10 +95,27 @@ export function usageIsEmpty(summary: UsageSummary): boolean {
 
 export type UsageDayColumn = {
   day: string;
+  /** Calls metered on this day, whether or not their tokens came back. */
+  requests: number;
   tokens: number;
   /** Height against the busiest rendered day, in [0, 1]. */
   ratio: number;
 };
+
+/**
+ * Whether a day carried a metered call at all.
+ *
+ * A day's activity is its request counter, never its token total. An upstream
+ * that answered without a token report still served a call the user made, so a
+ * day of those is a day that ran — and drawing it at zero height, or folding it
+ * into 「没有任何一天有计量数据」, reports our own missing evidence as the user's
+ * idleness. That is the rule the requests card states as a shortfall, applied per
+ * day, and it lives here so the series has one place to ask rather than one
+ * `tokens > 0` per thing it draws.
+ */
+export function usageDayIsMetered(column: UsageDayColumn): boolean {
+  return column.requests > 0;
+}
 
 /**
  * Every day of the window, oldest first, with the days that carried no turn
@@ -116,14 +133,19 @@ export type UsageDayColumn = {
  * span falls back to exactly the days reported — fewer bars, no invention.
  */
 export function usageDayColumns(summary: UsageSummary): UsageDayColumn[] {
-  const tokensByDay = new Map(summary.days.map((day: UsageByDay) => [day.day, usageTotalTokens(day)]));
+  const reportedByDay = new Map(summary.days.map((day: UsageByDay) => [day.day, day]));
   const span = windowSpan(summary.from_day, summary.to_day);
   const days = span ?? summary.days.map((day) => day.day);
-  const counted = days.map((day) => ({ day, tokens: tokensByDay.get(day) ?? 0 }));
+  // Both counters travel, because tokens alone cannot tell a day nobody used
+  // from a day whose upstream never said what it cost.
+  const counted = days.map((day) => {
+    const reported = reportedByDay.get(day);
+    return { day, requests: reported?.requests ?? 0, tokens: reported ? usageTotalTokens(reported) : 0 };
+  });
   // Scaled against the days on screen, not every day reported: a stray row
   // outside the window would otherwise flatten every bar the user can see.
   const peak = counted.reduce((max, column) => Math.max(max, column.tokens), 0);
-  return counted.map(({ day, tokens }) => ({ day, tokens, ratio: peak > 0 ? tokens / peak : 0 }));
+  return counted.map((column) => ({ ...column, ratio: peak > 0 ? column.tokens / peak : 0 }));
 }
 
 const windowSpan = (fromDay: string, toDay: string): string[] | null => {

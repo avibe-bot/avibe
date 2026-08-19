@@ -1097,3 +1097,57 @@ keeping them only invites someone to wire it back up. What remains is
 `types.SourceUsage` and the `mockData` 额度 fields: the type mirrors
 `docs/plans/model-hub-contracts/source.schema.json`, which still declares the block,
 and is retired when the contract retires it.
+
+### Stage 2, round 2 (head `5957182`)
+
+Two P2 findings, **no class repeat** — head 1 (`7082c882e`) carried one finding about
+catalog evidence resolved textually, which neither of these touches — so the breaker is
+not tripped and the round is two closures rather than a diagnosis.
+
+**F1: the day series read a missing token report as an idle day.** `token_reports <=
+requests` is a contract, and the gap means *reports that never arrived* — the tab already
+says exactly that for the totals (MH-USAGE-018). The day series then contradicted it: it
+scaled and captioned days by tokens alone, so a window whose upstreams all answered
+without token counts drew every bar at zero and captioned itself
+「没有任何一天有计量数据」 — our own missing evidence reported as the user's idleness.
+
+The finding named the peak/quiet copy. The class — *the day series asks tokens a question
+only requests can answer* — has exactly three members inside `ByDayPanel`: that copy, the
+column height, and the per-column tooltip. So the fix is one predicate, not one call site:
+`UsageDayColumn` carries `requests` alongside `tokens`, `usageDayIsMetered` is the single
+place the series asks whether a day ran, and all three members read it. A no-peak window
+now splits into the two different windows it always was — one nobody used, and one whose
+upstreams never said what it cost (`byDay.quiet` vs `byDay.unreported`).
+
+Ruled *out* of the class on evidence rather than by assumption, by reading
+`core/handlers/model_hub/usage.py`: `usageIsEmpty` gates on `sources.length`, and
+`summary()` builds source rows from the same request-driven rows, so an unreported window
+still has sources and is not empty; the stat cards, `cached.none`, and the chart's
+aria-label each state a token figure they really do own.
+
+**F2: deleting the last Source took the ledger with it.** `directEmpty` was a top-level
+routing fork, so the Frame 09 landing replaced the whole tab shell — including the Usage
+tab. But the ledger outlives the Sources it meters: retention is 62 days and MH-USAGE-017
+exists precisely because a vanished Source keeps its `src_*` id in the report. A user who
+deletes their last source loses the only route to what it cost, and a user reading the
+report when a deletion lands is thrown off the tab mid-read.
+
+One rule replaces the fork: **the Hub always has its two tabs, and `directEmpty` decides
+the body of the `sources` tab.** That is fewer concepts than the alternative (a usage
+affordance inside `DirectHome` plus a route back out of it), and it fixes the mid-read
+eviction for free. MH-USAGE-022 states the property over `Record<ModelsSurfaceKind, …>`,
+so a third landing fails to compile rather than shipping without a route.
+
+**Known-by-design: Frame 09 is drawn without the tab strip.** The frame predates this tab
+and the Usage tab has no frame at all, so the frame's silence is the absence of the
+concept, not a decision about it. What Frame 09 decides is the *body* of the `sources`
+tab, and that is still Frame 09 there — asserted, including that no gateway-overview
+content leaks in beside it.
+
+**Evidence.** MH-USAGE-021 draws a window where every request came back unreported and
+asserts the copy plus each day's readout. The bar geometry itself is not asserted there:
+the floor is `max(2px, …)`, an inline CSS function jsdom's parser drops, so `style.height`
+reads empty for drawn and undrawn columns alike. The decision behind the floor is the
+assertable part and it is asserted where it lives — `usageDayIsMetered` over columns in
+`usageProjection.test.ts` — leaving only the pixel to the residual visual check that this
+tab already carries.
