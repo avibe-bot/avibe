@@ -2702,6 +2702,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return res.json();
   };
 
+  // Absence is data for a GET of ONE session's Show Page, never an incident: the share
+  // panel opens on sessions that have no page yet and renders that as an empty link.
+  // The property is owned here instead of declared per call site because the panel fires
+  // several of these reads at once — one of them forgetting is a toast the user sees for
+  // the normal case, and the reader cannot tell which of the parallel reads produced it.
+  // Mutations stay off this path deliberately: pinning or re-skinning a page that does
+  // not exist IS a fault worth announcing. So is the POST-shaped access-settings read,
+  // which only mounts once an access read has already proven the page exists, so an
+  // absent page there means it vanished mid-session rather than never existed.
+  const readShowPageJson = (path: string) => getJson(path, { expectedCodes: ['show_page_not_found'] });
+
   const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
     // Best-effort callers (handleError: false) bypass the shared read cache so a
     // silently-failing request can't hand its suppressed-error promise to a
@@ -3302,7 +3313,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removeUser: (userId, platform) =>
       deleteJson(platform ? `/api/users/${encodeURIComponent(userId)}?platform=${encodeURIComponent(platform)}` : `/api/users/${encodeURIComponent(userId)}`),
     getShowPages: () => getJson('/api/show-pages'),
-    getShowPageAccess: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
+    getShowPageAccess: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
     probeShowPageAccess: async (sessionId) => {
       try {
         const response = await apiFetch(`/api/show-pages/${encodeURIComponent(sessionId)}/access`);
@@ -3341,13 +3352,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
       { offline },
     ),
-    getShowPage: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}`, {
-      // "This session has no page" is this read's expected answer, not an incident
-      // to announce: the share panel handles it by leaving the link empty. It must
-      // still REJECT — resolving with the error body would hand the panel a
-      // non-payload, and is what would tempt a caller back onto the ensure POST.
-      expectedCodes: ['show_page_not_found'],
-    }),
+    getShowPage: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}`),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes

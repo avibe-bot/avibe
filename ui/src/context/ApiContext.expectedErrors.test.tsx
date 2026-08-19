@@ -1,5 +1,7 @@
 /* @vitest-environment jsdom */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { useEffect } from 'react';
 import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -64,30 +66,50 @@ const mountApi = async () => {
   return capturedApi!;
 };
 
-describe('ApiProvider expected error codes', () => {
-  it('rejects a declared expected code without announcing it', async () => {
-    // Property: a code the call site declared expected still REJECTS — so no caller can
-    // mistake an error body for a payload — but is neither toasted nor logged as an
-    // error. "This session has no Show Page" is `getShowPage`'s normal answer, which the
-    // share panel renders as an empty link; a toast there would be a regression the
-    // read-only endpoint introduced rather than fixed.
-    const api = await mountApi();
-    apiFetch.mockResolvedValue(codedError('show_page_not_found', 404));
+const apiContextSource = () => readFileSync(join(__dirname, 'ApiContext.tsx'), 'utf8');
 
-    await expect(api.getShowPage('ses1')).rejects.toMatchObject({ code: 'show_page_not_found' });
-    expect(showToast).not.toHaveBeenCalled();
-    expect(consoleError).not.toHaveBeenCalled();
+describe('ApiProvider expected error codes', () => {
+  it('answers an absent Show Page silently on every read that shares the owner', async () => {
+    // The members are DERIVED from the product source rather than restated here, so a read
+    // added to `readShowPageJson` later is covered without editing this test — the panel
+    // fires several of these in parallel and the reviewer found the second one exactly
+    // because the property had been declared per call site instead of owned once.
+    // Both directions are asserted per member: an absent page still REJECTS (no caller can
+    // mistake an error body for a payload) yet is neither toasted nor logged, while any
+    // other failure of the very same read still reaches the user. That pairing is what
+    // stops the shared owner from quietly becoming "these reads never report anything".
+    const reads = [...apiContextSource().matchAll(/(\w+): \(sessionId\) => readShowPageJson\(/g)]
+      .map(([, name]) => name);
+    expect(reads.length).toBeGreaterThan(1);
+
+    const api = await mountApi();
+    for (const name of reads) {
+      const read = api[name as keyof typeof api] as (sessionId: string) => Promise<unknown>;
+
+      apiFetch.mockResolvedValue(codedError('show_page_not_found', 404));
+      await expect(read('ses1')).rejects.toMatchObject({ code: 'show_page_not_found' });
+      expect(showToast, name).not.toHaveBeenCalled();
+      expect(consoleError, name).not.toHaveBeenCalled();
+
+      apiFetch.mockResolvedValue(codedError('resource_access_forbidden', 403));
+      await expect(read('ses1')).rejects.toMatchObject({ code: 'resource_access_forbidden' });
+      expect(showToast, name).toHaveBeenCalledTimes(1);
+      expect(consoleError, name).toHaveBeenCalledTimes(1);
+
+      showToast.mockClear();
+      consoleError.mockClear();
+    }
   });
 
-  it('still announces any other failure of the same read', async () => {
-    // The other direction, which is what keeps the suppression narrow: only the DECLARED
-    // code is silent. A real fault on the very same call still reaches the user, so
-    // "expected" cannot quietly grow into "this read never reports anything".
-    const api = await mountApi();
-    apiFetch.mockResolvedValue(codedError('resource_access_forbidden', 403));
+  it('keeps every single-session Show Page GET on that owner', () => {
+    // The behavioural test above can only exercise reads that already went through the
+    // owner. This is the half that makes a NEW one fail: a GET of one session's page
+    // written against raw `getJson` is a violation by construction, whatever it is named.
+    // The list read (`/api/show-pages`, no session segment) cannot report a missing page
+    // and is excluded by the same shape.
+    const violations = [...apiContextSource().matchAll(/^.*\bgetJson\(`\/api\/show-pages\/\$\{.*$/gm)]
+      .map(([line]) => line.trim());
 
-    await expect(api.getShowPage('ses1')).rejects.toMatchObject({ code: 'resource_access_forbidden' });
-    expect(showToast).toHaveBeenCalledTimes(1);
-    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(violations).toEqual([]);
   });
 });
