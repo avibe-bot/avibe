@@ -632,14 +632,36 @@ def create_sqlite_migration_backup(
     return backup_dir
 
 
-def _displace_live_database(db_path: Path, into: Path) -> Path | None:
-    """Move the database now being rolled back out of the way, keeping all of it.
+def _duplicate_file(source: Path, destination: Path) -> None:
+    """Copy `source` to `destination` without a window where only one copy exists.
 
-    The write-ahead log and shared-memory sidecars move with it, and that is not
-    tidiness: a `-wal` left behind belongs to the generation being displaced, and
-    SQLite would replay it into the restored database and call the result
-    recovered. Moving them under the displaced database's own name keeps them
-    where SQLite will find them for it instead.
+    By link where the filesystem allows it, by copy where it does not.
+    """
+
+    try:
+        os.link(source, destination)
+    except OSError:
+        logger.debug("Hard link unavailable for %s; copying it to %s instead", source, destination, exc_info=True)
+        shutil.copy2(str(source), str(destination))
+
+
+def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path | None:
+    """Put `replacement` at the live path, keeping all of what was there.
+
+    Displacing the old generation and installing the new one are one operation
+    because the invariant is one: at every instant a failure can be observed, the
+    live path holds a database together with the sidecars that belong to it.
+    Split across two functions, neither owns that -- the displacement ends with
+    the live log already cleared and the caller has not yet renamed anything into
+    place, so an interrupted install leaves a database missing its own committed
+    tail, and no amount of care in either half closes a gap that exists between
+    them.
+
+    The write-ahead log and shared-memory sidecars move with the displaced
+    database, and that is not tidiness: a `-wal` left behind belongs to the
+    generation being displaced, and SQLite would replay it into the restored
+    database and call the result recovered. Moving them under the displaced
+    database's own name keeps them where SQLite will find them for it instead.
 
     A previous displacement into this same rollback point is replaced, but only
     once the new one is whole on disk -- staged under its own name, then renamed
@@ -662,6 +684,7 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
     """
 
     if not db_path.exists():
+        os.replace(replacement, db_path)
         return None
     replaced = into / REPLACED_DATABASE_NAME
     staging = into / f"{REPLACED_DATABASE_NAME}.incoming"
@@ -682,11 +705,7 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
             duplications.append((sidecar, staging.with_name(staging.name + suffix)))
 
     for source, destination in duplications:
-        try:
-            os.link(source, destination)
-        except OSError:
-            logger.debug("Hard link unavailable for %s; copying it to %s instead", source, destination, exc_info=True)
-            shutil.copy2(str(source), str(destination))
+        _duplicate_file(source, destination)
 
     # The previous displacement's sidecars go first and its database last. A
     # database briefly without its write-ahead log is still that database; a
@@ -701,11 +720,28 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
             os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
 
     # Only now does anything leave the live path, and only the sidecars: the
-    # displaced generation already holds its own copy of them, and the caller is
-    # about to put a different database under this name that must not inherit
-    # them. The database itself stays until that caller replaces it.
+    # displaced generation already holds its own copy of them, and the database
+    # arriving under this name must not inherit them. The database itself stays
+    # until the rename below replaces it.
     for sidecar in live_sidecars:
         sidecar.unlink(missing_ok=True)
+    try:
+        os.replace(replacement, db_path)
+    except Exception:
+        # The live generation goes back exactly as it was. Its database never
+        # left this path; its log did, and the displaced copy is where it is, so
+        # it is put back before the failure surfaces -- otherwise a restore that
+        # failed would still have cost the machine everything that database
+        # committed since its last checkpoint.
+        for sidecar in live_sidecars:
+            displaced_sidecar = replaced.with_name(replaced.name + sidecar.name[len(db_path.name) :])
+            if not displaced_sidecar.is_file():
+                continue
+            try:
+                _duplicate_file(displaced_sidecar, sidecar)
+            except OSError:
+                logger.warning("Failed to restore %s after an interrupted database swap", sidecar, exc_info=True)
+        raise
     return replaced
 
 
@@ -757,8 +793,7 @@ def restore_sqlite_backup(backup_dir: Path, db_path: Path) -> Path | None:
             stale.unlink(missing_ok=True)
         raise
 
-    replaced = _displace_live_database(target, source_db.parent)
-    os.replace(staged, target)
+    replaced = _swap_live_database(target, staged, into=source_db.parent)
     _fsync_directory(target.parent)
     _fsync_directory(source_db.parent)
     return replaced

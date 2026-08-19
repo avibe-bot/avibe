@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 import psutil
 
@@ -342,6 +343,26 @@ def service_instance_started(pid: int) -> bool:
     if record is None:
         return False
     return record.get("pid") == pid and record.get("phase") == SERVICE_PHASE_RUNNING
+
+
+def service_instance_still_starting(pid: int) -> bool:
+    """Whether ``pid``'s own record says it is still on its way up.
+
+    The mirror of :func:`service_instance_started`, and deliberately not its
+    negation. That one asks whether a new generation PROVED it works, so a
+    missing or unreadable record has to count as no proof. This one is read by
+    everything that reports a state word to a human, where the same absence means
+    only that nothing here knows -- and answering ``starting`` on no evidence
+    would leave a service whose lock record was lost looking stuck forever.
+
+    So only the holder's own record, naming this pid and this phase, moves the
+    word off ``running``. Anything less says what it has always said.
+    """
+
+    record = read_service_instance_lock_record()
+    if record is None:
+        return False
+    return record.get("pid") == pid and record.get("phase") == SERVICE_PHASE_STARTING
 
 
 def release_service_instance_lock() -> None:
@@ -1262,28 +1283,78 @@ def _pid_mismatches_service(pid: int) -> bool:
     return not _command_looks_like_service_entry(command, cwd=cwd)
 
 
-def render_status(*, detect_extra_processes: bool = True):
-    status = read_status()
+class ServiceState(NamedTuple):
+    """What this data dir's service is doing right now."""
+
+    state: str
+    detail: str
+    service_pid: int | None
+    owner_pid: int | None
+    extra_pids: list[int]
+
+    @property
+    def running(self) -> bool:
+        return self.state in {"running", "degraded"}
+
+
+def resolve_service_state(*, detect_extra_processes: bool = True) -> ServiceState:
+    """The one answer to what state word describes this instance's service.
+
+    Everything that reports or records that word asks here, because the word is
+    the same fact each time and every place that derived it independently got the
+    same case wrong: the lock is taken BEFORE the database is migrated and the
+    controller is built, so its holder occupies this instance long before it can
+    serve anything. Reading that occupancy as `running` is how a release that
+    hung in its migration read as healthy for eight days with nobody served.
+
+    `starting` is therefore a state of its own rather than a shade of running:
+    something is here, it holds the lock, and it is not serving. `degraded` stays
+    what it was -- a service process holding no lock, which is a different fault
+    with a different repair.
+
+    Only a record that positively says so produces `starting`, never the absence
+    of one saying otherwise. This function reports; it does not adjudicate. A
+    machine that lost its lock record has a service on it either way, and telling
+    its owner it is starting -- forever, since nothing will ever write the record
+    it is waiting for -- trades a stuck instance that reads healthy for a healthy
+    instance that reads stuck.
+    """
+
     owner_pid = resolve_service_owner_pid(include_starting=False)
     extra_pids: list[int] = []
     if detect_extra_processes:
         extra_pids = extra_service_process_pids(owner_pid=owner_pid)
-    running = bool(owner_pid or extra_pids)
     if owner_pid:
-        status["state"] = "running"
-        status["service_pid"] = owner_pid
+        detail = f"pid={owner_pid}"
         if extra_pids:
-            status["detail"] = f"pid={owner_pid}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
-        else:
-            status["detail"] = f"pid={owner_pid}"
-    elif extra_pids:
-        status["state"] = "degraded"
-        status["service_pid"] = extra_pids[0]
-        status["detail"] = f"lockless service process detected pid={extra_pids[0]}"
-    elif status.get("state") in {"running", "degraded"}:
-        status["state"] = "stopped"
-        status["detail"] = "process not running"
-        status["service_pid"] = None
+            detail = f"{detail}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
+        if service_instance_still_starting(owner_pid):
+            return ServiceState("starting", f"{detail} has not finished starting", owner_pid, owner_pid, extra_pids)
+        return ServiceState("running", detail, owner_pid, owner_pid, extra_pids)
+    if extra_pids:
+        return ServiceState(
+            "degraded",
+            f"lockless service process detected pid={extra_pids[0]}",
+            extra_pids[0],
+            None,
+            extra_pids,
+        )
+    return ServiceState("stopped", "process not running", None, None, [])
+
+
+def render_status(*, detect_extra_processes: bool = True):
+    status = read_status()
+    resolved = resolve_service_state(detect_extra_processes=detect_extra_processes)
+    owner_pid = resolved.owner_pid
+    extra_pids = resolved.extra_pids
+    running = resolved.running
+    # A resolved `stopped` does not overwrite a persisted `setup`, `starting` or
+    # `error`: those describe a machine with nothing running on purpose, and this
+    # function reports what is running, not what was meant to.
+    if resolved.state != "stopped" or status.get("state") in {"running", "degraded"}:
+        status["state"] = resolved.state
+        status["detail"] = resolved.detail
+        status["service_pid"] = resolved.service_pid
     if extra_pids:
         status["extra_service_pids"] = extra_pids
     else:

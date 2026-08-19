@@ -942,15 +942,23 @@ def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path
 
 
 @pytest.mark.parametrize("linking_available", [True, False], ids=["same-filesystem", "cross-filesystem"])
-def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacement(
+def test_no_rename_a_swap_performs_can_cost_the_live_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linking_available: bool
 ) -> None:
     # The property: at no point during a restore does the machine have no
     # database, and no copy of anyone's data is destroyed before its replacement
     # is complete. Both are claims about the instants in between, so the test
-    # interrupts the swap at the one instant they can be violated -- a rename
-    # that fails, which is what a crash, a full disk, or a killed process looks
-    # like from here.
+    # interrupts the swap at the instants they can be violated -- a rename that
+    # fails, which is what a crash, a full disk, or a killed process looks like
+    # from here.
+    #
+    # Every rename it performs, not the first one. Failing only the earliest is
+    # how a swap passed this while its LAST rename ran with the live log already
+    # deleted: everything the database had committed since its last checkpoint
+    # was gone the moment that rename failed, and no assertion here was looking.
+    # So the restore runs once per rename, with that rename failing, and the loop
+    # ends when there is no rename left to fail -- which makes the coverage
+    # complete by construction rather than by a list someone has to maintain.
     #
     # Run on both filesystem layouts, because the property is about the machine
     # and not about the fast path. A state directory on its own mount refuses the
@@ -959,48 +967,80 @@ def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacemen
     # then until the rename, `vibe.sqlite` does not exist. That is not a rarity
     # to accept -- it is the recovery step of a failed upgrade, running on a
     # machine that is already down.
-    db_path = tmp_path / "vibe.sqlite"
-    backups_dir = tmp_path / "backups"
-    _stamp(db_path, "20260806_0047")
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("create table payload (value text)")
-        conn.execute("insert into payload (value) values ('before the upgrade')")
-    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
-
-    if not linking_available:
-        def refuse_link(*args, **kwargs):
-            raise OSError(errno.EXDEV, "cross-device link")
-
-        monkeypatch.setattr(backups.os, "link", refuse_link)
-
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("insert into payload (value) values ('first attempt')")
-    backups.restore_sqlite_backup(rollback_point, db_path)
-    displaced = rollback_point / backups.REPLACED_DATABASE_NAME
-    assert ("first attempt",) in _db_contents(displaced)[1][1]
-
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("insert into payload (value) values ('second attempt')")
-    # A write-ahead log belonging to the live generation, which the displacement
-    # has to take a copy of and only then clear: it is the file SQLite would
-    # otherwise replay into whatever database arrives under this name next.
-    db_path.with_name(db_path.name + "-wal").write_bytes(b"live write-ahead log")
-
     real_replace = os.replace
+    real_link = os.link
 
-    def replace_once_then_fail(src, dst, *args, **kwargs):
-        monkeypatch.setattr(backups.os, "replace", real_replace)
-        raise OSError(errno.EIO, "interrupted")
+    def refuse_link(*args, **kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
 
-    monkeypatch.setattr(backups.os, "replace", replace_once_then_fail)
-    with pytest.raises(OSError):
+    renames = 0
+    while True:
+        renames += 1
+        root = tmp_path / f"failing-rename-{renames}"
+        root.mkdir()
+        db_path = root / "vibe.sqlite"
+        _stamp(db_path, "20260806_0047")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("create table payload (value text)")
+            conn.execute("insert into payload (value) values ('before the upgrade')")
+        rollback_point = create_sqlite_migration_backup(db_path, backups_dir=root / "backups")
+        if not linking_available:
+            monkeypatch.setattr(backups.os, "link", refuse_link)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("insert into payload (value) values ('first attempt')")
         backups.restore_sqlite_backup(rollback_point, db_path)
+        displaced = rollback_point / backups.REPLACED_DATABASE_NAME
+        assert ("first attempt",) in _db_contents(displaced)[1][1]
 
-    # The database the machine is running on is still there, still complete, and
-    # still with the write-ahead log that holds the rest of it.
-    assert db_path.exists()
-    assert ("second attempt",) in _db_contents(db_path)[1][1]
-    assert db_path.with_name(db_path.name + "-wal").read_bytes() == b"live write-ahead log"
-    # And the copy the previous attempt displaced was not spent making room for
-    # a displacement that never landed.
-    assert ("first attempt",) in _db_contents(displaced)[1][1]
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("insert into payload (value) values ('second attempt')")
+        # A write-ahead log belonging to the live generation, which the swap has
+        # to take a copy of and only then clear: it is the file SQLite would
+        # otherwise replay into whatever database arrives under this name next,
+        # and it holds everything committed since the last checkpoint.
+        db_path.with_name(db_path.name + "-wal").write_bytes(b"live write-ahead log")
+
+        countdown = [renames]
+
+        def fail_the_nth_rename(src, dst, *args, _countdown=countdown, **kwargs):
+            _countdown[0] -= 1
+            if _countdown[0] == 0:
+                raise OSError(errno.EIO, "interrupted")
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(backups.os, "replace", fail_the_nth_rename)
+        try:
+            backups.restore_sqlite_backup(rollback_point, db_path)
+            interrupted = False
+        except OSError:
+            interrupted = True
+        finally:
+            monkeypatch.setattr(backups.os, "replace", real_replace)
+            monkeypatch.setattr(backups.os, "link", real_link)
+
+        if not interrupted:
+            # This restore had fewer renames left than the one being failed, so
+            # every rename the swap performs has now been failed exactly once.
+            break
+
+        # The database the machine is running on is still there, still complete,
+        # and still with the write-ahead log that holds the rest of it.
+        assert db_path.exists()
+        assert ("second attempt",) in _db_contents(db_path)[1][1]
+        assert db_path.with_name(db_path.name + "-wal").read_bytes() == b"live write-ahead log"
+        # And whatever the rollback point holds under the displaced name is a
+        # whole generation: the previous displacement until the new one is
+        # complete on disk, the new one after that. Which of the two depends on
+        # how far the swap got, and both are complete answers. What would not be
+        # is a displacement deleted to make room for one that never landed.
+        assert displaced.is_file()
+        assert _db_contents(displaced)[1][1] in (
+            [("before the upgrade",), ("first attempt",)],
+            [("before the upgrade",), ("second attempt",)],
+        )
+
+    # The database out, its log out, the replacement in. Asserted so that a swap
+    # rewritten to do less can no longer satisfy the loop above by having nothing
+    # left to interrupt.
+    assert renames > 3

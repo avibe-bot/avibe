@@ -259,6 +259,24 @@ def _stop_runtime_for_restart(stop_ui: bool = True) -> tuple[bool, dict[str, flo
     return ui_stopped, ui_timings, stop_ui_seconds, ui_pid, service_stopped, stop_service_seconds
 
 
+def _failed_generation_still_running(*, include_ui: bool) -> bool:
+    """Whether anything the failed generation left behind is still alive.
+
+    Measured -- from the lock, the pid file and the process table -- and never
+    read off whether the stop helpers reported killing something. That report
+    answers a different question and answers it backwards on the ordinary case: a
+    version that died in its migration leaves nothing to kill, so `stop_service`
+    says it stopped nothing, exactly as it does for a process that refused to
+    die. The restart path above already knew this and asks
+    `_remaining_service_pids_after_stop` rather than believe the report; asking
+    it here too is what keeps one fact from having two answers.
+    """
+
+    if _remaining_service_pids_after_stop():
+        return True
+    return bool(include_ui and runtime.ui_pid_file_points_to_running_ui())
+
+
 def _restore_database_for_rollback(backup_watermark: int | None, write) -> dict:
     """Put back the database the version being rolled back from migrated, if it did.
 
@@ -351,14 +369,11 @@ def _roll_back_failed_upgrade(
     # service-only restart left the running UI alone on purpose, and quiescing
     # must not take it down when starting will not bring it back.
     #
-    # The result is read, not assumed. A process that resists termination is the
-    # entire reason this step exists, so recording success without asking would
-    # make the record say precisely nothing in the only case it is about -- and
-    # the install and the restore that follow would run underneath it.
-    ui_stopped, _ui_timings, _stop_ui_seconds, _ui_pid, service_stopped, _stop_service_seconds = (
-        _stop_runtime_for_restart(stop_ui=start_ui)
-    )
-    quiesced = service_stopped and (ui_stopped or not start_ui)
+    # The outcome is then measured rather than taken from what the stop helpers
+    # report, because a process that resists termination is the entire reason
+    # this step exists and "did the stop kill something" is not that question.
+    _stop_runtime_for_restart(stop_ui=start_ui)
+    quiesced = not _failed_generation_still_running(include_ui=start_ui)
     rollback["quiesced"] = quiesced
     record(rollback)
     if not quiesced:

@@ -761,6 +761,12 @@ def _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, *, service
     monkeypatch.setattr(restart_supervisor.subprocess, "run", run)
     monkeypatch.setattr(runtime, "verified_service_running", lambda: service_running)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout=None: pid)
+    # The machine as this failure actually leaves it: the version that died in
+    # its migration is gone, and so nothing of it is still holding the database
+    # open. Stated here rather than left to the host's real process table, which
+    # a test may not read and must never depend on.
+    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", list)
+    monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: False)
 
     return SimpleNamespace(
         db_path=db_path,
@@ -906,7 +912,44 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     assert _payload_rows(db_path) == ["before the upgrade"]
 
 
-def test_a_failed_generation_that_will_not_stop_stops_the_rollback_instead(monkeypatch, tmp_path):
+def test_a_generation_that_was_already_gone_is_quiesced(monkeypatch, tmp_path):
+    """The ordinary case, and the one a stop report gets exactly backwards.
+
+    A version that died in its migration has nothing left to kill, so
+    `stop_service` reports that it stopped nothing -- the same answer it gives
+    for a process that refused to die, because the two states are
+    indistinguishable from the report and distinguishable only from the machine.
+    A rollback gated on the report therefore refuses to run on the failure it was
+    built for, which is the one where the instance is already dark.
+    """
+
+    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda stop_ui=True: _fake_stop_runtime(armed.calls, service_stopped=False, ui_stopped=False),
+    )
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="jobgone", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+    )
+
+    assert rc == 1
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["rollback"]["quiesced"] is True
+    assert status["rollback"]["state"] == "succeeded"
+    assert _payload_rows(armed.db_path) == ["before the upgrade"]
+
+
+@pytest.mark.parametrize(
+    "survivor",
+    [
+        {"service_pids": [999]},
+        {"ui_alive": True},
+    ],
+    ids=["a-service-process-of-the-failed-generation", "a-ui-process-that-would-not-die"],
+)
+def test_a_failed_generation_that_will_not_stop_stops_the_rollback_instead(monkeypatch, tmp_path, survivor):
     """Quiescing is a step with an outcome, not a step with a side effect.
 
     A process that resists termination is the entire reason the stop is there, so
@@ -922,10 +965,13 @@ def test_a_failed_generation_that_will_not_stop_stops_the_rollback_instead(monke
     """
 
     armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
+    # Whichever process survived, and whatever the stop said about it: what
+    # decides is the machine afterwards, so the stop is left reporting success.
     monkeypatch.setattr(
-        restart_supervisor,
-        "_stop_runtime_for_restart",
-        lambda stop_ui=True: _fake_stop_runtime(armed.calls, service_stopped=False),
+        restart_supervisor, "_remaining_service_pids_after_stop", lambda: list(survivor.get("service_pids", []))
+    )
+    monkeypatch.setattr(
+        runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: bool(survivor.get("ui_alive"))
     )
 
     rc = restart_supervisor._run_restart_job(

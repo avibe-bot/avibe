@@ -11791,19 +11791,13 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
 
 
 def _write_refreshed_runtime_status() -> None:
+    # Asked, not re-derived. A repair that wrote its own idea of the state word
+    # would be the second place deciding one fact -- and the one that persists
+    # it, so a lock holder still migrating would be recorded as `running` and
+    # every later reader would inherit that answer instead of measuring.
     status = runtime.read_status()
-    ui_pid = status.get("ui_pid")
-    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
-    extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
-    if owner_pid:
-        detail = f"pid={owner_pid}"
-        if extra_pids:
-            detail = f"{detail}; extra_service_pids={','.join(map(str, extra_pids))}"
-        runtime.write_status("running", detail, owner_pid, ui_pid)
-    elif extra_pids:
-        runtime.write_status("degraded", f"lockless service process detected pid={extra_pids[0]}", extra_pids[0], ui_pid)
-    else:
-        runtime.write_status("stopped", "process not running", None, ui_pid)
+    resolved = runtime.resolve_service_state()
+    runtime.write_status(resolved.state, resolved.detail, resolved.service_pid, status.get("ui_pid"))
 
 
 def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:

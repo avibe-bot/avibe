@@ -752,6 +752,7 @@ class RuntimeServiceLockTests(unittest.TestCase):
                             runtime.release_service_instance_lock()
 
                         self.assertFalse(runtime.verified_service_running())
+
     def test_holding_the_lock_is_not_yet_having_started(self):
         """Two different facts, and the gap between them is where upgrades fail.
 
@@ -796,6 +797,90 @@ class RuntimeServiceLockTests(unittest.TestCase):
             lock_path.write_text(json.dumps({"pid": os.getpid(), "phase": "running"}), encoding="utf-8")
             with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
                 self.assertTrue(runtime.service_instance_started(os.getpid()))
+
+    def test_every_reporter_says_starting_while_the_lock_holder_is_still_starting(self):
+        """One machine, one word, whichever reporter is asked for it.
+
+        The lock is taken before the database is migrated, so between the two a
+        holder occupies this instance without serving anybody. Everything that
+        reports that machine has to say so -- `vibe status`, the dashboard reading
+        the same payload, and the repair that PERSISTS the word for later readers
+        alike. Each of them deriving it separately is one fact with three answers,
+        and an instance stuck in its migration reading `running` for eight days is
+        what the wrong answer cost.
+
+        Asserted over the reporters together rather than one test each, because
+        the property is that they agree: a fourth reporter written to derive its
+        own word is the bug returning, and it belongs here where the reason is
+        written down.
+        """
+
+        from vibe import cli
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+            status_path = runtime_dir / "status.json"
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.get_runtime_status_path", return_value=status_path):
+                        with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                            runtime.acquire_service_instance_lock()
+                            try:
+                                self.assertEqual(runtime.resolve_service_state().state, "starting")
+                                self.assertFalse(runtime.resolve_service_state().running)
+
+                                payload = json.loads(runtime.render_status())
+                                self.assertEqual(payload["state"], "starting")
+                                self.assertFalse(payload["running"])
+                                self.assertEqual(payload["service_pid"], os.getpid())
+
+                                cli._write_refreshed_runtime_status()
+                                self.assertEqual(runtime.read_status()["state"], "starting")
+
+                                # And all three again once the holder reports it
+                                # got through startup: the word follows the
+                                # machine rather than latching to either answer.
+                                runtime.mark_service_instance_started()
+                                self.assertEqual(runtime.resolve_service_state().state, "running")
+                                self.assertTrue(json.loads(runtime.render_status())["running"])
+                                cli._write_refreshed_runtime_status()
+                                self.assertEqual(runtime.read_status()["state"], "running")
+                            finally:
+                                runtime.release_service_instance_lock()
+
+    def test_only_a_record_saying_so_moves_the_word_off_running(self):
+        """`starting` is claimed by evidence, never inferred from its absence.
+
+        The distinction matters because the record is not the only thing that can
+        be missing -- it can be lost, truncated, or left behind by a holder that
+        is gone. Reading any of those as `starting` would tell the owner of a
+        working machine that it is coming up, forever, since nothing will ever
+        write the record that answer waits for. That trades a stuck instance
+        reading healthy for a healthy instance reading stuck, which is the same
+        bug pointed the other way.
+
+        `service_instance_started` takes the opposite default on purpose: it asks
+        whether a new generation PROVED it works, and there an absent record is
+        an absent proof.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "service.lock"
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.resolve_service_owner_pid", return_value=4242):
+                    self.assertEqual(runtime.resolve_service_state().state, "running")
+
+                    lock_path.write_text(json.dumps({"pid": 4242, "phase": "starting"}), encoding="utf-8")
+                    self.assertEqual(runtime.resolve_service_state().state, "starting")
+
+                    # Someone else's startup, in a record this instance happens
+                    # to be able to read.
+                    lock_path.write_text(json.dumps({"pid": 4243, "phase": "starting"}), encoding="utf-8")
+                    self.assertEqual(runtime.resolve_service_state().state, "running")
 
 
 class ReadinessWaitIsNeverOptionalTests(unittest.TestCase):
