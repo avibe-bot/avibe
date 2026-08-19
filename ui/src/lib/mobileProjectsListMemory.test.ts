@@ -10,7 +10,9 @@ import {
   isMobileProjectsListHeldForChatReturn,
   markMobileProjectsListRestored,
   readMobileProjectsListSnapshot,
+  rememberMobileProjectsListCounts,
   rememberMobileProjectsListOnPageLeave,
+  rememberMobileProjectsListScroll,
   revealMoreVisibleCount,
   visibleSessionCountFor,
   appShellScrollElement,
@@ -77,6 +79,17 @@ describe('mobile projects list memory', () => {
   it('does not overwrite a chat hold with the page-leave snapshot', () => {
     holdMobileProjectsListForChatReturn({ visibleCounts: { proj_a: 16 }, scrollTop: 240 });
     rememberMobileProjectsListOnPageLeave({ visibleCounts: {}, scrollTop: 0 });
+    rememberMobileProjectsListScroll(0);
+    rememberMobileProjectsListCounts({});
+    expect(readMobileProjectsListSnapshot()).toEqual({
+      visibleCounts: { proj_a: 16 },
+      scrollTop: 240,
+    });
+  });
+
+  it('keeps a live scroll offset so a later chat leave can restore it', () => {
+    rememberMobileProjectsListCounts({ proj_a: 16 });
+    rememberMobileProjectsListScroll(240);
     expect(readMobileProjectsListSnapshot()).toEqual({
       visibleCounts: { proj_a: 16 },
       scrollTop: 240,

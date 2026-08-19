@@ -71,6 +71,22 @@ export function rememberMobileProjectsListOnPageLeave(current: MobileProjectsLis
   writeMobileProjectsListSnapshot(current);
 }
 
+export function rememberMobileProjectsListScroll(scrollTop: number): void {
+  if (heldForChatReturn) return;
+  snapshot = {
+    ...snapshot,
+    scrollTop: Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0,
+  };
+}
+
+export function rememberMobileProjectsListCounts(visibleCounts: MobileProjectsVisibleCounts): void {
+  if (heldForChatReturn) return;
+  snapshot = {
+    ...snapshot,
+    visibleCounts: { ...visibleCounts },
+  };
+}
+
 export function forgetMobileProjectsListUnlessPreserved(pathname: string): void {
   // Chat is a detail of this list: keep the revealed window. Any other route
   // is a real departure, even if the user reached it through chat.
@@ -88,7 +104,11 @@ export function clearMobileProjectsListSnapshot(): void {
   heldForChatReturn = false;
 }
 
-type ScrollOwner = { scrollTop: number };
+type ScrollOwner = {
+  scrollTop: number;
+  addEventListener?(type: 'scroll', listener: () => void, options?: { passive?: boolean }): void;
+  removeEventListener?(type: 'scroll', listener: () => void): void;
+};
 
 export function readAppShellScrollTop(el: ScrollOwner | null | undefined): number {
   const top = el?.scrollTop;

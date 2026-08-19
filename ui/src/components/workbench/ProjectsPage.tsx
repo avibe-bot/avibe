@@ -32,7 +32,9 @@ import {
   markMobileProjectsListRestored,
   readAppShellScrollTop,
   readMobileProjectsListSnapshot,
+  rememberMobileProjectsListCounts,
   rememberMobileProjectsListOnPageLeave,
+  rememberMobileProjectsListScroll,
   revealMoreVisibleCount,
   visibleSessionCountFor,
   writeAppShellScrollTop,
@@ -418,27 +420,34 @@ export const ProjectsPage: React.FC = () => {
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<MobileProjectsVisibleCounts>(
     () => readMobileProjectsListSnapshot().visibleCounts,
   );
-  const visibleSessionCountsRef = useRef(visibleSessionCounts);
-  visibleSessionCountsRef.current = visibleSessionCounts;
-
   useEffect(() => {
     const top = readMobileProjectsListSnapshot().scrollTop;
     const restore = () => writeAppShellScrollTop(appShellScrollElement(), top);
     restore();
     const frame = requestAnimationFrame(restore);
     markMobileProjectsListRestored();
+    const scrollEl = appShellScrollElement();
+    const onScroll = () => rememberMobileProjectsListScroll(readAppShellScrollTop(scrollEl));
+    scrollEl?.addEventListener?.('scroll', onScroll, { passive: true });
     return () => {
       cancelAnimationFrame(frame);
-      rememberMobileProjectsListOnPageLeave({
-        visibleCounts: visibleSessionCountsRef.current,
-        scrollTop: readAppShellScrollTop(appShellScrollElement()),
-      });
+      scrollEl?.removeEventListener?.('scroll', onScroll);
     };
   }, []);
 
+  useEffect(() => {
+    rememberMobileProjectsListCounts(visibleSessionCounts);
+    return () => {
+      rememberMobileProjectsListOnPageLeave({
+        visibleCounts: visibleSessionCounts,
+        scrollTop: readMobileProjectsListSnapshot().scrollTop,
+      });
+    };
+  }, [visibleSessionCounts]);
+
   const captureListForChatReturn = () => {
     holdMobileProjectsListForChatReturn({
-      visibleCounts: visibleSessionCountsRef.current,
+      visibleCounts: visibleSessionCounts,
       scrollTop: readAppShellScrollTop(appShellScrollElement()),
     });
   };
