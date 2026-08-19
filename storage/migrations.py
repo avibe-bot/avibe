@@ -445,7 +445,6 @@ def _stamp_existing_initial_schema(db_path: Path, cfg: Config) -> None:
             conn.commit()
             _run_remove_legacy_default_agent_migration(db_path)
             command.stamp(cfg, LATEST_SCHEMA_REVISION)
-            _run_post_stamp_data_migrations(db_path)
             return
         if PRE_SHOW_SESSION_EVENTS_HEAD_TABLES.issubset(tables):
             if not _pre_show_session_events_head_schema_ready(conn, tables):
@@ -457,7 +456,6 @@ def _stamp_existing_initial_schema(db_path: Path, cfg: Config) -> None:
                 raise RuntimeError(f"existing SQLite head schema is incomplete; missing: {missing}")
             _run_remove_legacy_default_agent_migration(db_path)
             command.stamp(cfg, REMOVE_LEGACY_DEFAULT_AGENT_REVISION)
-            _run_post_stamp_data_migrations(db_path)
             return
 
     command.stamp(cfg, INITIAL_REVISION)
@@ -474,17 +472,6 @@ def _run_remove_legacy_default_agent_migration(db_path: Path) -> None:
                 revision_module.upgrade()
             finally:
                 revision_module.op = original_op
-    finally:
-        engine.dispose()
-
-
-def _run_post_stamp_data_migrations(db_path: Path) -> None:
-    from storage.importer import _run_sqlite_data_migrations
-
-    engine = create_sqlite_engine(db_path)
-    try:
-        with engine.begin() as conn:
-            _run_sqlite_data_migrations(conn)
     finally:
         engine.dispose()
 

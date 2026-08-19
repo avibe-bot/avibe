@@ -40,6 +40,7 @@ RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
 ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
+LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY = "migrations.legacy_deferred_resource_contexts.v1"
 RESOURCE_ORGANIZATIONS_META_KEY = "resource_access_organizations"
 SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY = "show_page_instance_ownership"
 HARNESS_ACCESS_FORBIDDEN_CODE = "harness_access_forbidden"
@@ -455,6 +456,11 @@ def _legacy_snapshot_has_organization_context(
         context.organization_id
         or context.organization_member_id
         or context.organization_role
+        or context.instance_access_source in {
+            "email",
+            "email_domain",
+            "public_instance",
+        }
         or context.instance_access_source == "organization_group"
         or context.group_ids
         or any(
@@ -545,12 +551,27 @@ def _migrate_deferred_metadata_value(
 def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[str, int]:
     """Bind released deferred metadata to the still-current runtime pairing.
 
-    The migration is deliberately conservative. It needs complete runtime
-    credentials and a known server-owned instance kind, and it only updates a
-    legacy snapshot when its existing instance evidence or Organization
-    claims agree with that pairing. Unreadable, ambiguous, or stale records
-    remain unchanged and are rejected by the runtime restore checks.
+    The migration is deliberately conservative and one-shot. It needs complete
+    runtime credentials and a known server-owned instance kind, and it only
+    updates a legacy snapshot when its existing instance evidence or
+    Organization claims agree with that pairing. Unreadable, ambiguous, or
+    stale records remain unchanged and are rejected by the runtime restore
+    checks. The marker is written even when no pairing is available, so a later
+    re-pair cannot reinterpret an old unbound record as belonging to the new
+    instance.
     """
+
+    empty_counts = {
+        "legacy_deferred_definitions": 0,
+        "legacy_deferred_runs": 0,
+        "legacy_deferred_deliveries": 0,
+    }
+    if connection.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+        )
+    ).scalar_one_or_none() is not None:
+        return empty_counts
 
     configured = _configured_resource_instance()
     if (
@@ -559,11 +580,19 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         or configured[0] is None
         or configured[1] not in {"personal", "organization"}
     ):
-        return {
-            "legacy_deferred_definitions": 0,
-            "legacy_deferred_runs": 0,
-            "legacy_deferred_deliveries": 0,
-        }
+        completed_at = _utc_now_iso()
+        connection.execute(
+            state_meta.insert().values(
+                key=LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                value_json=json.dumps(
+                    {"schema_version": 1, "completed_at": completed_at},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                updated_at=completed_at,
+            )
+        )
+        return empty_counts
     paired_instance_id, paired_kind = configured
 
     counts = {
@@ -675,6 +704,18 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             )
         )
         counts["legacy_deferred_deliveries"] += 1
+    completed_at = _utc_now_iso()
+    connection.execute(
+        state_meta.insert().values(
+            key=LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+            value_json=json.dumps(
+                {"schema_version": 1, "completed_at": completed_at},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            updated_at=completed_at,
+        )
+    )
     return counts
 
 

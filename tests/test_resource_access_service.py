@@ -771,11 +771,20 @@ def test_kindless_deferred_context_adopts_matching_validated_pairing(
     assert restored.is_personal_instance
 
 
-@pytest.mark.parametrize("paired_kind", ["personal", "organization"])
+@pytest.mark.parametrize(
+    ("paired_kind", "access_source", "organization_claims"),
+    [
+        ("personal", "owner", False),
+        ("organization", "organization_group", True),
+        ("organization", "email", False),
+    ],
+)
 def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliveries(
     monkeypatch,
     tmp_path,
     paired_kind: str,
+    access_source: str,
+    organization_claims: bool,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
@@ -788,12 +797,10 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
     legacy_context = {
         "sub": "legacy-user",
         "vibe_instance_role": "editor",
-        "vibe_instance_access_source": (
-            "owner" if paired_kind == "personal" else "organization_group"
-        ),
+        "vibe_instance_access_source": access_source,
         "claims_issued_at": 1_700_000_000,
     }
-    if paired_kind == "organization":
+    if organization_claims:
         legacy_context.update(
             {
                 "vibe_organization_id": "org-1",
@@ -986,6 +993,76 @@ def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch,
             assert "vibe_instance_id" not in metadata[
                 resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
             ]
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "owner",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "legacy-task",
+                "name": "legacy task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _run_sqlite_data_migrations(connection) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            assert connection.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key
+                    == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                )
+            ).scalar_one_or_none()
+
+        config.remote_access.vibe_cloud.enabled = True
+        config.remote_access.vibe_cloud.instance_id = "later-instance"
+        config.remote_access.vibe_cloud.instance_kind = "personal"
+        config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _run_sqlite_data_migrations(connection) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            raw_metadata = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+            metadata = json.loads(raw_metadata)
+            snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+            assert "vibe_instance_id" not in snapshot
             assert resource_access_service.resource_user_context_from_metadata(metadata) is None
     finally:
         store.close()
