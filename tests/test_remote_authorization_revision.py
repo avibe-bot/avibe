@@ -221,6 +221,37 @@ def test_partial_pairing_cannot_restore_cached_personal_authorization(tmp_path):
     assert resolution.reason == "pairing_unavailable"
 
 
+def test_partial_pairing_preserves_exact_show_page_email_grant(tmp_path):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+    cookie = remote_access.make_session_cookie(
+        config,
+        "viewer@example.com",
+        "viewer-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "show-1",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+
+    resolution = remote_access.resolve_current_authorization(
+        config,
+        identity,
+        allow_refresh=False,
+    )
+
+    assert resolution.current is True
+    assert resolution.payload is not None
+    assert resolution.payload["vibe_show_page_id"] == "show-1"
+
+
 def test_personal_revision_hint_refreshes_in_background_without_blocking(
     monkeypatch,
     tmp_path,
@@ -355,7 +386,7 @@ def test_organization_refresh_grace_expiry_and_recovery(monkeypatch, tmp_path):
     assert recovered.payload["vibe_instance_authorization_revision"] == 42
 
 
-def test_unknown_instance_kind_backfills_without_failing_valid_access(
+def test_unknown_instance_kind_requires_durable_backfill_before_access(
     monkeypatch,
     tmp_path,
 ):
@@ -382,9 +413,9 @@ def test_unknown_instance_kind_backfills_without_failing_valid_access(
 
     result = remote_access.resolve_current_authorization(config, identity)
 
-    assert result.current is True
-    assert result.policy == "organization"
-    assert config.remote_access.vibe_cloud.instance_kind == "organization"
+    assert result.state == "unavailable"
+    assert result.reason == "instance_kind_persistence_failed"
+    assert config.remote_access.vibe_cloud.instance_kind == ""
 
 
 def test_scoped_authorization_promotes_legacy_rows_and_isolates_show_pages(tmp_path):

@@ -328,8 +328,7 @@ def resource_user_context_from_metadata(
     # A persisted context is durable across re-pairing, so a Personal snapshot
     # must not authorize work after this installation moves to another
     # instance. Compare the server-owned binding whenever the current pairing
-    # exposes one; legacy snapshots without an instance id remain covered by
-    # the kind fallback below.
+    # exposes one; legacy snapshots without an instance id remain unbound.
     configured = _configured_resource_instance()
     if context.instance_kind is not None and (
         configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE or configured is None
@@ -354,8 +353,10 @@ def resource_user_context_from_metadata(
         return context
 
     # Released snapshots predate the instance-kind field. Recover their kind
-    # only from the currently paired, server-owned config; an unavailable or
-    # unknown pairing remains fail-closed rather than being guessed as Personal.
+    # only when the snapshot still names the current server-owned instance. An
+    # unbound legacy snapshot cannot be attributed to a re-paired Personal
+    # instance, because doing so would turn old Organization work into a
+    # Personal ACL bypass.
     paired_kind = (
         configured[1]
         if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
@@ -364,6 +365,8 @@ def resource_user_context_from_metadata(
     )
     if paired_kind not in {"personal", "organization"}:
         return context
+    if not context.instance_id:
+        return None
     return replace(context, instance_kind=paired_kind)
 
 

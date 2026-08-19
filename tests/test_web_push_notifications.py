@@ -77,6 +77,25 @@ def test_kindless_web_push_snapshot_adopts_current_personal_pairing_kind(
     assert decision.context.is_personal_instance
 
 
+def test_web_push_rejects_remote_snapshot_when_pairing_config_is_absent() -> None:
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_kind="personal",
+    )
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        None,
+        "remote:personal-user",
+        record,
+    )
+
+    assert not decision.authorized
+    assert decision.disposition == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
+    assert decision.reason == (
+        "paired configuration is unavailable; instance binding cannot be validated"
+    )
+
+
 def test_personal_web_push_requires_runtime_valid_pairing(tmp_path) -> None:
     config = _paired_revision_config(41, instance_kind="personal")
     config.remote_access.vibe_cloud.instance_secret = ""
@@ -399,6 +418,7 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
 
 def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -1100,6 +1120,7 @@ def test_in_flight_authorization_sync_wait_recovers_watermark(monkeypatch, tmp_p
 
 def test_merged_delivery_reports_provider_failure_per_owner(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-08-14T00:00:00Z"
@@ -1216,6 +1237,7 @@ def test_persisted_ring_survives_delivery_process_restart(monkeypatch, tmp_path)
 
 def test_merged_owner_without_endpoint_reports_no_subscription(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-08-15T00:00:00Z"
@@ -1373,7 +1395,7 @@ def test_unsigned_organization_snapshot_without_config_is_rejected(monkeypatch, 
 
     assert sends == []
     recent = web_push_notifications.recent_delivery_dispositions()
-    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
     assert recent[0]["owners"]["remote:user-a"]["policy"] == "organization"
     engine.dispose()
 
@@ -1673,7 +1695,7 @@ def test_organization_signed_snapshot_without_config_records_unavailable(monkeyp
 
     assert sends == []
     recent = web_push_notifications.recent_delivery_dispositions()
-    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_REVISION_UNAVAILABLE
+    assert recent[0]["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE
     assert recent[0]["owners"]["remote:user-a"]["policy"] == "organization"
     engine.dispose()
 
@@ -2105,6 +2127,7 @@ def test_organization_unsigned_record_reports_refresh_required(monkeypatch, tmp_
 
 def test_authorized_owner_without_subscription_records_no_subscription(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-08-04T00:00:00Z"
@@ -2196,6 +2219,7 @@ def test_authorized_owner_without_subscription_records_no_subscription(monkeypat
 
 def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="organization")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -2204,6 +2228,11 @@ def test_send_to_enabled_subscriptions_rechecks_restricted_project_access(monkey
         subject="user-a",
         email="member@example.com",
         instance_access_source="email",
+        organization_id="org_1",
+        organization_member_id="member_1",
+        organization_role="member",
+        instance_kind="organization",
+        authorization_revision=41,
         claims_issued_at=int(web_push_notifications.time.time()),
         is_remote=True,
     )
@@ -2547,6 +2576,7 @@ def test_send_to_enabled_subscriptions_personal_editor_ignores_restricted_projec
 def test_send_to_enabled_subscriptions_sets_visible_badge_count(monkeypatch, tmp_path):
     """One Project's badge includes every visible unread session in it."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -2708,6 +2738,7 @@ def test_send_to_enabled_subscriptions_rejects_legacy_session_owner(monkeypatch,
 
 def test_send_to_enabled_subscriptions_prefers_message_owner_over_legacy_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -2782,6 +2813,7 @@ def test_send_to_enabled_subscriptions_prefers_message_owner_over_legacy_session
 
 def test_send_to_enabled_subscriptions_sends_to_merged_prompt_owners(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -3241,6 +3273,7 @@ def test_send_to_enabled_subscriptions_skips_local_fallback_when_remote_access_e
 
 def test_send_to_enabled_subscriptions_sends_terminal_error_with_owner(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_revision_config(41, instance_kind="personal")
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"

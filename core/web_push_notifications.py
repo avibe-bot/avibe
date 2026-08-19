@@ -190,6 +190,20 @@ def _evaluate_record_authorization(
     from vibe import remote_access
 
     policy = _notification_policy_for_record(config, record)
+    if config is None:
+        reason = (
+            "paired configuration could not be read; instance binding cannot be validated"
+            if config_load_failed
+            else "paired configuration is unavailable; instance binding cannot be validated"
+        )
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason=reason,
+        )
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     if cloud is not None and not cloud.enabled:
         # Disabling remote access is a confirmed, deliberate removal of every

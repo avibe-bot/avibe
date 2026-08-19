@@ -1630,6 +1630,25 @@ def _known_kind_requires_runtime_pairing(config: V2Config) -> bool:
     return _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) is not None
 
 
+def _is_exact_show_page_grant(
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None = None,
+) -> bool:
+    """Identify the signed, page-scoped email grant exempt from pairing fences."""
+
+    candidates: list[Mapping[str, Any]] = [identity]
+    if isinstance(record, Mapping):
+        claims = record.get("claims")
+        if isinstance(claims, Mapping):
+            candidates.append(claims)
+    return any(
+        candidate.get("vibe_instance_access_source") == "show_page_email"
+        and isinstance(candidate.get("vibe_show_page_id"), str)
+        and bool(candidate["vibe_show_page_id"].strip())
+        for candidate in candidates
+    )
+
+
 def _persist_instance_kind(instance_id: str, value: object) -> bool:
     instance_kind = _normalized_instance_kind(value)
     if instance_kind is None:
@@ -1637,8 +1656,10 @@ def _persist_instance_kind(instance_id: str, value: object) -> bool:
     with CONFIG_LOCK:
         live_config = V2Config.load()
         live_cloud = live_config.remote_access.vibe_cloud
-        if live_cloud.instance_id != instance_id or live_cloud.instance_kind == instance_kind:
+        if live_cloud.instance_id != instance_id:
             return False
+        if live_cloud.instance_kind == instance_kind:
+            return True
         api.save_config(
             {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
             validate_remote_access_network=False,
@@ -4910,7 +4931,11 @@ def _validated_authorization_payload(
     identity: Mapping[str, Any],
     record: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    if _known_kind_requires_runtime_pairing(config) and not _runtime_pairing_available(config):
+    if (
+        _known_kind_requires_runtime_pairing(config)
+        and not _runtime_pairing_available(config)
+        and not _is_exact_show_page_grant(identity, record)
+    ):
         return None
     claims = record.get("claims")
     if not isinstance(claims, Mapping):
@@ -5038,15 +5063,17 @@ def _fetch_authorization_context(
     except Exception:
         logger.warning("remote authorization context validation failed", exc_info=True)
         return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
-    config.remote_access.vibe_cloud.instance_kind = instance_kind
     try:
-        _persist_instance_kind(str(identity.get("instance_id") or ""), instance_kind)
+        persisted = _persist_instance_kind(str(identity.get("instance_id") or ""), instance_kind)
     except Exception:
-        # The authoritative response and durable context are already valid.
-        # A config write failure must not turn accepted access into an outage;
-        # this in-memory config immediately follows the discovered policy and a
-        # later runtime status/auth refresh can retry the persistent backfill.
         logger.warning("Remote instance kind backfill failed", exc_info=True)
+        persisted = False
+    if not persisted:
+        # The UI and controller load configuration independently. Accepting the
+        # server-owned kind only in this process would let them disagree about
+        # whether kind-specific ACL bypasses are available.
+        return AuthorizationResolution("unavailable", reason="instance_kind_persistence_failed")
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
     if refreshed_record is None:
         return AuthorizationResolution("unavailable", reason="authorization_context_persistence_failed")
     payload = _validated_authorization_payload(config, identity, refreshed_record)
@@ -5249,8 +5276,6 @@ def resolve_current_authorization(
     current = int(time.time()) if now is None else now
     if not session_identity_is_current(identity, now=current):
         return AuthorizationResolution("invalid_identity", reason="identity_expired")
-    if _known_kind_requires_runtime_pairing(config) and not _runtime_pairing_available(config):
-        return AuthorizationResolution("unavailable", reason="pairing_unavailable")
     try:
         record = _load_authorization_record(config, identity, now=current)
     except Exception:
@@ -5259,6 +5284,12 @@ def resolve_current_authorization(
             "unavailable",
             reason="authorization_record_unavailable",
         )
+    if (
+        _known_kind_requires_runtime_pairing(config)
+        and not _runtime_pairing_available(config)
+        and not _is_exact_show_page_grant(identity, record)
+    ):
+        return AuthorizationResolution("unavailable", reason="pairing_unavailable")
     if (
         record is None
         and isinstance(identity.get(_SESSION_AUTHORIZATION_REFERENCE_KEY), str)

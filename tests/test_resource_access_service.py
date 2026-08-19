@@ -699,14 +699,19 @@ def test_explicit_deferred_context_requires_current_pairing(
 
 
 @pytest.mark.parametrize(
-    ("paired_kind", "expected_kind"),
-    [("personal", "personal"), ("organization", "organization"), ("", None)],
+    ("paired_kind", "expected_kind", "should_restore"),
+    [
+        ("personal", "personal", False),
+        ("organization", "organization", False),
+        ("", None, True),
+    ],
 )
-def test_legacy_deferred_context_uses_only_known_current_pairing_kind(
+def test_unbound_legacy_deferred_context_cannot_adopt_current_pairing_kind(
     monkeypatch,
     tmp_path,
     paired_kind: str,
     expected_kind: str | None,
+    should_restore: bool,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     config = V2Config.default()
@@ -726,8 +731,9 @@ def test_legacy_deferred_context_uses_only_known_current_pairing_kind(
     }
     restored = resource_access_service.resource_user_context_from_metadata(legacy_metadata)
 
-    assert restored is not None
-    assert restored.instance_kind == expected_kind
+    assert (restored is not None) is should_restore
+    if restored is not None:
+        assert restored.instance_kind == expected_kind
 
 
 def test_kindless_deferred_context_adopts_matching_validated_pairing(
