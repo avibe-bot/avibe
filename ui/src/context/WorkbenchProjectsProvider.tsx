@@ -53,6 +53,15 @@ const appliedRoute = (route: ProjectDefaultAgent): ProjectDefaultAgent | null =>
   return cleared ? null : route;
 };
 
+// The one rejection that is evidence about our compare-and-set token rather than
+// about the pick: the server compared `expected_agent_id` against the project's
+// current agent and they differed, so whatever we had confirmed is no longer what
+// is stored. Duck-typed on ``code`` like ``isSessionArchivedError`` — the shared
+// JSON helpers already parsed the 409 body into an ``ApiError`` carrying it — so a
+// plain ``Error`` from a network failure is correctly not a conflict.
+const isProjectAgentConflictError = (err: unknown): boolean =>
+  (err as { code?: unknown } | null | undefined)?.code === 'project_agent_conflict';
+
 // Scan every project's loaded rows for a session id and apply `patch`; returns a
 // new state only when something actually changed (so unrelated consumers don't
 // re-render). Used for both the status-dot and title SSE patches — keyed on
@@ -181,6 +190,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   //    Every commit and every read advances this ref, so "the last state the
   //    server confirmed" needs no bookkeeping of its own.
   const confirmedProjectRouteRef = useRef(new Map<string, ProjectDefaultAgent | null>());
+  // The projects whose confirmation the server has CONTRADICTED: a
+  // ``project_agent_conflict`` is the one failure that says the entry above is
+  // wrong, because the token it produced is exactly what the server compared. The
+  // route it still holds is unknown until a read answers, so the entry stays (it is
+  // also the rollback target, and inventing a route to display would be worse than
+  // showing a stale one for a moment) and the doubt is recorded beside it. While a
+  // project is in here, nothing derived from its confirmation stands on its own.
+  // Cleared wherever the confirmation is re-established — one place, below.
+  const contradictedProjectRouteRef = useRef(new Set<string>());
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
 
@@ -230,10 +248,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       projectsRef.current = resolved;
       if (options && 'confirmed' in options) {
         const confirmed = confirmedProjectRouteRef.current;
-        if (options.confirmed === null) confirmed.clear();
-        else {
+        const contradicted = contradictedProjectRouteRef.current;
+        // Whatever the server just told us about a project's route replaces our
+        // doubt about it, so the two move together: this is the only place either
+        // is written, which is what keeps "contradicted" from outliving the read
+        // that answers it.
+        if (options.confirmed === null) {
+          confirmed.clear();
+          contradicted.clear();
+        } else {
           for (const project of options.confirmed ?? []) {
             confirmed.set(project.id, project.default_agent ?? null);
+            contradicted.delete(project.id);
           }
         }
       }
@@ -1210,6 +1236,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         });
         return true;
       } catch (err) {
+        // A conflict is the server saying the token above was wrong, so it is the
+        // one failure that invalidates the confirmation the NEXT send would derive
+        // its token from. Record the doubt where the confirmation lives; nothing
+        // built on it stands on its own until a read answers.
+        if (isProjectAgentConflictError(err)) contradictedProjectRouteRef.current.add(projectId);
         // apiFetch already surfaced the toast; the settle re-read below is what
         // puts the optimistic row back to what the server actually holds.
         console.error('[workbench] set project default agent failed', err);
@@ -1223,15 +1254,22 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     'project-route',
     sendProjectRoute,
     {
-      // Every pick stands on its own, so a refused request never takes the pick
-      // waiting behind it down with it: ``sendProjectRoute`` composes the full
-      // 5-field route itself, and derives the compare-and-set token at SEND time
-      // from the last route the server confirmed. So a pick made while an earlier
-      // one was in flight names every field it needs and expects the route that is
-      // actually there — it was never composed against the route the server just
-      // refused, and dropping it would discard the user's newest choice to protect
-      // against a mismatch that cannot occur.
-      standsAlone: () => true,
+      // A pick names every field it needs — ``sendProjectRoute`` composes the full
+      // 5-field route itself — so a refused request normally says nothing about the
+      // pick waiting behind it, and dropping it would discard the user's newest
+      // choice for nothing.
+      //
+      // Except that the send also derives a PRECONDITION the payload does not
+      // carry: the compare-and-set token, read from the last confirmed route. A
+      // conflict means that confirmation is contradicted, so the follow-up would
+      // send the very token the server just rejected — a guaranteed second
+      // conflict, and a second toast, for a pick that never had a chance. There the
+      // conflict must END the burst: revert to the last confirmed route and let the
+      // settle's re-read say where the route actually went. We deliberately do not
+      // adopt the conflict's ``current_agent_id`` and retry — that turns
+      // compare-and-set into last-writer-wins, silently overwriting whoever moved
+      // the route with a pick the user made before learning of it.
+      standsAlone: (_route, projectId) => !contradictedProjectRouteRef.current.has(projectId),
       onSettled: useCallback(
         (projectId: string, committed: boolean) => {
           latestProjectRouteRef.current.delete(projectId);

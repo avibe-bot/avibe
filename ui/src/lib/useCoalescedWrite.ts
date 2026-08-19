@@ -6,7 +6,7 @@ import { useLatestRef } from './useLatestRef';
 type Owner = {
   send: (patch: unknown, key: string) => Promise<boolean>;
   merge: (prev: unknown, next: unknown) => unknown;
-  standsAlone: (patch: unknown) => boolean;
+  standsAlone: (patch: unknown, key: string) => boolean;
   onSettled: ((key: string, committed: boolean) => void | Promise<void>) | undefined;
 };
 
@@ -70,12 +70,13 @@ const drain = async (scope: string, scopedKey: string, key: string) => {
     // request and the settle after it belong to the view that is mounted when
     // they happen.
     entry.owner = owners.get(scope) ?? entry.owner;
-    // A failure ends the burst UNLESS what waits stands on its own. Whether it
-    // does is a property of the payload, and the owner is the only one that can
-    // read it — the writer never inspects a payload's fields — so it answers,
-    // and the default answer is the safe one. See the block below the send.
+    // A failure ends the burst UNLESS what waits stands on its own. Only the owner
+    // can say: the dependency may be the payload's own fields, which the writer
+    // never inspects, or a precondition the SENDER derives for it — and the answer
+    // is asked for here, after the failure, so it can account for what that failure
+    // said. The default answer is the safe one. See the block below the send.
     const next =
-      entry.pending && (committed || entry.owner.standsAlone(entry.pending.patch))
+      entry.pending && (committed || entry.owner.standsAlone(entry.pending.patch, key))
         ? entry.pending
         : undefined;
     if (next) {
@@ -101,7 +102,10 @@ const drain = async (scope: string, scopedKey: string, key: string) => {
     // a refusal says nothing about it: it is the user's newest intent, still
     // coherent on its own, and dropping it would lose a click for no reason. Those
     // keep the burst going above, and `committed` then reports whichever send
-    // ended it.
+    // ended it. Unless the refusal invalidated a precondition the sender would
+    // derive for it — a stale compare-and-set token makes the follow-up a
+    // guaranteed conflict — which is why the owner answers with the failure in
+    // hand rather than from the payload alone.
     entry.pending = undefined;
     // Reconcile BEFORE releasing the key, so a pick made during a rollback read
     // coalesces into this writer instead of starting a fresh burst against state
@@ -186,12 +190,17 @@ export function useCoalescedWrite<P>(
     merge?: (prev: P, next: P) => P;
     /**
      * Whether a payload waiting behind a REFUSED request may still be sent: true
-     * when it was composed against nothing that request was installing, so it is
+     * when nothing it depends on was invalidated by that refusal, so it is
      * coherent whatever the server just did. Defaults to false — a partial patch
      * applied to state the server kept would persist a combination nobody picked,
      * and that is the failure worth being conservative about.
+     *
+     * Asked AFTER the failure, and answered by the owner, because a dependency is
+     * not always visible in the payload: the fields it carries, but also the
+     * preconditions the sender will derive for it (a compare-and-set token, say)
+     * and whatever the failure just said about them.
      */
-    standsAlone?: (pending: P) => boolean;
+    standsAlone?: (pending: P, key: string) => boolean;
     onSettled?: (key: string, committed: boolean) => void | Promise<void>;
   },
 ): CoalescedWrite<P> {
@@ -208,7 +217,7 @@ export function useCoalescedWrite<P>(
     () => ({
       send: (patch, key) => sendRef.current(patch as P, key),
       merge: (prev, next) => (mergeRef.current ? mergeRef.current(prev as P, next as P) : next),
-      standsAlone: (patch) => standsAloneRef.current?.(patch as P) ?? false,
+      standsAlone: (patch, key) => standsAloneRef.current?.(patch as P, key) ?? false,
       onSettled: (key, committed) => settledRef.current?.(key, committed),
     }),
     [sendRef, mergeRef, standsAloneRef, settledRef],

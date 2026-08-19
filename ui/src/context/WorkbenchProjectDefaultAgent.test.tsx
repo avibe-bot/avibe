@@ -53,6 +53,13 @@ const route = (over: Partial<ProjectDefaultAgent> = {}): ProjectDefaultAgent => 
   ...over,
 });
 
+// What the shared JSON helpers throw for a ``409 {"code": "project_agent_conflict"}``:
+// an Error carrying the machine code. The code is the whole point — it is what says
+// the failure was about our compare-and-set token and not about the pick — so a
+// generic failure in these tests is a plain `Error`.
+const conflict = () =>
+  Object.assign(new Error('Project default agent changed'), { code: 'project_agent_conflict' });
+
 type UpdateCall = { projectId: string; payload: Record<string, unknown> };
 
 type FakeApi = {
@@ -366,6 +373,108 @@ describe('project default Agent route', () => {
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
   });
 
+  it('ends the burst when the refusal invalidates the token the next send would derive', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stored = { ...project, default_agent: route() };
+    // Another surface moved the route since our last read — which is what makes our
+    // token stale, and what only a re-read can report.
+    const moved = { ...project, default_agent: route({ agent_id: 'agt_codex', agent_name: 'codex', agent_variant: 'codex' }) };
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [stored], sessions: {} })
+      .mockResolvedValueOnce({ projects: [moved], sessions: {} });
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'haiku' }));
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].payload).toMatchObject({ expected_agent_id: 'agt_claude', model: 'opus' });
+
+    await act(async () => {
+      gates[0].reject(conflict());
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // The waiting pick carries a whole route, so by its own fields it stands alone —
+    // but the send would derive its compare-and-set token from a confirmation this
+    // very failure contradicted, so it is a guaranteed second conflict and a second
+    // toast for a pick that never had a chance. The burst ends instead. We do NOT
+    // adopt the conflict's current agent and retry: that would overwrite whoever
+    // moved the route with a pick made before the user could know about it.
+    expect(calls).toHaveLength(1);
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
+    expect(tree()!.projects?.[0].default_agent).toEqual(moved.default_agent);
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
+  it('lets a pick stand alone again once a read has answered the conflict', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stored = { ...project, default_agent: route() };
+    const moved = { ...project, default_agent: route({ agent_id: 'agt_codex', agent_name: 'codex', agent_variant: 'codex' }) };
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [stored], sessions: {} })
+      .mockResolvedValueOnce({ projects: [moved], sessions: {} });
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    await act(async () => {
+      gates[0].reject(conflict());
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+    expect(tree()!.projects?.[0].default_agent).toEqual(moved.default_agent);
+
+    // The doubt was about that one confirmation, and the read has replaced it. So a
+    // later burst is back to the normal rule: a whole-route pick waiting behind a
+    // refused request goes out, because nothing it depends on was invalidated.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'haiku' }));
+    });
+    await act(async () => {
+      gates[1].reject(new Error('boom'));
+      await gates[1].promise.catch(() => undefined);
+    });
+    await settle();
+
+    expect(calls).toHaveLength(3);
+    expect(calls[2].payload).toMatchObject({ expected_agent_id: 'agt_codex', model: 'haiku' });
+
+    await act(async () => {
+      gates[2].resolve({ ...moved, default_agent: route({ agent_id: 'agt_codex', agent_name: 'codex', agent_variant: 'codex', agent_backend: 'codex', model: 'haiku' }) });
+      await gates[2].promise;
+    });
+    await settle();
+    // Committed on the send that ended the burst, and no second rollback read.
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
+    expect(tree()!.projects?.[0].default_agent).toMatchObject({ agent_backend: 'codex', model: 'haiku' });
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
   it('reverts the whole burst when the pick that stood alone is refused too', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const getWorkbenchProjectsBootstrap = vi.fn()
@@ -487,7 +596,7 @@ describe('project default Agent route', () => {
     expect(tree()!.projects?.[0].default_agent).toEqual(route());
 
     await act(async () => {
-      gates[0].reject(new Error('project_agent_conflict'));
+      gates[0].reject(conflict());
       await gates[0].promise.catch(() => undefined);
     });
     await settle();
@@ -544,7 +653,7 @@ describe('project default Agent route', () => {
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      gates[0].reject(new Error('project_agent_conflict'));
+      gates[0].reject(new Error('boom'));
       await gates[0].promise.catch(() => undefined);
     });
     await settle();
@@ -557,7 +666,7 @@ describe('project default Agent route', () => {
     expect(tree()!.isSavingDefaultAgent(other.id)).toBe(false);
 
     await act(async () => {
-      gates[2].reject(new Error('project_agent_conflict'));
+      gates[2].reject(new Error('boom'));
       await gates[2].promise.catch(() => undefined);
     });
     await settle();

@@ -327,6 +327,43 @@ describe('useCoalescedWrite', () => {
     expect(result.current.isSaving('s1')).toBe(false);
   });
 
+  it('asks about the failed resource, so an owner can answer per key and not only per payload', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const asked: Array<[string, string]> = [];
+    // An owner whose answer does not live in the payload at all: what the pending
+    // write depends on is a per-resource precondition (a compare-and-set token that
+    // one resource's failure just invalidated), which the writer cannot see.
+    const standsAlone = (patch: string, key: string) => {
+      asked.push([patch, key]);
+      return key !== 's1';
+    };
+    const { result } = renderHook(() => useCoalescedWrite<string>('t', send, { merge: joinMerge, standsAlone }));
+
+    act(() => {
+      result.current.write('s1', 'a');
+      result.current.write('s2', 'a');
+    });
+    await settle();
+    act(() => {
+      result.current.write('s1', 'b');
+      result.current.write('s2', 'b');
+    });
+
+    await act(async () => {
+      pending.get('s1:a')!.resolve(false);
+      pending.get('s2:a')!.resolve(false);
+      await Promise.resolve();
+    });
+    await settle();
+
+    // Same payload on both keys, opposite outcomes: the question is asked with the
+    // resource it is about, once per failure, and only after one.
+    expect(asked).toEqual([['b', 's1'], ['b', 's2']]);
+    expect(started).toEqual(['s1:a', 's2:a', 's2:b']);
+  });
+
   it('treats a throw as a failed write', async () => {
     const started: string[] = [];
     const boom = deferred();
