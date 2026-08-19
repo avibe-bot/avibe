@@ -304,11 +304,13 @@ def test_memory_rerank_round_trips_without_projecting_its_key(tmp_path) -> None:
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     projected = config_to_payload(config)["memory"]["processing"]["rerank"]
     assert stored["memory"]["processing"]["rerank"]["api_key"] == "rerank-secret"
+    assert stored["memory"]["processing"]["rerank"]["provider"] == "deepinfra"
     assert projected == {
         "base_url": "https://rerank.example.test/v1/inference",
         "model": "rerank-model",
         "api_key": None,
         "has_api_key": True,
+        "provider": "deepinfra",
     }
 
 
@@ -335,6 +337,50 @@ def test_memory_multimodal_round_trips_without_projecting_its_key(tmp_path) -> N
         "api_key": None,
         "has_api_key": True,
     }
+
+
+def test_memory_rerank_persists_explicit_provider(tmp_path) -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "provider": "dashscope",
+        "base_url": "https://dashscope.aliyuncs.com",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+    config.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    loaded = V2Config.load(tmp_path / "config.json")
+    assert stored["memory"]["processing"]["rerank"]["provider"] == "dashscope"
+    assert loaded.memory.processing.rerank.rerank_provider() == "dashscope"
+    assert loaded.memory.processing.rerank.model == "gte-rerank-v2"
+
+
+def test_memory_rerank_rejects_unknown_provider() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "provider": "cohere",
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "rerank-model",
+        "api_key": "rerank-secret",
+    }
+    with pytest.raises(ValueError, match="provider must be deepinfra, vllm, or dashscope"):
+        V2Config.from_payload(_payload({"enabled": False, "processing": processing}))
+
+
+def test_memory_rerank_rejects_unsupported_dashscope_model() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "provider": "dashscope",
+        "base_url": "https://dashscope.aliyuncs.com",
+        "model": "qwen3-vl-rerank",
+        "api_key": "rerank-secret",
+    }
+    with pytest.raises(ValueError, match="gte-rerank-v2"):
+        V2Config.from_payload(_payload({"enabled": False, "processing": processing}))
 
 
 @pytest.mark.parametrize("missing", ["base_url", "model", "api_key"])

@@ -1794,6 +1794,95 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     assert "model" not in recorded[-1]["request"]
 
 
+def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="http://localhost:8000/v1",
+            rerank_model="Qwen/Qwen3-Reranker-4B",
+            rerank_api_key="rerank-secret",
+            rerank_provider="vllm",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests][-1] == "/v1/rerank"
+    assert json.loads(requests[-1].content) == {
+        "model": "Qwen/Qwen3-Reranker-4B",
+        "query": "OK",
+        "documents": ["OK"],
+    }
+
+
+def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(
+            200,
+            json={"output": {"results": [{"index": 0, "relevance_score": 0.9}]}},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="https://dashscope.aliyuncs.com",
+            rerank_model="gte-rerank-v2",
+            rerank_api_key="rerank-secret",
+            rerank_provider="dashscope",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests][-1] == (
+        "/api/v1/services/rerank/text-rerank/text-rerank"
+    )
+    assert json.loads(requests[-1].content) == {
+        "model": "gte-rerank-v2",
+        "input": {"query": "OK", "documents": ["OK"]},
+        "parameters": {"return_documents": False, "top_n": 1},
+    }
+
+
 def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
     """MEMORY-IM-ATTACH-001: opt-in is admitted with synthetic image data only."""
 

@@ -146,6 +146,7 @@ class EverOSProcessSettings:
     rerank_base_url: str | None = None
     rerank_model: str | None = None
     rerank_api_key: str | None = field(default=None, repr=False)
+    rerank_provider: str | None = None
     multimodal_base_url: str | None = None
     multimodal_model: str | None = None
     multimodal_api_key: str | None = field(default=None, repr=False)
@@ -2571,6 +2572,17 @@ def _memory_child_environment(
         "EVEROS_RERANK__BASE_URL": settings.rerank_base_url,
         "EVEROS_RERANK__MODEL": settings.rerank_model,
         "EVEROS_RERANK__API_KEY": settings.rerank_api_key,
+        "EVEROS_RERANK__PROVIDER": (
+            (settings.rerank_provider or "deepinfra")
+            if all(
+                (
+                    settings.rerank_base_url,
+                    settings.rerank_model,
+                    settings.rerank_api_key,
+                )
+            )
+            else None
+        ),
     }
     env.update({key: value for key, value in optional.items() if value is not None})
     if all(

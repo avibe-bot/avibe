@@ -4569,9 +4569,15 @@
       "embeddingHelp": "记忆功能用这个模型为记忆建立索引，让你可以搜索记忆。更改向量模型接口地址或模型后需要重建索引。",
       "embeddingHelpLabel": "关于向量模型",
       "rerankTitle": "重排序模型（可选）",
-      "rerankHelp": "记忆功能用这个模型为高级召回结果评分。填写重排序接口地址、模型名称和 API Key 后即可启用。",
+      "rerankHelp": "记忆功能用这个模型为高级召回结果评分。先选择 EverOS 支持的重排序服务商，再填写该服务商对应的接口地址、模型名称和 API Key。",
       "rerankHelpLabel": "关于重排序模型",
       "rerankClearLabel": "移除重排序端点",
+      "rerankProvider": "重排序服务商",
+      "rerankProviders": {
+        "deepinfra": "DeepInfra",
+        "vllm": "vLLM / OpenAI 兼容",
+        "dashscope": "DashScope"
+      },
       "multimodalTitle": "IM 附件处理模型（可选）",
       "multimodalHelp": "完整配置后，已绑定私聊中的合规附件会发送到这个兼容 OpenAI 格式的视觉模型端点，用于记忆捕获。",
       "multimodalHelpLabel": "关于 IM 附件处理",
@@ -4621,7 +4627,7 @@
       "rebuildCompleted": "记忆索引重建完成。",
       "rebuildFailed": "记忆索引重建失败。",
       "embeddingIdentityHint": "更改向量模型接口地址或模型会重建本地索引，已有记忆不会丢失。",
-      "rerankIdentityHint": "三个字段全部留空时，记忆功能会继续使用标准搜索层级。",
+      "rerankIdentityHint": "重排序字段全部留空时，记忆功能会继续使用标准搜索层级。DashScope 目前只支持 gte-rerank-v2。",
       "multimodalIdentityHint": "完整填写接口地址、模型和 API Key 即表示选择启用；三个字段全部留空时，IM 附件捕获保持关闭。"
     },
     "clear": {

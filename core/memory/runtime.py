@@ -2558,6 +2558,9 @@ class MemoryRuntime:
             rerank_base_url=(processing.rerank.base_url if processing.rerank else None),
             rerank_model=(processing.rerank.model if processing.rerank else None),
             rerank_api_key=(processing.rerank.api_key if processing.rerank else None),
+            rerank_provider=(
+                processing.rerank.rerank_provider() if processing.rerank else None
+            ),
             multimodal_base_url=(
                 processing.multimodal.base_url
                 if processing.multimodal
@@ -3822,6 +3825,7 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
         "rerank_base_url": rerank.base_url if rerank else None,
         "rerank_model": rerank.model if rerank else None,
         "rerank_api_key": rerank.api_key if rerank else None,
+        "rerank_provider": rerank.rerank_provider() if rerank else None,
         "multimodal_base_url": multimodal.base_url if multimodal else None,
         "multimodal_model": multimodal.model if multimodal else None,
         "multimodal_api_key": multimodal.api_key if multimodal else None,
