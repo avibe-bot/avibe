@@ -22,6 +22,15 @@ import logging
 import time
 from typing import Protocol
 
+from core.memory.admission_metadata import (
+    MEMORY_CLI_ADMITTED_METADATA as MEMORY_CLI_ADMITTED_METADATA,
+    MEMORY_ORDINARY_TEXT_METADATA as MEMORY_ORDINARY_TEXT_METADATA,
+    MEMORY_USER_ID_METADATA as MEMORY_USER_ID_METADATA,
+    admitted_user_id as admitted_user_id,
+    is_cli_admitted as is_cli_admitted,
+    is_ordinary_text as is_ordinary_text,
+    merge_identity as merge_identity,
+)
 from core.memory.attachments import workbench_capture_attachments
 from core.memory.im_attachments import (
     IM_ATTACHMENT_CAPTURE_PLATFORMS,
@@ -36,59 +45,6 @@ logger = logging.getLogger(__name__)
 WORKBENCH_PLATFORM = "avibe"
 IM_PLATFORMS = frozenset({"slack", "discord", "telegram", "lark", "feishu", "wechat"})
 ADMISSIBLE_PLATFORMS = IM_PLATFORMS | {WORKBENCH_PLATFORM}
-
-# Durable delivery-metadata keys for Memory admission facts. Readers and
-# writers share these names so the queue layer does not own the vocabulary.
-MEMORY_USER_ID_METADATA = "_memory_user_id"
-MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
-MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
-
-
-def _admission_metadata(metadata: object) -> dict:
-    return metadata if isinstance(metadata, dict) else {}
-
-
-def admitted_user_id(metadata: object) -> str | None:
-    """Return the Memory principal, or None when the stored value is unusable.
-
-    Only a non-empty string is usable. Surrounding whitespace is stripped;
-    a blank or non-string value is treated as missing.
-    """
-
-    memory_user_id = _admission_metadata(metadata).get(MEMORY_USER_ID_METADATA)
-    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
-        return None
-    if memory_user_id != memory_user_id.strip():
-        return memory_user_id.strip()
-    return memory_user_id
-
-
-def is_ordinary_text(metadata: object) -> bool:
-    """True only when the surface stored a literal JSON/Python ``True``."""
-
-    return _admission_metadata(metadata).get(MEMORY_ORDINARY_TEXT_METADATA) is True
-
-
-def is_cli_admitted(metadata: object) -> bool:
-    """True only when the surface stored a literal JSON/Python ``True``."""
-
-    return _admission_metadata(metadata).get(MEMORY_CLI_ADMITTED_METADATA) is True
-
-
-def merge_identity(metadata: object) -> tuple[str | None, bool, bool]:
-    """Return the Memory facts that one dispatch context must keep singular.
-
-    ``author_id`` is the web-push ownership identity, not the Memory principal.
-    Keep the durable Memory identity alongside the two admission flags so a
-    merged turn can never cross principals.
-    """
-
-    metadata = _admission_metadata(metadata)
-    return (
-        admitted_user_id(metadata),
-        is_ordinary_text(metadata),
-        is_cli_admitted(metadata),
-    )
 
 
 class PrincipalDirectory(Protocol):

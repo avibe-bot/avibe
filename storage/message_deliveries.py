@@ -16,7 +16,7 @@ from storage.delivery_states import (
     RUN_CANCEL_RETIRE_STATES,
     policy_for,
 )
-from core.memory.admission import (
+from core.memory.admission_metadata import (
     MEMORY_CLI_ADMITTED_METADATA,
     MEMORY_ORDINARY_TEXT_METADATA,
     MEMORY_USER_ID_METADATA,

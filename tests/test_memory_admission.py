@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -677,6 +679,28 @@ def test_merge_identity_normalizes_unusable_metadata(
     assert merge_identity(metadata) == expected
     assert is_ordinary_text(metadata) is expected[1]
     assert is_cli_admitted(metadata) is expected[2]
+
+
+def test_delivery_store_shares_metadata_keys_without_capture_admission() -> None:
+    """Storage can name the keys without loading CaptureAdmission or aiohttp."""
+
+    script = """
+import sys
+from storage import message_deliveries
+from core.memory.admission_metadata import MEMORY_USER_ID_METADATA
+assert message_deliveries.MEMORY_USER_ID_METADATA is MEMORY_USER_ID_METADATA
+assert "core.memory.admission" not in sys.modules
+assert "core.memory.im_attachments" not in sys.modules
+assert "core.handlers" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:
