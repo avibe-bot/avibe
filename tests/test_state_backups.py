@@ -358,6 +358,42 @@ def test_every_call_holds_the_database_as_it_stands_at_that_call(tmp_path: Path)
     assert set(_sqlite_backup_roots(backups_dir)) == {taken[0].name, taken[3].name, taken[4].name}
 
 
+def test_the_first_copy_at_a_position_survives_however_the_clock_moves(tmp_path: Path) -> None:
+    # A position keeps its first and its last copy, and "first" was read back out
+    # of the backup's timestamp -- the same mistake, one layer down, as every
+    # rule this change already discarded: a label standing in for a fact only the
+    # writer knew. A clock corrected backwards between two attempts dates the
+    # later copy earlier, so the retry after a partial migration becomes both the
+    # first and the last copy of its position and evicts the clean one it was
+    # supposed to bracket. Stated as the property -- the database as it stood
+    # when the position was first copied stays restorable -- because the clock
+    # can be wrong in more ways than a test can list.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('clean')")
+    before_the_storm = _db_contents(db_path)
+
+    # Each attempt is stamped earlier than the one before it, and none of them
+    # moves the revision, so all three copies belong to one position.
+    taken: list[Path] = []
+    for moment, damage in (
+        (datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc), "first retry"),
+        (datetime(2026, 8, 6, 11, 59, tzinfo=timezone.utc), "second retry"),
+        (datetime(2026, 8, 6, 11, 58, tzinfo=timezone.utc), None),
+    ):
+        taken.append(create_sqlite_migration_backup(db_path, backups_dir=backups_dir, now=moment))
+        if damage is not None:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("update payload set value = ?", (damage,))
+
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert surviving == sorted({taken[0].name, taken[2].name})
+    assert any(_db_contents(backups_dir / name / "vibe.sqlite") == before_the_storm for name in surviving)
+
+
 def test_the_manifest_records_the_revisions_read_from_the_copy(tmp_path: Path) -> None:
     # Callers sample the revisions before handing the work over, and another
     # process can advance the database in between. A manifest describing

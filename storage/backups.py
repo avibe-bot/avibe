@@ -54,6 +54,13 @@ class _BackupCandidate:
     #: backup does not record them. Two copies taken at the same revisions were
     #: taken to roll back to the same place in the schema history.
     position: tuple[str, ...] | None = None
+    #: Where this copy falls among the copies taken at its position, counted by
+    #: the code that wrote it, or None for a copy written before the field
+    #: existed. This is what the wall clock cannot say: a clock that steps
+    #: backward between two attempts dates the second copy before the first, and
+    #: every rule that reads creation order out of timestamps then reads it
+    #: backwards.
+    sequence: int | None = None
 
     @property
     def position_key(self) -> tuple[str, str]:
@@ -72,12 +79,12 @@ class _BackupCandidate:
 
     @property
     def order_key(self) -> tuple[datetime, int, str]:
-        """Creation order, as the backup's own name records it.
+        """When the backup's own name says it was taken.
 
-        A movable clock can reorder this, and that is tolerable here, because
-        ordering only decides which of the older copies to drop first. The copy
-        a call just made is not defended by outranking them -- it is handed to
-        `prune_state_backups` as protected, which no clock can undo.
+        This is a total order over the window, not creation order: a clock that
+        steps backward names a later copy with an earlier stamp. Use it to rank
+        positions against each other and to break ties, and use `sequence` --
+        counted by the writer -- wherever being *first* decides what is kept.
         """
 
         return (self.timestamp, self.suffix, self.root.name)
@@ -146,7 +153,21 @@ def _directory_candidate(path: Path) -> _BackupCandidate | None:
         timestamp=timestamp,
         suffix=int(match.group("suffix") or 0),
         position=_manifest_position(manifest),
+        sequence=_manifest_sequence(manifest),
     )
+
+
+def _normalized_position(revisions: Iterable[str]) -> tuple[str, ...]:
+    """One canonical name for a place in the schema history.
+
+    Alembic reports the heads of a branched history in no fixed order, so the
+    same place can be read back as a differently ordered list. Both the code
+    that writes a backup and the code that groups backups derive the name here,
+    because two spellings of one position would make the writer count a fresh
+    sequence for a position the pruner already knows.
+    """
+
+    return tuple(sorted(set(revisions)))
 
 
 def _manifest_position(manifest: dict) -> tuple[str, ...] | None:
@@ -160,7 +181,21 @@ def _manifest_position(manifest: dict) -> tuple[str, ...] | None:
     recorded = manifest.get("from_revisions")
     if not isinstance(recorded, list) or not all(isinstance(item, str) for item in recorded):
         return None
-    return tuple(sorted(set(recorded)))
+    return _normalized_position(recorded)
+
+
+def _manifest_sequence(manifest: dict) -> int | None:
+    """Where the writer counted this copy among the copies at its position.
+
+    Absent for every backup written before the field existed, which is why no
+    caller may require it: those windows must keep pruning exactly as they did.
+    `bool` is rejected because it is an `int` that never came from a counter.
+    """
+
+    recorded = manifest.get("position_sequence")
+    if not isinstance(recorded, int) or isinstance(recorded, bool) or recorded < 0:
+        return None
+    return recorded
 
 
 def _legacy_sqlite_candidate(path: Path) -> _BackupCandidate | None:
@@ -198,6 +233,30 @@ def _managed_candidates(backups_dir: Path) -> list[_BackupCandidate]:
         if candidate is not None:
             candidates.append(candidate)
     return candidates
+
+
+def _next_position_sequence(backups_dir: Path, position: tuple[str, ...]) -> int:
+    """The number to give the copy being written at `position`.
+
+    Counted from the window rather than from a stored counter, because the
+    window is the only thing that survives a crash between two attempts. It
+    stays monotonic because pruning always keeps the last copy of a position it
+    keeps at all, so the highest number is still there to count from; a position
+    that leaves the window entirely restarts at zero, and nothing outside that
+    position ever compares against it.
+
+    Two writers racing here would both claim one number. `run_migrations` holds
+    the migration lock across this call, so that race is not reachable today,
+    and its effect would be a position keeping one copy too many rather than one
+    too few.
+    """
+
+    recorded = [
+        candidate.sequence
+        for candidate in _managed_candidates(backups_dir)
+        if candidate.kind == "sqlite" and candidate.position == position and candidate.sequence is not None
+    ]
+    return max(recorded, default=-1) + 1
 
 
 def _remove_candidate(candidate: _BackupCandidate) -> bool:
@@ -286,18 +345,41 @@ def prune_state_backups(
     return removed
 
 
+def _creation_order(group: list[_BackupCandidate]) -> list[_BackupCandidate]:
+    """One position's copies in the order they were actually written.
+
+    Read from the counter each writer recorded, never re-derived from the
+    timestamps, because a clock that steps backward between two attempts dates
+    the second copy before the first and every timestamp rule then names the
+    wrong copy as the one taken first.
+
+    The counter has to be there on every member to order the group by it: a
+    window mixing counted copies with copies written before the field existed
+    has no common order, and inventing one would reshuffle backups an installed
+    release already made. Those windows fall back to the stamps, which is
+    exactly the behavior they have today.
+    """
+
+    if any(item.sequence is None for item in group):
+        return sorted(group, key=lambda item: item.order_key)
+    return sorted(group, key=lambda item: (item.sequence, item.order_key))
+
+
 def _kept_within_position(group: list[_BackupCandidate], protect: Path | None) -> set[Path]:
     """The copies to keep from one rollback position: the first and the last.
 
     `protect` takes the last slot when it is here, for the same reason it ranks
     first among positions -- a clock that ran ahead can leave a stale copy
-    sorting later than the one just written.
+    sorting later than the one just written. It never takes the first slot: the
+    copy a call has just made is the newest thing at this position, and letting
+    it hold both ends would drop the only copy predating the damage.
     """
 
-    ordered = sorted(group, key=lambda item: item.order_key)
+    ordered = _creation_order(group)
     protected = next((item for item in group if item.root == protect), None)
     latest = protected if protected is not None else ordered[-1]
-    return {ordered[0].root, latest.root}
+    first = next((item for item in ordered if item.root != latest.root), latest)
+    return {first.root, latest.root}
 
 
 def _fsync_file(path: Path) -> None:
@@ -417,6 +499,11 @@ def create_sqlite_migration_backup(
     The manifest records the revisions read back from the copy rather than
     anything the caller reported, because between a caller sampling them and
     this function running, another process can advance the database.
+
+    It also records where this copy falls among the copies already taken at that
+    position. Creation order is knowable only here, while the copy is being
+    made; anything reading it back later has nothing but the wall clock, and a
+    clock that steps backward between two attempts reports the order reversed.
     """
 
     source_path = db_path.expanduser().resolve()
@@ -449,14 +536,21 @@ def create_sqlite_migration_backup(
         os.chmod(temp_db, 0o600)
         _fsync_file(temp_db)
         temp_db.replace(backup_db)
+        position = _normalized_position(from_revisions)
         manifest = {
             "schema_version": BACKUP_MANIFEST_VERSION,
             "managed_by": "avibe",
             "kind": "sqlite-migration",
             "created_at": created_at.astimezone(timezone.utc).isoformat(),
             "database": "vibe.sqlite",
-            "from_revisions": list(from_revisions),
+            "from_revisions": list(position),
             "to_revisions": sorted(set(to_revisions)),
+            # Additive on purpose: a reader is recognized by an exact
+            # `schema_version`, so raising it would make every copy this release
+            # writes invisible to the release before it -- unrecognized, never
+            # pruned, and never offered as a rollback point. An older reader
+            # ignores this field and prunes the window exactly as it does today.
+            "position_sequence": _next_position_sequence(target_root, position),
         }
         manifest_path = backup_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
