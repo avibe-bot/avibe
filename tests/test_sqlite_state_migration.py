@@ -617,6 +617,9 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
 _SPLICE_POINT_REVISION = "20260806_0047"
 _SPLICED_MERGE_REVISION = "20260804_0047"
 _REPAIR_REVISION = "20260819_0056"
+# Created by 20260725_0038 on the spliced branch and widened by 20260815_0054, so a
+# replay interrupted between the two leaves it present and short of head.
+_INTERRUPTED_TABLE = "remote_access_authorizations"
 
 
 def _schema_of(db_path: Path) -> set[tuple[str, str, str]]:
@@ -650,6 +653,81 @@ def _revisions_the_repair_must_cover() -> list[str]:
         )
         if revision.revision != _REPAIR_REVISION
     ]
+
+
+def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
+    tmp_path: Path,
+) -> None:
+    # Every branch table being present does not mean the branch was applied. A repair
+    # interrupted after 20260725_0038 recreated the table but before 20260815_0054
+    # replayed leaves all six tables there, that one short of head, and Alembic still
+    # stamped below the repair. Skipping the replay on a table-presence check would
+    # stamp the repair over the short table, and a stamped revision never runs again:
+    # the columns would then be missing for the life of the database.
+    expected = {obj for obj in _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head")) if obj[1] == _INTERRUPTED_TABLE}
+    assert expected, "the interrupted table must exist at head"
+
+    # Take the interrupted shape from the revision that creates it instead of writing
+    # its DDL down here, so this stays the real pre-20260815_0054 table.
+    scratch = _upgraded_db(tmp_path / "scratch.sqlite", _SPLICED_MERGE_REVISION)
+    with sqlite3.connect(scratch) as conn:
+        interrupted_ddl = [
+            str(sql)
+            for (sql,) in conn.execute(
+                "select sql from sqlite_master where tbl_name = ? and sql is not null",
+                (_INTERRUPTED_TABLE,),
+            )
+        ]
+    assert interrupted_ddl
+
+    db_path = _upgraded_db(tmp_path / "interrupted.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = off")
+        conn.execute(f'drop table "{_INTERRUPTED_TABLE}"')
+        for statement in interrupted_ddl:
+            conn.execute(statement)
+        conn.commit()
+    assert not expected <= _schema_of(db_path), "the seeded database must really be short of head"
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    missing = expected - _schema_of(db_path)
+    assert not missing, f"the repair left an interrupted table short of head: {sorted(missing)}"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
+def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: Path) -> None:
+    # The repair replays unconditionally, so every database that reaches head replays
+    # the branch over a schema that already has it -- including the backfill in
+    # 20260725_0037, which writes rows rather than DDL. That is only safe while every
+    # replayed revision is a no-op against what it finds, so pin exactly that: same
+    # schema, and a row the backfill would otherwise duplicate or overwrite left alone.
+    db_path = _upgraded_db(tmp_path / "healthy.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "insert into media_objects (token, session_id, kind, source, local_path, created_at) "
+            "values ('tok', 'ses', 'image', 'agent', '/tmp/tok.png', 'created')"
+        )
+        conn.execute(
+            "insert into media_object_references (token, session_id, created_at) "
+            "values ('tok', 'ses', 'original')"
+        )
+        conn.commit()
+    before = _schema_of(db_path)
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    assert _schema_of(db_path) == before
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select token, session_id, created_at from media_object_references"
+        ).fetchall() == [("tok", "ses", "original")]
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
 
 
 def test_repair_refuses_to_stamp_a_schema_it_could_not_restore(tmp_path: Path) -> None:
@@ -694,12 +772,11 @@ def test_spliced_branch_schema_is_restored_from_every_released_revision(tmp_path
     assert branch_tables, "the spliced branch must own at least one table"
     assert expected, "the branch's objects must survive to head"
 
-    # The repair's short-circuit and its postcondition both read a literal tuple,
-    # because a migration cannot learn what its replayed revisions create without
-    # running them. Pin that tuple to two derivations it does not share: the merge
-    # boundary above, and the head table set the rest of the codebase maintains. A
-    # table added to the branch later then fails here, instead of being skipped by
-    # the short-circuit and missed by the postcondition that should have caught it.
+    # The repair's postcondition reads a literal tuple, because a migration cannot
+    # learn what its replayed revisions create without running them. Pin that tuple to
+    # two derivations it does not share: the merge boundary above, and the head table
+    # set the rest of the codebase maintains. A table added to the branch later then
+    # fails here, instead of slipping past the postcondition meant to catch it.
     script = ScriptDirectory.from_config(migrations.alembic_config())
     declared = set(script.get_revision(_REPAIR_REVISION).module._BRANCH_TABLES)
     assert declared == branch_tables

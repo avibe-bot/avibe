@@ -67,12 +67,17 @@ def _missing_tables() -> set[str]:
 
 
 def upgrade() -> None:
-    if not _missing_tables():
-        return
-
-    # Replay rather than copy their DDL: each of these revisions already skips every
-    # object it finds in place, so the repaired schema equals a fresh install's by
-    # construction instead of by a duplicate definition that can drift away from it.
+    # Replayed unconditionally: presence is not completeness. A repair interrupted
+    # after 20260725_0038 recreated remote_access_authorizations but before
+    # 20260815_0054 replayed leaves all six tables present and that one short of
+    # head, with Alembic still stamped below this revision. Skipping the replay on
+    # "every table is there" would stamp 0056 over the short table, and a stamped
+    # revision never runs again. Every revision below is already a no-op against the
+    # objects it finds in place, so replaying always costs a few introspection
+    # queries on the single upgrade that crosses this revision and removes the guess.
+    #
+    # Replay rather than copy their DDL: the repaired schema then equals a fresh
+    # install's by construction instead of by a duplicate definition that can drift.
     for stem in _UNAPPLIED_BRANCH:
         _revision_module(stem).upgrade()
 

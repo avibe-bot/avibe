@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -204,15 +205,56 @@ def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
     return candidate
 
 
-def _source_identity(source_path: Path) -> dict[str, int]:
-    stat = source_path.stat()
-    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+# Every on-disk file SQLite reads to answer for this database. ``-shm`` is
+# deliberately absent: it is a volatile index into the WAL, rebuilt from it, and
+# never content of its own.
+_DB_COMPONENT_SUFFIXES = ("", "-wal", "-journal")
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_identity(source_path: Path) -> dict[str, dict[str, object]]:
+    """Fingerprint the bytes a copy of this database would read.
+
+    Metadata cannot answer this. Avibe runs SQLite in WAL mode (``storage/db.py``,
+    ``storage/alembic/env.py``), so a commit can land entirely in
+    ``vibe.sqlite-wal`` and leave the main file's size and mtime untouched, and
+    timestamp resolution is a property of the filesystem rather than of SQLite. An
+    identity built from either would match a copy taken before that commit and hand
+    back a rollback point missing it, which is the one failure this whole mechanism
+    exists to prevent. So the identity is content, for every component.
+
+    Read before the copy, never after. A commit landing between this read and the
+    copy makes the copy strictly newer than the identity recorded beside it, so the
+    next attempt sees a changed database and takes a fresh backup. Reuse therefore
+    can only return a copy at or after the state it is being reused for -- never one
+    missing a commit the live database already has.
+    """
+
+    identity: dict[str, dict[str, object]] = {}
+    for suffix in _DB_COMPONENT_SUFFIXES:
+        component = source_path.with_name(source_path.name + suffix)
+        try:
+            size = component.stat().st_size
+            digest = _file_digest(component)
+        except OSError:
+            # Absence is a state too: a database with no WAL beside it must not
+            # match a copy taken when it had one.
+            continue
+        identity[suffix or "-db"] = {"size": size, "sha256": digest}
+    return identity
 
 
 def _backup_already_covering(
     target_root: Path,
     *,
-    source: dict[str, int],
+    source: dict[str, dict[str, object]],
     from_revisions: list[str],
     to_revisions: list[str],
 ) -> Path | None:

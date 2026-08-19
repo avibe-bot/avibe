@@ -301,14 +301,64 @@ def test_retried_failing_migration_reuses_one_rollback_backup(monkeypatch, tmp_p
     monkeypatch.setattr("storage.migrations.command.upgrade", _blocked)
 
     made = []
-    for _ in range(5):
+    for _ in range(8):
         with pytest.raises(RuntimeError, match="upgrade blocked"):
             ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
-        made.append(sorted(backups_dir.glob("avibe-sqlite-migration-*")))
+        made.append(tuple(sorted(backups_dir.glob("avibe-sqlite-migration-*"))))
 
-    assert made[0] == made[-1], "a retry must reuse the copy it already made"
-    assert len(made[0]) == 1
+    # The property is that retrying stops producing copies -- not that it never
+    # produces a second one. The first attempt materializes the WAL sidecar, which is
+    # a genuinely different database state and so genuinely deserves its own rollback
+    # point. What filled the disk was growth per attempt, and that is what must stop.
+    assert len(set(made[1:])) == 1, "retries must stop producing new backups"
+    assert len(made[-1]) <= 2, "bounded by distinct database states, not by attempts"
     assert all(path.exists() for path in existing)
+
+
+def test_backup_reuse_sees_a_commit_that_only_touched_the_wal(tmp_path: Path) -> None:
+    # Reuse is only safe if "the same state" is decided from the bytes a copy would
+    # read. Avibe runs SQLite in WAL mode, so a commit can land entirely in
+    # vibe.sqlite-wal and leave the main database file untouched -- this test asserts
+    # that is what happened before it asserts anything else. An identity read from
+    # the main file's metadata would call that an already-copied state and hand back
+    # a rollback point missing the commit, which is the one thing a rollback point
+    # must never do.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    backups_dir = state_dir / "backups"
+    writer = sqlite3.connect(db_path)
+    try:
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        writer.execute("create table records (value text not null)")
+        writer.execute("insert into records values ('before')")
+        writer.commit()
+
+        first = create_sqlite_migration_backup(
+            db_path, backups_dir=backups_dir, from_revisions={"old"}, to_revisions={"new"}
+        )
+        reused = create_sqlite_migration_backup(
+            db_path, backups_dir=backups_dir, from_revisions={"old"}, to_revisions={"new"}
+        )
+        assert reused == first, "an unchanged database must reuse the copy it already made"
+
+        before = db_path.stat()
+        writer.execute("insert into records values ('after')")
+        writer.commit()
+        after = db_path.stat()
+        assert (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), (
+            "this test is only meaningful while the commit stays out of the main file"
+        )
+
+        fresh = create_sqlite_migration_backup(
+            db_path, backups_dir=backups_dir, from_revisions={"old"}, to_revisions={"new"}
+        )
+        assert fresh != first, "a commit living only in the WAL is still a new state"
+        with sqlite3.connect(fresh / "vibe.sqlite") as backup:
+            assert backup.execute("select count(*) from records").fetchone() == (2,)
+    finally:
+        writer.close()
 
 
 def test_run_migrations_backs_up_only_when_existing_schema_advances(tmp_path: Path) -> None:
