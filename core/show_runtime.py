@@ -32,7 +32,14 @@ from typing import Any, Iterable, Iterator, Mapping
 
 import httpx
 
-from storage.lock import MigrationFileLock, MigrationLockTimeout, _try_lock as storage_lock_try_lock
+from storage.lock import (
+    MigrationFileLock,
+    MigrationLockTimeout,
+    _try_lock as storage_lock_try_lock,
+    fcntl_available,
+    try_windows_exclusive_lock,
+    unlock_windows_exclusive_lock,
+)
 
 from config import paths
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
@@ -813,39 +820,13 @@ class ShowRuntimeManager:
         fd = getattr(self, "_preview_guard_fd", None)
         if fd is not None:
             if getattr(self, "_preview_guard_msvcrt", False):
-                try:
-                    import msvcrt
-
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                except (OSError, ImportError):
-                    pass
+                unlock_windows_exclusive_lock(fd)
                 self._preview_guard_msvcrt = False
             try:
                 os.close(fd)
             except OSError:
                 pass
             self._preview_guard_fd = None
-
-    @staticmethod
-    def _fcntl_available() -> bool:
-        try:
-            import fcntl  # noqa: F401
-        except ImportError:
-            return False
-        return True
-
-    @staticmethod
-    def _try_windows_preview_lock(fd: int) -> bool:
-        """Non-blocking exclusive probe on an already-open Windows lock fd."""
-        try:
-            import msvcrt
-        except ImportError:
-            return False
-        try:
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
-        return True
 
     def _windows_preview_busy_reason(self) -> str | None:
         """Read-only Windows busy probe covering the pre-staging interval.
@@ -869,7 +850,7 @@ class ShowRuntimeManager:
         except OSError:
             return "runtime_install_guard_unavailable"
         try:
-            if not self._try_windows_preview_lock(fd):
+            if not try_windows_exclusive_lock(fd):
                 os.close(fd)
                 return "runtime_install_already_running"
             if not self._guard_path_matches_fd(fd):
@@ -900,7 +881,7 @@ class ShowRuntimeManager:
         """
         if self._install_guard_depth > 0:
             return "runtime_install_already_running"
-        if not self._fcntl_available():
+        if not fcntl_available():
             return self._windows_preview_busy_reason()
         import fcntl
 

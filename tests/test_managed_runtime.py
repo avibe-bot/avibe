@@ -4,6 +4,7 @@ import ast
 import hashlib
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -122,6 +123,60 @@ def test_clean_dry_run_holds_preview_guard_through_planning(
     assert getattr(manager, "_preview_guard_fd", None) is None
     assert manager._install_lock.acquire(blocking=False)
     manager._install_lock.release()
+
+
+def test_windows_preview_detects_held_git_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / ".install.lock").write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    monkeypatch.setattr("core.managed_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.managed_runtime.try_windows_exclusive_lock", lambda fd: False)
+    result = manager.clean(dry_run=True)
+    assert result["ok"] is False
+    assert result["reason"] == "git_install_already_running"
+
+
+def test_git_preview_refuses_lock_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    lock_path = runtime_dir / ".install.lock"
+    lock_path.write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    real_lstat = Path.lstat
+    mismatch = {"on": False}
+
+    def _lstat(self):
+        info = real_lstat(self)
+        if mismatch["on"] and self == lock_path:
+            fields = list(info)
+            fields[1] = info.st_ino + 51
+            return os.stat_result(fields)
+        return info
+
+    def _fstat(fd):
+        mismatch["on"] = True
+        return real_fstat(fd)
+
+    real_fstat = os.fstat
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    monkeypatch.setattr(os, "fstat", _fstat)
+    result = manager.clean(dry_run=True)
+    assert result["ok"] is False
+    assert result["reason"] == "git_install_already_running"
 
 
 def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() -> None:

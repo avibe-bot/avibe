@@ -30,7 +30,13 @@ from core.dependency_network import (
     probe_url,
     redact_url,
 )
-from storage.lock import MigrationFileLock, MigrationLockTimeout
+from storage.lock import (
+    MigrationFileLock,
+    MigrationLockTimeout,
+    fcntl_available,
+    try_windows_exclusive_lock,
+    unlock_windows_exclusive_lock,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -425,6 +431,9 @@ class ManagedRuntimeManager:
     def _release_preview_guard(self) -> None:
         fd = getattr(self, "_preview_guard_fd", None)
         if fd is not None:
+            if getattr(self, "_preview_guard_msvcrt", False):
+                unlock_windows_exclusive_lock(fd)
+                self._preview_guard_msvcrt = False
             try:
                 os.close(fd)
             except OSError:
@@ -437,28 +446,68 @@ class ManagedRuntimeManager:
             except RuntimeError:
                 pass
 
+    def _guard_path_matches_fd(self, fd: int) -> bool:
+        """True when the live path still names the locked descriptor."""
+        try:
+            open_stat = os.fstat(fd)
+            path_stat = self._install_file_lock_path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(open_stat.st_mode)
+            and open_stat.st_nlink == 1
+            and not stat.S_ISLNK(open_stat.st_mode)
+            and stat.S_ISREG(path_stat.st_mode)
+            and path_stat.st_nlink == 1
+            and not stat.S_ISLNK(path_stat.st_mode)
+            and (open_stat.st_dev, open_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+        )
+
+    def _windows_preview_busy_reason(self) -> str | None:
+        """Read-only Windows busy probe covering the pre-staging interval."""
+        probe = self._preview_lock_probe()
+        if probe is not None:
+            return probe
+        if getattr(self, "_preview_lock_was_absent", False):
+            return None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self._install_file_lock_path, flags)
+        except OSError:
+            return self._reason("install_already_running")
+        try:
+            if not try_windows_exclusive_lock(fd):
+                os.close(fd)
+                return self._reason("install_already_running")
+            if not self._guard_path_matches_fd(fd):
+                os.close(fd)
+                return self._reason("install_already_running")
+            self._preview_guard_fd = fd
+            self._preview_guard_msvcrt = True
+            return None
+        except OSError:
+            os.close(fd)
+            return self._reason("install_already_running")
+
     def _preview_busy_reason(self) -> str | None:
-        """Read-only busy check for previews: never creates or locks files.
+        """Read-only busy check for previews: never creates or rewrites files.
 
         On POSIX success the shared flock stays held (stored on the instance)
         until ``_release_preview_guard`` so an exclusive installer cannot
-        start between the probe and staging enumeration.
+        start between the probe and staging enumeration. Native Windows uses
+        a non-blocking ``msvcrt.locking`` on an existing lock file instead.
+        After either acquisition, the live path is rechecked against the
+        descriptor so a same-user swap cannot leave the preview on an
+        orphaned inode.
         """
         if not self._install_lock.acquire(blocking=False):
             return self._reason("install_already_running")
         self._preview_held_install_lock = True
         try:
-            # Cross-process installs hold flock on .install.lock. Probing with
-            # LOCK_SH|LOCK_NB on an existing file is read-only (no create, no
-            # truncate); failure to take it means another process is active.
-            # fcntl is POSIX-only: on Windows there is no read-only probe, so
-            # the preview proceeds (no cross-process installs of this runtime
-            # exist on Windows today; the in-process check still applies).
-            try:
-                import fcntl
-            except ImportError:
-                self._preview_lock_was_absent = self._preview_lock_missing()
-                return None
+            if not fcntl_available():
+                return self._windows_preview_busy_reason()
+            import fcntl
+
             probe = self._preview_lock_probe()
             if probe is not None:
                 return probe
@@ -474,6 +523,9 @@ class ManagedRuntimeManager:
                 return self._reason("install_already_running")
             try:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                if not self._guard_path_matches_fd(fd):
+                    os.close(fd)
+                    return self._reason("install_already_running")
                 self._preview_guard_fd = fd
                 return None
             except OSError:

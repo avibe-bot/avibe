@@ -1134,8 +1134,8 @@ def test_windows_preview_ignores_persistent_lock_file(tmp_path: Path, monkeypatc
     (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
     _write_current_pointer(manager, _sha(1))
     stale = _write_archive(manager, _sha(2), b"stale")
-    monkeypatch.setattr(manager, "_fcntl_available", lambda: False)
-    monkeypatch.setattr(manager, "_try_windows_preview_lock", lambda fd: True)
+    monkeypatch.setattr("core.show_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.show_runtime.try_windows_exclusive_lock", lambda fd: True)
     result = manager.clean(dry_run=True)
     assert result["ok"] is True
     assert result["archives"]["candidate_count"] == 1
@@ -1148,8 +1148,8 @@ def test_windows_preview_detects_held_lock_before_staging(tmp_path: Path, monkey
     (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
     _write_current_pointer(manager, _sha(1))
     stale = _write_archive(manager, _sha(2), b"stale")
-    monkeypatch.setattr(manager, "_fcntl_available", lambda: False)
-    monkeypatch.setattr(manager, "_try_windows_preview_lock", lambda fd: False)
+    monkeypatch.setattr("core.show_runtime.fcntl_available", lambda: False)
+    monkeypatch.setattr("core.show_runtime.try_windows_exclusive_lock", lambda fd: False)
     result = manager.clean(dry_run=True)
     assert result["ok"] is False
     assert result["archives"]["skipped_reason"] == "runtime_install_already_running"

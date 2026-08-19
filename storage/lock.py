@@ -91,3 +91,35 @@ def _unlock(handle) -> None:
     import fcntl
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def fcntl_available() -> bool:
+    try:
+        import fcntl  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def try_windows_exclusive_lock(fd: int) -> bool:
+    """Non-blocking exclusive probe on an already-open Windows lock fd."""
+    try:
+        import msvcrt
+    except ImportError:
+        return False
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError:
+        return False
+    return True
+
+
+def unlock_windows_exclusive_lock(fd: int) -> None:
+    try:
+        import msvcrt
+    except ImportError:
+        return
+    try:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
