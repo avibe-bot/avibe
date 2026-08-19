@@ -456,11 +456,6 @@ def _legacy_snapshot_has_organization_context(
         context.organization_id
         or context.organization_member_id
         or context.organization_role
-        or context.instance_access_source in {
-            "email",
-            "email_domain",
-            "public_instance",
-        }
         or context.instance_access_source == "organization_group"
         or context.group_ids
         or any(
@@ -500,19 +495,14 @@ def _legacy_deferred_context_binding(
     if raw_kind is not None and raw_kind != paired_kind:
         return None
 
-    # An id already matching the live pairing is sufficient to recover a
-    # missing kind. If both fields are absent, infer only the instance kind
-    # retained in the old signed claims; this prevents old Organization work
-    # from being adopted by a Personal pairing (and vice versa).
-    inferred_kind = raw_kind or (
-        paired_kind
-        if snapshot_instance_id
-        else (
-            "organization"
-            if _legacy_snapshot_has_organization_context(context, snapshot)
-            else "personal"
-        )
-    )
+    # The pairing kind is the only authoritative evidence for a legacy
+    # snapshot that predates both binding fields. Explicit Organization claims
+    # still contradict a Personal pairing, but access sources such as ``email``
+    # are shared by Personal and Organization instances and cannot choose a
+    # kind on their own.
+    if paired_kind == "personal" and _legacy_snapshot_has_organization_context(context, snapshot):
+        return None
+    inferred_kind = raw_kind or paired_kind
     if inferred_kind != paired_kind:
         return None
     return {
@@ -553,12 +543,13 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
 
     The migration is deliberately conservative and one-shot. It needs complete
     runtime credentials and a known server-owned instance kind, and it only
-    updates a legacy snapshot when its existing instance evidence or
+    updates a legacy snapshot when its existing instance evidence or explicit
     Organization claims agree with that pairing. Unreadable, ambiguous, or
     stale records remain unchanged and are rejected by the runtime restore
-    checks. The marker is written even when no pairing is available, so a later
-    re-pair cannot reinterpret an old unbound record as belonging to the new
-    instance.
+    checks. A marker records the first migration opportunity: a known instance
+    with an unknown kind remains pending until that same instance is
+    authoritatively classified, while a later different pairing can never
+    adopt the old records.
     """
 
     empty_counts = {
@@ -566,34 +557,93 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         "legacy_deferred_runs": 0,
         "legacy_deferred_deliveries": 0,
     }
-    if connection.execute(
+    marker_value = connection.execute(
         select(state_meta.c.value_json).where(
             state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
         )
-    ).scalar_one_or_none() is not None:
-        return empty_counts
+    ).scalar_one_or_none()
+    marker: dict[str, Any] | None = None
+    if marker_value is not None:
+        try:
+            parsed_marker = json.loads(marker_value)
+        except (TypeError, ValueError):
+            parsed_marker = None
+        if not isinstance(parsed_marker, dict):
+            # A corrupt marker cannot prove which pairing created the rows.
+            # Preserve fail-closed behavior instead of trying to insert a
+            # duplicate key or guessing a new binding.
+            return empty_counts
+        marker = parsed_marker
+        if marker.get("state") not in {"pending", "completed"}:
+            marker["state"] = "completed" if marker.get("completed_at") else "pending"
 
     configured = _configured_resource_instance()
-    if (
-        configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-        or configured is None
-        or configured[0] is None
-        or configured[1] not in {"personal", "organization"}
-    ):
-        completed_at = _utc_now_iso()
-        connection.execute(
-            state_meta.insert().values(
-                key=LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
-                value_json=json.dumps(
-                    {"schema_version": 1, "completed_at": completed_at},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                updated_at=completed_at,
+    current_instance_id = (
+        configured[0]
+        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        and isinstance(configured, tuple)
+        else None
+    )
+    current_kind = (
+        configured[1]
+        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        and isinstance(configured, tuple)
+        else None
+    )
+
+    def write_marker(*, state: str, instance_id: str | None) -> None:
+        now = _utc_now_iso()
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "state": state,
+            "instance_id": instance_id,
+            "updated_at": now,
+        }
+        if state == "completed":
+            payload["completed_at"] = now
+        values = {
+            "value_json": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            "updated_at": now,
+        }
+        if marker is None:
+            connection.execute(
+                state_meta.insert().values(
+                    key=LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    **values,
+                )
             )
-        )
+        else:
+            connection.execute(
+                update(state_meta)
+                .where(state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY)
+                .values(**values)
+            )
+
+    if marker is not None and marker.get("state") == "completed":
         return empty_counts
-    paired_instance_id, paired_kind = configured
+
+    marker_instance_id = _clean_optional_string(marker.get("instance_id")) if marker else None
+    if marker is not None:
+        if marker_instance_id is None:
+            # No first pairing was available to prove ownership. A later
+            # pairing must not be allowed to claim these records.
+            if current_instance_id is not None:
+                write_marker(state="completed", instance_id=None)
+            return empty_counts
+        if current_instance_id is None:
+            return empty_counts
+        if current_instance_id != marker_instance_id:
+            write_marker(state="completed", instance_id=marker_instance_id)
+            return empty_counts
+
+    if current_instance_id is None:
+        write_marker(state="pending", instance_id=None)
+        return empty_counts
+    if current_kind not in {"personal", "organization"}:
+        write_marker(state="pending", instance_id=current_instance_id)
+        return empty_counts
+    paired_instance_id = current_instance_id
+    paired_kind = current_kind
 
     counts = {
         "legacy_deferred_definitions": 0,
@@ -704,18 +754,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             )
         )
         counts["legacy_deferred_deliveries"] += 1
-    completed_at = _utc_now_iso()
-    connection.execute(
-        state_meta.insert().values(
-            key=LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
-            value_json=json.dumps(
-                {"schema_version": 1, "completed_at": completed_at},
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            updated_at=completed_at,
-        )
-    )
+    write_marker(state="completed", instance_id=paired_instance_id)
     return counts
 
 

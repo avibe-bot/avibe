@@ -1069,6 +1069,74 @@ def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_pat
         engine.dispose()
 
 
+def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "same-instance"
+    config.remote_access.vibe_cloud.instance_kind = ""
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "legacy-task",
+                "name": "legacy task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _run_sqlite_data_migrations(connection) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+
+        config.remote_access.vibe_cloud.instance_kind = "personal"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _run_sqlite_data_migrations(connection) == {
+                "legacy_deferred_definitions": 1,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            raw_metadata = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+            snapshot = json.loads(raw_metadata)[
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+            ]
+            assert snapshot["vibe_instance_id"] == "same-instance"
+            assert snapshot["vibe_instance_kind"] == "personal"
+    finally:
+        store.close()
+        engine.dispose()
+
+
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
