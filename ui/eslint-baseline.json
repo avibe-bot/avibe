@@ -101,7 +101,7 @@
     },
     "src/components/workbench/ChatPage.tsx": {
       "@typescript-eslint/no-explicit-any": 1,
-      "react-hooks/preserve-manual-memoization": 2,
+      "react-hooks/preserve-manual-memoization": 1,
       "react-hooks/set-state-in-effect": 3
     },
     "src/components/workbench/FileTree.tsx": {
