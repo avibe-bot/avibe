@@ -41,7 +41,7 @@ from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
-from tests.ui_server_test_helpers import _save_config
+from tests.ui_server_test_helpers import _save_config, remote_session_cookie
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
@@ -212,6 +212,58 @@ def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp
     )
     assert replay.status_code == 400
     assert replay.get_json()["error"] == "replayed_assertion"
+
+    store = ShowPageStore()
+    try:
+        access = store.get_access(page.session_id)
+        assert access is not None
+        revoked = store.apply_access(
+            page.session_id,
+            expected_revision=access.revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["someone-else@example.com"],
+        )
+        assert revoked.status == "applied"
+    finally:
+        store.close()
+
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "viewer-1",
+            session_claims={
+                "vibe_instance_id": cloud.instance_id,
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "show_page_email",
+                "vibe_show_page_id": page.session_id,
+            },
+        ),
+        domain="alex.avibe.bot",
+    )
+    revoked_navigation = client.get(
+        f"/p/{page.share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer,
+        headers={
+            "Accept": "text/html",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        },
+        follow_redirects=False,
+    )
+    assert revoked_navigation.status_code == 403
+    assert "Location" not in revoked_navigation.headers
+    assert "You do not have access to this page" in revoked_navigation.text
+
+    revoked_subresource = client.get(
+        f"/p/{page.share_id}/app.js",
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer,
+    )
+    assert revoked_subresource.status_code == 404
 
 
 class _FakeNextTurnRuntime:

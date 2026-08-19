@@ -191,7 +191,7 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_recovers_and_revokes_without_oauth
   - id: AUTH-SETUP-404
-    name: Verified limited Show Page identity completes local guest admission
+    name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered
     kind: happy_path
     layer: scenario

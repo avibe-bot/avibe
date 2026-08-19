@@ -12980,7 +12980,13 @@ def _show_public_authenticated_context(config: V2Config | None):
     return context_from_session_payload(session) if session is not None else None
 
 
-def _show_limited_viewer_is_allowed(context: Any, access: Any, page_id: str) -> bool:
+def _show_limited_viewer_is_allowed(
+    context: Any,
+    access: Any,
+    page_id: str,
+    *,
+    allow_page_scoped: bool = True,
+) -> bool:
     from core.show_pages import normalize_show_access_email
 
     allowlisted = False
@@ -12993,7 +12999,7 @@ def _show_limited_viewer_is_allowed(context: Any, access: Any, page_id: str) -> 
             )
         except (TypeError, ValueError):
             allowlisted = False
-    return allowlisted or context.can_use_show_page(page_id)
+    return allowlisted or (allow_page_scoped and context.can_use_show_page(page_id))
 
 
 async def _show_public_request_author() -> dict[str, str] | None:
@@ -14986,11 +14992,12 @@ async def serve_public_show_page(share_id, asset_path):
                         _show_public_authenticated_context,
                         config,
                     )
-                    if authenticated_context is not None:
+                    if authenticated_context is not None and request.method == "GET" and is_spa_navigation:
                         if not _show_limited_viewer_is_allowed(
                             authenticated_context,
                             access,
                             page.session_id,
+                            allow_page_scoped=False,
                         ):
                             return _show_page_access_denied_response(
                                 include_back_link=(
