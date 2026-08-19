@@ -54,12 +54,12 @@ class _BackupCandidate:
     #: backup does not record them. Two copies taken at the same revisions were
     #: taken to roll back to the same place in the schema history.
     position: tuple[str, ...] | None = None
-    #: Where this copy falls among the copies taken at its position, counted by
-    #: the code that wrote it, or None for a copy written before the field
-    #: existed. This is what the wall clock cannot say: a clock that steps
-    #: backward between two attempts dates the second copy before the first, and
-    #: every rule that reads creation order out of timestamps then reads it
-    #: backwards.
+    #: Where this backup falls among the managed backups written into its
+    #: window, counted by the code that wrote it, or None for one written before
+    #: the field existed. This is what the wall clock cannot say: a clock that
+    #: steps backward between two attempts dates the second backup before the
+    #: first, and every rule that reads write order out of timestamps then reads
+    #: it backwards.
     sequence: int | None = None
 
     @property
@@ -81,13 +81,37 @@ class _BackupCandidate:
     def order_key(self) -> tuple[datetime, int, str]:
         """When the backup's own name says it was taken.
 
-        This is a total order over the window, not creation order: a clock that
-        steps backward names a later copy with an earlier stamp. Use it to rank
-        positions against each other and to break ties, and use `sequence` --
-        counted by the writer -- wherever being *first* decides what is kept.
+        Never an answer to which backup came first: a clock that steps backward
+        names a later one with an earlier stamp. Read `written_order` for that,
+        and use this only to break its ties.
         """
 
         return (self.timestamp, self.suffix, self.root.name)
+
+    @property
+    def written_order(self) -> tuple[int, int, datetime, int, str]:
+        """The order the backups were written in, as their writers recorded it.
+
+        The one declaration of that order, because every rule that re-derived it
+        from the timestamps was wrong in the same way: the stamp is a label the
+        writer chose, and a clock corrected backwards between two attempts
+        reverses it. Both things pruning decides -- which position leaves the
+        window, and which copies a position keeps -- read it from here.
+
+        A backup with no counter was written by a release that did not have the
+        field, so it precedes every counted one. That ordering is a fact about
+        which binary made it, not a guess: this release always writes the
+        counter, and the release before it never could. Among themselves those
+        backups have no recorded order and the stamps are all there is -- the
+        one place a clock still decides anything here, and only for backups an
+        installed release already made, which nothing can retrofit. Rewriting
+        their manifests to invent an order would freeze that same guess into the
+        artifact a rollback is supposed to be able to trust.
+        """
+
+        if self.sequence is None:
+            return (0, 0, *self.order_key)
+        return (1, self.sequence, *self.order_key)
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -185,14 +209,14 @@ def _manifest_position(manifest: dict) -> tuple[str, ...] | None:
 
 
 def _manifest_sequence(manifest: dict) -> int | None:
-    """Where the writer counted this copy among the copies at its position.
+    """Where the writer counted this backup among the window's backups.
 
     Absent for every backup written before the field existed, which is why no
-    caller may require it: those windows must keep pruning exactly as they did.
-    `bool` is rejected because it is an `int` that never came from a counter.
+    caller may require it. `bool` is rejected because it is an `int` that never
+    came from a counter.
     """
 
-    recorded = manifest.get("position_sequence")
+    recorded = manifest.get("backup_sequence")
     if not isinstance(recorded, int) or isinstance(recorded, bool) or recorded < 0:
         return None
     return recorded
@@ -235,26 +259,29 @@ def _managed_candidates(backups_dir: Path) -> list[_BackupCandidate]:
     return candidates
 
 
-def _next_position_sequence(backups_dir: Path, position: tuple[str, ...]) -> int:
-    """The number to give the copy being written at `position`.
+def next_backup_sequence(backups_dir: Path) -> int:
+    """The number to record in the backup about to be written here.
 
     Counted from the window rather than from a stored counter, because the
     window is the only thing that survives a crash between two attempts. It
-    stays monotonic because pruning always keeps the last copy of a position it
-    keeps at all, so the highest number is still there to count from; a position
-    that leaves the window entirely restarts at zero, and nothing outside that
-    position ever compares against it.
+    stays monotonic because pruning always keeps the newest backup it keeps at
+    all, so the highest number is still there to count from; a window pruned
+    down to nothing restarts at zero with nothing left to compare against.
 
-    Two writers racing here would both claim one number. `run_migrations` holds
-    the migration lock across this call, so that race is not reachable today,
-    and its effect would be a position keeping one copy too many rather than one
-    too few.
+    Counted across both windows sharing the directory, since the number says
+    when a backup was written and comparisons never cross kinds anyway. One
+    counter is also one fewer thing that can disagree with itself.
+
+    Two writers racing here would both claim one number. The migration lock is
+    held across this call on every path that reaches it, so that race is not
+    reachable today, and its effect would be a position keeping one copy too
+    many rather than one too few.
     """
 
     recorded = [
         candidate.sequence
         for candidate in _managed_candidates(backups_dir)
-        if candidate.kind == "sqlite" and candidate.position == position and candidate.sequence is not None
+        if candidate.sequence is not None
     ]
     return max(recorded, default=-1) + 1
 
@@ -331,7 +358,7 @@ def prune_state_backups(
             positions.setdefault(candidate.position_key, []).append(candidate)
         ordered = sorted(
             positions.values(),
-            key=lambda group: max(item.order_key for item in group),
+            key=lambda group: max(item.written_order for item in group),
             reverse=True,
         )
         if protect is not None:
@@ -345,26 +372,6 @@ def prune_state_backups(
     return removed
 
 
-def _creation_order(group: list[_BackupCandidate]) -> list[_BackupCandidate]:
-    """One position's copies in the order they were actually written.
-
-    Read from the counter each writer recorded, never re-derived from the
-    timestamps, because a clock that steps backward between two attempts dates
-    the second copy before the first and every timestamp rule then names the
-    wrong copy as the one taken first.
-
-    The counter has to be there on every member to order the group by it: a
-    window mixing counted copies with copies written before the field existed
-    has no common order, and inventing one would reshuffle backups an installed
-    release already made. Those windows fall back to the stamps, which is
-    exactly the behavior they have today.
-    """
-
-    if any(item.sequence is None for item in group):
-        return sorted(group, key=lambda item: item.order_key)
-    return sorted(group, key=lambda item: (item.sequence, item.order_key))
-
-
 def _kept_within_position(group: list[_BackupCandidate], protect: Path | None) -> set[Path]:
     """The copies to keep from one rollback position: the first and the last.
 
@@ -375,7 +382,7 @@ def _kept_within_position(group: list[_BackupCandidate], protect: Path | None) -
     it hold both ends would drop the only copy predating the damage.
     """
 
-    ordered = _creation_order(group)
+    ordered = sorted(group, key=lambda item: item.written_order)
     protected = next((item for item in group if item.root == protect), None)
     latest = protected if protected is not None else ordered[-1]
     first = next((item for item in ordered if item.root != latest.root), latest)
@@ -500,10 +507,10 @@ def create_sqlite_migration_backup(
     anything the caller reported, because between a caller sampling them and
     this function running, another process can advance the database.
 
-    It also records where this copy falls among the copies already taken at that
-    position. Creation order is knowable only here, while the copy is being
-    made; anything reading it back later has nothing but the wall clock, and a
-    clock that steps backward between two attempts reports the order reversed.
+    It also records where this copy falls among the backups already in the
+    window. Write order is knowable only here, while the copy is being made;
+    anything reading it back later has nothing but the wall clock, and a clock
+    that steps backward between two attempts reports the order reversed.
     """
 
     source_path = db_path.expanduser().resolve()
@@ -545,12 +552,12 @@ def create_sqlite_migration_backup(
             "database": "vibe.sqlite",
             "from_revisions": list(position),
             "to_revisions": sorted(set(to_revisions)),
-            # Additive on purpose: a reader is recognized by an exact
+            # Additive on purpose: a backup is recognized by an exact
             # `schema_version`, so raising it would make every copy this release
             # writes invisible to the release before it -- unrecognized, never
             # pruned, and never offered as a rollback point. An older reader
             # ignores this field and prunes the window exactly as it does today.
-            "position_sequence": _next_position_sequence(target_root, position),
+            "backup_sequence": next_backup_sequence(target_root),
         }
         manifest_path = backup_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

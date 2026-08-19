@@ -394,6 +394,80 @@ def test_the_first_copy_at_a_position_survives_however_the_clock_moves(tmp_path:
     assert any(_db_contents(backups_dir / name / "vibe.sqlite") == before_the_storm for name in surviving)
 
 
+def _as_pre_sequence_backup(backup_dir: Path) -> Path:
+    """Turn a backup into one the previous release would have written.
+
+    Produced by the current writer and then stripped, rather than hand-built, so
+    a change to the manifest cannot leave this fixture describing a shape no
+    release ever wrote.
+    """
+
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["backup_sequence"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return backup_dir
+
+
+def test_backups_from_before_the_counter_still_come_first(tmp_path: Path) -> None:
+    # A window is mixed for exactly as long as it takes the copies an older
+    # release wrote to age out, and during that time the counter cannot order it
+    # by itself. Falling back to the stamps for the whole group puts the clock
+    # back in charge of the one decision it was just taken off -- with a clock
+    # corrected backwards, a retry dated earlier than the clean copy from the
+    # previous release becomes the first copy of the position and evicts it.
+    #
+    # The fact that settles it is not in the timestamps: a copy without a
+    # counter was written by a release that did not have one, so it precedes
+    # every counted copy no matter what either name says.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('clean')")
+    before_the_storm = _db_contents(db_path)
+
+    from_the_previous_release = _as_pre_sequence_backup(
+        create_sqlite_migration_backup(
+            db_path, backups_dir=backups_dir, now=datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+        )
+    )
+    retries: list[Path] = []
+    for moment, damage in (
+        (datetime(2026, 8, 6, 11, 0, tzinfo=timezone.utc), "first retry"),
+        (datetime(2026, 8, 6, 10, 0, tzinfo=timezone.utc), "second retry"),
+    ):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("update payload set value = ?", (damage,))
+        retries.append(create_sqlite_migration_backup(db_path, backups_dir=backups_dir, now=moment))
+
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert surviving == sorted({from_the_previous_release.name, retries[-1].name})
+    assert any(_db_contents(backups_dir / name / "vibe.sqlite") == before_the_storm for name in surviving)
+
+
+def test_a_position_dated_in_the_future_does_not_evict_a_newer_one(tmp_path: Path) -> None:
+    # The window ranks positions against each other too, and that ranking read
+    # the same timestamps. State carried from a machine running ahead is dated
+    # into the future permanently, so ranking by the stamp parks it at the top
+    # of the window forever and every genuinely newer position falls out beneath
+    # it. Same class as the copies inside a position, so it reads the same
+    # recorded order.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    taken: list[Path] = []
+    for revision, moment in (
+        ("20260806_0047", datetime(2099, 1, 1, tzinfo=timezone.utc)),
+        ("20260809_0049", datetime(2026, 8, 9, 1, 0, tzinfo=timezone.utc)),
+        ("20260811_0050", datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)),
+    ):
+        _stamp(db_path, revision)
+        taken.append(create_sqlite_migration_backup(db_path, backups_dir=backups_dir, now=moment))
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({taken[1].name, taken[2].name})
+
+
 def test_the_manifest_records_the_revisions_read_from_the_copy(tmp_path: Path) -> None:
     # Callers sample the revisions before handing the work over, and another
     # process can advance the database in between. A manifest describing

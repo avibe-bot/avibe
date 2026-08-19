@@ -22,7 +22,7 @@ from config.v2_sessions import (
     migrate_session_state_mappings,
 )
 from config.v2_settings import SettingsState, load_settings_state_from_json
-from storage.backups import BACKUP_MANIFEST_VERSION, prune_state_backups
+from storage.backups import BACKUP_MANIFEST_VERSION, next_backup_sequence, prune_state_backups
 from storage.db import create_sqlite_engine
 from storage.lock import MigrationFileLock, migration_lock_path_for
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
@@ -297,6 +297,12 @@ def _backup_json_state(state_dir: Path) -> Path:
             "managed_by": "avibe",
             "kind": "json-state-migration",
             "created_at": _utc_now_iso(),
+            # Recorded here for the same reason the sqlite window records it:
+            # nothing reading this directory later can tell what a clock did
+            # between two snapshots. Written by both kinds so that reading the
+            # order off the timestamps stays a compatibility path for backups an
+            # older release made, rather than a rule still in use.
+            "backup_sequence": next_backup_sequence(backups_dir),
             "files": {},
         }
         for name in (
