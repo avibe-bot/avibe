@@ -167,6 +167,51 @@ jobs:
             exit 1
           fi
 
+  migration-release-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # The guard reads each release's migration graph straight out of git. The
+          # default shallow checkout fetches no tags, which would leave it with no
+          # shipped graph to compare against.
+          fetch-depth: 0
+
+      # Editable installs require the force-included directory; this job only needs the
+      # migration chain to import.
+      - name: Prepare minimal UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          enable-cache: true
+          save-cache: false
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install package and test deps
+        run: uv pip install --system -e . --group dev
+
+      - name: Guard the migration graph against every released version
+        run: |
+          set -o pipefail
+          output="$RUNNER_TEMP/migration-release-guard.log"
+          python -m pytest tests/test_migration_release_guard.py -ra | tee "$output"
+          # The release-history properties skip themselves when no tags are reachable so
+          # the sharded unit job stays green on its shallow checkout. This job is the one
+          # that supplies the history, so here a skip means the guard proved nothing.
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "The migration release guard must not skip: this checkout reached no release history."
+            exit 1
+          fi
+
   npm-wrapper:
     runs-on: [self-hosted, Linux, X64, avibe]
     steps:
