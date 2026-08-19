@@ -148,6 +148,7 @@ def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True, **kwargs: 100)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
     monkeypatch.setattr(runtime, "start_ui", lambda host, port, **kwargs: 333)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 100)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 100)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 333)  # service 100 dead, ui alive
 

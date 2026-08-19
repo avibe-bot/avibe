@@ -15,6 +15,7 @@ from config import paths
 from storage.backups import create_sqlite_migration_backup
 from vibe import restart_supervisor
 from vibe import runtime
+from vibe.upgrade import RollbackTarget
 
 
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
@@ -590,7 +591,11 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     assert calls[4][:4] == ("start_ui", "0.0.0.0", 5123, False)
     assert calls[2][3]["memory_ui_secret"] == calls[4][4]["memory_ui_secret"]
     status = runtime.read_status()
-    assert status["state"] == "running"
+    # "starting", not "running", and the stubbed lock says the pid is recorded.
+    # This helper spawns; it does not observe. Its callers wait for the service's
+    # own report and promote the status themselves, so a claim of "running" from
+    # here is a claim about a process that has not migrated the database yet.
+    assert status["state"] == "starting"
     assert status["service_pid"] == 222
     assert status["ui_pid"] == 333
 
@@ -901,6 +906,43 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
     assert _payload_rows(db_path) == ["before the upgrade"]
 
 
+def test_a_failed_generation_that_will_not_stop_stops_the_rollback_instead(monkeypatch, tmp_path):
+    """Quiescing is a step with an outcome, not a step with a side effect.
+
+    A process that resists termination is the entire reason the stop is there, so
+    a rollback that ran it and then carried on regardless would be at its most
+    confident in the only case it is about. What follows makes that concrete: the
+    restore rewrites a database file that process holds open, and the final start
+    adopts its live recorded pid instead of launching what was just reinstalled --
+    so the rollback would report success for the version it was rolling back from,
+    over a database it had corrupted underneath it.
+
+    So the database is what this asserts on. Untouched is the whole claim; the
+    status record only has to be readable enough to send someone to look.
+    """
+
+    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda stop_ui=True: _fake_stop_runtime(armed.calls, service_stopped=False),
+    )
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="jobstuck", delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10"
+    )
+
+    assert rc == 1
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["rollback"]["state"] == "failed"
+    assert status["rollback"]["quiesced"] is False
+    assert "still running" in status["rollback"]["error"]
+    # Nothing was installed and nothing was restored: the machine is left exactly
+    # as the failed upgrade left it, which is recoverable by hand.
+    assert [command for command in armed.installs if any("3.0.10" in argument for argument in command)] == []
+    assert _payload_rows(armed.db_path) == ["before the upgrade", "committed by the new version"]
+
+
 def test_a_restart_with_no_version_to_go_back_to_changes_nothing(monkeypatch, tmp_path):
     """A plain restart is already running what it would reinstall.
 
@@ -952,11 +994,15 @@ def test_no_failure_branch_can_end_the_job_without_the_rollback_decision():
 def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypatch, tmp_path):
     """The target survives the process boundary the restart is built on.
 
-    `schedule_restart` spawns a detached job, so the version to go back to has to
+    `schedule_restart` spawns a detached job, so the install to go back to has to
     travel as argv and be read back by the job's own parser. Asserted as a round
     trip rather than as two independent expectations: the two sides are what can
     drift, and a flag renamed on one of them would leave every rollback silently
     disarmed while both halves still look right.
+
+    Both halves of the target make the trip. Argv is the one place they are apart,
+    so it is the one place they can be separated by accident, and a version that
+    arrives without its distribution pins a name the old release never had.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -974,16 +1020,24 @@ def test_a_recoverable_restart_carries_its_rollback_target_into_the_job(monkeypa
 
     monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
 
-    restart_supervisor.schedule_restart(delay_seconds=0, vibe_path="/bin/vibe", trigger="upgrade", rollback_to="3.0.10")
+    restart_supervisor.schedule_restart(
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        rollback_to=RollbackTarget(version="3.0.10", package="vibe-remote"),
+    )
     upgrade_argv = commands[-1]
     restart_supervisor.schedule_restart(delay_seconds=0, vibe_path="/bin/vibe", trigger="cli")
     assert "--rollback-to" not in commands[-1]
+    assert "--rollback-package" not in commands[-1]
 
     parsed: dict = {}
     monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: parsed.update(kwargs) or 0)
     assert restart_supervisor.main(upgrade_argv[2:]) == 0
     assert parsed["rollback_to"] == "3.0.10"
+    assert parsed["rollback_package"] == "vibe-remote"
 
     parsed.clear()
     assert restart_supervisor.main(commands[-1][2:]) == 0
     assert parsed["rollback_to"] is None
+    assert parsed["rollback_package"] is None

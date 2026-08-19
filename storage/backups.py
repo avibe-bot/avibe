@@ -648,6 +648,17 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
     the copy being dropped is a working database an operator may still need, and
     deleting it to make room for one not yet written trades a bounded directory
     for a window in which neither generation is anywhere.
+
+    Nothing leaves the live path until the displaced generation is whole under
+    its own name, and that ordering is the whole design rather than a detail of
+    it. This runs to free the live pathname for a restore that is itself the
+    recovery from a failure, so its own failure has to leave the machine no worse
+    than it found it: on any error the live database is still there, still with
+    its own write-ahead log, and still the database it was. Every step before the
+    commit therefore duplicates rather than moves -- by link where the filesystem
+    allows it, by copy where it does not, which costs a transient second copy on
+    a cross-filesystem layout and is the price of not having a window where the
+    only copy is in flight.
     """
 
     if not db_path.exists():
@@ -661,19 +672,21 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
 
     for stale in (staging, *sidecars_of(staging)):
         stale.unlink(missing_ok=True)
-    try:
-        # A link, so the displaced copy exists before the live path is replaced
-        # and no instant passes with no database at all. Across filesystems the
-        # link is refused and the move is the only way through; it leaves that
-        # instant open, which is why it is the fallback and not the rule.
-        os.link(db_path, staging)
-    except OSError:
-        logger.debug("Hard link unavailable for %s; moving it to %s instead", db_path, staging, exc_info=True)
-        shutil.move(str(db_path), str(staging))
+
+    live_sidecars: list[Path] = []
+    duplications: list[tuple[Path, Path]] = [(db_path, staging)]
     for suffix in sidecar_suffixes:
         sidecar = db_path.with_name(db_path.name + suffix)
         if sidecar.is_file() and not sidecar.is_symlink():
-            shutil.move(str(sidecar), str(staging.with_name(staging.name + suffix)))
+            live_sidecars.append(sidecar)
+            duplications.append((sidecar, staging.with_name(staging.name + suffix)))
+
+    for source, destination in duplications:
+        try:
+            os.link(source, destination)
+        except OSError:
+            logger.debug("Hard link unavailable for %s; copying it to %s instead", source, destination, exc_info=True)
+            shutil.copy2(str(source), str(destination))
 
     # The previous displacement's sidecars go first and its database last. A
     # database briefly without its write-ahead log is still that database; a
@@ -686,6 +699,13 @@ def _displace_live_database(db_path: Path, into: Path) -> Path | None:
         staged_sidecar = staging.with_name(staging.name + suffix)
         if staged_sidecar.exists():
             os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
+
+    # Only now does anything leave the live path, and only the sidecars: the
+    # displaced generation already holds its own copy of them, and the caller is
+    # about to put a different database under this name that must not inherit
+    # them. The database itself stays until that caller replaces it.
+    for sidecar in live_sidecars:
+        sidecar.unlink(missing_ok=True)
     return replaced
 
 

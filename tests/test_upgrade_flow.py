@@ -24,7 +24,8 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     pinned_package_spec,
-    rollback_target_version,
+    RollbackTarget,
+    rollback_target,
 )
 
 
@@ -193,10 +194,14 @@ def test_a_tree_with_no_published_release_has_no_rollback_target(monkeypatch):
     from vibe import UNKNOWN_VERSION
 
     monkeypatch.setattr("vibe.__version__", UNKNOWN_VERSION, raising=False)
-    assert rollback_target_version() is None
+    assert rollback_target() is None
 
+    # And a tree that does name a release answers with the distribution too, in
+    # one value: the two halves are read here, in the process that still predates
+    # the install, and there is no way to obtain one without the other.
     monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
-    assert rollback_target_version() == "3.0.10"
+    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
+    assert rollback_target() == RollbackTarget(version="3.0.10", package="vibe-remote")
 
 
 def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
@@ -526,7 +531,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(api, "rollback_target_version", lambda: "3.0.10")
+    monkeypatch.setattr(api, "rollback_target", lambda: RollbackTarget("3.0.10", "vibe-remote"))
     monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
 
     def fake_run(cmd, **kwargs):
@@ -554,9 +559,11 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
         "vibe_path": "/custom/bin/vibe",
         "trigger": "upgrade",
         "prepare_show_runtime": True,
-        # The version this process is running, handed over BEFORE it is replaced:
-        # what the restart reinstalls if it cannot bring the new one up.
-        "rollback_to": "3.0.10",
+        # The install this process is running, handed over BEFORE it is replaced:
+        # what the restart reinstalls if it cannot bring the new one up. Version
+        # and distribution together, because a pin needs both and a machine that
+        # predates the rename does not answer "avibe-os" for the old one.
+        "rollback_to": RollbackTarget("3.0.10", "vibe-remote"),
     }
 
 
@@ -775,7 +782,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(cli, "rollback_target_version", lambda: "3.0.10")
+    monkeypatch.setattr(cli, "rollback_target", lambda: RollbackTarget("3.0.10", "vibe-remote"))
 
     def fake_schedule_restart(**kwargs):
         calls["restart_kwargs"] = kwargs
@@ -807,8 +814,8 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         "vibe_path": "/custom/bin/vibe",
         "trigger": "upgrade",
         "prepare_show_runtime": True,
-        # See the do_upgrade case: the restart is handed the version to fall back to.
-        "rollback_to": "3.0.10",
+        # See the do_upgrade case: the restart is handed the install to fall back to.
+        "rollback_to": RollbackTarget("3.0.10", "vibe-remote"),
     }
 
 

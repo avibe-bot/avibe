@@ -11,7 +11,7 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 
 PACKAGE_NAME = "avibe-os"
@@ -472,12 +472,33 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
-def rollback_target_version() -> str | None:
-    """The version a failed restart of THIS process could be put back on.
+class RollbackTarget(NamedTuple):
+    """An install to go back to, named the only way an install can be named.
+
+    Both halves travel together because they are one measurement, and splitting
+    them is exactly how this went wrong once: the version was read in the process
+    that predates the install and the distribution in the one that follows it, so
+    a `vibe-remote` machine pinned `avibe-os==2.9.4`, a release that never
+    existed. There is no constructor that reads only one half.
+    """
+
+    version: str
+    package: str | None
+
+
+def rollback_target() -> RollbackTarget | None:
+    """The install a failed restart of THIS process could be put back on.
 
     The running version, because that is the one the machine was working on
     before the upgrade replaced it -- read from this process's own already-bound
-    `__version__`, which the install on disk cannot change underneath it.
+    `__version__`, which the install on disk cannot change underneath it. The
+    distribution comes from this process's own interpreter path for the same
+    reason: it names what is installed NOW, and only a caller running before the
+    install can still see that.
+
+    So this is the one owner of "what can we go back to", and it belongs to the
+    pre-install process. Calling it from the detached restart job would answer
+    for the install that replaced the target, which is not a rollback.
 
     `None` when the running tree reports no published release (a source checkout,
     an editable install, a regression build with a pretend version). Handing that
@@ -488,16 +509,26 @@ def rollback_target_version() -> str | None:
 
     from vibe import UNKNOWN_VERSION, __version__
 
-    return None if __version__ == UNKNOWN_VERSION else __version__
+    if __version__ == UNKNOWN_VERSION:
+        return None
+    return RollbackTarget(version=__version__, package=installed_package_name())
 
 
-def pinned_package_spec(version: str, *, python_executable: str | None = None) -> str:
+def pinned_package_spec(
+    version: str, *, python_executable: str | None = None, package_name: str | None = None
+) -> str:
     """The distribution this install came from, pinned to exactly one version.
 
-    The name comes from the install on disk when it can be read, and only from
-    configuration otherwise -- `installed_package_name` has the argument. A pin is
-    a claim that a specific release exists under a specific name, and the install
-    is the only witness to which name that was.
+    `package_name` is the name measured before the forward install ran, and it
+    wins when given. Reading the name here instead would read it on the wrong side
+    of the event: the upgrade replaces the tool before it schedules the restart,
+    so by the time the detached supervisor asks, the install it can see is the new
+    one. Only the caller that ran before the install can answer for what was
+    replaced.
+
+    Falling back to the install on disk, and to configuration after that. A pin is
+    a claim that a specific release exists under a specific name, and something
+    has to witness which name that was.
 
     Raises when the resulting name cannot carry a pin -- a local path, a direct
     URL, or a spec that already states its own version. Refusing is the whole
@@ -510,7 +541,7 @@ def pinned_package_spec(version: str, *, python_executable: str | None = None) -
     URL carrying credentials, and this error is written to a restart log.
     """
 
-    spec = installed_package_name(python_executable) or get_upgrade_package_spec()
+    spec = package_name or installed_package_name(python_executable) or get_upgrade_package_spec()
     if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
         raise ValueError("The configured upgrade package spec cannot carry a version pin")
     return f"{spec}=={version}"
@@ -523,6 +554,7 @@ def build_upgrade_plan(
     vibe_path: str | None = None,
     base_env: dict[str, str] | None = None,
     version: str | None = None,
+    package_name: str | None = None,
 ) -> UpgradePlan:
     """How to install avibe: the newest release, or `version` exactly.
 
@@ -539,7 +571,7 @@ def build_upgrade_plan(
     executable = python_executable or sys.executable
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     package_spec = (
-        pinned_package_spec(version, python_executable=executable)
+        pinned_package_spec(version, python_executable=executable, package_name=package_name)
         if version
         else get_upgrade_package_spec()
     )

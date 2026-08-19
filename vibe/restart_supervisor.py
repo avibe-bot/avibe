@@ -21,6 +21,7 @@ from config import paths
 from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
 from vibe.upgrade import (
+    RollbackTarget,
     build_upgrade_plan,
     get_restart_command,
     get_restart_environment,
@@ -216,10 +217,13 @@ def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
     else:
         ui_pid = preserved_ui_pid
 
-    if runtime.service_pid_recorded(service_pid):
-        runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
-    elif runtime.pid_alive(service_pid):
-        runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
+    # Provisional, and never "running": holding the lock is not having started, so
+    # this helper is not in a position to claim it. Both callers wait for the
+    # service's own report and promote the status themselves. Claiming it here
+    # published `running` to anyone reading the status file -- doctor, the Web UI --
+    # for a process still migrating, which is the same wrong answer one layer down.
+    if runtime.pid_alive(service_pid):
+        runtime.write_status("starting", "waiting for service to finish starting", service_pid, ui_pid)
     else:
         runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
         raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
@@ -299,6 +303,7 @@ def _restore_database_for_rollback(backup_watermark: int | None, write) -> dict:
 def _roll_back_failed_upgrade(
     *,
     rollback_to: str,
+    rollback_package: str | None,
     vibe_path: str | None,
     start_ui: bool,
     backup_watermark: int | None,
@@ -345,12 +350,32 @@ def _roll_back_failed_upgrade(
     # `start_ui` is also the answer to whether the UI is this job's to manage: a
     # service-only restart left the running UI alone on purpose, and quiescing
     # must not take it down when starting will not bring it back.
-    _stop_runtime_for_restart(stop_ui=start_ui)
-    rollback["quiesced"] = True
+    #
+    # The result is read, not assumed. A process that resists termination is the
+    # entire reason this step exists, so recording success without asking would
+    # make the record say precisely nothing in the only case it is about -- and
+    # the install and the restore that follow would run underneath it.
+    ui_stopped, _ui_timings, _stop_ui_seconds, _ui_pid, service_stopped, _stop_service_seconds = (
+        _stop_runtime_for_restart(stop_ui=start_ui)
+    )
+    quiesced = service_stopped and (ui_stopped or not start_ui)
+    rollback["quiesced"] = quiesced
     record(rollback)
+    if not quiesced:
+        # Nothing further is safe. The restore rewrites a database file this
+        # process holds open, and the final start adopts its pid instead of
+        # launching what was reinstalled -- so a rollback that continued here
+        # would report success for the version it was rolling back from.
+        rollback.update(
+            state="failed",
+            error=f"the failed generation is still running; not rolling back to {rollback_to}",
+        )
+        record(rollback)
+        write(f"cannot roll back to {rollback_to}: the failed generation did not stop")
+        return rollback
 
     try:
-        plan = build_upgrade_plan(vibe_path=vibe_path, version=rollback_to)
+        plan = build_upgrade_plan(vibe_path=vibe_path, version=rollback_to, package_name=rollback_package)
     except Exception as exc:
         rollback.update(state="failed", error=f"cannot build a pinned install for {rollback_to}: {exc}")
         record(rollback)
@@ -406,7 +431,7 @@ def _roll_back_failed_upgrade(
         rollback.update(
             state="failed",
             service_pid=service_pid,
-            error=f"{rollback_to} started but service pid {service_pid} did not acquire the service lock",
+            error=f"{rollback_to} started but service pid {service_pid} did not finish starting",
         )
         record(rollback)
         return rollback
@@ -437,6 +462,7 @@ def _run_restart_job(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     rollback_to: str | None = None,
+    rollback_package: str | None = None,
 ) -> int:
     # "service": restart only the service process, leaving the Web UI process
     # running (a config change shouldn't tear down the open Web UI). "all"
@@ -490,6 +516,7 @@ def _run_restart_job(
                 try:
                     _roll_back_failed_upgrade(
                         rollback_to=rollback_to,
+                        rollback_package=rollback_package,
                         vibe_path=vibe_path,
                         start_ui=restart_ui,
                         backup_watermark=backup_watermark,
@@ -525,6 +552,7 @@ def _run_restart_job(
             # restart with no `rollback` record is readable: armed and killed
             # before it could recover, versus never recoverable at all.
             "rollback_to": rollback_to,
+            "rollback_package": rollback_package,
             "old_pid": old_pid,
             "new_pid": None,
             "log_path": str(log_path),
@@ -688,17 +716,23 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
-    rollback_to: str | None = None,
+    rollback_to: RollbackTarget | None = None,
 ) -> dict:
     """Spawn the detached restart job.
 
-    `rollback_to` is the version currently installed, and passing it is what
+    `rollback_to` is the install currently on the machine, and passing it is what
     makes this restart recoverable: if the restart fails and leaves nothing
-    holding the service lock, the job reinstalls exactly that version, puts back
+    holding the service lock, the job reinstalls exactly that release, puts back
     the database if the new one migrated it, and starts the service again. Only
     an upgrade has an answer for it -- a plain restart is already running the
     version it would roll back to, so there is nothing to reinstall and the
     failure is the operator's to look at.
+
+    It arrives as one value from `rollback_target()` rather than as a version and
+    a distribution name, because a caller that can pass one without the other
+    eventually does, and the pin it produces then names a release that was never
+    published. The argv below is the only place the two are apart, and only
+    because a command line has no other shape.
     """
     from core.memory.ui_access import process_ui_read_secret
     from storage.migrations import guard_source_checkout_default_state_bootstrap
@@ -719,7 +753,9 @@ def schedule_restart(
     if prepare_show_runtime:
         command.append("--prepare-show-runtime")
     if rollback_to:
-        command.extend(["--rollback-to", rollback_to])
+        command.extend(["--rollback-to", rollback_to.version])
+        if rollback_to.package:
+            command.extend(["--rollback-package", rollback_to.package])
     env = get_restart_environment(vibe_path=vibe_path)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -790,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vibe-path")
     parser.add_argument("--prepare-show-runtime", action="store_true")
     parser.add_argument("--rollback-to")
+    parser.add_argument("--rollback-package")
     args = parser.parse_args(argv)
     return _run_restart_job(
         job_id=args.job_id,
@@ -799,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
         scope=args.scope,
         prepare_show_runtime=args.prepare_show_runtime,
         rollback_to=args.rollback_to,
+        rollback_package=args.rollback_package,
     )
 
 

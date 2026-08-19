@@ -704,17 +704,25 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             self.assertFalse(runtime.current_process_owns_service_instance())
 
-    def test_verified_service_running_follows_the_lock_not_the_lock_record(self):
-        """The held lock is the fact; a readable holder pid is not required.
+    def test_a_working_service_is_a_held_lock_plus_the_holders_own_report(self):
+        """"Something is holding the lock" is not "this instance has a service".
 
-        ``start_service`` refuses on ``lock_available`` alone and does not care
-        whether a holder pid can be read, so the doctor predicate that decides
-        whether an instance has a working service has to agree with it. Corrupting
-        the record while the lock stays held is the state where those two can
-        disagree: it is what a service looks like in the window between taking the
-        lock and writing its record, and answering "no service is running" there
-        would report downtime for a running instance and prescribe a start that
-        cannot succeed.
+        The lock is taken before the database is migrated, so every failed
+        migration passes through a state where it is held by a process that will
+        never serve anything. That state is what the incident looked like, and a
+        predicate that answers "running" there is the reason a dark instance was
+        reported healthy -- so the holder's own claim to have finished starting is
+        part of the fact, not a detail of it.
+
+        An unreadable record while the lock is held reads as not running for the
+        same reason: nothing has claimed to have started. It is indistinguishable
+        from the mid-startup window, and calling that window "running" is exactly
+        the mistake. The bounded wait, not this predicate, is what tells a slow
+        start from a stuck one.
+
+        ``service_instance_lock_available`` still answers the different question
+        ``start_service`` asks -- whether anything at all would block a second
+        start -- and stays true to the lock alone.
         """
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -730,11 +738,16 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
                         runtime.acquire_service_instance_lock()
                         try:
+                            self.assertFalse(runtime.verified_service_running())
+                            self.assertFalse(runtime.service_instance_lock_available()[0])
+
+                            runtime.mark_service_instance_started()
                             self.assertTrue(runtime.verified_service_running())
 
                             lock_path.write_text("", encoding="utf-8")
                             self.assertIsNone(runtime.service_instance_lock_available()[1])
-                            self.assertTrue(runtime.verified_service_running())
+                            self.assertFalse(runtime.service_instance_lock_available()[0])
+                            self.assertFalse(runtime.verified_service_running())
                         finally:
                             runtime.release_service_instance_lock()
 
@@ -783,6 +796,54 @@ class RuntimeServiceLockTests(unittest.TestCase):
             lock_path.write_text(json.dumps({"pid": os.getpid(), "phase": "running"}), encoding="utf-8")
             with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
                 self.assertTrue(runtime.service_instance_started(os.getpid()))
+
+
+class ReadinessWaitIsNeverOptionalTests(unittest.TestCase):
+    """The class of bug this closes, stated once instead of caught once per site.
+
+    Three separate starters had each decided for themselves that a recorded pid
+    meant the wait could be skipped, and each was wrong in the same way, and each
+    cost its own review round. The mistake is available to every future starter
+    for as long as the two predicates sit next to each other, so it is worth a
+    test rather than three fixes: a fourth one written the same way fails here,
+    where the reason is written down, instead of in an incident.
+
+    Stated as the property -- no starter makes the wait conditional on the lock --
+    rather than as the list of starters, so a module added later is covered
+    without editing this.
+    """
+
+    PRODUCTION_MODULES = (
+        Path(__file__).resolve().parents[1] / "vibe" / "runtime.py",
+        Path(__file__).resolve().parents[1] / "vibe" / "cli.py",
+        Path(__file__).resolve().parents[1] / "vibe" / "restart_supervisor.py",
+        Path(__file__).resolve().parents[1] / "scripts" / "incus_regression_supervisor.py",
+    )
+
+    def test_no_starter_makes_the_readiness_wait_conditional_on_the_lock(self):
+        import ast
+
+        for module in self.PRODUCTION_MODULES:
+            tree = ast.parse(module.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.If):
+                    continue
+                if "service_pid_recorded" not in ast.dump(node.test):
+                    continue
+                guarded = [*node.body, *node.orelse]
+                waits = [
+                    child
+                    for branch in guarded
+                    for child in ast.walk(branch)
+                    if isinstance(child, ast.Call) and getattr(child.func, "attr", None) == "wait_for_service_ready"
+                ]
+                self.assertEqual(
+                    waits,
+                    [],
+                    f"{module.name}:{node.lineno} waits for readiness only when the lock says so; "
+                    "the lock is taken before the database is migrated, so that is the case the "
+                    "wait exists for",
+                )
 
 
 if __name__ == "__main__":

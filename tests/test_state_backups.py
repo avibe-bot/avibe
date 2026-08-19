@@ -941,8 +941,9 @@ def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path
     assert ("second attempt",) in _db_contents(rollback_point / backups.REPLACED_DATABASE_NAME)[1][1]
 
 
+@pytest.mark.parametrize("linking_available", [True, False], ids=["same-filesystem", "cross-filesystem"])
 def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linking_available: bool
 ) -> None:
     # The property: at no point during a restore does the machine have no
     # database, and no copy of anyone's data is destroyed before its replacement
@@ -950,6 +951,14 @@ def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacemen
     # interrupts the swap at the one instant they can be violated -- a rename
     # that fails, which is what a crash, a full disk, or a killed process looks
     # like from here.
+    #
+    # Run on both filesystem layouts, because the property is about the machine
+    # and not about the fast path. A state directory on its own mount refuses the
+    # hard link, and an implementation that answers that refusal by MOVING the
+    # live database has already broken the property before anything fails: from
+    # then until the rename, `vibe.sqlite` does not exist. That is not a rarity
+    # to accept -- it is the recovery step of a failed upgrade, running on a
+    # machine that is already down.
     db_path = tmp_path / "vibe.sqlite"
     backups_dir = tmp_path / "backups"
     _stamp(db_path, "20260806_0047")
@@ -957,6 +966,12 @@ def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacemen
         conn.execute("create table payload (value text)")
         conn.execute("insert into payload (value) values ('before the upgrade')")
     rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+
+    if not linking_available:
+        def refuse_link(*args, **kwargs):
+            raise OSError(errno.EXDEV, "cross-device link")
+
+        monkeypatch.setattr(backups.os, "link", refuse_link)
 
     with sqlite3.connect(db_path) as conn:
         conn.execute("insert into payload (value) values ('first attempt')")
@@ -966,6 +981,10 @@ def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacemen
 
     with sqlite3.connect(db_path) as conn:
         conn.execute("insert into payload (value) values ('second attempt')")
+    # A write-ahead log belonging to the live generation, which the displacement
+    # has to take a copy of and only then clear: it is the file SQLite would
+    # otherwise replay into whatever database arrives under this name next.
+    db_path.with_name(db_path.name + "-wal").write_bytes(b"live write-ahead log")
 
     real_replace = os.replace
 
@@ -977,8 +996,11 @@ def test_an_interrupted_swap_leaves_a_live_database_and_the_previous_displacemen
     with pytest.raises(OSError):
         backups.restore_sqlite_backup(rollback_point, db_path)
 
-    # The database the machine is running on is still there, still complete.
+    # The database the machine is running on is still there, still complete, and
+    # still with the write-ahead log that holds the rest of it.
+    assert db_path.exists()
     assert ("second attempt",) in _db_contents(db_path)[1][1]
+    assert db_path.with_name(db_path.name + "-wal").read_bytes() == b"live write-ahead log"
     # And the copy the previous attempt displaced was not spent making room for
     # a displacement that never landed.
     assert ("first attempt",) in _db_contents(displaced)[1][1]

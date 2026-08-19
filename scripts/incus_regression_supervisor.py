@@ -88,17 +88,18 @@ def main() -> int:
         memory_ui_secret=memory_ui_secret,
     )
 
-    if not runtime.service_pid_recorded(service_pid):
-        ready_service_pid = runtime.wait_for_service_ready(
-            service_pid,
-            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-        )
-        if ready_service_pid is None:
-            runtime.write_status("error", "service did not become ready", service_pid, ui_pid)
-            runtime.stop_ui()
-            runtime.stop_service()
-            return 1
-        service_pid = ready_service_pid
+    # Asked unconditionally: the predicate that used to guard this is the lock,
+    # which is held by a process that has not finished migrating and may never.
+    ready_service_pid = runtime.wait_for_service_ready(
+        service_pid,
+        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+    )
+    if ready_service_pid is None:
+        runtime.write_status("error", "service did not become ready", service_pid, ui_pid)
+        runtime.stop_ui()
+        runtime.stop_service()
+        return 1
+    service_pid = ready_service_pid
     runtime.write_status("running", "incus regression started", service_pid, ui_pid)
 
     while not stopping:

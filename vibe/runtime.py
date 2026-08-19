@@ -839,22 +839,31 @@ def verified_service_running() -> bool:
     start, and a restart record describing that failure must not be demoted to
     history because the wreckage is still running.
 
-    The held lock *is* that fact, so this asks for nothing else. Reading the holder
-    pid out of the lock record and requiring it to parse would be strictly weaker
-    than the signal already in hand: the record is written just after the lock is
-    taken, so a service caught in that window -- or one whose record was corrupted
-    -- holds the lock while answering no pid, and calling that "no service" both
-    contradicts the lock and disagrees with ``start_service``, which refuses on
-    ``lock_available`` alone and does not care whether a holder pid could be read.
-    A dead holder cannot keep the lock either, since the kernel drops it when the
-    process goes, so liveness needs no separate check.
+    That argument does not stop at the lock, and this function used to. A process
+    that acquired the lock and never finished starting is not a working service
+    either -- it is the same failed start one step further along, since the lock is
+    taken BEFORE the database is migrated and the controller built. So the holder
+    must also have published ``SERVICE_PHASE_RUNNING``. Without that, a release
+    that hangs in its migration holds the lock forever and reads as healthy, which
+    is precisely the state the upgrade rollback exists to end.
 
-    Cheap by construction: one open and one non-blocking lock attempt, and unlike
-    the broader probe it never scans the process table.
+    A dead holder cannot keep the lock, since the kernel drops it when the process
+    goes, so liveness needs no separate check beyond that.
+
+    This is the one owner of "does this instance have a working service".
+    ``service_instance_lock_available`` owns the different question ``start_service``
+    asks -- whether anything at all would block a second start -- and callers must
+    not mix them: a holder mid-startup blocks a start AND is not yet running, and
+    both answers are correct for their own question.
+
+    Cheap by construction: one open, one non-blocking lock attempt, and one small
+    read, and unlike the broader probe it never scans the process table.
     """
 
-    lock_available, _holder_pid = service_instance_lock_available()
-    return not lock_available
+    lock_available, holder_pid = service_instance_lock_available()
+    if lock_available:
+        return False
+    return holder_pid is not None and service_instance_started(holder_pid)
 
 
 def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERVICE_SLOW_START_TIMEOUT_SECONDS) -> bool:
