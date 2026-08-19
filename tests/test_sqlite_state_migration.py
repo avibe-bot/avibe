@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.exc import IntegrityError
@@ -33,7 +35,14 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260819_0056"
+HEAD_REVISION = "20260819_0057"
+# ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
+# Alembic cannot re-emit them when batch mode recreates a table. Every migration that
+# rebuilds one therefore passes this convention; the rebuild simulated below has to pass
+# the same one to reproduce what those migrations actually do.
+_MIGRATION_FK_NAMING_CONVENTION = {
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"
+}
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -742,11 +751,15 @@ def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path) ->
 
 
 def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: Path) -> None:
-    # The repair replays unconditionally, so every database that reaches head replays
-    # the branch over a schema that already has it -- including the backfill in
+    # The repair replays unconditionally, so every database that reaches it replays the
+    # branch over a schema that already has it -- including the backfill in
     # 20260725_0037, which writes rows rather than DDL. That is only safe while every
     # replayed revision is a no-op against what it finds, so pin exactly that: same
     # schema, and a row the backfill would otherwise duplicate or overwrite left alone.
+    #
+    # Upgrade to the repair itself rather than to head. The subject here is the replay,
+    # and a later revision is free to change the schema deliberately -- as 20260819_0057
+    # does -- which would otherwise read as the replay having damaged something.
     db_path = _upgraded_db(tmp_path / "healthy.sqlite", "20260817_0055")
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -760,7 +773,7 @@ def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: 
         conn.commit()
     before = _schema_of(db_path)
 
-    command.upgrade(migrations.alembic_config(db_path), "head")
+    command.upgrade(migrations.alembic_config(db_path), _REPAIR_REVISION)
 
     assert _schema_of(db_path) == before
     with sqlite3.connect(db_path) as conn:
@@ -768,7 +781,7 @@ def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: 
             "select token, session_id, created_at from media_object_references"
         ).fetchall() == [("tok", "ses", "original")]
         assert conn.execute("select version_num from alembic_version").fetchall() == [
-            (HEAD_REVISION,)
+            (_REPAIR_REVISION,)
         ]
 
 
@@ -948,6 +961,305 @@ def test_session_queue_hold_removal_is_schema_complete_and_reversible(
             "from agent_sessions where id='ses_queue_hold'"
         ).fetchone()
     assert restored == ("open", 1, None)
+
+
+def _column_defaults(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """Every stored column default in the database, keyed by (table, column)."""
+    tables = [
+        row[0]
+        for row in conn.execute(
+            "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+        )
+    ]
+    return {
+        (table, row[1]): row[4]
+        for table in tables
+        for row in conn.execute(f"pragma table_info('{table}')")
+        if row[4] is not None
+    }
+
+
+def _rebuild_every_table(db_path: Path) -> None:
+    """Run the no-op batch rebuild Alembic performs for a SQLite table alteration.
+
+    This leaves the database only good enough to read column defaults back from: batch
+    mode cannot reflect an expression-based index, so rebuilding every table drops the
+    partial and expression indexes this schema uses. Do not reuse it to assert anything
+    about indexes.
+    """
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            operations = Operations(MigrationContext.configure(conn))
+            tables = [
+                row[0]
+                for row in conn.exec_driver_sql(
+                    "select name from sqlite_master where type = 'table' "
+                    "and name not like 'sqlite_%' and name <> 'alembic_version'"
+                )
+            ]
+            for table in tables:
+                with operations.batch_alter_table(
+                    table,
+                    recreate="always",
+                    naming_convention=_MIGRATION_FK_NAMING_CONVENTION,
+                ):
+                    pass
+            conn.commit()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("schema", ["declared", "migrated"])
+def test_no_table_rebuild_can_corrupt_a_column_default(tmp_path: Path, schema: str) -> None:
+    """A table rebuild must preserve every column default, in every table.
+
+    Alembic alters a SQLite column by reflecting the table and recreating it, and
+    reflection hands a server default back as a ``TextClause``. Recompiling one
+    re-reads ``:name`` as a bind parameter, so a default containing a colon is
+    rewritten -- that is how ``20260811_0050`` silently turned
+    ``message_deliveries.delivery_history_json`` into invalid JSON while replacing
+    an unrelated check constraint.
+
+    Asserting over every default in the schema is what makes this durable: the
+    property holds for defaults nobody has written yet, so a colon-bearing default
+    added to any table fails here when it is declared rather than one unrelated
+    rebuild later. Both the declared schema and the migrated one are checked
+    because they are separately authored and can disagree.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    if schema == "declared":
+        engine = create_sqlite_engine(db_path)
+        try:
+            metadata.create_all(engine)
+        finally:
+            engine.dispose()
+    else:
+        run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        before = _column_defaults(conn)
+    assert before, "expected the schema under test to declare column defaults"
+
+    _rebuild_every_table(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        after = _column_defaults(conn)
+    drifted = {
+        key: (before.get(key), after.get(key))
+        for key in before.keys() | after.keys()
+        if before.get(key) != after.get(key)
+    }
+    assert drifted == {}
+
+
+def test_head_column_defaults_satisfy_their_own_table_constraints(tmp_path: Path) -> None:
+    """A defaulted column must accept an insert that omits it.
+
+    The whole point of a server default is that a writer may leave the column out,
+    so a default the table's own constraints reject is a broken column. This is the
+    reachable half of the ``delivery_history_json`` defect: the corrupted default was
+    not valid JSON, and ``ck_message_deliveries_history_json`` refused every insert
+    that relied on it.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_defaults")
+        _insert_agent_session(
+            conn,
+            row_id="ses_defaults",
+            scope_id="scope_defaults",
+            anchor="defaults",
+            workdir=None,
+            backend="codex",
+            native="native-defaults",
+            last_active="now",
+        )
+        conn.execute(
+            "insert into message_deliveries ("
+            "id, session_id, priority, state, snapshot_sha256, dispatch_sha256, "
+            "submitted_at, updated_at"
+            ") values ('md_defaults', 'ses_defaults', 'p1', 'queued', 'h', 'h', 'now', 'now')"
+        )
+        stored = conn.execute(
+            "select delivery_history_json from message_deliveries where id = 'md_defaults'"
+        ).fetchone()[0]
+        conn.commit()
+
+    assert json.loads(stored) == {"version": 1, "events": []}
+
+
+def test_delivery_history_default_repair_preserves_rows_and_reverses(tmp_path: Path) -> None:
+    """0057 changes that one default and nothing else, over data and back.
+
+    The repair rebuilds a table four others reference, so the rows that already
+    exist are the thing at risk. One row of each shape a real database can hold is
+    seeded -- a reference-clean row, and one whose parent is missing, because SQLite
+    enforces foreign keys only when a connection asks it to and ``20260819_0056``
+    exists to repair databases that are already damaged. Refusing to upgrade over
+    pre-existing damage would pin such an install below head for a reason this
+    revision did not cause.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260819_0056")
+
+    history = json.dumps({"version": 1, "events": [{"kind": "queued"}]})
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_history")
+        _insert_agent_session(
+            conn,
+            row_id="ses_history",
+            scope_id="scope_history",
+            anchor="history",
+            workdir=None,
+            backend="codex",
+            native="native-history",
+            last_active="now",
+        )
+        for row_id, session_id in (("md_clean", "ses_history"), ("md_orphan", "ses_missing")):
+            conn.execute(
+                "insert into message_deliveries ("
+                "id, session_id, priority, state, snapshot_sha256, dispatch_sha256, "
+                "submitted_at, updated_at, delivery_history_json"
+                ") values (?, ?, 'p1', 'queued', 'h', 'h', 'now', 'now', ?)",
+                (row_id, session_id, history),
+            )
+        conn.commit()
+        seeded = _schema_fingerprint(conn)
+        rows_before = _delivery_rows(conn)
+
+    # The check the corrupted default violates is the reason this repair exists, so
+    # prove the fingerprint actually captured it: a comparison over a set that silently
+    # came out empty would hold no matter what the rebuild did.
+    assert "ck_message_deliveries_history_json" in " ".join(
+        seeded["constraints"]["message_deliveries"]
+    )
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        upgraded = _schema_fingerprint(conn)
+        assert _delivery_rows(conn) == rows_before
+        assert conn.execute("select version_num from alembic_version").fetchone() == (
+            HEAD_REVISION,
+        )
+    # Only that one column's default may differ -- every other column, constraint,
+    # index, and table in the database is untouched.
+    assert _fingerprint_difference(seeded, upgraded) == {
+        ("message_deliveries", "delivery_history_json")
+    }
+
+    command.downgrade(migrations.alembic_config(db_path), "20260819_0056")
+    with sqlite3.connect(db_path) as conn:
+        assert _schema_fingerprint(conn) == seeded
+        assert _delivery_rows(conn) == rows_before
+
+
+def _delivery_rows(conn: sqlite3.Connection) -> list[tuple[object, ...]]:
+    return conn.execute(
+        "select id, session_id, delivery_history_json from message_deliveries order by id"
+    ).fetchall()
+
+
+def _schema_fingerprint(conn: sqlite3.Connection) -> dict[str, object]:
+    """Column shapes, table constraints, indexes, and foreign keys, whole database.
+
+    Constraints are compared as sets rather than as DDL text because a batch rebuild
+    re-emits them in reflection order, which is not the order they were written in.
+    """
+    tables = sorted(
+        row[0]
+        for row in conn.execute(
+            "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+        )
+    )
+    columns = {
+        (table, row[1]): tuple(row[2:6])
+        for table in tables
+        for row in conn.execute(f"pragma table_info('{table}')")
+    }
+    constraints = {
+        table: {
+            re.sub(r"\s+", " ", item)
+            for item in _split_table_constraints(
+                conn.execute(
+                    "select sql from sqlite_master where type = 'table' and name = ?",
+                    (table,),
+                ).fetchone()[0]
+            )
+        }
+        for table in tables
+    }
+    others = {
+        (row[0], row[1]): re.sub(r"\s+", " ", row[2] or "")
+        for row in conn.execute(
+            "select type, name, sql from sqlite_master "
+            "where type <> 'table' and name not like 'sqlite_%'"
+        )
+    }
+    foreign_keys = {
+        table: sorted(tuple(row[2:]) for row in conn.execute(f"pragma foreign_key_list('{table}')"))
+        for table in tables
+    }
+    return {
+        "columns": columns,
+        "constraints": constraints,
+        "others": others,
+        "foreign_keys": foreign_keys,
+    }
+
+
+_TABLE_CONSTRAINT_KEYWORDS = ("constraint", "check", "foreign", "primary", "unique")
+
+
+def _split_table_constraints(sql: str) -> list[str]:
+    """Table-level constraints declared in a CREATE TABLE body.
+
+    Column definitions are deliberately dropped: ``pragma table_info`` reports column
+    shape exactly, so parsing it out of the DDL text again would only add a second,
+    weaker reading of the same fact. A plain ``split(",")`` also cannot do this --
+    ``check (state in ('a','b'))`` puts commas inside parentheses and a default like
+    ``'{"a":1,"b":2}'`` puts one inside a string literal -- so both are tracked.
+    """
+    body = sql[sql.index("(") + 1 : sql.rindex(")")]
+    items: list[str] = []
+    depth = 0
+    quoted = False
+    current: list[str] = []
+    for char in body:
+        if char == "'":
+            # SQLite escapes a quote by doubling it, which this toggle handles: the
+            # second quote of '' re-enters the literal.
+            quoted = not quoted
+        elif not quoted and char == "(":
+            depth += 1
+        elif not quoted and char == ")":
+            depth -= 1
+        if char == "," and depth == 0 and not quoted:
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    items.append("".join(current).strip())
+    return [
+        item
+        for item in items
+        if item.split(" ", 1)[0].lower() in _TABLE_CONSTRAINT_KEYWORDS
+    ]
+
+
+def _fingerprint_difference(
+    before: dict[str, object], after: dict[str, object]
+) -> set[tuple[str, str]]:
+    """(table, column) pairs whose shape changed; raises if anything else did."""
+    for key in ("constraints", "others", "foreign_keys"):
+        assert before[key] == after[key], f"{key} changed"
+    before_columns = before["columns"]
+    after_columns = after["columns"]
+    assert before_columns.keys() == after_columns.keys()
+    return {key for key in before_columns if before_columns[key] != after_columns[key]}
 
 
 def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
