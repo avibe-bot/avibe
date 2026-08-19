@@ -9,10 +9,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
+import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
-import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
+import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source, UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -84,6 +85,25 @@ const takeoverChain: AgentChain = {
   supply_state: 'ok',
 };
 
+const usageSummary: UsageSummary = {
+  window_days: 30,
+  from_day: '2026-07-20',
+  to_day: '2026-08-18',
+  totals: { requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 },
+  sources: [{
+    source_id: 'src_retained',
+    label: 'Retained source',
+    last_metered_at: '2026-08-18T03:14:00+00:00',
+    requests: 12,
+    token_reports: 12,
+    input_tokens: 148230,
+    cached_input_tokens: 96010,
+    output_tokens: 4120,
+    models: [{ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
+  }],
+  days: [{ day: '2026-08-18', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
+};
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -101,6 +121,7 @@ const renderPage = (sources: Source[]) => {
   ]);
   vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+  vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
   return render(
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
@@ -163,13 +184,17 @@ describe('SettingsModelsPage surface branches', () => {
     expect(listSources).toHaveBeenCalledTimes(refreshesBeforeCreate + 1);
   });
 
-  it('renders Frame 09 without tabs when every backend is direct and no source exists', async () => {
+  it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
     renderPage([]);
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
     expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeTruthy();
-    expect(screen.queryByRole('tab')).toBeNull();
+    // Frame 09 is what the `sources` tab shows here — not what the Hub shows
+    // instead of its tabs. It is still Frame 09's body: none of the gateway
+    // overview leaks in beside it.
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
   });
 
   it('renders the no-backend state when every authoritative CLI is absent', async () => {
@@ -897,5 +922,85 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
     expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+});
+
+// How the usage report is READ. What it says once read is `UsageTab.test.tsx`'s
+// subject; the property here is that the read is the tab's own — off the first
+// paint, live on every open, and spanning whatever the control was left on.
+describe('SettingsModelsPage usage region', () => {
+  const openUsage = () => userEvent.click(screen.getByRole('tab', { name: /^Usage$|^用量$/ }));
+
+  // The ledger outlives the Sources it metered — 62 days of retention, and a
+  // vanished Source still named by its id — so the route to it cannot be a branch
+  // of currently having one. Deleting the last source may not delete the only way
+  // to read what it cost, and a user reading the report may not be thrown off it
+  // by their own deletion.
+  it('MH-USAGE-022: reaches the report from every landing the Hub can draw', async () => {
+    // Keyed by the landing itself: a `Record<ModelsSurfaceKind, …>` cannot omit
+    // one, so a landing added later fails to compile here rather than quietly
+    // shipping without a route. The loop stays inside one case because a row's
+    // evidence has to be a case the catalog can resolve by name.
+    const landings: Record<ModelsSurfaceKind, Source[]> = {
+      direct_empty: [],
+      gateway: [retainedSource],
+    };
+
+    for (const [landing, sources] of Object.entries(landings)) {
+      cleanup();
+      vi.restoreAllMocks();
+      renderPage(sources);
+
+      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(2));
+      await openUsage();
+      await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith(30));
+    }
+  });
+
+  it('MH-USAGE-020: leaves the report unread until its tab is opened, then reads the default span', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getUsageSummary);
+
+    // The landing is what decides routing. A report nobody is looking at may
+    // not be part of the read that draws it.
+    expect(read).not.toHaveBeenCalled();
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledWith(30));
+  });
+
+  it('re-reads with the span the control was moved to', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    await openUsage();
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole('radio', { name: /^7d$|^7 天$/ }));
+    await waitFor(() => expect(read).toHaveBeenLastCalledWith(7));
+  });
+
+  it('re-reads on every open, because the figure is live', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^来源与网关$/ }));
+    await openUsage();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+
+  it('retries the read the tab failed on, at the same span', async () => {
+    renderPage([retainedSource]);
+    const read = vi.mocked(modelsApi.getUsageSummary);
+    read.mockRejectedValueOnce(new TypeError('usage unread'));
+    await screen.findByText('Retained source');
+    await openUsage();
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/ }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(read.mock.calls.map(([days]) => days)).toEqual([30, 30]);
   });
 });

@@ -163,7 +163,7 @@ scenarios:
     status: covered
     kind: regression
     layer: contract
-    test: ui/src/components/workbench/Composer.attachmentRetry.test.tsx
+    test: ui/src/components/workbench/Composer.attachmentRetry.test.tsx::MESSAGE-DELIVERY-025
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered

@@ -66,10 +66,19 @@ export type SourceState = {
   detail_key?: SourceDetailKey | null;
 };
 
+/**
+ * The 額度 block of `source.schema.json`, mirrored so the contract stays typed.
+ *
+ * Nothing renders it: `cycle_used_pct` and `month_spend_cents` have one writer
+ * each (`migration.py`, both `None`), so every value the UI could receive is
+ * absent. The tab that used to promise 額度 reports metered tokens instead — see
+ * `UsageTab.tsx`. Kept as a mirror rather than deleted because the contract file
+ * still declares the fields; drop it when the contract does.
+ */
 export type SourceUsage = {
   cycle_used_pct?: number | null;
   month_spend_cents?: number | null;
-  /** ISO 4217, e.g. USD / CNY. Absent means USD (see formatSpend). */
+  /** ISO 4217, e.g. USD / CNY. Absent means USD. */
   currency?: string | null;
   /** v3, subscription sources only: when the current cycle is projected to run
    *  out at the observed burn rate. null when unknown or not projectable. */
@@ -504,6 +513,79 @@ export type RuntimeDependency = {
     error_key?: 'settings.models.install.fail.detail' | null;
   };
 };
+
+// ── usage-summary.schema.json ───────────────────────────────────────────
+/**
+ * Metered token usage over a trailing local-day window. A REPORT ONLY: the
+ * schema forbids any consumer feeding it back into resolution, admission, or
+ * cooldown, and the UI honours that by never reading it outside the usage tab.
+ *
+ * FIELD names are the schema's exactly, as everywhere in this file. The three
+ * per-dimension TYPE names are `UsageBy*` rather than the schema's `SourceUsage`
+ * / `ModelUsage` / `DayUsage`: `SourceUsage` is already taken above by
+ * source.schema.json's cycle-quota-and-spend projection, which is a different
+ * concept on a different document, and shadowing it would make「用量」ambiguous
+ * in exactly the file that exists to remove ambiguity.
+ */
+export type UsageCounters = {
+  /** Self-measured upstream calls that reached the model. One turn contributes
+   *  more than one when it failed over. Always available. */
+  requests: number;
+  /** Metered calls whose upstream response carried a token report. Never
+   *  greater than `requests`; a shortfall means MISSING REPORTS, not zero
+   *  usage, so no view may present the difference as unused capacity. */
+  token_reports: number;
+  /** Vendor-reported input tokens composed per protocol, cache included. */
+  input_tokens: number;
+  /** Subset of `input_tokens` served from cache. */
+  cached_input_tokens: number;
+  output_tokens: number;
+};
+
+export type UsageByModel = UsageCounters & {
+  /** Ledger key, which for a long identifier is a head plus a digest rather
+   *  than the identifier itself — a string nobody typed. Display `label`,
+   *  never this. `usageProjection.modelIdentity` is the only reader. */
+  model_id: string;
+  /** The model identity this row was metered under, joined from current Source
+   *  config; null once the model is gone. */
+  label: string | null;
+};
+
+export type UsageBySource = UsageCounters & {
+  source_id: string;
+  /** Joined from current Source config; null once the Source is gone. */
+  label: string | null;
+  /** When this Source last had a call metered, served or billed-and-failed. */
+  last_metered_at: string | null;
+  /** Never empty. A model's identity is the (source, model) pair, so this
+   *  nesting is the contract's own answer to a flat model map. */
+  models: UsageByModel[];
+};
+
+export type UsageByDay = UsageCounters & { day: string };
+
+export type UsageSummary = {
+  /** The window the server actually served, after clamping to retention. Views
+   *  render THIS, never the number they asked for. */
+  window_days: number;
+  /** First local day of the window, present even when it carries no turn. */
+  from_day: string;
+  /** Last local day of the window, which is the host's today. */
+  to_day: string;
+  totals: UsageCounters;
+  /** One entry per Source with at least one metered turn, busiest first. */
+  sources: UsageBySource[];
+  /** One entry per local day carrying a metered turn, oldest first — a trend
+   *  series, so a day with no turn is ABSENT rather than reported as zero. */
+  days: UsageByDay[];
+};
+
+/** `window_days` bounds from the schema. The offered options live in
+ *  `usageProjection` and are gated against these. */
+export const USAGE_WINDOW_MIN_DAYS = 1 as const;
+export const USAGE_WINDOW_MAX_DAYS = 62 as const;
+export const USAGE_DEFAULT_WINDOW_DAYS = 30 as const;
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;

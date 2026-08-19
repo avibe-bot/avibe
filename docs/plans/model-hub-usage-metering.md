@@ -1024,11 +1024,443 @@ verbatim.
 - [x] `ModelHubService.usage_summary` + RPC + `GET /api/models/usage`
 - [x] Contract row, response registry entry, and usage schema
 - [x] Unit and contract coverage
-- [ ] Stage 2: draw the 用量与额度 tab against this data
+- [x] Stage 2: draw the tab against this data, as 用量
 
-## Stage 2 note
+## Stage 2 — what shipped
 
-The tab is currently named 用量与额度 / "Usage and quota". After this stage the
-用量 half is real and the 额度 half is still unobtainable, so the label needs a
-design decision before stage 2 ships — renaming the tab to 用量 is the honest
-option unless a quota source appears.
+**The tab is named 用量 / "Usage".** The label was 用量与额度 / "Usage and quota",
+and the 额度 half has exactly one production writer:
+`core/handlers/model_hub/migration.py` writes `"cycle_used_pct": None`. Every
+non-null value in the repo is a mock or a schema example. So this is not a naming
+preference — a quota reading would be an invention, and the tab is named for what
+it can show. If a quota source ever appears, the label grows back with it.
+
+**Where the data becomes a view.** `usageProjection.ts` owns every derivation the
+tab could get wrong — the trailing local-day window, what a row may display, and
+the densification of a sparse trend — so each one is asserted as a property rather
+than inspected in JSX. `UsageTab.tsx` owns layout and copy and translates nothing
+into numbers. Three properties are worth naming because getting them wrong would
+be a lie rather than a glitch, and each is a catalog row (MH-USAGE-016..020):
+
+- the caption states the `window_days` the server *served*, never the number the
+  control asked for;
+- a `token_reports` shortfall reads as reports that never arrived, never as unused
+  capacity, which the schema forbids in as many words;
+- a model whose label is gone shows no identity at all, because its ledger key is a
+  digest; a gone Source keeps its `src_*` id, which is a string the user has seen.
+
+**The read is the tab's own.** It is deliberately not a member of
+`FIRST_PAINT_REGION_WHITELIST`: the landing decides routing, and a report nobody
+is looking at must not delay it. One effect owns both the open and the window
+change, since a window change is the same read over a different span, and
+`beginRegionRead` keeps the previous figure on screen while the new one lands.
+
+**Geometry.** `design.pen` has no frame for this tab on the local surface, so the
+block adapts `MS/ConfigPanel → cp-usage-body` and otherwise follows the source
+table directly above it — same 18px gutter, 36px head, 11px column labels, 12px
+radius. Importing a second panel's spacing into the middle of this one would read
+as two surfaces stitched together. Two deliberate departures: the day series is a
+column chart because the day count is a window parameter rather than a fixed five,
+and the panels stack because the table carries nested rows. No light-mode branch
+was needed — every ink resolves through a step both light blocks already re-anchor,
+and the chart's two colors are a wash and a `color-mix` accent, which flip on their
+own.
+
+**Catalog.** `tests/scenarios/model_hub/test_model_hub_catalog.py` previously
+resolved a row's evidence with `ast.parse`, so the capability's user-visible half
+could not be registered at all. A `.ts`/`.tsx` row now cites its own ID
+(`…/UsageTab.test.tsx::MH-USAGE-018`) and resolves to the single executable
+`it('MH-USAGE-018: …')` declaration that carries it. A vitest case's name is its
+docstring, so that is where the ID belongs — the same per-row greppability the
+Python docstring rule gives, and the evidence is runnable by ID
+(`vitest -t MH-USAGE-018`) rather than only greppable.
+
+The first version of this checker sliced each case's body instead and asked whether
+the ID appeared inside the slice. Two properties are why it was replaced rather than
+patched. Deciding where a case *ends* needs balanced delimiters, and a scan that
+small cannot tell a regex literal from division — so `/Couldn't refresh/i`, ordinary
+in this suite, read as a string opening and the slice swallowed eight sibling cases.
+And its guard against exactly that (re-parse the slice, require one declaration) ran
+the same scan, so the desync agreed with itself and passed. Reading only names
+removes the failure instead of guarding it: a wrong guess can lose a declaration,
+which fails the row loudly, but can never hand a row a neighbour's ID. Verified
+against vitest's own collection over the whole Model Hub UI suite — 873 collected
+cases, every unresolved one a parameterized `it.each` whose name does not exist in
+the source, and nothing resolved that vitest does not run.
+
+**Dead 额度 code removed with the rename.** Copy: `settings.models.usage.monthSpend`,
+`settings.models.usageTab`, and `settings.models.tabs` (a zero-caller duplicate of
+`shell.tab`). Formatters: `formatSpend` and `currencySymbol`, which had zero callers
+already on `master` — they render `month_spend_cents`, whose one writer is
+`migration.py`'s `None`, so the amount they format is unobtainable in production and
+keeping them only invites someone to wire it back up. What remains is
+`types.SourceUsage` and the `mockData` 额度 fields: the type mirrors
+`docs/plans/model-hub-contracts/source.schema.json`, which still declares the block,
+and is retired when the contract retires it.
+
+### Stage 2, round 2 (head `5957182`)
+
+Two P2 findings, **no class repeat** — head 1 (`7082c882e`) carried one finding about
+catalog evidence resolved textually, which neither of these touches — so the breaker is
+not tripped and the round is two closures rather than a diagnosis.
+
+**F1: the day series read a missing token report as an idle day.** `token_reports <=
+requests` is a contract, and the gap means *reports that never arrived* — the tab already
+says exactly that for the totals (MH-USAGE-018). The day series then contradicted it: it
+scaled and captioned days by tokens alone, so a window whose upstreams all answered
+without token counts drew every bar at zero and captioned itself
+「没有任何一天有计量数据」 — our own missing evidence reported as the user's idleness.
+
+The finding named the peak/quiet copy. The class — *the day series asks tokens a question
+only requests can answer* — has exactly three members inside `ByDayPanel`: that copy, the
+column height, and the per-column tooltip. So the fix is one predicate, not one call site:
+`UsageDayColumn` carries `requests` alongside `tokens`, `usageDayIsMetered` is the single
+place the series asks whether a day ran, and all three members read it. A no-peak window
+now splits into the two different windows it always was — one nobody used, and one whose
+upstreams never said what it cost (`byDay.quiet` vs `byDay.unreported`).
+
+Ruled *out* of the class on evidence rather than by assumption, by reading
+`core/handlers/model_hub/usage.py`: `usageIsEmpty` gates on `sources.length`, and
+`summary()` builds source rows from the same request-driven rows, so an unreported window
+still has sources and is not empty; the stat cards, `cached.none`, and the chart's
+aria-label each state a token figure they really do own.
+
+**F2: deleting the last Source took the ledger with it.** `directEmpty` was a top-level
+routing fork, so the Frame 09 landing replaced the whole tab shell — including the Usage
+tab. But the ledger outlives the Sources it meters: retention is 62 days and MH-USAGE-017
+exists precisely because a vanished Source keeps its `src_*` id in the report. A user who
+deletes their last source loses the only route to what it cost, and a user reading the
+report when a deletion lands is thrown off the tab mid-read.
+
+One rule replaces the fork: **the Hub always has its two tabs, and `directEmpty` decides
+the body of the `sources` tab.** That is fewer concepts than the alternative (a usage
+affordance inside `DirectHome` plus a route back out of it), and it fixes the mid-read
+eviction for free. MH-USAGE-022 states the property over `Record<ModelsSurfaceKind, …>`,
+so a third landing fails to compile rather than shipping without a route.
+
+**Known-by-design: Frame 09 is drawn without the tab strip.** The frame predates this tab
+and the Usage tab has no frame at all, so the frame's silence is the absence of the
+concept, not a decision about it. What Frame 09 decides is the *body* of the `sources`
+tab, and that is still Frame 09 there — asserted, including that no gateway-overview
+content leaks in beside it.
+
+**Evidence.** MH-USAGE-021 draws a window where every request came back unreported and
+asserts the copy plus each day's readout. The bar geometry itself is not asserted there:
+the floor is `max(2px, …)`, an inline CSS function jsdom's parser drops, so `style.height`
+reads empty for drawn and undrawn columns alike. The decision behind the floor is the
+assertable part and it is asserted where it lives — `usageDayIsMetered` over columns in
+`usageProjection.test.ts` — leaving only the pixel to the residual visual check that this
+tab already carries.
+
+### Stage 2, round 3 (head `d22cb479`) — breaker tripped
+
+Two P2 findings. **F1 repeats head 1's class on a second reviewed head**, so the breaker
+is mechanical: stop patching, diagnose at orchestrator level, record the scope decision.
+
+**The class: a text scan deciding which vitest declarations execute.** Head 1 flagged that
+the catalog accepted a non-executable case; the round-2 fix answered with a hand-written
+JS lexer in `test_model_hub_catalog.py` — comments, string and template literals, a regex
+heuristic. Head 3 then flagged a regex opening after `return`, which the heuristic reads as
+division because it only inspects the previous *character*.
+
+Naming the remaining members is what ends this. Measured against the fixture, the lexer
+accepted a fake declaration in **five** shapes — a regex after a keyword, JSX text, a
+`describe.skip` body, an `if (false)` body, and its own division heuristic — and the
+reviewer had reached one. Two of the four it never reached (`describe.skip`, `if (false)`)
+are ordinary code, not adversarial constructions. The class has no last member by
+construction: telling a regex from division needs the parser's state, and telling a skipped
+or unreachable declaration from a live one needs the run. Every future round buys one more
+patch and leaves the property unproved.
+
+**Scope decision (orchestrator, no owner escalation needed): delete the lexer and ask the
+collector.** `vitest list` answers "does this case run" definitively, and `npm test` — which
+is `vitest run` — already executes in CI's `build-linux-artifacts` job on the same commit,
+so the real collector costs no new job and no new dependency beyond a declared `js-yaml`.
+The action is reversible, contract-preserving (row shape and `path::ID` syntax unchanged),
+and smaller than what it replaces: 219 lines of scanner deleted for 126 lines of resolver
+plus gate.
+
+Duties split so neither side overclaims:
+
+| Question | Owner | Why there |
+| --- | --- | --- |
+| Row shape, cited file exists, ID greppable in it, no `expected_fail` on a UI row | `test_model_hub_catalog.py` | `ast`/text answers these exactly |
+| Does the cited ID name exactly one case vitest **runs** | `ui/scripts/validate-scenario-catalog.mjs` | only the collector knows |
+
+`scenarioCatalog.mjs` holds the resolution rules with no subprocess in them, so they stay
+unit-testable; the gate discovers `tests/scenarios/*/catalog.yaml` rather than listing
+them, reads each catalog's own `status_legend` so the two sides cannot drift into
+disagreeing policies, and throws if `tests/scenarios` is absent — this gate must never
+report "nothing to check" for the one input it exists to read. It collects only the cited
+files (9 rows, 3 files, ~0.3 s), not the whole 231-file suite.
+
+MH-CATALOG-002 moves to `ui/scripts/scenarioCatalog.test.mjs`, seeds one declaration of
+every shape, and asserts the set that resolves *equals* the set the fixture names as
+running — derived from the fixture text, so a shape added later is covered without editing
+the assertion. `it.each` is no longer disqualified on principle: the surviving property is
+"exactly one collected case named for the row", and a 2-row `it.each` fails it by count.
+
+**F2: every non-peak day's figures existed only in a hover `title`.** Keyboard,
+screen-reader, and touch users could reach the endpoints and the peak from the axis and
+nothing else — and `role="img"` on the chart hides the columns from assistive tech by
+design. One `readout(column)` helper now feeds both the tooltip and an `sr-only` list
+rendered as a *sibling* of the image (inside it, it would be hidden with everything else).
+No new i18n key: `byDay.column` is the same wording, so the two readings cannot disagree —
+which is how MH-USAGE-023 asserts it, tooltips against list items rather than against a
+list of days.
+
+### Stage 2, round 4 (head `82c46d5a0`) — breaker tripped again
+
+Two P2 findings, **both class repeats**, so the breaker trips a second time and both
+closures are made at the class owner rather than at the flagged site.
+
+| Class | Heads | What recurs |
+| --- | --- | --- |
+| A | 1, 3, 4 | A row can read `covered` while nothing executable backs it |
+| B | 3, 4 | The report states per-row figures through visual position alone |
+
+**Class A — the gate asked one catalog and passed three in silence.** Round 3's gate
+selected rows through each catalog's own `status_legend`, and `status_legend` maps a status
+to a *description string* in every catalog here but `model_hub`. Reading `test_required`
+off a string yields `undefined`, so `harness_command_task`, `memory_list`, and
+`message_delivery` contributed zero rows — the gate reported a clean 9/9 while three
+catalogs went unasked. That is the same failure the gate exists to prevent, one level up.
+
+The reviewer proposed normalizing the scalar legends. Rejected: inferring `test_required`
+from prose (`'deterministic scenario or contract coverage exists'` → true?) is a heuristic
+over English, the exact species of thing round 3 deleted from the Python side. **A row that
+*cites* a UI file must resolve, whatever its legend looks like** — simpler and strictly
+stronger. A citation is the row's own claim, exists in every catalog, and no legend shape
+can switch it off. Coverage went 9 rows / 1 catalog → 20 rows / 4 catalogs; collection
+still rides `npm test`, 1.7 s.
+
+Three citation shapes now resolve under one rule, because one notion (prefix) is what they
+have in common — a rule per catalog would be a policy each new catalog could contradict:
+
+| Shape | Written as | Resolves against |
+| --- | --- | --- |
+| Catalog ID | `path::MH-USAGE-024` | the case's own name |
+| Readable full name | `path::taskCommandPreview quotes an argv part …` | the full name with `' > '` flattened to `' '` |
+| File only | `path` | the file being collected at all — *deleted in round 5, below* |
+
+Two shapes that resolve to a running case and still prove nothing are rejected explicitly: a
+row citing a **sibling row's ID** (checked against the whole catalog's ID set, including
+pytest-evidenced rows), and a file-only citation whose file collects nothing.
+
+The gate immediately caught a real pre-existing defect it had been unable to see:
+`harness_command_task` **SCT-016** was `covered` on `taskCommandPreview quotes argv the way
+the shell would read it back`, a case name that no longer exists. Re-pointed to the live
+case; the row's claim was true, its citation had rotted.
+
+**Class B — one mechanism for every panel of per-row figures.** Round 3 answered the by-day
+chart with an `sr-only` sentence per day; head 4 flagged the by-source table, whose figures
+were unattributed `<span>`s in a CSS grid. Answering the second panel with a second
+mechanism invites a fifth round, so both panels now carry the same structure.
+
+Why roles and not a native `<table>` for the visible panel: the layout is a CSS grid
+(`--model-hub-usage-columns`) that collapses to one column below 767px, and a `<table>` can
+only stack through a `display` override — overriding `display` is exactly what strips the
+native table semantics it was chosen for. Explicit roles are unaffected by `display` and
+keep both the grid and the structure at every width. The by-day list became an `sr-only`
+native `<table>` (Tailwind's `sr-only` does not touch `display`), so the tab has one answer
+for "figures need row and column association" instead of two.
+
+A figure's column is **its position in its row** — which is what makes the header row an
+answer rather than decoration, in an ARIA table exactly as in a native one — and the cell
+repeats its header as a `md:hidden` label for the width where the header row is `display:none`.
+Between them the two cover both widths, so a per-cell `aria-colindex` restates what position
+already says; it earns its keep only for a row that skips a *middle* column, and the model
+row's empty `lastMetered` cell is the simpler way to not have one. Mutation-checked before
+deciding: dropping `aria-colindex` changed no observable association and no assertion, so it
+went.
+
+MH-USAGE-023 is reframed against the table (its `<li>`s are gone), still deriving every
+expectation from the tooltips so the two readings of a day cannot answer differently.
+MH-USAGE-024 is the class property, asked of *whatever* tables the tab renders: every body
+row has exactly one row header, states as many figures as there are columns (no row ends
+early and shifts the ones before it), and — where the headers can leave the accessibility
+tree — labels every figure with the header at its own position. Four mutations were run
+against it and all four fail: dropping `role="table"`, removing the model row's placeholder
+cell, removing the stacked labels, and reordering `SOURCE_COLUMNS`.
+
+### Stage 2, round 5 (head `28baeb512`) — class A, fifth appearance
+
+One P2 finding, and it is class A again: **a row can read `covered` while nothing executable
+is tied to *that row*.** Heads 1, 3, 4, 5. Each round's fix was correct about the level it
+was shown and defined the property by what the existing rows happened to say — which is what
+produced the next level.
+
+| Head | What the gate accepted | The question it was actually answering |
+| --- | --- | --- |
+| 1 | a commented-out declaration | does the cited case run |
+| 3 | a regex literal read as division | the same, one layer deeper |
+| 4 | rows selected through `status_legend` | which rows get asked |
+| 5 | a file-only citation | what counts as an answer |
+
+Round 4 accepted the file-only shape **because three legacy rows used it**. The reviewer
+showed why that cannot hold: `MEMORY-LIST-006` and `MEMORY-LIST-007` both cited
+`MemorySearchPanel.test.tsx` and nothing else, so deleting either row's case leaves the other
+row keeping the file collected and *both* rows green. A file runs for reasons that have
+nothing to do with the citing row.
+
+**Terminal rule, with no free parameter left for an adversary to probe:** a citation must
+name a case, and that name must resolve to **exactly one** case the collector observes in the
+cited file — for **every** citation a row makes, not for one key. The shape is deleted rather
+than weakened; there is no ID heuristic bolted onto a bare file.
+
+**The member the reviewer had not reached, which is where the rot was.** `memory_repair`
+states its UI half as `ui_contract: {test, case, inputs}`, so reading `row.test` alone left
+all five of its fully-written citations unasked — the round-4 legend hole again, in a
+different key. Four of the five were dead. `git log -S` traces three to `d6ea9ee0f`
+(#1401, merged 2026-08-14), which deleted 623 lines from `SettingsMemoryPage.test.tsx` and
+368 from `MemoryStatusPanel.test.tsx`; nothing read `ui_contract`, so the false claims sat
+there for five days. Those three `ui_contract` blocks are deleted — `status`,
+`expected_outputs`, and `related_tests` untouched, since only the case-level claim was
+provably false and asserting anything more about another capability's semantics is not mine
+to assert.
+
+`related_tests` and `canonical_tests` stay unread, and that is **the same rule rather than an
+exception to it**: they name a file and no case, so they cannot evidence a row — and they do
+not claim to. "Related" is a pointer.
+
+Two mechanics follow from measurement rather than from taste:
+
+- **Containment, not prefix.** `[MEMORY-LIST-004][MEMORY-LIST-006] browses …` is one case
+  answering two scenarios, each citing it by its own ID, so an ID is not always first. The
+  looseness is bounded by the pre-existing uniqueness count — a name reaching two cases fails
+  for the same reason as one reaching none.
+- **Parameterized cases without emulating printf.** `vitest list` *does* expand `it.each`, so
+  a citation's terms are the template's literal head plus each `inputs` entry, all contained
+  in one collected name. The literal tail is dropped rather than parsed because the count is
+  what decides: for `accepts the declared failure %s with result %s` with
+  `[memory_repair_failed, timed_out]`, one collected case carries all three terms and the
+  other seven carry two.
+
+The three bare-file rows were fixable as citations alone — their cases already carry their
+IDs, which §4 of the scenario-testing standard has required all along, so a bare-file row was
+the standard not being followed rather than a second legitimate convention. Zero test renames.
+Coverage went 20 rows / 1 legend-selected catalog → **22 citations across 22 rows**, and the
+standard now states the property so the next catalog writes citations that pass.
+
+### Stage 2, round 6 (head `aa051476e`) — a new class: a composite npm script swallows filters
+
+One P2 finding, on a line round 5 introduced, and it is **not** class A — it is the first
+appearance of a different class: **a composite npm script forwards `--` arguments only to its
+last command.** No breaker trip; a first appearance is a finding, not a pattern.
+
+```
+"test": "vitest run && npm run validate:catalog"
+npm test -- UsageTab.test.tsx
+  → vitest run && npm run validate:catalog UsageTab.test.tsx
+```
+
+npm appends the arguments to the *end* of the whole string, so the filter landed on the
+validator — which takes no path and ignored it — while vitest ran all 231 files unfiltered.
+Both halves still exited 0, so the failure is silent: the focused run AGENTS.md asks for
+first quietly becomes a four-minute full suite, and the argument that was supposed to narrow
+it is discarded by a command that never wanted it.
+
+The class has exactly one other member in `ui/package.json`, and checking it is what decided
+the fix. `"build": "npm run validate:imports && tsc -b && vite build"` is composite too, but
+its argument-taking command is **last**, so `npm run build -- --mode=x` reaches `vite build`
+by accident rather than by design. A rule of the form "put the arg-taking command last" is a
+rule about command order that nothing enforces and the next composite breaks again.
+
+**So the fix deletes the mechanism instead of wrapping it.** `"test"` returns to
+`vitest run`, and the gate reaches CI as a vitest case: `checkCatalogs()` is exported from
+`validate-scenario-catalog.mjs` with the CLI behind an `import.meta.url` guard, and
+`scenarioCatalog.test.mjs` asserts on it. A test case has no argument to misroute, and
+`npm test` already means "everything that must hold", so the gate needs no second entry
+point in CI to be reached.
+
+Both alternatives the reviewer offered were declined for the same reason. A wrapper script
+that parses `--` and forwards to each command keeps the hazard and adds a layer that hides
+it. A separate unfiltered CI command re-splits "what must hold" across two callers, which is
+how the gate could be forgotten on the next workflow edit — and `build-linux-artifacts`
+already runs `npm test`.
+
+What proved it: `npm test -- UsageTab.test.tsx` now runs 1 file / 14 cases, and the gate case
+fails with the resolver's own message when `MEMORY-LIST-006`'s citation is rotted to a
+nonexistent ID (reverted after checking). Full suite 231 files / 2943 tests, CLI gate 22
+citations across 22 rows, `tsc` clean, `eslint` clean, `npm run build` ✓.
+
+### Stage 2, round 7 (head `f5991f2a6`) — breaker tripped: a token figure states a number without saying it was measured
+
+One P2 finding, and it is a **class repeat on a second reviewed head** (`5957182` →
+`f5991f2a6`), so the breaker trips mechanically. As the orchestrator in a user-started
+session I recorded the scope decision and continued: the smallest complete action is clear,
+reversible, and changes no contract.
+
+The finding is about the copy round 2 introduced. `byDay.zero` claims 「这个区间的 token 用量
+是 0」 for a window whose upstreams never reported anything, because `usageDayColumns`
+carried `requests` and `tokens` and **dropped `token_reports`** — so no site in the day
+series could ask the coverage question even if its copy wanted to.
+
+**Why this is the same class, and why round 2's closure could not have held.** Round 2 named
+the class *the day series asks tokens a question only requests can answer* and closed it with
+`usageDayIsMetered`. That predicate is about activity, and it is still right about activity.
+What round 2 missed is that a bucket carries **three independent facts, not two**:
+
+| Counter | The question it alone answers |
+| --- | --- |
+| `requests` | did calls happen |
+| `token_reports` | did an upstream say what they cost |
+| `input_tokens + output_tokens` | how much |
+
+A rendered `0` is therefore three different readings — a cost reported as nothing, a cost
+nobody reported, and nothing having run at all — and round 2's projection could distinguish
+only the third. Round 2 also explicitly ruled the stat cards *out* of the class, on the
+evidence that they 「each state a token figure they really do own」. Ownership was the wrong
+test: owning the figure says nothing about whether the figure is a measurement.
+
+**The inventory, which is what makes this a class and not a line.** Every token figure the
+tab states, found by grepping every token expression in `UsageTab.tsx` rather than by
+recalling the panels — **8 members**, one of which round 2's ruling had cleared:
+
+1. the tokens stat card's value
+2. its input/output split note
+3. the cached-input card's note — 「No input tokens in this window」, the same defect one card
+   over: with nothing reported there were no input tokens *we know of*, and an absence of
+   reports is not an absence of usage
+4. the by-model row cell
+5. the by-source row cell
+6. the day bar's tooltip readout
+7. the sr-only day table cell
+8. the peak / no-peak sentence
+
+**The fix is one door plus an enumerable marker.** `useTokenText(counters, value)` is the only
+path from a token count to text, and coverage travels *with* the value rather than being
+checked by the caller, so a new token figure cannot be written without naming the counters it
+came from. `TokenFigure` wraps it in `<span data-usage-token="">`, which is not styling: it is
+what lets a test enumerate every node-shaped token figure on screen and assert they all went
+through the door — completeness by construction, which a per-site test cannot claim. Figures
+interpolated into translated sentences have no element of their own and call `useTokenText`
+directly; their sentence is then the asserted unit.
+
+**Two predicates, deliberately not one.** The first draft was `token_reports > 0` alone, and
+it would have shipped the mirror image of the defect it fixes: a day where nothing ran cost
+nothing, and that zero is measured by *our own* request counter rather than promised by an
+upstream. Blanking it reads an idle day as unknowable. So:
+
+- `usageTokensAreReported` = `token_reports > 0` — an upstream costed something. Used by peak
+  selection and by the claim about what the reports said.
+- `usageTokensAreKnown` = `usageTokensAreReported(c) || c.requests === 0` — the number is a
+  measurement, so printable. Used by the figure door.
+
+Only a day whose tokens were reported can be the busiest one: a day with no report has no
+measured cost to compare, so naming it the peak puts a superlative on a number the report
+never carried. And the no-peak copy becomes four-way with **`reported` ordered before
+`metered`** — a window with any report in it can state what its reports said, and the calls
+that came back without one are the requests card's shortfall to name, not this sentence's.
+
+**The backend premise, verified rather than assumed.** A reported zero really does exist on
+the wire: `extract_protocol_usage` (`core/handlers/model_hub/stream_wire.py:533`) returns a
+non-null report for an explicit all-zero usage block — `_usage_sum` returns `0`, not `None` —
+and `usage.py:464` sets `token_reports = call.requests if usage is not None else 0`. So
+MH-USAGE-025 draws a window that exists, not a hypothetical.
+
+**What proved it, by breaking it.** Rotting `usageTokensAreKnown` to `return true` fails
+MH-USAGE-021 and MH-USAGE-026 and nothing else; swapping the `reported`/`metered` branch order
+fails MH-USAGE-025 and only it. Both restored. Full suite 231 files / 2950 tests, catalog gate
+24 citations across 24 rows, model_hub catalog pytest ✓, `tsc` clean, `eslint` clean,
+`npm run build` ✓.

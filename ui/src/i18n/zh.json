@@ -633,10 +633,6 @@
       "subtitle": "按 Agent 查看每个型号现在能否运行、由谁供给；需要时可为单个型号指定路由。",
       "addSource": "添加来源",
       "loadError": "加载失败：{{detail}}",
-      "tabs": {
-        "sources": "来源与网关",
-        "usage": "用量与额度"
-      },
       "sourceKind": {
         "api_key": "API Key",
         "subscription": "订阅"
@@ -659,7 +655,7 @@
         },
         "tab": {
           "hub": "来源与网关",
-          "usage": "用量与额度"
+          "usage": "用量"
         }
       },
       "direct": {
@@ -817,10 +813,6 @@
         "unavailable": "供给已暂停",
         "note": "路由链就是各后端配置的来源顺序。"
       },
-      "usageTab": {
-        "title": "用量与额度",
-        "detail": "网关来源完成请求后，用量会显示在这里。"
-      },
       "status": {
         "allHealthy": "全部正常",
         "needsAction_one": "{{count}} 个模型需要处理",
@@ -948,7 +940,54 @@
         "error": "需要处理"
       },
       "usage": {
-        "monthSpend": "本月 {{amount}}"
+        "title": "用量",
+        "detail": "网关代理的对话所计量的 token，按本地日期汇总。",
+        "window": {
+          "label": "区间",
+          "option": "{{days}} 天"
+        },
+        "range": "{{from}} – {{to}} · 近 {{days}} 天",
+        "empty": "还没有计量数据。网关来源完成请求后，这里就会有内容。",
+        "blank": "—",
+        "tokens": {
+          "label": "Tokens",
+          "detail": "输入 {{input}} · 输出 {{output}}",
+          "none": "这个区间没有请求回报 token"
+        },
+        "requests": {
+          "label": "请求数",
+          "reported": "每次请求都回报了 token",
+          "shortfall_one": "{{count}} 次请求没有回报 token",
+          "shortfall_other": "{{count}} 次请求没有回报 token"
+        },
+        "cached": {
+          "label": "缓存输入",
+          "detail": "输入 {{input}} 中有 {{cached}} 来自缓存",
+          "none": "这个区间没有输入 token"
+        },
+        "bySource": {
+          "title": "按来源",
+          "col": {
+            "source": "来源",
+            "tokens": "Tokens",
+            "requests": "请求",
+            "cached": "缓存",
+            "lastMetered": "最近计量"
+          },
+          "goneSource": "已删除",
+          "goneModel": "型号已不在列表中"
+        },
+        "byDay": {
+          "title": "按日",
+          "chart": "每日计量 token，{{from}} 至 {{to}}",
+          "table": "每日计量 token 与请求数，{{from}} 至 {{to}}",
+          "col": { "day": "日期" },
+          "column": "{{day}} · {{tokens}} tokens · {{requests}} 次请求",
+          "peak": "峰值 {{tokens}}，出现在 {{day}}",
+          "quiet": "这个区间没有任何一天有计量数据",
+          "unreported": "有请求，但没有任何一天回报了 token",
+          "zero": "有回报 token 的日子，回报的都是 0"
+        }
       },
       "supplyTooltip": {
         "label": "供应："

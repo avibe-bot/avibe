@@ -48,10 +48,10 @@ scenarios:
     status: covered
     kind: happy_path
     layer: contract
-    test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx
+    test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx::[MEMORY-LIST-006]
   - id: MEMORY-LIST-007
     name: Non-empty Search query preserves relevance search behavior
     status: covered
     kind: compatibility
     layer: contract
-    test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx
+    test: ui/src/components/settings/memory/MemorySearchPanel.test.tsx::[MEMORY-LIST-007]

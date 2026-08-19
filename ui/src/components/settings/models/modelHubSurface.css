@@ -1455,6 +1455,150 @@
   font-weight: 600;
 }
 
+/* 用量 tab.
+ *
+ * design.pen has no frame for this tab on the local surface, so the geometry is
+ * borrowed from the source table above rather than invented: the same 18px
+ * gutter, 36px head, 11px column label, and wash-05 head fill. Importing a
+ * second panel's spacing into the middle of this one would read as two
+ * surfaces stitched together.
+ *
+ * Every ink here resolves through a step the light blocks already re-anchor
+ * (ink-73 / ink-8c / muted-b3), so this block needs no light branch of its own.
+ * The one genuinely new unit is the day chart, and its two colors are a wash and
+ * an accent fill — both of which flip correctly on their own.
+ */
+.model-hub-usage {
+  --model-hub-usage-gap: 16px;
+  --model-hub-usage-bar-padding-y: 13px;
+  --model-hub-usage-bar-padding-x: 18px;
+  --model-hub-usage-padding-x: 18px;
+  --model-hub-usage-head-height: 36px;
+  --model-hub-usage-row-min-height: 46px;
+  --model-hub-usage-row-padding-y: 9px;
+  --model-hub-usage-columns: minmax(0, 1fr) 104px 84px 84px 116px;
+  --model-hub-usage-gutter: 16px;
+  --model-hub-usage-title-size: 13px;
+  --model-hub-usage-section-size: 12px;
+  --model-hub-usage-label-size: 11px;
+  --model-hub-usage-value-size: 20px;
+  --model-hub-usage-cell-size: 12px;
+  --model-hub-usage-note-size: 10.5px;
+  --model-hub-usage-model-indent: 14px;
+  --model-hub-usage-chart-height: 132px;
+  --model-hub-usage-chart-gap: 3px;
+  --model-hub-usage-column-radius: 2px;
+  --model-hub-usage-head-fill: var(--model-hub-wash-05);
+  --model-hub-usage-label-ink: var(--model-hub-ink-73);
+  --model-hub-usage-note-ink: var(--model-hub-muted-b3);
+  --model-hub-usage-model-ink: var(--model-hub-ink-8c);
+  --model-hub-usage-track-fill: var(--model-hub-wash-08);
+  --model-hub-usage-column-fill: color-mix(in srgb, var(--mint) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-usage-gap);
+}
+.model-hub-usage-bar {
+  padding: var(--model-hub-usage-bar-padding-y) var(--model-hub-usage-bar-padding-x);
+}
+.model-hub-usage-title { font-size: var(--model-hub-usage-title-size); }
+.model-hub-usage-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-failure {
+  padding: 11px var(--model-hub-usage-padding-x);
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-usage-pending { font-size: var(--model-hub-usage-title-size); }
+.model-hub-usage-empty {
+  padding: 26px var(--model-hub-usage-padding-x);
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-usage-stat {
+  padding: 13px var(--model-hub-usage-padding-x) 14px;
+  gap: 5px;
+}
+.model-hub-usage-stat-label {
+  color: var(--model-hub-usage-label-ink);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-usage-stat-value {
+  font-size: var(--model-hub-usage-value-size);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-usage-stat-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-card-head {
+  padding: 11px var(--model-hub-usage-padding-x);
+}
+.model-hub-usage-section-title { font-size: var(--model-hub-usage-section-size); }
+/* Grid items stretch by default, which would leave a plain text cell drawing its
+ * glyphs against the top of the box while a flex cell beside it centres them. */
+.model-hub-usage-head {
+  min-height: var(--model-hub-usage-head-height);
+  padding: 0 var(--model-hub-usage-padding-x);
+  grid-template-columns: var(--model-hub-usage-columns);
+  gap: var(--model-hub-usage-gutter);
+  align-items: center;
+  background: var(--model-hub-usage-head-fill);
+  color: var(--model-hub-usage-label-ink);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-usage-row {
+  min-height: var(--model-hub-usage-row-min-height);
+  padding: var(--model-hub-usage-row-padding-y) var(--model-hub-usage-padding-x);
+  grid-template-columns: var(--model-hub-usage-columns);
+  gap: var(--model-hub-usage-gutter);
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-usage-row--model {
+  padding-left: calc(var(--model-hub-usage-padding-x) + var(--model-hub-usage-model-indent));
+  color: var(--model-hub-usage-model-ink);
+}
+.model-hub-usage-source,
+.model-hub-usage-model,
+.model-hub-usage-cell { min-width: 0; }
+.model-hub-usage-cell { font-variant-numeric: tabular-nums; }
+.model-hub-usage-cell-label {
+  color: var(--model-hub-usage-label-ink);
+  font-size: var(--model-hub-usage-note-size);
+  font-variant-numeric: normal;
+}
+.model-hub-usage-gone {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-plot {
+  padding: 16px var(--model-hub-usage-padding-x) 12px;
+  gap: 9px;
+}
+.model-hub-usage-chart {
+  height: var(--model-hub-usage-chart-height);
+  gap: var(--model-hub-usage-chart-gap);
+}
+/* The track is drawn even where the column is not: a bar of zero height in an
+ * empty row cannot be told apart from a day the report never covered, and that
+ * distinction is the reason the series is plotted day by day at all. */
+.model-hub-usage-track {
+  min-width: 0;
+  height: 100%;
+  border-radius: var(--model-hub-usage-column-radius);
+  background: var(--model-hub-usage-track-fill);
+}
+.model-hub-usage-column {
+  border-radius: var(--model-hub-usage-column-radius);
+  background: var(--model-hub-usage-column-fill);
+}
+.model-hub-usage-axis {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-peak { color: var(--model-hub-usage-label-ink); }
+
 @media (min-width: 1024px) {
   .model-hub-direct-grid {
     grid-template-columns: minmax(0, 1fr) var(--model-hub-direct-benefits-width);
@@ -1468,6 +1612,9 @@
   .model-hub-source-bar { align-items: stretch; }
   .model-hub-source-action { width: auto; flex: 1 1 0; }
   .model-hub-direct-card { min-height: 0; }
+  /* Stacked, each cell carries its own label, so the column gutter becomes a
+   * line gap and 16px of it would read as four separate rows. */
+  .model-hub-usage-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
 }
 
 @media (min-width: 1024px) {

@@ -11,6 +11,13 @@ capability:
     - tests/test_model_hub_l3.py
     - tests/test_model_hub_usage.py
     - tests/test_opencode_server.py
+    # The user-visible half of metering. A vitest case is the only place these
+    # properties can be observed, so the catalog checker resolves both shapes.
+    - ui/src/components/settings/models/UsageTab.test.tsx
+    - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+    # The gate that resolves those rows against vitest's own collection, and
+    # its own evidence.
+    - ui/scripts/scenarioCatalog.test.mjs
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
@@ -40,6 +47,12 @@ scenarios:
     kind: contract
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_001_scenario_catalog_is_complete_and_executable
+  - id: MH-CATALOG-002
+    name: A UI-evidenced row resolves only to a vitest case that runs under its catalog ID
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/scripts/scenarioCatalog.test.mjs::MH-CATALOG-002
   - id: MH-S1-001
     name: Live conditions never change the exact configured hop identity
     status: covered
@@ -209,6 +222,72 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_usage.py::test_a_wedged_ledger_write_cannot_hold_the_process_open
+  - id: MH-USAGE-016
+    name: The usage report names the window the server served, not the one the view asked for
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-016
+  - id: MH-USAGE-017
+    name: A vanished model's ledger key never reaches the screen, while a vanished Source stays identifiable
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
+  - id: MH-USAGE-018
+    name: A token-report shortfall reads as missing reports rather than unused capacity
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-018
+  - id: MH-USAGE-019
+    name: A day the window covered without a metered turn is drawn as idle rather than closed over
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-019
+  - id: MH-USAGE-020
+    name: The usage report is read when its tab is opened, never as part of the routing surface's first paint
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-020
+  - id: MH-USAGE-021
+    name: A day whose calls carried no token report reads as metered rather than idle
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-021
+  - id: MH-USAGE-022
+    name: The usage report stays reachable from every Model Hub landing, including one with no Source left
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-022
+  - id: MH-USAGE-023
+    name: Every day of the window states its figures in text, not only in a pointer tooltip
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-023
+  - id: MH-USAGE-024
+    name: Every figure in the usage report names the row and the column it answers, not a position on screen
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-024
+  - id: MH-USAGE-025
+    name: A window whose upstreams reported zero tokens reads as measured rather than unreported
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-025
+  - id: MH-USAGE-026
+    name: Every token figure the usage report states names the coverage it was measured from
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-026
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
