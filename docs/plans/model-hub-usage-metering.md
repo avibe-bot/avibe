@@ -1341,3 +1341,45 @@ IDs, which §4 of the scenario-testing standard has required all along, so a bar
 the standard not being followed rather than a second legitimate convention. Zero test renames.
 Coverage went 20 rows / 1 legend-selected catalog → **22 citations across 22 rows**, and the
 standard now states the property so the next catalog writes citations that pass.
+
+### Stage 2, round 6 (head `aa051476e`) — a new class: a composite npm script swallows filters
+
+One P2 finding, on a line round 5 introduced, and it is **not** class A — it is the first
+appearance of a different class: **a composite npm script forwards `--` arguments only to its
+last command.** No breaker trip; a first appearance is a finding, not a pattern.
+
+```
+"test": "vitest run && npm run validate:catalog"
+npm test -- UsageTab.test.tsx
+  → vitest run && npm run validate:catalog UsageTab.test.tsx
+```
+
+npm appends the arguments to the *end* of the whole string, so the filter landed on the
+validator — which takes no path and ignored it — while vitest ran all 231 files unfiltered.
+Both halves still exited 0, so the failure is silent: the focused run AGENTS.md asks for
+first quietly becomes a four-minute full suite, and the argument that was supposed to narrow
+it is discarded by a command that never wanted it.
+
+The class has exactly one other member in `ui/package.json`, and checking it is what decided
+the fix. `"build": "npm run validate:imports && tsc -b && vite build"` is composite too, but
+its argument-taking command is **last**, so `npm run build -- --mode=x` reaches `vite build`
+by accident rather than by design. A rule of the form "put the arg-taking command last" is a
+rule about command order that nothing enforces and the next composite breaks again.
+
+**So the fix deletes the mechanism instead of wrapping it.** `"test"` returns to
+`vitest run`, and the gate reaches CI as a vitest case: `checkCatalogs()` is exported from
+`validate-scenario-catalog.mjs` with the CLI behind an `import.meta.url` guard, and
+`scenarioCatalog.test.mjs` asserts on it. A test case has no argument to misroute, and
+`npm test` already means "everything that must hold", so the gate needs no second entry
+point in CI to be reached.
+
+Both alternatives the reviewer offered were declined for the same reason. A wrapper script
+that parses `--` and forwards to each command keeps the hazard and adds a layer that hides
+it. A separate unfiltered CI command re-splits "what must hold" across two callers, which is
+how the gate could be forgotten on the next workflow edit — and `build-linux-artifacts`
+already runs `npm test`.
+
+What proved it: `npm test -- UsageTab.test.tsx` now runs 1 file / 14 cases, and the gate case
+fails with the resolver's own message when `MEMORY-LIST-006`'s citation is rotted to a
+nonexistent ID (reverted after checking). Full suite 231 files / 2943 tests, CLI gate 22
+citations across 22 rows, `tsc` clean, `eslint` clean, `npm run build` ✓.

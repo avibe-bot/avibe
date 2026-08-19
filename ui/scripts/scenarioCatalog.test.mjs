@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { collectCases, isUiEvidence, resolveUiEvidence, uiEvidenceRows } from './scenarioCatalog.mjs';
+import { checkCatalogs, report } from './validate-scenario-catalog.mjs';
 
 /** Executable, and so citable as evidence. */
 const RUNS = 'MH-FIXTURE-RUNS';
@@ -173,4 +174,27 @@ describe('UI evidence resolution', () => {
     });
     expect(isUiEvidence('tests/test_a.py::test_a')).toBe(false);
   });
+
+  /**
+   * The gate itself, run against the real catalogs rather than a fixture.
+   *
+   * Here and not chained onto `npm test`, because npm appends `--` arguments to
+   * the end of a composite script: `vitest run && npm run validate:catalog` turned
+   * `npm test -- UsageTab.test.tsx` into a full unfiltered suite plus a validator
+   * ignoring a path, which breaks the focused run this repo asks for first. A test
+   * case has no argument to misroute, and `npm test` already means "everything
+   * that must hold".
+   */
+  it(
+    'every UI citation in the checkout names one case this suite collects',
+    () => {
+      const result = checkCatalogs();
+      expect(result.problems, report(result)).toEqual([]);
+      // A checkout whose catalogs cite no UI case at all would pass the line
+      // above while proving nothing, which is the shape of pass this gate exists
+      // to reject.
+      expect(result.rows.length).toBeGreaterThan(0);
+    },
+    60_000,
+  );
 });

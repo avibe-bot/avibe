@@ -14,7 +14,7 @@
     "lint:report": "eslint .",
     "lint:baseline": "node scripts/lint-baseline.mjs --update",
     "preview": "vite preview",
-    "test": "vitest run && npm run validate:catalog",
+    "test": "vitest run",
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
