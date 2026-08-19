@@ -235,14 +235,17 @@ class ProviderRoot:
         try:
             sentinel_path.lstat()
         except FileNotFoundError:
-            try:
-                self._require_released_unsentinelled_root()
-            except ProviderRootError as error:
-                raise ProviderRootError(
-                    "memory provider root cannot be claimed for Clear"
-                ) from error
-            self._write_sentinel(meta, active_metadata)
-            self._verify(meta, active_metadata, require_empty=False)
+            if self._directory_is_empty():
+                self.ensure(meta, active_metadata)
+            else:
+                try:
+                    self._require_released_unsentinelled_root()
+                except ProviderRootError as error:
+                    raise ProviderRootError(
+                        "memory provider root cannot be claimed for Clear"
+                    ) from error
+                self._write_sentinel(meta, active_metadata)
+                self._verify(meta, active_metadata, require_empty=False)
         except OSError as error:
             raise ProviderRootError(
                 "memory provider root sentinel is unavailable"

@@ -318,6 +318,22 @@ def test_provider_root_clear_recovers_released_unsentinelled_first_start(
     assert root.inspect(metadata).empty is True
 
 
+def test_provider_root_clear_claims_empty_unsentinelled_first_start(
+    tmp_path: Path,
+) -> None:
+    root, meta = _owner(tmp_path)
+    metadata = _metadata()
+    root.path.parent.mkdir(mode=0o700)
+    root.path.mkdir(mode=0o700)
+
+    root.recreate_empty_for_clear(meta, metadata)
+
+    assert {entry.name for entry in root.path.iterdir()} == {
+        ROOT_SENTINEL_FILENAME
+    }
+    assert root.inspect(metadata).empty is True
+
+
 def test_provider_root_clear_recovery_is_idempotent_after_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

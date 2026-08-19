@@ -278,13 +278,31 @@ def _sidecar_health_smoke(python: Path, *, effective_home: Path) -> None:
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from core.memory.everos import EverOSPort
 from core.memory.process import EverOSProcess, EverOSProcessSettings
+from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
 
 async def verify() -> None:
+    effective_home = Path(sys.argv[2])
+    provider_root = ProviderRoot(
+        effective_home / "memory" / "everos-root",
+        effective_home=effective_home,
+    )
+    provider_root_meta = SimpleNamespace(
+        provider_root_id="memory-runtime-release-smoke",
+    )
+    provider_root_format = f"everos-{sys.argv[3]}"
+    provider_root_metadata = ProviderRootMetadata(
+        provider_root_format=provider_root_format,
+        compatible_provider_root_formats=frozenset({provider_root_format}),
+        artifact_fingerprint="memory-runtime-release-smoke",
+    )
+    provider_root.ensure(provider_root_meta, provider_root_metadata)
+
     process = EverOSProcess(
         python=Path(sys.argv[1]),
-        effective_home=Path(sys.argv[2]),
+        effective_home=effective_home,
         settings=EverOSProcessSettings(
             llm_base_url="https://llm.invalid/v1",
             llm_model="unused",
@@ -295,6 +313,10 @@ async def verify() -> None:
         ),
         startup_timeout_seconds=30,
         stop_timeout_seconds=10,
+        provider_root_guard=lambda: provider_root.require_owned(
+            provider_root_meta,
+            provider_root_metadata,
+        ),
     )
     started = await process.start()
     try:
@@ -315,7 +337,15 @@ asyncio.run(verify())
     }
     try:
         subprocess.run(
-            [str(python), "-B", "-c", script, str(python), str(effective_home)],
+            [
+                str(python),
+                "-B",
+                "-c",
+                script,
+                str(python),
+                str(effective_home),
+                EVEROS_VERSION,
+            ],
             cwd=repository,
             env=env,
             check=True,
