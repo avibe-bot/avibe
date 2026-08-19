@@ -189,6 +189,38 @@ def test_validated_remote_payload_projects_paired_instance_kind(tmp_path):
     assert context_from_session_payload(payload).is_personal_instance
 
 
+def test_partial_pairing_cannot_restore_cached_personal_authorization(tmp_path):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+
+    payload = remote_access._validated_authorization_payload(
+        config,
+        {
+            "sub": "personal-user",
+            "email": "personal@example.com",
+            "instance_id": "inst_123",
+        },
+        {
+            "id": "authorization-1",
+            "claims": {**_organization_claims(config), "vibe_instance_kind": "organization"},
+        },
+    )
+
+    assert payload is None
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    resolution = remote_access.resolve_current_authorization(
+        config,
+        identity,
+        allow_refresh=False,
+    )
+    assert resolution.state == "unavailable"
+    assert resolution.reason == "pairing_unavailable"
+
+
 def test_personal_revision_hint_refreshes_in_background_without_blocking(
     monkeypatch,
     tmp_path,

@@ -77,6 +77,26 @@ def test_kindless_web_push_snapshot_adopts_current_personal_pairing_kind(
     assert decision.context.is_personal_instance
 
 
+def test_web_push_snapshot_with_stale_instance_kind_is_rejected(tmp_path) -> None:
+    config = _paired_revision_config(41, instance_kind="organization")
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_kind="personal",
+    )
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+
+    assert not decision.authorized
+    assert decision.disposition == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert decision.reason == (
+        "persisted snapshot instance kind differs from the current pairing"
+    )
+
+
 def _paired_revision_config(revision: int, *, instance_kind: str = ""):
     from core.services.settings import default_config
 

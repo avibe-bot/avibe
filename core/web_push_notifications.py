@@ -251,9 +251,23 @@ def _evaluate_record_authorization(
             reason="persisted snapshot was issued for a different paired instance",
         )
     paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    record_kind = record.get("vibe_instance_kind")
+    if (
+        record_kind in {"personal", "organization"}
+        and paired_kind in {"personal", "organization"}
+        and record_kind != paired_kind
+    ):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_REVOKED,
+            reason="persisted snapshot instance kind differs from the current pairing",
+        )
     if (
         context.instance_kind is None
-        and record.get("vibe_instance_kind") is None
+        and record_kind is None
         and paired_instance_id
         and paired_kind in {"personal", "organization"}
     ):

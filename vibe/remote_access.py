@@ -1611,6 +1611,13 @@ def _normalized_instance_kind(value: object) -> str | None:
     return value if isinstance(value, str) and value in _INSTANCE_KINDS else None
 
 
+def _runtime_pairing_available(config: V2Config) -> bool:
+    try:
+        return config.remote_access.vibe_cloud.runtime_credentials() is not None
+    except Exception:
+        return False
+
+
 def _persist_instance_kind(instance_id: str, value: object) -> bool:
     instance_kind = _normalized_instance_kind(value)
     if instance_kind is None:
@@ -4891,6 +4898,8 @@ def _validated_authorization_payload(
     identity: Mapping[str, Any],
     record: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    if not _runtime_pairing_available(config):
+        return None
     claims = record.get("claims")
     if not isinstance(claims, Mapping):
         return None
@@ -5228,6 +5237,8 @@ def resolve_current_authorization(
     current = int(time.time()) if now is None else now
     if not session_identity_is_current(identity, now=current):
         return AuthorizationResolution("invalid_identity", reason="identity_expired")
+    if not _runtime_pairing_available(config):
+        return AuthorizationResolution("unavailable", reason="pairing_unavailable")
     try:
         record = _load_authorization_record(config, identity, now=current)
     except Exception:
