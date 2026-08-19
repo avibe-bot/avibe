@@ -14992,7 +14992,12 @@ async def serve_public_show_page(share_id, asset_path):
                         _show_public_authenticated_context,
                         config,
                     )
-                    if authenticated_context is not None and request.method == "GET" and is_spa_navigation:
+                    if (
+                        authenticated_context is not None
+                        and request.method == "GET"
+                        and is_spa_navigation
+                        and _show_page_accepts_html()
+                    ):
                         if not _show_limited_viewer_is_allowed(
                             authenticated_context,
                             access,

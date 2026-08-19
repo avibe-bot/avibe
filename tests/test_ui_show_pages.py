@@ -1374,6 +1374,17 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         assert "Please contact the page owner" in authenticated_revoked_navigation.text
         assert "Location" not in authenticated_revoked_navigation.headers
 
+        for entry_path in (f"/p/{share_id}/", f"/p/{share_id}/index.html"):
+            non_html_entry = client.get(
+                entry_path,
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+                headers={"Accept": "application/json"},
+                follow_redirects=False,
+            )
+            assert non_html_entry.status_code == 404
+            assert non_html_entry.get_json() == {"error": "not_found"}
+
         fresh_client = app.test_client()
         fresh_login = fresh_client.get(
             f"/p/{share_id}/",
