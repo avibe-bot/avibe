@@ -171,12 +171,17 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
 def test_a_recorded_outcome_reports_the_job_and_nothing_about_liveness(monkeypatch, tmp_path, outcome):
     """The record says what the job did. It makes no claim about the machine.
 
-    Publishing the outcome must not depend on inspecting the service: the probe
-    can fail on its own -- an unopenable lock file is enough -- and a diagnostic
-    detail is never worth losing the actual restart result over, least of all on
-    the spawn-error path where losing it also strands the `ok: null` marker that
-    makes status report a restart still in flight. So the probes raise here, and
-    every outcome still lands.
+    A fence, not a repair. An earlier revision of this fix had the writer stamp
+    what was alive at write time, and every later reader of that stamp was a way
+    to get a present-tense question wrong from a past-tense answer; doctor now
+    measures liveness when it reports, so the record must stay a statement about
+    the job alone. The liveness probes are stubbed to raise rather than to answer,
+    so a writer that starts consulting them fails here instead of in review --
+    and it names the second cost of consulting them, since a probe can fail on
+    its own (an unopenable lock file is enough) and a diagnostic detail is never
+    worth losing the restart result over, least of all on the spawn-error path
+    where losing it also strands the `ok: null` marker that makes status report a
+    restart still in flight.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
