@@ -221,5 +221,10 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     # The bot quotes `@codex review` in its own boilerplate, so a body-text search
     # for the trigger matches the verdicts it is supposed to be distinguished from.
     assert "never find one by matching `@codex review` in comment bodies" in flat
+    # Only the *passing* auto-review is reaction-only. Broadening that to every
+    # auto-review tells an agent to ignore a findings review and keep waiting on
+    # a reaction that will never describe it.
+    assert "An auto-review that finds something submits a review with inline threads" in flat
+    assert "Only the passing case is asymmetric" in flat
     assert (ROOT / "skills/background-watch-hook/scripts/wait_pr.py").is_file()
     assert (ROOT / "skills/background-watch-hook/scripts/wait_action.py").is_file()

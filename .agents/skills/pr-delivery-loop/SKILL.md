@@ -169,11 +169,13 @@ turn ends because you armed a watch and are waiting, say exactly that.
 
 - The Codex bot usually auto-reviews new pushes, but not reliably. After every
   push, confirm a review of the new head is in flight within a few minutes; if
-  none appears, comment `@codex review`. An auto-review announces its verdict
-  only through the PR-body reaction; the sha-bearing pass comment is produced by
-  an explicit trigger and by nothing else. So `@codex review` is not only how a
-  stalled review is restarted — it is the only way to obtain comment-shaped
-  head-bound pass evidence.
+  none appears, comment `@codex review`. An auto-review that finds something
+  submits a review with inline threads, exactly like a triggered one — that is a
+  verdict, act on it. Only the passing case is asymmetric: an auto-review that
+  finds nothing announces only through the PR-body reaction, and never emits the
+  sha-bearing pass comment, which is produced by an explicit trigger and by
+  nothing else. So `@codex review` is not only how a stalled review is restarted
+  — it is the only way to obtain comment-shaped head-bound pass evidence.
 - A trigger only counts once the bot reacts 👀 (`eyes`) to that comment — but
   **the bot withdraws the reaction when the review completes**, so 👀 is
   evidence only inside its own window. Capture the URL returned by
@@ -262,10 +264,13 @@ turn ends because you armed a watch and are waiting, say exactly that.
   PR head is unchanged. Never reseed to manufacture that boundary. When the
   timeline cannot settle it — an intervening head that was never reviewed, say —
   force the binding rather than infer it: comment `@codex review` on the
-  unchanged head and watch the slot flip 👀 → `+1`. Both transitions inside one
-  head epoch bind the pass to that head, and the same trigger produces the
-  sha-bearing comment that says so outright. Waiting for that comment instead of
-  triggering waits forever.
+  unchanged head and take whatever verdict that trigger returns. It is head-bound
+  in either branch — a pass comment naming the sha, or a findings review naming
+  it — so the reaction stops being the thing you have to reason about. Do not
+  make the slot's 👀 → `+1` transition your evidence: the mandated waiter queries
+  PR-body reactions with `?content=+1`, so it cannot report the 👀 half, and a
+  rule resting on it would demand evidence the required tooling never collects.
+  Waiting for that comment instead of triggering waits forever.
 - Keep the two 👀 apart by location. On your trigger comment it says the trigger
   was picked up, and it is withdrawn on completion, so it is evidence only inside
   its own window. On the PR body it is the slot's in-flight value: a review is
