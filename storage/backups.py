@@ -30,8 +30,9 @@ _LEGACY_SQLITE_REPAIR_RE = re.compile(
     r"(?P<timestamp>\d{8}T\d{6}Z)\.sqlite$"
 )
 
-# The schema move a backup was taken for: (from_revisions, to_revisions).
-_Transition = tuple[tuple[str, ...], tuple[str, ...]]
+# Where the schema stood when a backup was taken, and where it was headed:
+# (from_revisions, to_revisions).
+_Revisions = tuple[tuple[str, ...], tuple[str, ...]]
 
 # A platform or filesystem declining to sync a directory is an answer, not a
 # fault. Anything else -- ENOSPC, EIO -- means the data may not be on the disk,
@@ -50,17 +51,33 @@ class _BackupCandidate:
     kind: str
     timestamp: datetime
     suffix: int
-    transition: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+    sequence: int | None = None
+    revisions: _Revisions | None = None
 
     @property
-    def order_key(self) -> tuple[datetime, int, str]:
-        return self.timestamp, self.suffix, self.root.name
+    def order_key(self) -> tuple[bool, int, datetime, int, str]:
+        """Creation order, measured by us where possible.
 
-    @property
-    def group_key(self) -> object:
-        # A backup with no recorded transition cannot be shown to be an attempt
-        # at the same rollback point as any other, so it stands alone.
-        return self.transition or self.root.name
+        The sequence is a counter this module writes and increments from its own
+        previous writes, so it is the one ordering input nothing outside the
+        process can move. Wall-clock time can: an NTP correction, a manual
+        change, or state carried from a machine running ahead all reorder
+        timestamps after the fact, and a backup that lands out of order stops
+        being identifiable as the first attempt.
+
+        Backups written before the counter existed have no sequence, and sort
+        below every backup that has one -- which is simply true, since the
+        counter only started being written later. Among themselves the timestamp
+        is the best evidence available.
+        """
+
+        return (
+            self.sequence is not None,
+            self.sequence or 0,
+            self.timestamp,
+            self.suffix,
+            self.root.name,
+        )
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -125,17 +142,21 @@ def _directory_candidate(path: Path) -> _BackupCandidate | None:
         kind=kind,
         timestamp=timestamp,
         suffix=int(match.group("suffix") or 0),
-        transition=_manifest_transition(manifest),
+        sequence=_manifest_sequence(manifest),
+        revisions=_manifest_revisions(manifest),
     )
 
 
-def _manifest_transition(manifest: dict) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """The schema move a backup was taken for, when the manifest records one.
+def _manifest_sequence(manifest: dict) -> int | None:
+    value = manifest.get("sequence")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
-    A failed upgrade leaves the recorded revisions untouched, so every retry of
-    it reports the same move. That is what makes the move usable as the identity
-    of one rollback point across attempts. Manifests written before these fields
-    existed simply have no transition.
+
+def _manifest_revisions(manifest: dict) -> _Revisions | None:
+    """Where the schema stood and where it was headed, when the manifest says.
+
+    Manifests written before these fields existed simply have none, and a backup
+    with none cannot be linked to its neighbours at all.
     """
 
     from_revisions = manifest.get("from_revisions")
@@ -201,11 +222,49 @@ def _remove_candidate(candidate: _BackupCandidate) -> bool:
     return True
 
 
-def _keep_priority(
-    candidates: Iterable[_BackupCandidate],
-    *,
-    active: _Transition | None = None,
-) -> list[_BackupCandidate]:
+def _continues(previous: _BackupCandidate, current: _BackupCandidate) -> bool:
+    """Whether `current` is another attempt at the migration `previous` was for.
+
+    Each manifest records where the schema stood when its backup was taken and
+    where that run was headed. Put two consecutive ones side by side and they
+    answer the only question that matters: had the earlier run finished? If it
+    had, the database would have been sitting at its destination when the next
+    backup was taken. It was not, so the earlier run is still unfinished and
+    these two are attempts at one rollback point.
+
+    Deriving the answer from the pair, rather than reading an identity off
+    either one alone, is what makes it hold while a failing upgrade moves the
+    ground under it. `command.upgrade` walks several revisions, and entering an
+    `autocommit_block` commits the version stamps it has already earned -- so a
+    run that dies inside a later revision leaves the next attempt starting
+    somewhere new. An identity built from the starting point splits one episode
+    in two and throws away its clean first snapshot; an identity built from the
+    destination survives that but not a release upgrade arriving mid-episode,
+    which moves the destination instead. The comparison survives both, because
+    it never asks either backup to name the episode it belongs to.
+
+    A backup with no recorded revisions cannot be linked either way, so it
+    begins an episode of its own.
+    """
+
+    if previous.revisions is None or current.revisions is None:
+        return False
+    return current.revisions[0] != previous.revisions[1]
+
+
+def _episodes(candidates: Iterable[_BackupCandidate]) -> list[list[_BackupCandidate]]:
+    """Split backups into runs of attempts at the same rollback point, oldest first."""
+
+    episodes: list[list[_BackupCandidate]] = []
+    for candidate in sorted(candidates, key=lambda item: item.order_key):
+        if episodes and _continues(episodes[-1][-1], candidate):
+            episodes[-1].append(candidate)
+        else:
+            episodes.append([candidate])
+    return episodes
+
+
+def _keep_priority(candidates: Iterable[_BackupCandidate]) -> list[_BackupCandidate]:
     """Order backups by how much a rollback would want them, best first.
 
     Retries of one unfinished migration are attempts at a single rollback point
@@ -217,29 +276,18 @@ def _keep_priority(
     newest-first is the wrong order here: it fills the window with the newest
     two attempts and discards the only clean one.
 
-    `active` is the migration being attempted right now, and its ends outrank
-    everything else because being newest on disk is not the same as being
-    current. A clock corrected backwards, or state carried from a machine that
-    ran ahead, leaves unrelated copies dated later; spending the window on those
-    would evict the snapshot taken before the upgrade that is failing.
+    The episode holding the newest backup comes first, which is also how the
+    backup being taken right now keeps its slot: it is created with the highest
+    sequence there is, so its episode leads by construction rather than by a
+    second rule saying so.
 
-    Backups that stand alone are their own group, so for a healthy machine --
-    where each backup marks a different completed migration -- this stays the
-    familiar newest-first.
+    On a healthy machine every migration finishes, so each backup is an episode
+    by itself and this is the familiar newest-first.
     """
-
-    groups: dict[object, list[_BackupCandidate]] = {}
-    for candidate in candidates:
-        groups.setdefault(candidate.group_key, []).append(candidate)
-
-    def rank(group: list[_BackupCandidate]) -> tuple[bool, tuple[datetime, int, str]]:
-        is_active = active is not None and group[0].transition == active
-        return is_active, max(entry.order_key for entry in group)
 
     ranked: list[_BackupCandidate] = []
     superseded: list[_BackupCandidate] = []
-    for group in sorted(groups.values(), key=rank, reverse=True):
-        members = sorted(group, key=lambda item: item.order_key)
+    for members in sorted(_episodes(candidates), key=lambda group: group[-1].order_key, reverse=True):
         ranked.append(members[-1])
         if len(members) > 1:
             ranked.append(members[0])
@@ -252,16 +300,11 @@ def prune_state_backups(
     *,
     json_retention: int | None = JSON_STATE_BACKUP_RETENTION,
     sqlite_retention: int | None = SQLITE_BACKUP_RETENTION,
-    active: _Transition | None = None,
 ) -> list[Path]:
     """Keep a bounded rollback window of backups created by Avibe.
 
     Unknown files, symlinks, incomplete backups, and directories without a
     recognized manifest are intentionally left untouched.
-
-    `active` names the migration in progress, whose rollback points get the
-    slots first. Callers that are only reclaiming space leave it unset and get
-    the same order by recency.
     """
 
     limits = {
@@ -273,7 +316,7 @@ def prune_state_backups(
     removed: list[Path] = []
     for kind, limit in limits.items():
         matching = [candidate for candidate in candidates if candidate.kind == kind]
-        keep = {candidate.root for candidate in _keep_priority(matching, active=active)[:limit]}
+        keep = {candidate.root for candidate in _keep_priority(matching)[:limit]}
         for candidate in sorted(matching, key=lambda item: item.order_key):
             if candidate.root not in keep and _remove_candidate(candidate):
                 removed.append(candidate.root)
@@ -321,6 +364,25 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _next_sequence(backups_dir: Path) -> int:
+    """One past the highest sequence any backup on disk carries.
+
+    Counting from what survives rather than from a stored high-water mark is
+    what keeps the counter honest across pruning: the new backup only has to
+    outrank the backups that still exist, and reusing a number whose backup was
+    deleted costs nothing. It cannot collide with a live one by construction.
+    """
+
+    return max(
+        (
+            candidate.sequence
+            for candidate in _managed_candidates(backups_dir)
+            if candidate.sequence is not None
+        ),
+        default=0,
+    ) + 1
+
+
 def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
     timestamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     suffixes = [
@@ -358,14 +420,16 @@ def create_sqlite_migration_backup(
 
     Owning it here also means this call is the only thing that can destroy what
     it just produced, so it never does: the copy reaches stable storage before
-    any older one is deleted, and the prune is told which migration is in
-    progress rather than left to infer it from timestamps it cannot trust.
+    any older one is deleted, and it is stamped with the next sequence, which
+    puts it ahead of every backup on disk without having to trust a clock.
     """
 
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
     target_root.mkdir(parents=True, exist_ok=True)
+    # Read before anything is written, so the count is of finished backups only.
+    sequence = _next_sequence(target_root)
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
     temp_db = backup_dir / "vibe.sqlite.tmp"
@@ -388,6 +452,7 @@ def create_sqlite_migration_backup(
             "kind": "sqlite-migration",
             "created_at": created_at.astimezone(timezone.utc).isoformat(),
             "database": "vibe.sqlite",
+            "sequence": sequence,
             "from_revisions": sorted(set(from_revisions)),
             "to_revisions": sorted(set(to_revisions)),
         }
@@ -408,7 +473,7 @@ def create_sqlite_migration_backup(
     # a failure while pruning cannot reach that cleanup and delete the rollback
     # point this call just made. And it has to follow the manifest write,
     # because a directory without one is not yet a recognized candidate: it
-    # would neither count itself against the bound nor be found as the newest
-    # attempt at the migration now in progress.
-    prune_state_backups(target_root, json_retention=None, active=_manifest_transition(manifest))
+    # would neither count itself against the bound nor carry the sequence that
+    # puts it at the head of the episode in progress.
+    prune_state_backups(target_root, json_retention=None)
     return backup_dir

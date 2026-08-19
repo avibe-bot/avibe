@@ -265,9 +265,9 @@ def test_retry_window_keeps_the_snapshot_taken_before_a_partial_upgrade(monkeypa
     # rebuild inside an autocommit block that fails a later check is exactly
     # that shape. From the next attempt on, every copy is of the half-migrated
     # database, so keeping the newest copies fills the window with damage and
-    # discards the only snapshot that can undo it. What each attempt shares is
-    # the schema move it was taken for, since a failed upgrade leaves the
-    # recorded revisions alone; the window keeps the ends of that move.
+    # discards the only snapshot that can undo it. Consecutive manifests show
+    # the run never reached where it was headed, which is what makes the
+    # attempts one episode; the window keeps its ends.
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
@@ -297,10 +297,10 @@ def test_retry_window_keeps_the_snapshot_taken_before_a_partial_upgrade(monkeypa
 def test_future_dated_copies_do_not_outrank_the_migration_in_progress(monkeypatch, tmp_path: Path) -> None:
     # A clock corrected backwards, or state carried from a machine running
     # ahead, leaves unrelated copies dated after everything the current
-    # migration produces. Being newest on disk is not the same as being current:
-    # ranked by timestamp those copies take the window, and both ends of the
-    # failing migration -- the clean snapshot and the latest one -- are lost to
-    # backups that have nothing to do with it.
+    # migration produces. Being newest on disk is not the same as being newest
+    # in creation order: ranked by timestamp those copies take the window, and
+    # both ends of the failing migration -- the clean snapshot and the latest
+    # one -- are lost to backups that have nothing to do with it.
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
@@ -326,6 +326,82 @@ def test_future_dated_copies_do_not_outrank_the_migration_in_progress(monkeypatc
     assert any(
         not _table_exists(backups_dir / name / "vibe.sqlite", "half_migrated") for name in surviving
     ), "the snapshot from before the partial upgrade must keep its slot"
+
+
+def _attempt(
+    db_path: Path,
+    backups_dir: Path,
+    *,
+    hour: int,
+    frm: tuple[str, ...],
+    to: tuple[str, ...] = ("20260811_0051",),
+) -> Path:
+    """One migration attempt's backup, at a chosen wall-clock hour."""
+
+    return create_sqlite_migration_backup(
+        db_path,
+        backups_dir=backups_dir,
+        from_revisions=frm,
+        to_revisions=to,
+        now=datetime(2026, 7, 10, hour, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_attempt_order_survives_a_clock_that_moves_backwards(tmp_path: Path) -> None:
+    # A clock correction lands in the middle of a retry storm: the first attempt
+    # is stamped 10:00, the correction drags the next to 05:00, and the third
+    # comes back at 15:00. Sorted by wall-clock time the ends of the episode are
+    # 05:00 and 15:00 -- both taken after the upgrade began committing -- and the
+    # clean 10:00 snapshot is treated as a superseded middle and deleted. Order
+    # has to come from a counter this module writes, not from the clock.
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table marker (value text)")
+    backups_dir = tmp_path / "backups"
+
+    clean = _attempt(db_path, backups_dir, hour=10, frm=("20260806_0047",))
+    _attempt(db_path, backups_dir, hour=5, frm=("20260809_0049",))
+    latest = _attempt(db_path, backups_dir, hour=15, frm=("20260809_0049",))
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({clean.name, latest.name})
+
+
+def test_one_episode_survives_an_upgrade_that_commits_revisions_before_failing(tmp_path: Path) -> None:
+    # `command.upgrade` walks several revisions in one call, and entering an
+    # autocommit block commits the version stamps already earned. A run that
+    # starts at 0047 can therefore reach 0049 and die inside 0050, leaving the
+    # next attempt starting from 0049 instead. Identifying the episode by where
+    # its attempts started splits it in two and lets the newer, already-damaged
+    # half take the whole window; what actually holds is that no attempt ever
+    # reached where it was headed.
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table marker (value text)")
+    backups_dir = tmp_path / "backups"
+
+    pristine = _attempt(db_path, backups_dir, hour=1, frm=("20260806_0047",))
+    _attempt(db_path, backups_dir, hour=2, frm=("20260809_0049",))
+    latest = _attempt(db_path, backups_dir, hour=3, frm=("20260809_0049",))
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({pristine.name, latest.name})
+
+
+def test_a_finished_migration_ends_the_episode(tmp_path: Path) -> None:
+    # The other side of the same comparison: when a run does reach its
+    # destination, the next backup starts from there, and that is what marks the
+    # boundary. Two settled migrations are two rollback points rather than one
+    # episode with ends, so the window is the newest two -- never an ancient
+    # snapshot held open by an episode that closed long ago.
+    db_path = tmp_path / "vibe.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table marker (value text)")
+    backups_dir = tmp_path / "backups"
+
+    _attempt(db_path, backups_dir, hour=1, frm=("20260806_0047",), to=("20260809_0049",))
+    second = _attempt(db_path, backups_dir, hour=2, frm=("20260809_0049",), to=("20260811_0050",))
+    third = _attempt(db_path, backups_dir, hour=3, frm=("20260811_0050",), to=("20260811_0051",))
+
+    assert _sqlite_backup_roots(backups_dir) == sorted({second.name, third.name})
 
 
 def test_new_backup_reaches_stable_storage_before_older_ones_are_deleted(monkeypatch, tmp_path: Path) -> None:
