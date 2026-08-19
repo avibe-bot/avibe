@@ -55,6 +55,7 @@ _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
 _MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
 _CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
+_ABANDONED_ARCHIVE_CLAIM_RE = re.compile(r"^[0-9a-f]{64}\.tgz\.avibe-removing$")
 # Cross-process safety window: between a download finalizing ``<sha256>.tgz``
 # and the installing process writing install metadata / ``current.json``, the
 # archive is not yet protected. Archives younger than this window are never
@@ -645,7 +646,6 @@ class ShowRuntimeManager:
                 protected_install_dirs = self._manifest_install_dirs_for_command(command)
                 removed = self._clean_manifest_install_dirs(
                     keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
-                    manifest_source=self._manifest_source_for_install_dirs(protected_install_dirs),
                     protected_install_dirs=protected_install_dirs,
                 )
                 if removed:
@@ -958,15 +958,9 @@ class ShowRuntimeManager:
         actually remove. Failures in either phase return the structured
         inspection-failure report so Doctor can render them.
         """
-        try:
-            stale_plan = self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=True)
-            return self._clean_downloaded_archives(
-                dry_run=True,
-                skip_metadata_under={Path(path) for path in stale_plan},
-            )
-        except Exception:
-            logger.warning("Show Runtime archive cache inspection failed", exc_info=True)
-            return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+        report = self.clean(keep_previous=keep_previous, dry_run=True)
+        archives = report.get("archives") or self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+        return archives
 
     @staticmethod
     def _iter_install_metadata(versions_dir: Path, pattern: str) -> Iterator[Path]:
@@ -1130,20 +1124,22 @@ class ShowRuntimeManager:
             iterator = os.scandir(downloads_dir)
             try:
                 for entry in iterator:
-                    if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(entry.name):
+                    is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.match(entry.name))
+                    if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.match(entry.name):
                         continue
                     try:
                         entry_stat = entry.stat(follow_symlinks=False)
                     except FileNotFoundError:
                         continue
-                    except OSError as exc:
-                        raise _ArchiveInspectionError(f"archive is not stat-able: {entry.name}") from exc
+                    except OSError as cop:
+                        raise _ArchiveInspectionError(f"archive is not stat-able: {entry.name}") from cop
                     if not stat.S_ISREG(entry_stat.st_mode):
                         continue
-                    if entry_stat.st_mtime > mtime_floor:
-                        continue
-                    if entry.name[: -len(".tgz")] in protected:
-                        continue
+                    if not is_claim:
+                        if entry_stat.st_mtime > mtime_floor:
+                            continue
+                        if entry.name[: -len(".tgz")] in protected:
+                            continue
                     candidates.append(
                         (downloads_dir / entry.name, entry_stat.st_size, entry.name, entry_stat.st_ino)
                     )
@@ -1163,22 +1159,23 @@ class ShowRuntimeManager:
             with os.scandir(dir_fd) as entries:
                 names = [entry.name for entry in entries]
             for name in sorted(names):
-                if not _CONTENT_ADDRESSED_ARCHIVE_RE.match(name):
+                is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.match(name))
+                if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.match(name):
                     continue
                 try:
                     stat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                except OSError as exc:
-                    raise _ArchiveInspectionError(f"archive is not stat-able: {name}") from exc
+                except OSError as cop:
+                    raise _ArchiveInspectionError(f"archive is not stat-able: {name}") from cop
                 if not stat.S_ISREG(stat_result.st_mode):
                     continue
-                if stat_result.st_mtime > mtime_floor:
-                    continue
-                path = downloads_dir / name
-                if name[: -len(".tgz")] in protected:
-                    continue
-                candidates.append((path, stat_result.st_size, name, 0))
+                if not is_claim:
+                    if stat_result.st_mtime > mtime_floor:
+                        continue
+                    if name[: -len(".tgz")] in protected:
+                        continue
+                candidates.append((downloads_dir / name, stat_result.st_size, name, 0))
             # Keep the enumeration descriptor until the caller closes it so
             # the removal phase (when any) unlinks through the same fd.
             # Dry runs, Doctor, and empty real scans close it in
@@ -1249,37 +1246,12 @@ class ShowRuntimeManager:
                 # path resolution that a concurrent swap could redirect); on
                 # Windows unlink by path. A fresh runtime with no candidates
                 # never opens the directory at all.
-                leftover_claims: list[Path] = []
-                downloads_dir = self.runtime_dir / "downloads"
-                try:
-                    for leftover in downloads_dir.iterdir():
-                        if leftover.name.endswith(".tgz.avibe-removing") and leftover.is_file():
-                            leftover_claims.append(leftover)
-                except FileNotFoundError:
-                    leftover_claims = []
-                downloads_identity = getattr(self, "_downloads_dir_identity", None)
-                for leftover in leftover_claims:
-                    try:
-                        if downloads_identity is not None:
-                            dir_stat = leftover.parent.lstat()
-                            if _is_reparse_point(dir_stat) or (
-                                dir_stat.st_dev,
-                                dir_stat.st_ino,
-                            ) != downloads_identity:
-                                raise OSError("downloads directory was replaced")
-                        leftover_size = leftover.stat().st_size
-                        os.unlink(leftover)
-                    except OSError:
-                        logger.warning("Failed to finish abandoned Show Runtime archive claim %s", leftover, exc_info=True)
-                        failed_count += 1
-                        continue
-                    removed_count += 1
-                    removed_bytes += leftover_size
                 if candidates:
                     if os.name == "nt":
                         downloads_identity = getattr(self, "_downloads_dir_identity", None)
                         for path, size, name, inode in candidates:
-                            claimed = path.with_name(f"{name}.avibe-removing")
+                            is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.match(name))
+                            claimed = path if is_claim else path.with_name(f"{name}.avibe-removing")
                             try:
                                 if downloads_identity is not None:
                                     dir_stat = path.parent.lstat()
@@ -1293,21 +1265,20 @@ class ShowRuntimeManager:
                                     raise OSError("entry was replaced after enumeration")
                                 if not stat.S_ISREG(pre_stat.st_mode):
                                     raise OSError("entry replaced by a non-regular file")
-                                # Atomically claim the entry: a rename moves
-                                # exactly this inode to a private name, so any
-                                # later same-name replacement survives and the
-                                # unlink cannot delete a replacement.
-                                os.rename(path, claimed)
-                                post_stat = os.stat(claimed, follow_symlinks=False)
-                                if inode and post_stat.st_ino != inode:
-                                    os.rename(claimed, path)  # put it back; not ours
-                                    raise OSError("rename claimed a different entry")
-                                os.unlink(claimed)
+                                if is_claim:
+                                    os.unlink(path)
+                                else:
+                                    os.rename(path, claimed)
+                                    post_stat = os.stat(claimed, follow_symlinks=False)
+                                    if inode and post_stat.st_ino != inode:
+                                        os.rename(claimed, path)
+                                        raise OSError("rename claimed a different entry")
+                                    os.unlink(claimed)
                             except OSError:
                                 logger.warning("Failed to remove stale Show Runtime archive %s", path, exc_info=True)
                                 failed_count += 1
                                 try:
-                                    if claimed.exists():
+                                    if not is_claim and claimed.exists():
                                         os.rename(claimed, path)
                                 except OSError:
                                     pass

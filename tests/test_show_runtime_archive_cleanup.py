@@ -125,6 +125,8 @@ def test_archive_cleanup_never_touches_unknown_symlink_or_tmp_files(tmp_path: Pa
     symlink.symlink_to(outside)
     directory = manager.runtime_dir / "downloads" / f"{_sha(5)}.tgz"
     directory.mkdir()
+    unknown_claim = manager.runtime_dir / "downloads" / "backup.tgz.avibe-removing"
+    unknown_claim.write_bytes(b"not ours")
 
     result = manager.clean()
 
@@ -133,6 +135,7 @@ def test_archive_cleanup_never_touches_unknown_symlink_or_tmp_files(tmp_path: Pa
     assert packaged.exists() and temp_download.exists() and notes.exists()
     assert symlink.is_symlink() and outside.exists()
     assert directory.is_dir()
+    assert unknown_claim.exists()
 
 
 def test_clean_is_idempotent_for_archives(tmp_path: Path) -> None:
@@ -187,6 +190,42 @@ def test_clean_after_custom_manifest_install_prunes_stale_installs(tmp_path: Pat
     current_archive = _write_archive(manager, _sha(1), b"current")
     rollback_archive = _write_archive(manager, _sha(8), b"rollback")
     stale_archive = _write_archive(manager, _sha(9), b"stale-custom")
+
+    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+
+    assert current_archive.exists() and current_install.exists()
+    assert rollback_archive.exists() and rollback_install.exists()
+    assert not stale_install.exists() and not stale_archive.exists()
+
+
+def test_clean_after_custom_manifest_prunes_obsolete_sources(tmp_path: Path) -> None:
+    old_manifest = tmp_path / "old-manifest.json"
+    new_manifest = tmp_path / "new-manifest.json"
+    old_manifest.write_text("{}", encoding="utf-8")
+    new_manifest.write_text("{}", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        offline=True,
+        runtime_source="manifest-cache",
+        manifest_path=new_manifest,
+    )
+
+    def _retag(install_dir: Path, source: str) -> None:
+        metadata_path = next(install_dir.rglob(".vibe-show-runtime.json"))
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload["manifest_source"] = source
+        metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    rollback_install = _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    stale_install = _write_install_metadata(manager, version="v0", sha256=_sha(9), mtime=-999999)
+    _retag(current_install, str(new_manifest))
+    _retag(rollback_install, str(old_manifest))
+    _retag(stale_install, str(old_manifest))
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    current_archive = _write_archive(manager, _sha(1), b"current")
+    rollback_archive = _write_archive(manager, _sha(8), b"rollback")
+    stale_archive = _write_archive(manager, _sha(9), b"stale-old-source")
 
     manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
 
@@ -1004,3 +1043,39 @@ def test_abandoned_windows_claim_is_reclaimed(tmp_path: Path) -> None:
     result = manager.clean()
     assert not claim.exists()
     assert result["archives"]["removed_count"] >= 1
+
+
+def test_dry_run_includes_abandoned_claims(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    leftover = manager.runtime_dir / "downloads"
+    leftover.mkdir(parents=True, exist_ok=True)
+    claim = leftover / f"{_sha(2)}.tgz.avibe-removing"
+    claim.write_bytes(b"abandoned")
+    stamp = time.time() - 3600
+    os.utime(claim, (stamp, stamp))
+    dry = manager.clean(dry_run=True)
+    assert dry["archives"]["candidate_count"] == 1
+    assert dry["archives"]["candidate_bytes"] == len(b"abandoned")
+    assert claim.exists()
+
+
+def test_archive_cache_status_uses_preview_guard(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+    seen: dict[str, object] = {}
+    real_clean = manager._clean_downloaded_archives
+
+    def _observe(*, dry_run=False, skip_metadata_under=None):
+        seen["fd"] = getattr(manager, "_preview_guard_fd", None)
+        return real_clean(dry_run=dry_run, skip_metadata_under=skip_metadata_under)
+
+    manager._clean_downloaded_archives = _observe
+    report = manager.archive_cache_status()
+    assert report["candidate_count"] == 1
+    if os.name != "nt":
+        assert seen["fd"] is not None
+    assert getattr(manager, "_preview_guard_fd", None) is None
