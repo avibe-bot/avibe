@@ -405,7 +405,11 @@ def test_g2_outcome_reads_have_one_settlement_owner() -> None:
     )
     assert response_owner is not None
     stream_at = response_owner.index("response = web.StreamResponse")
-    settle_at = response_owner.index("await self._settle_turn_handle", stream_at)
+    # Settlement now reaches the handle through the one function that meters the
+    # turn first, so the t4 slot in this ordering is named by that owner. The
+    # ordering it constrains is unchanged: the response exists, then the turn is
+    # ended, then the terminal copy renders into it.
+    settle_at = response_owner.index("await self._settle_metered_turn", stream_at)
     render_at = response_owner.index("await self._write_stream_terminal_copy", settle_at)
     eof_at = response_owner.index("await self._downstream_io(response.write_eof())", render_at)
     assert settle_at < render_at < eof_at
@@ -595,14 +599,129 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     assert meter_calls[0] in set(ast.walk(invoke))
     # Any of the gateway's endings may report the forwarded call, so exactly-once
     # rests on the write it owns; a caller that pre-checks or clears that handle
-    # would move the decision outside the owner.
+    # would move the decision outside the owner. An ending may still need to know
+    # whether a row is owed — the abandonment path decides whether to run at all —
+    # so that question is a property of the turn and the only other reader of the
+    # handle. Review 4970...: it used to ask whether the turn was *settled*, which
+    # a forced terminal had already made true for a call the vendor billed.
+    owes = _functions(gateway_tree)["owes_metering"]
+    readers = (recorder, owes)
     handles = [
         node
         for node in ast.walk(gateway_tree)
         if isinstance(node, ast.Attribute) and node.attr == "usage_write"
     ]
     assert handles
-    assert all(handle in set(ast.walk(recorder)) for handle in handles)
+    assert all(any(handle in set(ast.walk(reader)) for reader in readers) for handle in handles)
+    assert not [
+        node
+        for node in ast.walk(owes)
+        if isinstance(node, ast.Assign) or isinstance(node, ast.AugAssign)
+    ]
+
+
+def test_settling_a_turn_is_what_meters_it_for_every_ending_there_will_be() -> None:
+    # Review 4970...: metering was positioned relative to bookkeeping rather than to
+    # the upstream call, and each ending paid for it differently — one settled first
+    # and skipped the row when settlement raised, one never metered at all. Naming
+    # the class instead of its endings: there is one function that ends a metered
+    # turn, the recorder is its first statement, and no ending can settle without
+    # going through it. An ending added later inherits the order rather than
+    # restating it, because there is nowhere else to state it.
+    gateway_tree = _tree(TURN_GATEWAY)
+    functions = _functions(gateway_tree)
+    owner = functions["_settle_metered_turn"]
+    recorded = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_record_usage"]
+    assert len(recorded) == 1
+    assert recorded[0] in set(ast.walk(owner))
+    # The first *executable* statement, and the statement itself rather than
+    # anything nested in one: metering under a condition is what every ending that
+    # got this wrong already did.
+    body = [node for node in owner.body if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))]
+    assert isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Await)
+    assert body[0].value.value is recorded[0]
+    # And the settlement it wraps is reachable only through it, so "settled here"
+    # cannot come apart from "metered here" at a call site the next round adds.
+    settlements = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_turn_handle"]
+    assert len(settlements) == 1
+    assert settlements[0] in set(ast.walk(owner))
+    endings = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_metered_turn"]
+    assert len(endings) >= 2
+    assert all(
+        any(ending in set(ast.walk(functions[name])) for name in ("_settle_boundary_termination", "_resolved_response"))
+        for ending in endings
+    )
+
+
+def test_a_metered_row_is_dated_by_the_call_and_not_by_what_followed_it() -> None:
+    # Review 4970...: the other half of the same class. The recorder read the clock
+    # itself, so a row carried the moment bookkeeping got around to it rather than
+    # the moment the call ended — across local midnight, the wrong day's usage for a
+    # call the vendor billed on the previous one. Asserted here rather than driven,
+    # because the fix is what makes it unreachable: nothing suspends between the
+    # body ending and the row being queued, so no clock can move in between and no
+    # test can make one. What is left to protect is where the instant comes from.
+    gateway_tree = _tree(TURN_GATEWAY)
+    functions = _functions(gateway_tree)
+    # Captured where the upstream body ends, which is the one function that has a
+    # body to end. A capture anywhere else is a second answer to when the call
+    # finished, and the endings are exactly the places that would get it wrong.
+    captures = [
+        node
+        for node in ast.walk(gateway_tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute) and target.attr == "completed_at"
+            for target in node.targets
+        )
+    ]
+    assert captures
+    assert all(capture in set(ast.walk(functions["_resolved_response"])) for capture in captures)
+    # And carried from there to the ledger rather than re-read at the write.
+    handoff = next(
+        node for node in ast.walk(functions["_record_usage"]) if _call_name(node) == "record"
+    )
+    dated = next(keyword for keyword in handoff.keywords if keyword.arg == "at")
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "completed_at"
+        for node in ast.walk(dated.value)
+    )
+
+
+def test_how_long_a_turn_waits_on_the_ledger_is_the_writers_to_bound() -> None:
+    # Reviews 4964754924 / 4964894667 / 4970...: the wait was spelled at each
+    # metering call site, which made the bound the one property a new site could
+    # omit by writing the obvious `await` — and one did, putting an unresponsive
+    # disk on a turn's critical path and in front of the next failover hop. Both
+    # halves, shield and bound, now sit behind one name. The scan keys on the usage
+    # write specifically, so an unrelated shielded task is not mistaken for one.
+    waited = {"shield", "wait_for"}
+    usage_names = {"record", "usage_write", "wait_recorded", "usage_writer"}
+
+    def wraps_a_usage_write(tree: ast.AST) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(tree)
+            if _call_name(node) in waited
+            and any(
+                isinstance(inner, ast.Attribute) and inner.attr in usage_names
+                or isinstance(inner, ast.Name) and inner.id in usage_names
+                for argument in node.args
+                for inner in ast.walk(argument)
+            )
+        ]
+
+    usage_tree = _tree(USAGE)
+    waiter = _functions(usage_tree)["wait_recorded"]
+    assert {name for node in ast.walk(waiter) if (name := _call_name(node)) in waited} == waited
+    # Inside the writer the wait is spelled over its own parameter, so the name-keyed
+    # scan is aimed outward: at the modules that hold a `usage_write` and could wait
+    # on it themselves. Every one of them must go through the name above instead.
+    assert all(node in set(ast.walk(waiter)) for node in wraps_a_usage_write(usage_tree))
+    for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
+        if module == USAGE:
+            continue
+        assert not wraps_a_usage_write(_tree(module)), module.name
 
 
 def test_every_body_fact_the_turn_reads_can_come_from_the_engine_that_read_it() -> None:

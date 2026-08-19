@@ -883,6 +883,66 @@ next async-only read is carried without an edit. With that fixed, the driver val
 real summary against `usage-summary.schema.json`, which is what makes `label` a contract
 rather than a field the ledger happens to emit.
 
+### Round 16 (head `a85a88569`)
+
+Four P2 findings, and three of them are one class: **metering was positioned relative to
+our bookkeeping instead of relative to the upstream call.** That is the class name, and
+naming it is what makes the remaining members predictable — every ending that settles a
+turn is a member, and so is every property that follows from *when* the row is taken.
+The fourth finding is unrelated and closed on its own terms. Per the property-ownership
+rule the fix moves ownership rather than patching the sites.
+
+**F1: a settlement that raised took the billed row with it.** Metering was each ending's
+own step, written after that ending's bookkeeping, so an exception on the way through
+settlement skipped the recorder — the vendor had already billed the call, and our ledger
+never heard about it. The sites were the members; the owner was missing. `_settle_metered_turn`
+is now the single ending owner for every shape a turn can end in, and `await self._record_usage(execution)`
+is its first executable statement, ahead of every branch that can fail. Doing it exactly
+once needed a second piece: the boundary that catches the raise re-enters the same ending,
+so "is a row still owed" had to stop being each caller's inference. `_TurnExecution.owes_metering`
+is now that one answer, read by the recorder and by the abandonment boundary alike.
+
+**F2: the row was dated by when bookkeeping got around to it.** The recorder read the
+clock itself, so a call that ended at 23:59:58 and settled at 00:00:01 landed in the next
+local day — the wrong day's usage for a call the vendor billed on the previous one. The
+completion instant is now captured where the upstream body ends, which is the one place
+that has a body to end, and carried into `record(at=...)`; the writer keeps
+`metered_at = min(call.at, persisted_at)` so a row is dated by its call and clamped
+forward only by the persist instant. What is worth recording is *why this one is not a
+behavior test*: with the recorder as the first statement of the ending, nothing suspends
+between the capture and the queue, so no clock can advance in between and no test can make
+one. The unreachability is the fix, so the guard asserts where the instant comes from
+rather than driving a gap that no longer exists.
+
+**F3: the durability wait was spelled at each call site.** Metering waits out its own
+write so a client that opens the usage tab right after its call already sees that call.
+Two call sites each wrote their own version of that wait, and the gateway's was
+unbounded — hold the single thread ledger writes run on and a served response waits
+behind a disk that has stopped answering. `UsageWriter.wait_recorded` now owns both
+halves once: shielded, so a timed-out write is queued rather than cancelled, and bounded,
+so the convenience cannot become the turn's critical path. `service._meter_call` was
+migrated onto it instead of keeping its own copy.
+
+**F4: canonical duplicates were repaired on live writes instead of refused.** Collapsing
+a duplicate hop is right for a persisted tree we must be able to load, and wrong for a
+request we can still answer: the caller that named one model in two spellings gets half
+of what it sent, silently. The two doors are now distinct — `from_payload(..., repairing=True)`
+collapses, the default raises — and there is exactly one repairing door,
+`V2Config.from_payload`. `create_source` already refused, because it round-trips through
+`to_payload()`; only the route-hop path reproduced. Client config saves cannot reach the
+repairing door either way, since `vibe/api.py` strips `model_hub` from them.
+
+**Evidence.** `MH-USAGE-010` states F1's property in both shapes — buffered and streamed
+reach the ending from different frames — with `requests == 1` rather than `>= 1`, because
+exactly-once is the half that the re-entering boundary threatens. `MH-USAGE-011` states
+F3's property as its two halves at once: the turn is served while the ledger hangs, and
+the row is still queued rather than dropped. `MH-USAGE-012` states F4's property as one
+payload through both doors with opposite answers, which is why it is one test rather than
+two. Two structure guards carry what behavior cannot reach: the recorder must be the
+ending's first statement and the ending must be the only one there is, and the completion
+instant must be captured in `_resolved_response` and carried rather than re-read at the
+write. Six mutations, six distinct failures.
+
 ## Todo
 
 - [x] Usage taxonomy and extraction in `stream_wire.py`

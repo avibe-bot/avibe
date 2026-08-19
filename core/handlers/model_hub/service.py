@@ -4957,13 +4957,14 @@ class ModelHubService:
 
         Which is also why the write is the writer's and not this call's: a resolve
         cancelled downstream while its row sat queued would otherwise discard usage
-        the vendor had already billed. Shielded rather than dropped so the ordinary
-        path still leaves the row on disk before the caller sees its outcome.
+        the vendor had already billed. The writer's own bounded wait keeps the
+        ordinary path leaving the row on disk before the caller sees its outcome,
+        without putting an unresponsive disk in front of the next failover hop.
         """
 
         if outcome.usage is None:
             return
-        await asyncio.shield(
+        await self.usage_writer.wait_recorded(
             self.usage_writer.record(
                 source_id=source_id,
                 model_id=model_id,

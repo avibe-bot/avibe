@@ -564,6 +564,10 @@ class BoundedUsageLedger:
 
 _LEDGER_EXECUTOR_LOCK: Final = threading.Lock()
 _LEDGER_EXECUTOR: Optional[ThreadPoolExecutor] = None
+# How long a metering caller waits for its own row to reach the disk. Sized for a
+# local read-modify-write and an fsync plus scheduling slack, which is orders of
+# magnitude under it, so nothing but a disk that has stopped answering gets here.
+_DURABILITY_WAIT_SECONDS: Final = 2.0
 
 
 def _ledger_executor() -> ThreadPoolExecutor:
@@ -677,8 +681,9 @@ class UsageWriter:
     on a disk that is already failing.
     """
 
-    def __init__(self, ledger: BoundedUsageLedger):
+    def __init__(self, ledger: BoundedUsageLedger, *, durability_wait: float = _DURABILITY_WAIT_SECONDS):
         self.ledger = ledger
+        self._durability_wait = durability_wait
         self._pending: dict[tuple[str, str, str, bool], _QueuedRow] = {}
         # The batch on its way to disk, kept visible so a drain that times out
         # can count it: in the executor is not the same as persisted.
@@ -706,10 +711,10 @@ class UsageWriter:
         than re-read, because the flush that persists this can start well after
         it and a queued write is still a report about the moment it finished.
 
-        A caller that wants the row on disk before it returns awaits the result
-        through `asyncio.shield`; one that does not can simply drop it. Callers
-        whose calls fold together share one future, which is the same promise each
-        would have had alone: it completes when their row reaches the disk.
+        A caller that wants the row on disk before it returns hands the result to
+        `wait_recorded`; one that does not can simply drop it. Callers whose calls
+        fold together share one future, which is the same promise each would have
+        had alone: it completes when their row reaches the disk.
         """
 
         call = UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at)
@@ -722,6 +727,32 @@ class UsageWriter:
         if self._flush is None or self._flush.done():
             self._flush = asyncio.create_task(self._flush_pending())
         return queued.done
+
+    async def wait_recorded(self, write: "asyncio.Future[None]") -> bool:
+        """Wait out one queued write, bounded, and answer whether it landed.
+
+        Two properties every metering caller wants and none of them owns. The
+        shield is why a caller cancelled here loses its ordering and not the row.
+        The bound is why a ledger that has stopped answering cannot hold a served
+        turn open behind it: the wait exists so a caller reading the usage tab
+        right after its own call sees that call, which is an ordering convenience,
+        not a durability requirement the turn is allowed to fail for.
+
+        Both used to be spelled at each metering call site, which made the bound
+        the one property a new call site could omit by writing the obvious thing —
+        and it did: awaiting a write with no deadline puts a stuck disk on the
+        turn's critical path. Here there is nothing to omit.
+
+        A timed-out write is not lost or cancelled. It stays this writer's, keeps
+        its place in the queue, and keeps counting in `unpersisted` until the disk
+        answers; only the caller's wait for it ends.
+        """
+
+        try:
+            await asyncio.wait_for(asyncio.shield(write), self._durability_wait)
+        except asyncio.TimeoutError:
+            return False
+        return True
 
     @property
     def unpersisted(self) -> int:

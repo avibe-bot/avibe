@@ -72,7 +72,7 @@ from core.handlers.model_hub.turn_gateway import (
     render_protocol_terminal_event,
 )
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
-from core.handlers.model_hub.usage import BoundedUsageLedger, _ledger_executor
+from core.handlers.model_hub.usage import BoundedUsageLedger, UsageWriter, _ledger_executor
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -7182,5 +7182,133 @@ def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) ->
         assert result.body == body
         service.usage.record_many.assert_called_once()
         assert service.store.load().sources[0].state.status == "standby"
+
+    asyncio.run(exercise())
+
+
+def test_a_settlement_that_raises_still_meters_the_call_it_was_settling(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-010: the vendor billed the call before our bookkeeping got a turn.
+
+    Metering used to be each ending's own step, placed after that ending's
+    bookkeeping, so a settlement that raised on the way through took the row with
+    it. Both shapes, because the two reach the ending from different frames and
+    each used to carry its own copy of the order — and `requests == 1` rather than
+    `>= 1`, because the boundary that catches the raise re-enters the same ending.
+    """
+
+    async def exercise(stream: bool) -> None:
+        state = tmp_path / ("stream" if stream else "buffer")
+        state.mkdir()
+        source = _source("src_meterraise1", "Broken settlement")
+        chunks = (
+            (
+                b'event: response.completed\ndata: {"type":"response.completed",'
+                b'"sequence_number":1,"response":{"usage":{"input_tokens":256,'
+                b'"output_tokens":12}}}\n\n',
+            )
+            if stream
+            else (b'{"usage":{"input_tokens":256,"output_tokens":12}}',)
+        )
+        service = _service(
+            state,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.SUCCESS,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=stream,
+                    ),
+                    chunks,
+                )
+            ],
+        )
+
+        async def exploding_settlement(*args: object, **kwargs: object):
+            raise RuntimeError("settlement exploded")
+
+        service.settle_handle_outcome = exploding_settlement
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=f"turn_meter_raise_{'stream' if stream else 'buffer'}",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=stream,
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            with pytest.raises(RuntimeError, match="settlement exploded"):
+                await asyncio.wait_for(gateway._handle_request(request), timeout=5)
+        await gateway.close()
+
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1, stream
+        assert metered["token_reports"] == 1, stream
+        assert metered["input_tokens"] == 256, stream
+        assert metered["output_tokens"] == 12, stream
+
+    for stream in (False, True):
+        asyncio.run(exercise(stream))
+
+
+def test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-011: waiting for the row is an ordering convenience, not a gate.
+
+    Metering waits out its own write so a client that opens the usage tab right
+    after its call already sees that call. Unbounded, the convenience becomes the
+    turn's critical path: hold the one thread ledger writes run on and the served
+    response waits behind a disk that has stopped answering. Bounded, the turn is
+    served and the row stays queued — timed out is not dropped, which is the other
+    half of the same wait.
+    """
+
+    async def exercise() -> None:
+        source = _source("src_meterhang01", "Unresponsive ledger")
+        body = json.dumps({"usage": {"input_tokens": 64, "output_tokens": 4}}).encode("utf-8")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id),
+                    (body,),
+                )
+            ],
+        )
+        service.usage_writer = UsageWriter(service.usage, durability_wait=0.05)
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_meter_hung_ledger",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=False,
+        )
+
+        with _occupied_ledger_writer():
+            result = await asyncio.wait_for(gateway._handle_request(request), timeout=1)
+            assert result.status == 200
+            assert result.body == body
+            # The scenario is only the scenario while the write is still queued,
+            # and a queued write is still the writer's to finish.
+            assert service.usage_writer.unpersisted == 1
+            assert _usage_of(service, source.id) == {}
+
+        assert await service.usage_writer.drain(timeout=5) == 0
+        metered = _usage_of(service, source.id)
+        assert metered["requests"] == 1
+        assert metered["input_tokens"] == 64
+        assert metered["output_tokens"] == 4
 
     asyncio.run(exercise())

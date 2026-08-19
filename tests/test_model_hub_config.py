@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import inspect
 import json
 import re
 import stat
@@ -1815,6 +1816,42 @@ def test_every_normalized_identifier_collection_collapses_through_one_owner():
     assert len(collapsing) == len(normalizing)
 
 
+def test_collapsing_a_settled_duplicate_is_a_repair_no_caller_gets_by_default():
+    # The other half of the collapse: *who* asked. Repairing a file a released
+    # build wrote has to keep loading, and admitting a request that names one
+    # model twice has to say so — the same pair, two answers, so the parser cannot
+    # infer it and the caller has to state it. This asserts the default rather
+    # than the two call sites, because the default is what a call site added later
+    # inherits without deciding: an ordinary `from_payload` collapses nothing.
+    for owner in (ModelHubSourceConfig, ModelHubRouteConfig, ModelHubAgentSupplyConfig, ModelHubConfig):
+        signature = inspect.signature(owner.from_payload)
+        assert signature.parameters["repairing"].default is False, owner.__name__
+
+    settled = inspect.signature(v2_config._collapse_settled_duplicates)
+    assert settled.parameters["repairing"].default is inspect.Parameter.empty
+    assert settled.parameters["repairing"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_a_live_chain_is_refused_the_duplicate_a_persisted_chain_is_repaired():
+    """MH-USAGE-012: one payload, both doors, opposite answers.
+
+    Which is the property, and the reason it is one test. The chain names one
+    upstream model in two spellings, so it is one ledger row either way; what
+    differs is whether the caller gets to learn that before it becomes one.
+    """
+
+    hops = [
+        {"source_id": "src_same0001", "model_id": "model-a"},
+        {"source_id": "src_same0001", "model_id": " model-a "},
+    ]
+
+    with pytest.raises(ValueError, match="unique pairs"):
+        ModelHubRouteConfig.from_payload({"hops": copy.deepcopy(hops)})
+
+    repaired = ModelHubRouteConfig.from_payload({"hops": copy.deepcopy(hops)}, repairing=True)
+    assert [hop.model_id for hop in repaired.hops] == ["model-a"]
+
+
 def test_config_reload_recovers_dangling_legacy_custom_source_order(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
@@ -2643,7 +2680,8 @@ def test_route_hops_allow_one_source_to_supply_distinct_models():
                 {"source_id": "src_same0001", "model_id": "model-a"},
                 {"source_id": "src_same0001", "model_id": " model-a "},
             ]
-        }
+        },
+        repairing=True,
     )
     assert [(hop.source_id, hop.model_id) for hop in collapsed.hops] == [
         ("src_same0001", "model-a"),

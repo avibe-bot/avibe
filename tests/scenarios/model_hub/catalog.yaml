@@ -173,6 +173,24 @@ scenarios:
     kind: concurrency
     layer: unit
     test: tests/test_model_hub_usage.py::test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate
+  - id: MH-USAGE-010
+    name: A turn whose settlement raises still meters the call the vendor billed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_settlement_that_raises_still_meters_the_call_it_was_settling
+  - id: MH-USAGE-011
+    name: A ledger that stopped answering cannot hold the served turn open behind it
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open
+  - id: MH-USAGE-012
+    name: A caller that names one model twice is refused rather than answered with half of what it sent
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_config.py::test_a_live_chain_is_refused_the_duplicate_a_persisted_chain_is_repaired
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
