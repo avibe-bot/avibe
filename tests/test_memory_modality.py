@@ -1,5 +1,6 @@
 import io
 import struct
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -254,6 +255,35 @@ def test_office_probe_uses_sidecar_path_and_macos_fallback(
 
     fallback.chmod(0o700)
     assert office_conversion_available() is True
+
+
+def test_office_conversion_preflight_uses_isolated_bounded_soffice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_private(tmp_path / "report.xlsx", b"office")
+    converter = tmp_path / "soffice"
+    seen: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["kwargs"] = kwargs
+        output_dir = Path(command[command.index("--outdir") + 1])
+        (output_dir / "report.pdf").write_bytes(b"%PDF-1.7\nconverted")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(modality_module, "_office_converter_path", lambda: converter)
+    monkeypatch.setattr(modality_module.subprocess, "run", fake_run)
+
+    assert modality_module.office_document_conversion_succeeds(source) is True
+    command = seen["command"]
+    kwargs = seen["kwargs"]
+    assert "--headless" in command
+    assert "--convert-to" in command
+    assert any(str(value).startswith("-env:UserInstallation=file:") for value in command)
+    assert kwargs["env"]["PATH"] == "/usr/bin:/bin"
+    assert kwargs["timeout"] == 30
+    assert kwargs["check"] is False
 
 
 def test_classifier_skips_office_without_soffice(

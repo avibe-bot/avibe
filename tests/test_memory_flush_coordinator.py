@@ -3610,6 +3610,11 @@ async def test_delivery_rechecks_soffice_and_preserves_non_office_siblings(
         "office_conversion_available",
         lambda: True,
     )
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_document_conversion_succeeds",
+        lambda _path: True,
+    )
     attachment_store, bundle = _pin_office_bundle(include_pdf=True)
     original = _enqueue_attachment_bundle(
         store,
@@ -3652,6 +3657,11 @@ async def test_delivery_settles_captionless_office_when_soffice_disappears(
         attachment_module.memory_modality,
         "office_conversion_available",
         lambda: True,
+    )
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_document_conversion_succeeds",
+        lambda _path: True,
     )
     attachment_store, bundle = _pin_office_bundle(include_pdf=False)
     original = _enqueue_attachment_bundle(

@@ -225,6 +225,10 @@ def test_workbench_long_office_display_name_keeps_suffix_through_pin(
         "core.memory.modality.office_conversion_available",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        lambda _path: True,
+    )
     office = _source_file(source_root, "upload.xlsx", _xlsx_bytes())
     long_name = f"{'report' * 100}.xlsx"
 
@@ -242,6 +246,42 @@ def test_workbench_long_office_display_name_keeps_suffix_through_pin(
     assert len(converted[0].name.encode("utf-8")) <= 512
     assert converted[0].name.endswith(".xlsx")
     assert bundle.attachments[0].name == converted[0].name
+
+
+def test_pin_requires_office_conversion_proof_without_losing_siblings(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        lambda _path: False,
+    )
+    office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
+    notes = _source_file(source_root, "notes.txt", b"keep this sibling")
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name="report.xlsx",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(office),
+            ),
+            SimpleNamespace(
+                name="notes.txt",
+                mimetype="text/plain",
+                local_path=str(notes),
+            ),
+        ]
+    )
+
+    bundle = AttachmentPinStore().pin(converted)
+
+    assert [attachment.name for attachment in bundle.attachments] == ["notes.txt"]
+    assert bundle.attachments[0].storage_key.endswith("/00.txt")
 
 
 @pytest.mark.parametrize(

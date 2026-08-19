@@ -27,7 +27,10 @@ from __future__ import annotations
 import codecs
 import os
 import shutil
+import stat
 import struct
+import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -170,6 +173,16 @@ _ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
 _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES = 46
 _MAX_ZIP_COMMENT_BYTES = 65_535
 _MAX_OFFICE_ZIP_ENTRIES = 4_096
+_OFFICE_CONVERSION_TIMEOUT_SECONDS = 30
+
+
+def _office_converter_path() -> Path | None:
+    resolved = shutil.which("soffice", path="/usr/bin:/bin")
+    if resolved is not None:
+        return Path(resolved)
+    if _MACOS_SOFFICE.is_file() and os.access(_MACOS_SOFFICE, os.X_OK):
+        return _MACOS_SOFFICE
+    return None
 
 
 def office_conversion_available() -> bool:
@@ -180,13 +193,50 @@ def office_conversion_available() -> bool:
     Office file the parser child cannot convert.
     """
 
-    return (
-        shutil.which("soffice", path="/usr/bin:/bin") is not None
-        or (
-            _MACOS_SOFFICE.is_file()
-            and os.access(_MACOS_SOFFICE, os.X_OK)
-        )
-    )
+    return _office_converter_path() is not None
+
+
+def office_document_conversion_succeeds(path: Path) -> bool:
+    """Prove that the sidecar-visible converter accepts one private staged file."""
+
+    converter = _office_converter_path()
+    if converter is None:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="avibe-office-preflight-") as temp_dir:
+            temp_root = Path(temp_dir)
+            output_dir = temp_root / "output"
+            profile_dir = temp_root / "profile"
+            output_dir.mkdir(mode=0o700)
+            profile_dir.mkdir(mode=0o700)
+            result = subprocess.run(
+                [
+                    str(converter),
+                    "--headless",
+                    f"-env:UserInstallation={profile_dir.as_uri()}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(output_dir),
+                    str(path),
+                ],
+                cwd=temp_root,
+                env={"HOME": str(temp_root), "PATH": "/usr/bin:/bin"},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_OFFICE_CONVERSION_TIMEOUT_SECONDS,
+                check=False,
+            )
+            output = output_dir / f"{path.stem}.pdf"
+            output_info = output.lstat()
+            return (
+                result.returncode == 0
+                and stat.S_ISREG(output_info.st_mode)
+                and output_info.st_size > 0
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def classify_pinned_attachment(

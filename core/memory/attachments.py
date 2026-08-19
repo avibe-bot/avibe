@@ -322,6 +322,9 @@ class AttachmentPinStore:
                                     filename,
                                     source.kind,
                                     source.ext,
+                                    conversion_path=(
+                                        self._staging / stage_name / filename
+                                    ),
                                 )
                             ):
                                 raise AttachmentPinError(
@@ -1045,6 +1048,8 @@ def _pinned_office_matches(
     filename: str,
     kind: MemoryContentKind,
     extension: str,
+    *,
+    conversion_path: Path | None = None,
 ) -> bool:
     try:
         descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
@@ -1052,12 +1057,18 @@ def _pinned_office_matches(
         raise _storage_failure(error, "pinned Office attachment is unavailable") from error
     try:
         _require_private_file(os.fstat(descriptor), "pinned Office attachment")
-        return memory_modality.classify_pinned_attachment(
+        classification = memory_modality.classify_pinned_attachment(
             filename,
             "application/octet-stream",
             Path(filename),
             file_fd=descriptor,
-        ) == (kind, extension)
+        )
+        return classification == (kind, extension) and (
+            conversion_path is None
+            or memory_modality.office_document_conversion_succeeds(
+                conversion_path
+            )
+        )
     finally:
         os.close(descriptor)
 

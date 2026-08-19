@@ -330,6 +330,10 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
 ) -> None:
     """Scenario: MEMORY-IM-ATTACH-012."""
 
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        lambda _path: True,
+    )
     monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
     without_home = tmp_path / "without-soffice"
     monkeypatch.setenv("AVIBE_HOME", str(without_home / "avibe-home"))
