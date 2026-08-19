@@ -75,6 +75,17 @@ vi.mock('./ApiContext', async () => {
   return { ...actual, useApi: () => apiRef.current };
 });
 
+// The provider's own message surface, for the one refusal that never reaches the
+// network and so has no ``apiFetch`` toast of its own. Keyed rather than rendered:
+// the assertion is about which fact the user is told, not about a translation.
+const toasts: string[] = [];
+
+vi.mock('./ToastContext', () => ({
+  useToast: () => ({ showToast: (message: string) => toasts.push(message) }),
+}));
+
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+
 const connectWorkbenchEvents = () => vi.fn(() => vi.fn());
 
 // Records every PATCH and hands back a gate per call, so a write waiting behind
@@ -109,6 +120,7 @@ function renderTree() {
 describe('project default Agent route', () => {
   beforeEach(() => {
     apiRef.current = null;
+    toasts.length = 0;
     // The writer's store is module state (a resource outlives the view that edits
     // it), so each case starts from an empty one.
     resetCoalescedWrites();
@@ -473,6 +485,63 @@ describe('project default Agent route', () => {
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
     expect(tree()!.projects?.[0].default_agent).toMatchObject({ agent_backend: 'codex', model: 'haiku' });
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
+  it('refuses a pick made after the conflicted burst ended, until a read has answered it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stored = { ...project, default_agent: route() };
+    const moved = { ...project, default_agent: route({ agent_id: 'agt_codex', agent_name: 'codex', agent_variant: 'codex' }) };
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [stored], sessions: {} })
+      // The read that would answer the conflict fails, so nothing has replaced the
+      // confirmation the server contradicted. This is the state that separates the
+      // rule from the writer's admission of a WAITING patch: the burst is over.
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ projects: [moved], sessions: {} });
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    await act(async () => {
+      gates[0].reject(conflict());
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+
+    // A brand-new burst, with no pending patch anywhere for the writer to judge. It
+    // would derive its token from the confirmation the 409 contradicted, so it is a
+    // guaranteed second conflict: refused at the send, where the token comes from,
+    // and the user is told the same fact the 409 carries rather than watching the
+    // click revert for no stated reason.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'haiku' }));
+    });
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(toasts).toEqual(['errors.project_agent_conflict']);
+    // Refused is not stuck: the rollback puts the confirmed route back and asks
+    // again, and THAT read is what lifts the doubt.
+    expect(tree()!.projects?.[0].default_agent).toEqual(moved.default_agent);
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ agent_id: 'agt_codex', agent_name: 'codex', agent_variant: 'codex', model: 'haiku' }));
+    });
+    await settle();
+    expect(calls).toHaveLength(2);
+    expect(calls[1].payload).toMatchObject({ expected_agent_id: 'agt_codex', model: 'haiku' });
+    expect(toasts).toEqual(['errors.project_agent_conflict']);
   });
 
   it('reverts the whole burst when the pick that stood alone is refused too', async () => {

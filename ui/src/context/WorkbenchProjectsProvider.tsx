@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { useApi } from './ApiContext';
+import { useToast } from './ToastContext';
 import type { ProjectDefaultAgent, WorkbenchProject, WorkbenchSession, WorkbenchSessionCreate } from './ApiContext';
 import {
   WorkbenchProjectsContext,
@@ -10,7 +12,7 @@ import {
 } from './WorkbenchProjectsContext';
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
-import { useCoalescedWrite } from '../lib/useCoalescedWrite';
+import { overwritesRefusedFields, useCoalescedWrite } from '../lib/useCoalescedWrite';
 import { errorMessage } from '@/lib/errorMessage';
 import { useConsumerActivation } from '@/lib/useConsumerActivation';
 import {
@@ -132,6 +134,10 @@ const REORDER_ACTIVITY_EVENTS = new Set(['created', 'user_message', 'show_event'
 // WorkbenchInboxContext (both consumers read it directly).
 export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const api = useApi();
+  const { t } = useTranslation();
+  // The write paths here report their own failures through ``apiFetch``; this is
+  // for the one refusal that never reaches the network (see ``sendProjectRoute``).
+  const { showToast } = useToast();
   // The tree is workbench-only data behind an app-level provider. Nothing under
   // /admin renders a project, so nothing there should pay for the bootstrap —
   // neither on load nor on an SSE reconnect.
@@ -195,9 +201,16 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // wrong, because the token it produced is exactly what the server compared. The
   // route it still holds is unknown until a read answers, so the entry stays (it is
   // also the rollback target, and inventing a route to display would be worse than
-  // showing a stale one for a moment) and the doubt is recorded beside it. While a
-  // project is in here, nothing derived from its confirmation stands on its own.
-  // Cleared wherever the confirmation is re-established — one place, below.
+  // showing a stale one for a moment) and the doubt is recorded beside it.
+  //
+  // While a project is in here, ``sendProjectRoute`` refuses to write it at all —
+  // read at the one place the token is DERIVED, so it holds for a brand-new burst
+  // and not only for a patch already waiting. The alternatives are both wrong
+  // rather than merely worse: sending the contradicted token is a request we know
+  // the server will refuse, and re-deriving the token from what the conflict (or a
+  // fresh read) says is stored turns compare-and-set into last-writer-wins, which
+  // is the lost update the token exists to prevent. Cleared wherever the
+  // confirmation is re-established — one place, below.
   const contradictedProjectRouteRef = useRef(new Set<string>());
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
@@ -1201,6 +1214,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // pick this very request is trying to install. That is what keeps a
       // rejected pick from poisoning the next one: expecting the route the server
       // refused would make every retry a deterministic conflict.
+      //
+      // And if that confirmation has been contradicted, no token can be derived at
+      // all, so the write does not go out: the server has told us our token is
+      // wrong, and it is the only party that can say what the right one is. Refused
+      // here rather than at the writer's admission of a waiting patch, because this
+      // is the single line every project-route write passes through — a pick made
+      // after the burst ended reaches exactly the same answer. The user is told the
+      // same thing the 409 says, since a click that silently reverts is the lag this
+      // whole path exists to remove; the toast layer collapses the repeat when this
+      // is the same incident's second pick.
+      if (contradictedProjectRouteRef.current.has(projectId)) {
+        showToast(t('errors.project_agent_conflict'), 'error');
+        return false;
+      }
       const expectedAgentId = confirmedProjectRouteRef.current.get(projectId)?.agent_id ?? null;
       try {
         // Always send the full 5-field route: a complete set is coherent whether
@@ -1247,29 +1274,22 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         return false;
       }
     },
-    [acceptProjectsMutation, api, commitProjectFields],
+    [acceptProjectsMutation, api, commitProjectFields, showToast, t],
   );
 
   const { write: writeProjectRoute, isSaving: isSavingDefaultAgent } = useCoalescedWrite<ProjectDefaultAgent>(
     'project-route',
     sendProjectRoute,
     {
-      // A pick names every field it needs — ``sendProjectRoute`` composes the full
-      // 5-field route itself — so a refused request normally says nothing about the
-      // pick waiting behind it, and dropping it would discard the user's newest
-      // choice for nothing.
-      //
-      // Except that the send also derives a PRECONDITION the payload does not
-      // carry: the compare-and-set token, read from the last confirmed route. A
-      // conflict means that confirmation is contradicted, so the follow-up would
-      // send the very token the server just rejected — a guaranteed second
-      // conflict, and a second toast, for a pick that never had a chance. There the
-      // conflict must END the burst: revert to the last confirmed route and let the
-      // settle's re-read say where the route actually went. We deliberately do not
-      // adopt the conflict's ``current_agent_id`` and retry — that turns
-      // compare-and-set into last-writer-wins, silently overwriting whoever moved
-      // the route with a pick the user made before learning of it.
-      standsAlone: (_route, projectId) => !contradictedProjectRouteRef.current.has(projectId),
+      // Asked as the relation it is, not asserted for this owner: a pick overwrites
+      // every field the refused one wrote, because ``sendProjectRoute`` composes the
+      // full 5-field route either way — so a refusal says nothing about the pick
+      // waiting behind it, and dropping it would discard the user's newest choice
+      // for nothing. Should a route payload ever narrow to the field the user
+      // touched (as the session picker's does), the same answer covers it without
+      // this line changing. The one precondition a pick does NOT carry — the
+      // compare-and-set token — is enforced where it is derived, above.
+      standsAlone: overwritesRefusedFields,
       onSettled: useCallback(
         (projectId: string, committed: boolean) => {
           latestProjectRouteRef.current.delete(projectId);

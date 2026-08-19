@@ -99,6 +99,11 @@ vi.mock('./ApiContext', async () => {
   return { ...actual, useApi: () => apiRef.current };
 });
 
+// The provider reports its one never-sent refusal through the toast surface, which
+// this tree does not mount. Nothing here asserts that copy — a no-op keeps the
+// dependency from throwing.
+vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast: () => {} }) }));
+
 function settle() {
   return act(async () => {
     await Promise.resolve();

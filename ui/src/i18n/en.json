@@ -1667,6 +1667,7 @@
     "icon_write_failed": "Couldn't save the icon. Please try again.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
+    "project_agent_conflict": "The project's Agent changed elsewhere. Reloading it — apply your change again.",
     "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
     "remote_access_config_unavailable": "Avibe couldn't read its configuration. Check that the service is healthy and try again.",
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",

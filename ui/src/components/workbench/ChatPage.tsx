@@ -995,12 +995,13 @@ export const ChatPage: React.FC = () => {
   // let a refused rename drop a route pick that had never been sent, and revert
   // it. They share the sender: the request is the same PATCH either way, and the
   // server writes only the columns it was given.
-  // Whether a refused request takes the write behind it down with it is read off
-  // that write's own fields, by the group that owns them — never assumed for the
-  // key as a whole (a whole-route pick waiting behind a refused effort click
-  // depends on nothing that was refused).
+  // Whether a refused request takes the write behind it down with it is decided by
+  // the group that owns those fields, from the two payloads' relation — never
+  // assumed for the key as a whole (a model click behind a refused model click
+  // overwrites the very field that failed).
   const patchStandsAlone = useCallback(
-    ({ changes, group }: SessionPatchWrite) => sessionWriteStandsAlone(group, changes),
+    (pending: SessionPatchWrite, refused: SessionPatchWrite) =>
+      sessionWriteStandsAlone(pending.group, pending.changes, refused.changes),
     [],
   );
 

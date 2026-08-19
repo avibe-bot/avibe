@@ -495,6 +495,45 @@ describe('the chat row under an optimistic write', () => {
     expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: 'medium', saving: 'no' });
   });
 
+  it('sends a second model pick behind a refused one, because it overwrites the field that was refused', async () => {
+    const gates = [deferred<unknown>(), deferred<unknown>()];
+    let call = 0;
+    mocks.api.updateSession.mockImplementation(() => gates[call++].promise);
+    await mountChat();
+
+    // Two model clicks on a session that already has an explicit Agent. The picker
+    // emits each as ``{model}`` ALONE — there is no default to pin — so neither
+    // payload carries the whole route, and counting fields would call the second
+    // one dependent on the first.
+    act(() => {
+      mocks.onPatch!({ model: 'gpt-5' });
+      mocks.onPatch!({ model: 'gpt-5-codex' });
+    });
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'gpt-5-codex', saving: 'yes' });
+
+    await act(async () => {
+      gates[0].reject(new Error('nope'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // What decides it is the RELATION: the pending patch restates every field the
+    // refused one tried to write, so the refusal says nothing about it. The user's
+    // newest model choice must reach the server, not be discarded because the
+    // choice it replaced failed.
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, { model: 'gpt-5-codex' });
+
+    const committedRow = { ...sessionRow, model: 'gpt-5-codex' };
+    mocks.api.getSession.mockResolvedValue(committedRow);
+    await act(async () => {
+      gates[1].resolve(committedRow);
+      await gates[1].promise;
+    });
+    await settle();
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'gpt-5-codex', saving: 'no' });
+  });
+
   it('keeps the fields a partly committed burst persisted, reverting only the refused ones', async () => {
     const gates = [deferred<unknown>(), deferred<unknown>()];
     let call = 0;

@@ -1,5 +1,7 @@
 import { useCallback, useState } from 'react';
 
+import { overwritesRefusedFields } from '../../lib/useCoalescedWrite';
+
 // Orders best-effort Session-row reads against every newer local observation.
 // Reads wait for in-flight mutations to settle; a push event or mutation then
 // invalidates every read that began before that newer state was observed.
@@ -53,25 +55,26 @@ export const bySessionWriteGroup = <T extends object>(
 };
 
 /** Whether a write may still be sent after an earlier request for its OWN group
- *  was refused — i.e. whether it was composed against that refused state or
- *  stands on its own.
+ *  was refused — i.e. whether it was composed against a field that request was
+ *  moving, or overwrites whatever it moved.
  *
  *  Route fields are chosen against each other: a model belongs to an Agent, an
- *  effort to a model. So `{reasoning_effort}` alone was composed against the Agent
- *  the refused write was installing, and applying it to the Agent the row still
- *  holds would persist a combination nobody picked — while a payload carrying the
- *  WHOLE route (what the picker emits for an Agent pick, and for a model or effort
- *  pick on an inherited route) names every field it depends on and is coherent
- *  whatever the server just did. Nothing in `meta` is chosen against another
- *  field. Read off the fields present, never claimed by a caller. */
+ *  effort to a model. So the question is not how MANY fields a pick carries but
+ *  whether it restates the ones that were refused — the relation
+ *  ``overwritesRefusedFields`` answers. `{reasoning_effort}` behind a refused
+ *  AGENT switch was composed against an Agent the row never took, and applying it
+ *  would persist a combination nobody picked; `{model}` behind a refused `{model}`
+ *  replaces the exact field that failed, against an Agent nothing has moved, and
+ *  dropping it would throw away the user's newest click. Counting fields could not
+ *  tell those apart — which is why the group only says WHETHER its fields are
+ *  chosen against each other, and the relation says the rest. Nothing in `meta`
+ *  is chosen against another field, so nothing there can be composed against a
+ *  refusal. */
 export const sessionWriteStandsAlone = (
   group: SessionWriteGroup,
-  changes: object,
-): boolean => {
-  if (group !== 'route') return true;
-  for (const field of ROUTE_FIELDS) if (!(field in changes)) return false;
-  return true;
-};
+  pending: object,
+  refused: object,
+): boolean => (group === 'route' ? overwritesRefusedFields(pending, refused) : true);
 
 // ── What a row's OPEN writes are holding, keyed by session id and group ─────
 //

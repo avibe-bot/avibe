@@ -327,23 +327,23 @@ describe('useCoalescedWrite', () => {
     expect(result.current.isSaving('s1')).toBe(false);
   });
 
-  it('asks about the failed resource, so an owner can answer per key and not only per payload', async () => {
+  it('asks with both payloads, so the same pending patch can be answered either way', async () => {
     const started: string[] = [];
     const pending = new Map<string, Deferred>();
     const send = gatedSend(started, pending);
     const asked: Array<[string, string]> = [];
-    // An owner whose answer does not live in the payload at all: what the pending
-    // write depends on is a per-resource precondition (a compare-and-set token that
-    // one resource's failure just invalidated), which the writer cannot see.
-    const standsAlone = (patch: string, key: string) => {
-      asked.push([patch, key]);
-      return key !== 's1';
+    // The identical pending payload, behind two different refusals: whether it
+    // stands alone is a property of the PAIR, so an owner that is told only what
+    // waits cannot answer at all.
+    const standsAlone = (patch: string, refused: string) => {
+      asked.push([patch, refused]);
+      return refused === 'same-field';
     };
     const { result } = renderHook(() => useCoalescedWrite<string>('t', send, { merge: joinMerge, standsAlone }));
 
     act(() => {
-      result.current.write('s1', 'a');
-      result.current.write('s2', 'a');
+      result.current.write('s1', 'same-field');
+      result.current.write('s2', 'wider');
     });
     await settle();
     act(() => {
@@ -352,16 +352,59 @@ describe('useCoalescedWrite', () => {
     });
 
     await act(async () => {
-      pending.get('s1:a')!.resolve(false);
-      pending.get('s2:a')!.resolve(false);
+      pending.get('s1:same-field')!.resolve(false);
+      pending.get('s2:wider')!.resolve(false);
       await Promise.resolve();
     });
     await settle();
 
-    // Same payload on both keys, opposite outcomes: the question is asked with the
-    // resource it is about, once per failure, and only after one.
-    expect(asked).toEqual([['b', 's1'], ['b', 's2']]);
-    expect(started).toEqual(['s1:a', 's2:a', 's2:b']);
+    expect(asked).toEqual([
+      ['b', 'same-field'],
+      ['b', 'wider'],
+    ]);
+    expect(started).toEqual(['s1:same-field', 's2:wider', 's1:b']);
+  });
+
+  it('asks about the MOST RECENT send, so a burst that fails twice compares against the right one', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const asked: Array<[string, string]> = [];
+    const standsAlone = (patch: string, refused: string) => {
+      asked.push([patch, refused]);
+      return true;
+    };
+    const { result } = renderHook(() => useCoalescedWrite<string>('t', send, { merge: joinMerge, standsAlone }));
+
+    act(() => {
+      result.current.write('s1', 'a');
+    });
+    await settle();
+    act(() => {
+      result.current.write('s1', 'b');
+    });
+    await act(async () => {
+      pending.get('s1:a')!.resolve(false);
+      await Promise.resolve();
+    });
+    await settle();
+    act(() => {
+      result.current.write('s1', 'c');
+    });
+    await act(async () => {
+      pending.get('s1:b')!.resolve(false);
+      await Promise.resolve();
+    });
+    await settle();
+
+    // ``c`` is weighed against ``b``, never against ``a``: the first failure is
+    // already accounted for by the payload the second one sent, and comparing
+    // against a patch two sends back would answer a question nobody asked.
+    expect(asked).toEqual([
+      ['b', 'a'],
+      ['c', 'b'],
+    ]);
+    expect(started).toEqual(['s1:a', 's1:b', 's1:c']);
   });
 
   it('treats a throw as a failed write', async () => {
