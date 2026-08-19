@@ -163,9 +163,10 @@ before a mismatched pair is used.
 
 Cancellation of in-flight captures happens only on the 5s timeout
 path, and only after that path's destructive operation succeeds. A
-successful `/new`/archive that acquired the lock only advances the
-epoch. The capture task's epoch check discards stale work without
-killing a capture admitted for the new generation.
+failed `/new`/archive leaves both the epoch and in-flight captures
+unchanged. A successful `/new`/archive that acquired the lock only
+advances the epoch. The capture task's epoch check discards stale
+work without killing a capture admitted for the new generation.
 
 If a second `/new`/archive times out while another lifecycle operation
 already holds the lock, it waits for that holder instead of fail-opening

@@ -749,23 +749,15 @@ class SessionTurnManager:
             else:
                 logger.warning(
                     "session lifecycle admission did not quiesce before the "
-                    "deadline; abandoning in-flight captures and proceeding "
+                    "deadline; proceeding without the capture lock "
                     "session=%s",
                     raw_session_id,
                 )
-                handler = getattr(self.controller, "message_handler", None)
-                abandon = getattr(
-                    handler,
-                    "abandon_memory_captures_for_session",
-                    None,
+                result = await operation()
+                self._advance_session_lifecycle_epoch(
+                    raw_session_id,
+                    abandon_captures=True,
                 )
-                if callable(abandon):
-                    abandon(raw_session_id)
-                try:
-                    result = await operation()
-                except BaseException:
-                    raise
-                self._advance_session_lifecycle_epoch(raw_session_id)
                 return result
         self._session_lifecycle_held.add(raw_session_id)
         try:

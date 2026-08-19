@@ -488,6 +488,46 @@ async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
     assert scheduled[0].cancelled() is False
 
 
+@pytest.mark.anyio
+async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
+    managers,
+) -> None:
+    """A failed /new after the 5s deadline must not cancel accepted captures."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    never_resolves = asyncio.Event()
+    holding = asyncio.Event()
+
+    async def hung_capture() -> None:
+        holding.set()
+        await never_resolves.wait()
+
+    handler._schedule_memory_capture_task(
+        session_id="ses_fsm",
+        expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+        capture=hung_capture(),
+    )
+    await asyncio.wait_for(holding.wait(), timeout=1.0)
+    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+
+    async def reset_session() -> str:
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.run_session_lifecycle(
+            "ses_fsm",
+            reset_session,
+            deadline_seconds=0.05,
+        )
+
+    assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+    assert handler._memory_capture_tasks
+    assert all(not task.cancelled() for task in handler._memory_capture_tasks)
+    never_resolves.set()
+    await handler.drain_memory_capture_tasks()
+
+
 async def _activate(
     manager: SessionTurnManager,
     *,
