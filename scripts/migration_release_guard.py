@@ -25,8 +25,10 @@ asks ``background_tables_ready``, so it covers the repair and stamping that run 
 Alembic does, and it means by "ready" exactly what production means -- required columns
 included, not merely a full set of table names.
 
-The first three are metadata only. The fourth builds a database per release and costs
-roughly a fifth of a second each.
+A release here is any installable tag, ``gh-vX.Y.ZrcN`` prereleases included, because a
+database in the field can have been built by one. The first three properties are metadata
+only; the fourth builds a database per *distinct shipped graph*, which is what makes that
+wider window affordable -- many tags ship byte-identical migrations.
 
 Run it directly, or through the ``migration-release-guard`` workflow, which is the job
 that supplies the full tag history this needs.
@@ -85,22 +87,39 @@ def _git(*args: str) -> str:
     return result.stdout
 
 
+RELEASE_TAG = re.compile(r"^(?:gh-)?v(\d+)\.(\d+)\.(\d+)(?:rc(\d+))?$")
+
+
 def version_key(tag: str) -> tuple[int, ...]:
-    """Sort key for a ``vX.Y.Z`` tag; empty for anything that is not one."""
-    try:
-        return tuple(int(part) for part in tag.lstrip("v").split("."))
-    except ValueError:
+    """Sort key for a release tag, prereleases ordered before the version they lead to.
+
+    ``gh-vX.Y.ZrcN`` prereleases are installable -- AGENTS.md §9 requires a wheel and an
+    sdist in their release assets -- so a database in the field can have been built by
+    one, and a graph edited between the prerelease and the release is edited behind those
+    databases. Empty for anything that is not a release tag.
+    """
+    match = RELEASE_TAG.match(tag)
+    if match is None:
         return ()
+    major, minor, patch, candidate = match.groups()
+    ordinal = (0, int(candidate)) if candidate else (1, 0)
+    return (int(major), int(minor), int(patch), *ordinal)
 
 
-def _carries_migrations(tag: str) -> bool:
+def versions_tree(tag: str) -> str | None:
+    """The git object id of ``tag``'s versions directory, or ``None`` if it shipped none.
+
+    Identity of a shipped graph, straight from git: two tags with the same object id
+    shipped byte-identical migrations and therefore put the same database in the field.
+    """
     result = subprocess.run(
-        ["git", "cat-file", "-e", f"{tag}:{VERSIONS_PATH}"],
+        ["git", "rev-parse", "--verify", "--quiet", f"{tag}^{{}}:{VERSIONS_PATH}"],
         capture_output=True,
         check=False,
+        text=True,
         cwd=REPO_ROOT,
     )
-    return result.returncode == 0
+    return result.stdout.strip() or None
 
 
 def released_tags() -> list[str]:
@@ -111,8 +130,9 @@ def released_tags() -> list[str]:
     cutoff would instead stop covering a release on a schedule unrelated to whether
     anyone is still running it.
     """
-    candidates = sorted((tag for tag in _git("tag", "-l", "v*").split() if version_key(tag)), key=version_key)
-    tags = [tag for tag in candidates if _carries_migrations(tag)]
+    names = _git("tag", "-l", "v*", "-l", "gh-v*").split()
+    candidates = sorted((tag for tag in names if version_key(tag)), key=version_key)
+    tags = [tag for tag in candidates if versions_tree(tag)]
     if not tags:
         # A guard that reads "no baseline" as "nothing to compare, therefore fine" passes
         # forever while proving nothing. Refuse instead, and name the cause: a shallow
@@ -136,6 +156,21 @@ def latest_released_tag() -> str:
     and the invariant chains forward without relitigating anything.
     """
     return released_tags()[-1]
+
+
+def released_graphs() -> list[str]:
+    """One tag per distinct shipped graph, oldest first: the first release that shipped it.
+
+    The unit is a graph, not a tag. What puts a database in the field is a versions
+    directory, so the many prerelease tags that ship a byte-identical one all put the same
+    database there and building it once is building it for all of them. That is what makes
+    covering every installable tag affordable: one ``git rev-parse`` per tag instead of one
+    database per tag, with no release left unexercised.
+    """
+    graphs: dict[str, str] = {}
+    for tag in released_tags():
+        graphs.setdefault(str(versions_tree(tag)), tag)
+    return sorted(graphs.values(), key=version_key)
 
 
 def released_sources(tag: str) -> dict[str, str]:
@@ -259,8 +294,8 @@ def declared_graph_fields(source: str) -> dict[str, object]:
     return declared
 
 
-def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, dict[str, object]]]:
-    """``{revision: (filename, {edge_field: value})}``, parsed rather than imported.
+def revision_claims(sources: dict[str, str]) -> dict[str, list[tuple[str, dict[str, object]]]]:
+    """Every claim on every revision identifier, contested ones included.
 
     Parsing keeps this free of import side effects and lets it read a revision from a
     release whose modules would no longer import against today's code. A computed value
@@ -268,25 +303,72 @@ def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, dict[str, ob
     additionally cannot identify its file, so it is keyed by filename and can never be
     mistaken for a literal revision that happens to render the same way. An edge a module
     never declares is ``()``, which is what Alembic defaults it to.
+
+    The identifier is the guard's only handle on "the same migration across two releases",
+    and two modules can declare it at once. Keeping the claimants as a list is what lets a
+    caller report that rather than overwrite one of them: the survivor would otherwise
+    answer for a migration whose body Alembic will skip on any database stamped with the
+    shared identifier.
     """
-    graph: dict[str, tuple[str, dict[str, object]]] = {}
-    for name, source in sources.items():
+    claims: dict[str, list[tuple[str, dict[str, object]]]] = {}
+    for name, source in sorted(sources.items()):
         declared = declared_graph_fields(source)
         if "revision" not in declared:
             continue
         revision = declared["revision"]
         key = f"<computed:{name}>" if revision is COMPUTED else str(revision)
-        graph[key] = (name, {field: declared.get(field, ()) for field in GRAPH_EDGES})
-    return graph
+        edges = {field: declared.get(field, ()) for field in GRAPH_EDGES}
+        claims.setdefault(key, []).append((name, edges))
+    return claims
 
 
-def unverifiable_sources(sources: dict[str, str]) -> list[str]:
-    """Filenames whose revision metadata is computed, and so cannot be compared at all."""
-    return sorted(
-        name
-        for key, (name, edges) in revision_graph(sources).items()
-        if key.startswith("<computed:") or any(value is COMPUTED for value in edges.values())
-    )
+def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, dict[str, object]]]:
+    """``{revision: (filename, {edge_field: value})}`` for identifiers naming one readable migration.
+
+    A contested or computed identifier names nothing a comparison could be about, so it is
+    absent here and reported by ``ungraphable_sources`` instead. The two functions
+    partition the source tree, which is the whole point: a migration that fell out of both
+    would be one the guard neither checked nor admitted it could not check.
+    """
+    unreadable = ungraphable_sources(sources)
+    return {
+        revision: claims[0]
+        for revision, claims in revision_claims(sources).items()
+        if len(claims) == 1 and claims[0][0] not in unreadable
+    }
+
+
+def ungraphable_sources(sources: dict[str, str]) -> dict[str, str]:
+    """``{filename: why the guard cannot hold that file to a released graph}``.
+
+    Both reasons are one defect wearing two faces: a key the guard invents has stopped
+    naming exactly one migration. Metadata it cannot read as a literal names nothing, and
+    an identifier two modules declare names two things. Either way the honest answer is
+    "cannot verify", and the one answer that must stay unreachable is "verified unchanged"
+    -- so this partitions the source tree with ``revision_graph``: every migration is a
+    node the comparison reaches or a reason it refuses to run, never neither.
+    """
+    reasons: dict[str, str] = {}
+    for revision, claims in revision_claims(sources).items():
+        names = [name for name, _ in claims]
+        for name, edges in claims:
+            if revision.startswith("<computed:") or any(value is COMPUTED for value in edges.values()):
+                reasons[name] = "computes its migration metadata"
+            elif len(claims) > 1:
+                others = ", ".join(other for other in names if other != name)
+                reasons[name] = f"declares revision {revision!r}, which {others} also declares"
+    return reasons
+
+
+def shipped_head_revisions(sources: dict[str, str]) -> set[str]:
+    """The revisions nothing in ``sources`` descends from: where a full upgrade of them ends.
+
+    ``depends_on`` is an ordering constraint rather than a parent link, so only
+    ``down_revision`` decides what is still a head -- the same rule Alembic applies.
+    """
+    graph = revision_graph(sources)
+    parents = {parent for _, edges in graph.values() for parent in edges["down_revision"]}
+    return set(graph) - parents
 
 
 def rechained_revisions(baseline: str | None = None) -> list[str]:
@@ -300,18 +382,21 @@ def rechained_revisions(baseline: str | None = None) -> list[str]:
     """
     baseline = baseline or latest_released_tag()
     working_tree = working_tree_sources()
+    claimed = revision_claims(working_tree)
     current = revision_graph(working_tree)
     problems = [
-        f"{name} computes its migration metadata, so the guard cannot hold it to {baseline}"
-        for name in unverifiable_sources(working_tree)
+        f"{name} {reason}, so the guard cannot hold it to {baseline}"
+        for name, reason in sorted(ungraphable_sources(working_tree).items())
     ]
     for revision, (name, shipped) in sorted(revision_graph(released_sources(baseline)).items()):
         if revision not in current:
+            if revision in claimed:
+                # Still claimed, just not readably: every claimant is named once in the
+                # reasons above, and repeating it here describes one defect as two.
+                continue
             problems.append(f"{revision} ({name}) shipped in {baseline} and is no longer in the graph")
             continue
         edges = current[revision][1]
-        if any(value is COMPUTED for value in edges.values()):
-            continue  # already reported above, and reporting it twice describes one defect as two
         drift = "; ".join(
             f"{field} {value!r} -> {edges[field]!r}" for field, value in shipped.items() if edges[field] != value
         )
@@ -404,17 +489,20 @@ def schema_gap_after_upgrade(tag: str) -> str | None:
         root = Path(workspace)
         db_path = root / "vibe.sqlite"
         released = extract_released_versions(tag, root / "released")
+        # Read from the tag's own files, before Alembic is involved at all. Asking the
+        # resolved graph for its head instead would make this self-confirming: an
+        # extraction or ``version_locations`` that silently resolved to a prefix produces a
+        # smaller graph whose head the run then trivially reaches, and it is exactly that
+        # database -- one the release never put in the field, and one today's graph can
+        # legitimately repair -- whose clean upgrade would be read as evidence.
+        shipped_heads = shipped_head_revisions(released_sources(tag))
         command.upgrade(_alembic_config(db_path, released), "head")
 
-        # An Alembic run that resolves ``version_locations`` to nothing reports success
-        # and applies nothing, and an empty database then upgrades cleanly to today's head
-        # -- the guard's own false-negative. Confirm the first upgrade really walked the
-        # released graph before believing anything the second one produces.
         stamp = stamped_revision(db_path)
-        if stamp is None or stamp not in revision_graph(released_sources(tag)):
+        if stamp is None or stamp not in shipped_heads:
             raise MigrationGuardError(
-                f"upgrading with {tag}'s graph left the database stamped {stamp!r}, which is not "
-                f"one of its revisions; the released graph was not applied"
+                f"upgrading with {tag}'s graph left the database stamped {stamp!r} rather than at "
+                f"its head {sorted(shipped_heads)!r}; the released graph was not applied in full"
             )
 
         run_migrations(db_path)
@@ -424,7 +512,7 @@ def schema_gap_after_upgrade(tag: str) -> str | None:
 def unrepairable_releases() -> dict[str, str]:
     """``{tag: reason}`` for every release whose databases today's graph cannot bring to head."""
     failures = {}
-    for tag in released_tags():
+    for tag in released_graphs():
         try:
             gap = schema_gap_after_upgrade(tag)
         except Exception as exc:  # noqa: BLE001 - however the upgrade fails, the verdict is the same

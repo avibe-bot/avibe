@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+from pathlib import Path
 
 import pytest
 from alembic.script.revision import Revision
@@ -237,6 +238,69 @@ def test_computed_revision_metadata_is_reported_rather_than_compared(monkeypatch
     assert "computes its migration metadata" in problems[0]
 
 
+def test_two_files_claiming_one_revision_are_reported_rather_than_compared(monkeypatch):
+    """Alembic identifies a migration by its revision string, and so must the guard.
+
+    Two files declaring one identifier are indistinguishable to both: a database stamped
+    with it has applied whichever one ran, and Alembic will never run the other's body.
+    The dangerous outcome is not the collision but the silent survivor -- one claimant
+    answering the comparison for a migration whose tables no database has.
+    """
+    current = dict(SHIPPED_GRAPH)
+    current["20260105_0005_impostor.py"] = _revision_file("20260102_0002", '"20260101_0001"')
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert len(problems) == 2
+    assert {"20260102_0002_linear.py", "20260105_0005_impostor.py"} == {problem.split()[0] for problem in problems}
+    assert all("also declares" in problem for problem in problems)
+
+
+# Every way a migration file's declared metadata can be malformed, alongside the well-formed
+# shapes. Seeding the malformed ones rather than listing which failures must be caught is
+# what makes the partition below complete: a new way to be unreadable joins this table and
+# is covered without editing an assertion.
+UNREADABLE_GRAPH = dict(SHIPPED_GRAPH) | {
+    "20260105_0005_computed_revision.py": _revision_file("X", "None").replace('"X"', "SOME_CONSTANT"),
+    "20260106_0006_computed_parent.py": _revision_file("20260106_0006", "SOME_CONSTANT"),
+    "20260107_0007_computed_dependency.py": _revision_file(
+        "20260107_0007", '"20260101_0001"', depends_on="SOME_CONSTANT"
+    ),
+    "20260108_0008_duplicate.py": _revision_file("20260102_0002", '"20260101_0001"'),
+    "20260109_0009_no_metadata.py": '"""not a migration at all"""\n',
+}
+
+
+@pytest.mark.parametrize("sources", [SHIPPED_GRAPH, UNREADABLE_GRAPH], ids=["well-formed", "malformed"])
+def test_every_migration_is_either_compared_or_reported(sources):
+    """The invariant behind every key this guard invents, stated once.
+
+    A key names exactly one migration or it names none. Whatever a file declares, it is
+    either a node the comparison reaches or a reason the comparison refuses to run --
+    never neither, because a file that is neither has been dropped silently and the
+    comparison then passes over a graph missing it. Both known ways to lose one were
+    review findings; asserting the partition instead of those two means the third way
+    fails a test rather than shipping as a hole.
+    """
+    compared = {name for name, _ in guard.revision_graph(sources).values()}
+    reported = set(guard.ungraphable_sources(sources))
+    declares_a_revision = {name for name, source in sources.items() if "revision" in guard.declared_graph_fields(source)}
+
+    assert compared | reported == declares_a_revision
+    assert compared & reported == set()
+
+
+@requires_release_history
+def test_the_real_graph_is_wholly_comparable():
+    """The partition above, run against the graph that actually ships.
+
+    Holding only a synthetic tree to it would leave the possibility that every real
+    migration sits in the reported half, where nothing is ever compared.
+    """
+    assert guard.ungraphable_sources(guard.working_tree_sources()) == {}
+
+
 @pytest.mark.parametrize(("problems", "expected_exit"), [([], 0), (["a released revision was rechained"], 1)])
 def test_the_command_line_exit_code_follows_the_verdict(monkeypatch, capsys, problems, expected_exit):
     """The CLI is how a developer runs this outside CI, so its wiring is part of the guard."""
@@ -288,6 +352,35 @@ def test_a_complete_set_of_tables_is_not_by_itself_a_complete_schema(tmp_path):
     assert "column(s) missing" in gap
 
 
+def test_a_prerelease_sorts_between_the_releases_it_falls_between():
+    """Installable prereleases are releases here, ordered where they actually shipped.
+
+    ``gh-vX.Y.ZrcN`` builds carry a wheel and an sdist, so a database in the field can
+    have been built by one. Sorting them as releases is what makes the newest tag a
+    baseline rather than a guess.
+    """
+    assert (
+        guard.version_key("v3.0.8")
+        < guard.version_key("gh-v3.0.9rc2")
+        < guard.version_key("gh-v3.0.9rc10")
+        < guard.version_key("v3.0.9")
+    )
+
+
+@requires_release_history
+def test_every_installable_tag_is_covered_exactly_once():
+    """Coverage is per shipped graph: nothing skipped, nothing rebuilt.
+
+    The unit has to be the graph rather than the tag, because a graph is what put a
+    database in the field -- and because covering ~95 installable tags one database each
+    would cost minutes to prove what ~30 distinct directories already prove.
+    """
+    covered = guard.released_graphs()
+
+    assert {guard.versions_tree(tag) for tag in covered} == {guard.versions_tree(tag) for tag in guard.released_tags()}
+    assert len({guard.versions_tree(tag) for tag in covered}) == len(covered)
+
+
 @requires_release_history
 def test_no_slot_is_newly_taken_twice():
     assert guard.new_slot_collisions() == {}
@@ -311,18 +404,26 @@ def test_every_released_database_still_reaches_head():
 
 
 @requires_release_history
-def test_a_released_graph_that_applies_nothing_cannot_pass(monkeypatch):
-    """The guard's own false negative, closed.
+@pytest.mark.parametrize("keep", [0, 1], ids=["applies-nothing", "applies-a-prefix"])
+def test_a_database_the_release_never_shipped_cannot_pass(monkeypatch, keep, tmp_path):
+    """The guard's own false negative, closed at the only revision that proves anything.
 
-    An Alembic run whose ``version_locations`` resolves to no revisions reports success
-    and applies nothing, and the empty database it leaves behind then upgrades to today's
-    head with a complete schema -- a pass that proves the opposite of what it claims.
+    An extraction that resolves to no revisions -- or to some prefix of the release --
+    reports success and leaves a database that release never shipped, which then upgrades
+    to today's head with a complete schema: a pass proving the opposite of what it claims.
+    Every intermediate revision is a database today's graph can legitimately repair, so
+    only the released graph's own head is evidence it was applied in full.
     """
-    monkeypatch.setattr(
-        guard,
-        "extract_released_versions",
-        lambda tag, destination: (destination.mkdir(parents=True, exist_ok=True), destination)[1],
-    )
+
+    extract = guard.extract_released_versions
+
+    def truncated(tag: str, destination: Path) -> Path:
+        versions = extract(tag, destination)
+        for path in sorted(versions.glob("*.py"))[keep:]:
+            path.unlink()
+        return versions
+
+    monkeypatch.setattr(guard, "extract_released_versions", truncated)
 
     with pytest.raises(guard.MigrationGuardError):
         guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
