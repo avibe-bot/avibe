@@ -13,6 +13,7 @@ from core.show_runtime import (
     ShowRuntimeContextCapability,
     ShowRuntimeManager,
     ShowRuntimeProtocolEnvelope,
+    ShowRuntimeResponseTooLarge,
     ShowRuntimeResult,
 )
 
@@ -152,6 +153,54 @@ def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
     assert all(call[2][SHOW_RUNTIME_CONTEXT_HEADER] == "shared" for call in requests)
     assert all(call[2][SHOW_RUNTIME_BASE_HEADER] == "/show/ses/" for call in requests)
     assert all("X-Vibe-Show-Base" not in call[2] for call in requests)
+
+
+def test_show_runtime_request_aborts_a_response_over_the_caller_budget(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    manager._base_url = "http://127.0.0.1:4173"
+
+    async def ensure():
+        return ShowRuntimeResult(True, manager._base_url)
+
+    async def negotiate(_base_url):
+        return ShowRuntimeContextCapability.UNSUPPORTED
+
+    class _StreamingResponse:
+        status_code = 200
+        headers = httpx.Headers({"content-type": "text/markdown"})
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"1234"
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return _StreamingResponse()
+
+    monkeypatch.setattr(manager, "ensure", ensure)
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", negotiate)
+    monkeypatch.setattr(show_runtime.httpx, "AsyncClient", lambda **_kwargs: _Client())
+
+    with pytest.raises(ShowRuntimeResponseTooLarge):
+        asyncio.run(
+            manager.request(
+                "GET",
+                "/sessions/ses/app/api/agent-markdown",
+                envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
+                max_response_bytes=3,
+            )
+        )
 
 
 def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lifetime(

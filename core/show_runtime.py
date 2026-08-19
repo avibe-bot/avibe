@@ -106,6 +106,10 @@ class ShowRuntimeResult:
     reason: str | None = None
 
 
+class ShowRuntimeResponseTooLarge(RuntimeError):
+    """The managed runtime response exceeded the caller's byte budget."""
+
+
 @dataclass(frozen=True)
 class ShowRuntimeArchive:
     platform: str
@@ -253,7 +257,10 @@ class ShowRuntimeManager:
         envelope: ShowRuntimeProtocolEnvelope,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
+        max_response_bytes: int | None = None,
     ) -> httpx.Response:
+        if max_response_bytes is not None and max_response_bytes < 0:
+            raise ValueError("max_response_bytes must be non-negative")
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
             raise RuntimeError(ready.reason or "show runtime unavailable")
@@ -266,12 +273,36 @@ class ShowRuntimeManager:
         if session_part := _show_runtime_app_session_part(path):
             request_headers[SHOW_RUNTIME_BASE_HEADER] = f"/show/{session_part}/"
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-            return await client.request(
+            if max_response_bytes is None:
+                return await client.request(
+                    method,
+                    f"{ready.base_url}{path}",
+                    headers=request_headers,
+                    content=body,
+                )
+            async with client.stream(
                 method,
                 f"{ready.base_url}{path}",
                 headers=request_headers,
                 content=body,
-            )
+            ) as response:
+                content_length = response.headers.get("content-length")
+                try:
+                    declared_length = int(content_length) if content_length is not None else None
+                except ValueError:
+                    declared_length = None
+                if declared_length is not None and declared_length > max_response_bytes:
+                    raise ShowRuntimeResponseTooLarge(
+                        f"Show Runtime response exceeds {max_response_bytes} bytes"
+                    )
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > max_response_bytes:
+                        raise ShowRuntimeResponseTooLarge(
+                            f"Show Runtime response exceeds {max_response_bytes} bytes"
+                        )
+                return httpx.Response(response.status_code, headers=response.headers, content=bytes(content))
 
     async def request_global(
         self,

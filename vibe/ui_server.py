@@ -12708,34 +12708,13 @@ def _is_show_page_markdown_request(asset_path: str, starlette_request: FastAPIRe
     segments = [segment for segment in relative.split("/") if segment]
     if not segments or segments[0] in {"api", "__show"}:
         return False
-    # An explicit asset extension remains an asset request even when a caller
-    # sends an unusual Accept header. Extensionless paths are SPA history routes.
-    asset_suffixes = {
-        ".css",
-        ".gif",
-        ".html",
-        ".ico",
-        ".jpeg",
-        ".jpg",
-        ".js",
-        ".json",
-        ".map",
-        ".mjs",
-        ".mp3",
-        ".mp4",
-        ".png",
-        ".svg",
-        ".tsx",
-        ".ts",
-        ".txt",
-        ".wasm",
-        ".webmanifest",
-        ".webp",
-        ".woff",
-        ".woff2",
-        ".xml",
-    }
-    return not any(segment.lower().endswith(suffix) for segment in segments for suffix in asset_suffixes)
+    # A dotted final segment is an asset request even when the caller sends an
+    # unusual Accept header. Keep email-shaped history routes (for example
+    # ``users/alice@example.com``) as SPA routes.
+    final_segment = segments[-1]
+    if "." in final_segment and "@" not in final_segment:
+        return False
+    return True
 
 
 def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
@@ -14160,9 +14139,7 @@ def _rewrite_public_show_agent_markdown(
     private_prefix = f"/show/{session_part}"
     public_prefix = external_prefix.rstrip("/")
     rewritten = re.sub(
-        r"(?<![A-Za-z0-9._~-])"
-        + re.escape(private_prefix)
-        + r"(?=$|[/?#\s)\]}>,])",
+        re.escape(private_prefix) + r"(?=$|[/?#\s)\]}>,])",
         public_prefix,
         text,
     )
@@ -14181,6 +14158,7 @@ async def _show_page_agent_markdown_response(
     from core.show_runtime import (
         ShowRuntimeContext,
         ShowRuntimeProtocolEnvelope,
+        ShowRuntimeResponseTooLarge,
         get_show_runtime_manager,
     )
 
@@ -14189,26 +14167,31 @@ async def _show_page_agent_markdown_response(
     if starlette_request.url.query:
         runtime_path = f"{runtime_path}?{starlette_request.url.query}"
     context = ShowRuntimeContext.SHARED if external_prefix else ShowRuntimeContext.PRIVATE
-    if starlette_request.method != "GET":
-        return _show_page_agent_markdown_error_response("agent_markdown_method_not_allowed", 405)
+    runtime_method = "GET"
     request_headers = {
         key: value
         for key, value in _show_runtime_forwarded_headers(starlette_request.headers).items()
-        if key.lower() != SHOW_EVENT_WRITE_TOKEN_HEADER.lower()
+        if key.lower() not in {
+            SHOW_EVENT_WRITE_TOKEN_HEADER.lower(),
+            "range",
+        }
     }
     envelope = ShowRuntimeProtocolEnvelope(context)
     body = await starlette_request.body()
     try:
         proxied = await asyncio.wait_for(
             get_show_runtime_manager().request(
-                starlette_request.method,
+                runtime_method,
                 runtime_path,
                 envelope=envelope,
                 headers=request_headers,
                 body=body or None,
+                max_response_bytes=SHOW_PAGE_AGENT_MARKDOWN_MAX_BYTES,
             ),
             timeout=SHOW_PAGE_AGENT_MARKDOWN_TIMEOUT_SECONDS,
         )
+    except ShowRuntimeResponseTooLarge:
+        return _show_page_agent_markdown_error_response("agent_markdown_too_large", 413)
     except asyncio.TimeoutError:
         return _show_page_agent_markdown_error_response("agent_markdown_timeout", 504)
     except httpx.TimeoutException:
@@ -14249,9 +14232,13 @@ async def _show_page_agent_markdown_response(
             session_id=session_id,
             external_prefix=external_prefix,
         )
-        if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", content.decode("utf-8")):
+        if re.search(r"/show/[^\s)\]}>,]+", content.decode("utf-8")):
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
-    return FastAPIResponse(content=content, status_code=200, headers=response_headers)
+    return FastAPIResponse(
+        content=b"" if starlette_request.method == "HEAD" else content,
+        status_code=200,
+        headers=response_headers,
+    )
 
 
 def _should_inject_show_runtime_config(

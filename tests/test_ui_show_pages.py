@@ -102,7 +102,16 @@ class _FakeShowRuntimeManager:
         self.websocket_headers = []
         self.stopped = False
 
-    async def request(self, method, path, *, envelope, headers=None, body=None):
+    async def request(
+        self,
+        method,
+        path,
+        *,
+        envelope,
+        headers=None,
+        body=None,
+        max_response_bytes=None,
+    ):
         import httpx
 
         self.calls.append((method, path, envelope.headers(headers), body))
@@ -1524,7 +1533,10 @@ def test_show_page_agent_markdown_handler_is_the_document_representation(
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "private" if surface == "private" else "public")
     manager = _FakeShowRuntimeManager(
-        body=b"# Status\n\nSee [the page](/show/ses123/reports/daily).\n",
+        body=(
+            b"# Status\n\nSee [the page](/show/ses123/reports/daily).\n"
+            b"[Absolute](https://alex.avibe.bot/show/ses123/reports/daily).\n"
+        ),
         extra_headers={"content-type": "text/markdown; charset=utf-8"},
     )
     set_show_runtime_manager_for_tests(manager)
@@ -1575,6 +1587,7 @@ def test_show_page_agent_markdown_handler_is_the_document_representation(
     assert "cookie" not in manager.calls[0][2]
     assert "x-vibe-csrf-token" not in manager.calls[0][2]
     assert "X-Avibe-Show-Event-Write-Token" not in manager.calls[0][2]
+    assert "range" not in manager.calls[0][2]
 
 
 @pytest.mark.parametrize("surface", ["private", "public"])
@@ -1679,7 +1692,8 @@ def test_public_show_page_agent_markdown_rejects_other_private_show_links(monkey
     assert b"other-session" not in response.content
 
 
-def test_show_page_agent_markdown_does_not_capture_asset_requests(monkeypatch, tmp_path):
+@pytest.mark.parametrize("asset_path", ["app.js", "report.pdf"])
+def test_show_page_agent_markdown_does_not_capture_asset_requests(monkeypatch, tmp_path, asset_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
@@ -1687,7 +1701,7 @@ def test_show_page_agent_markdown_does_not_capture_asset_requests(monkeypatch, t
     set_show_runtime_manager_for_tests(manager)
     try:
         response = app.test_client().get(
-            "/show/ses123/app.js",
+            f"/show/ses123/{asset_path}",
             base_url="http://127.0.0.1:5123",
             headers={"Accept": "text/markdown"},
         )
@@ -1696,7 +1710,32 @@ def test_show_page_agent_markdown_does_not_capture_asset_requests(monkeypatch, t
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/html; charset=utf-8"
-    assert manager.calls[0][1] == "/sessions/ses123/app/app.js"
+    assert manager.calls[0][1] == f"/sessions/ses123/app/{asset_path}"
+
+
+def test_show_page_agent_markdown_honors_head_without_calling_head_handler(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        body=b"# Status\n",
+        extra_headers={"content-type": "text/markdown; charset=utf-8"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().request(
+            "HEAD",
+            "/show/ses123/",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b""
+    assert response.headers["content-type"] == "text/markdown; charset=utf-8"
+    assert manager.calls[0][0] == "GET"
 
 
 def test_show_page_agent_markdown_maps_handler_errors(monkeypatch, tmp_path):
