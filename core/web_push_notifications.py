@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -250,6 +250,14 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_REVOKED,
             reason="persisted snapshot was issued for a different paired instance",
         )
+    paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    if (
+        context.instance_kind is None
+        and record.get("vibe_instance_kind") is None
+        and paired_instance_id
+        and paired_kind in {"personal", "organization"}
+    ):
+        context = replace(context, instance_kind=paired_kind)
     if policy == "personal":
         return OwnerAuthorizationDecision(
             user_key=user_key,

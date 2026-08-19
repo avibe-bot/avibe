@@ -58,6 +58,25 @@ def test_web_push_authorization_snapshot_preserves_instance_kind() -> None:
     assert context_from_session_payload(record).is_personal_instance
 
 
+def test_kindless_web_push_snapshot_adopts_current_personal_pairing_kind(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_revision_config(41, instance_kind="personal")
+    record = _remote_authorization_record("remote:personal-user")
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+
+    assert decision.authorized
+    assert decision.context is not None
+    assert decision.context.is_personal_instance
+
+
 def _paired_revision_config(revision: int, *, instance_kind: str = ""):
     from core.services.settings import default_config
 
