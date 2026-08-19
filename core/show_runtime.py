@@ -1020,7 +1020,7 @@ class ShowRuntimeManager:
         try:
             pointer = json.loads((self.runtime_dir / "current.json").read_text(encoding="utf-8"))
             digest = pointer.get("archive_sha256")
-            if isinstance(digest, str) and digest:
+            if isinstance(digest, str) and _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(f"{digest}.tgz"):
                 protected.add(digest)
         except FileNotFoundError:
             pass
@@ -1048,8 +1048,13 @@ class ShowRuntimeManager:
                     except Exception as exc:
                         raise _ArchiveMetadataError(f"install metadata is unreadable: {metadata_path}") from exc
                     digest = metadata.get("archive_sha256")
-                    if isinstance(digest, str) and digest:
-                        protected.add(digest)
+                    if not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
+                        f"{digest}.tgz" if isinstance(digest, str) else ""
+                    ):
+                        raise _ArchiveMetadataError(
+                            f"install metadata archive_sha256 is missing or not a digest: {metadata_path}"
+                        )
+                    protected.add(digest)
         return protected
 
     def _archive_cleanup_candidates(self, protected: set[str]) -> list[tuple[Path, int, str, int]]:
@@ -1140,14 +1145,24 @@ class ShowRuntimeManager:
                 if name[: -len(".tgz")] in protected:
                     continue
                 candidates.append((path, stat_result.st_size, name, 0))
-            # Keep the enumeration descriptor open: the removal phase unlinks
-            # through it, so a path swap between phases cannot redirect
-            # deletion. The caller closes it when done.
+            # Keep the enumeration descriptor until the caller closes it so
+            # the removal phase (when any) unlinks through the same fd.
+            # Dry runs, Doctor, and empty real scans close it in
+            # ``_clean_downloaded_archives``.
             self._downloads_dir_fd = dir_fd
             return candidates
         except BaseException:
             os.close(dir_fd)
             raise
+
+    def _close_downloads_dir_fd(self) -> None:
+        fd = getattr(self, "_downloads_dir_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._downloads_dir_fd = None
 
     def _clean_downloaded_archives(
         self,
@@ -1171,6 +1186,10 @@ class ShowRuntimeManager:
             except Exception:
                 logger.warning("Show Runtime archive cleanup inspection failed", exc_info=True)
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+            finally:
+                # Dry runs never delete, so the enumeration descriptor (kept
+                # for the removal phase) must be closed on every path.
+                self._close_downloads_dir_fd()
             return {
                 "outcome": "cleaned" if not candidates else "partial",
                 "protected_count": len(protected),
@@ -1260,6 +1279,10 @@ class ShowRuntimeManager:
             except Exception:
                 logger.warning("Show Runtime archive cleanup failed", exc_info=True)
                 return self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED)
+            finally:
+                # Empty real scans never enter the unlink branch that closes
+                # the enumeration descriptor; close it on every remaining path.
+                self._close_downloads_dir_fd()
 
     @staticmethod
     def _skipped_archive_report(reason: str) -> dict[str, Any]:

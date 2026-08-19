@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -345,29 +346,31 @@ class ManagedRuntimeManager:
             # work on read-only runtime directories. Busy checks exclude both
             # same-process staging (in-process lock) and cross-process staging
             # (read-only existence probe of the lock file) — a preview must not
-            # advertise removing live staging state.
-            busy_reason = self._preview_busy_reason()
-            if busy_reason:
-                return {
-                    "ok": False,
-                    "removed": [],
-                    "reason": busy_reason,
-                    "message": "an install is currently running",
-                }
-            try:
-                return self._clean_locked(keep_previous=keep_previous, dry_run=True)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Managed %s runtime dry-run inspection failed",
-                    self.spec.runtime_id,
-                    exc_info=True,
-                )
-                return {
-                    "ok": False,
-                    "removed": [],
-                    "reason": self._reason("clean_inspection_failed"),
-                    "message": str(exc),
-                }
+            # advertise removing live staging state. The probe stays held
+            # through candidate planning so an install cannot start between
+            # the check and the ``install-*`` enumeration.
+            with self._preview_guard() as busy_reason:
+                if busy_reason:
+                    return {
+                        "ok": False,
+                        "removed": [],
+                        "reason": busy_reason,
+                        "message": "an install is currently running",
+                    }
+                try:
+                    return self._clean_locked(keep_previous=keep_previous, dry_run=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Managed %s runtime dry-run inspection failed",
+                        self.spec.runtime_id,
+                        exc_info=True,
+                    )
+                    return {
+                        "ok": False,
+                        "removed": [],
+                        "reason": self._reason("clean_inspection_failed"),
+                        "message": str(exc),
+                    }
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001
@@ -386,16 +389,57 @@ class ManagedRuntimeManager:
             }
         try:
             return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001
+            # Real cleanups hit the same traversal errors dry runs do; return
+            # the structured inspection failure instead of raising through
+            # _clean_git_runtime into a reasonless result.
+            logger.exception("Managed %s runtime cleanup failed", self.spec.runtime_id)
+            return {
+                "ok": False,
+                "removed": [],
+                "reason": self._reason("clean_inspection_failed"),
+                "message": str(exc),
+            }
         finally:
             self._release_mutation_lock(file_lock)
 
+    @contextlib.contextmanager
+    def _preview_guard(self):
+        """Hold the read-only busy probe through preview candidate planning."""
+        busy = self._preview_busy_reason()
+        try:
+            yield busy
+        finally:
+            self._release_preview_guard()
+
+    def _release_preview_guard(self) -> None:
+        fd = getattr(self, "_preview_guard_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._preview_guard_fd = None
+        if getattr(self, "_preview_held_install_lock", False):
+            self._preview_held_install_lock = False
+            try:
+                self._install_lock.release()
+            except RuntimeError:
+                pass
+
     def _preview_busy_reason(self) -> str | None:
-        """Read-only busy check for previews: never creates or locks files."""
+        """Read-only busy check for previews: never creates or locks files.
+
+        On POSIX success the shared flock stays held (stored on the instance)
+        until ``_release_preview_guard`` so an exclusive installer cannot
+        start between the probe and staging enumeration.
+        """
         if not self._install_lock.acquire(blocking=False):
             return self._reason("install_already_running")
+        self._preview_held_install_lock = True
         try:
             # Cross-process installs hold flock on .install.lock. Probing with
-            # LOCK_EX|LOCK_NB on an existing file is read-only (no create, no
+            # LOCK_SH|LOCK_NB on an existing file is read-only (no create, no
             # truncate); failure to take it means another process is active.
             # fcntl is POSIX-only: on Windows there is no read-only probe, so
             # the preview proceeds (no cross-process installs of this runtime
@@ -406,8 +450,10 @@ class ManagedRuntimeManager:
                 return None
             try:
                 self._install_file_lock_path.stat()
-            except OSError:
+            except FileNotFoundError:
                 return None
+            except OSError:
+                return self._reason("install_already_running")
             try:
                 fd = os.open(self._install_file_lock_path, os.O_RDONLY)
             except OSError:
@@ -416,15 +462,15 @@ class ManagedRuntimeManager:
                 # than risking a misleading "0 entries" preview.
                 return self._reason("install_already_running")
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                self._preview_guard_fd = fd
                 return None
             except OSError:
-                return self._reason("install_already_running")
-            finally:
                 os.close(fd)
-        finally:
-            self._install_lock.release()
+                return self._reason("install_already_running")
+        except BaseException:
+            self._release_preview_guard()
+            raise
 
     def _rglob_install_metadata(self, versions_dir: Path) -> Iterator[Path]:
         """rglob metadata files with error-preserving traversal.

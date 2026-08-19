@@ -13,6 +13,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from core.show_runtime import ShowRuntimeManager
 
 
@@ -813,3 +815,50 @@ def test_cli_clean_reports_skipped_archives_without_zero_counts(monkeypatch, cap
     # (they may legitimately be zero here — the fake removed nothing).
     assert "Removed 0 Show Runtime cache item(s)." in captured.out
     assert "downloaded Show Runtime archive" not in captured.out  # no placeholder archive line
+
+
+def test_posix_downloads_descriptor_is_closed_after_every_scan(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("directory descriptors are POSIX-only")
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(1), b"current")
+    stale = _write_archive(manager, _sha(2), b"stale")
+
+    manager.clean(dry_run=True)
+    assert getattr(manager, "_downloads_dir_fd", None) is None
+
+    manager.archive_cache_status()
+    assert getattr(manager, "_downloads_dir_fd", None) is None
+
+    manager.clean()
+    assert getattr(manager, "_downloads_dir_fd", None) is None
+    assert not stale.exists()
+
+    manager.clean()
+    assert getattr(manager, "_downloads_dir_fd", None) is None
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [None, "", 123, "not-a-digest", "A" * 64, "g" * 64, "a" * 63],
+)
+def test_retained_metadata_without_valid_digest_fails_closed(tmp_path: Path, digest) -> None:
+    manager = _make_manager(tmp_path)
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    rollback_dir = _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    metadata_path = next(rollback_dir.rglob(".vibe-show-runtime.json"))
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if digest is None:
+        payload.pop("archive_sha256", None)
+    else:
+        payload["archive_sha256"] = digest
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    _write_archive(manager, _sha(1), b"current")
+    rollback_archive = _write_archive(manager, _sha(8), b"rollback")
+
+    result = manager.clean()
+
+    assert result["archives"]["skipped_reason"] == "archive_inspection_failed"
+    assert rollback_archive.exists()

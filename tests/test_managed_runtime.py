@@ -66,6 +66,64 @@ def test_clean_dry_run_reports_inspection_failure(
     assert "disk unreadable" in result["message"]
 
 
+def test_clean_reports_inspection_failure_on_real_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    manager = GitRuntimeManager(
+        runtime_dir=tmp_path / "git-runtime",
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+
+    def _boom(*, keep_previous, dry_run=False):
+        raise OSError("disk unreadable")
+
+    monkeypatch.setattr(manager, "_clean_locked", _boom)
+    result = manager.clean()
+
+    assert result["ok"] is False
+    assert result["reason"] == "git_clean_inspection_failed"
+    assert "disk unreadable" in result["message"]
+
+
+def test_clean_dry_run_holds_preview_guard_through_planning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    runtime_dir = tmp_path / "git-runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / ".install.lock").write_text("", encoding="utf-8")
+    manager = GitRuntimeManager(
+        runtime_dir=runtime_dir,
+        manifest_path=tmp_path / "missing-manifest.json",
+        offline=True,
+    )
+    seen: dict[str, object] = {}
+    real_clean_locked = manager._clean_locked
+
+    def _observe(*, keep_previous, dry_run=False):
+        seen["held_lock"] = getattr(manager, "_preview_held_install_lock", False)
+        seen["fd"] = getattr(manager, "_preview_guard_fd", None)
+        seen["lock_busy"] = not manager._install_lock.acquire(blocking=False)
+        if seen["lock_busy"] is False:
+            manager._install_lock.release()
+        return real_clean_locked(keep_previous=keep_previous, dry_run=dry_run)
+
+    monkeypatch.setattr(manager, "_clean_locked", _observe)
+    result = manager.clean(dry_run=True)
+
+    assert result["ok"] is True
+    assert seen["held_lock"] is True
+    assert seen["lock_busy"] is True
+    assert getattr(manager, "_preview_held_install_lock", False) is False
+    assert getattr(manager, "_preview_guard_fd", None) is None
+    assert manager._install_lock.acquire(blocking=False)
+    manager._install_lock.release()
+
+
 def test_shared_ensure_failure_vocabulary_matches_reachable_reason_literals() -> None:
     module = ast.parse(Path("core/managed_runtime.py").read_text(encoding="utf-8"))
     manager = next(
