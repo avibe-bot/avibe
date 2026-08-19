@@ -331,8 +331,16 @@ def resource_user_context_from_metadata(
     # exposes one; legacy snapshots without an instance id remain covered by
     # the kind fallback below.
     configured = _configured_resource_instance()
+    if context.instance_kind is not None and (
+        configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE or configured is None
+    ):
+        return None
     if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE and configured is not None:
         paired_instance_id, paired_kind = configured
+        if context.instance_kind is not None and (
+            not paired_instance_id or not paired_kind
+        ):
+            return None
         snapshot_instance_id = context.instance_id
         if (
             snapshot_instance_id

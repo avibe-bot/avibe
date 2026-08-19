@@ -566,8 +566,18 @@ def test_http_resource_services_reuse_the_parsed_authorization_context() -> None
         assert resource_access_service.resolve_resource_access_context() is context
 
 
-def test_deferred_remote_context_remains_valid_past_authorization_refresh_boundary() -> None:
+def test_deferred_remote_context_remains_valid_past_authorization_refresh_boundary(
+    monkeypatch,
+    tmp_path,
+) -> None:
     from vibe import remote_access
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "organization-instance"
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.save()
 
     issued_at = 1_700_000_000
     context = resource_access_service.ResourceUserContext(
@@ -580,6 +590,7 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
         instance_role="viewer",
         instance_access_source="organization_group",
         instance_kind="organization",
+        instance_id="organization-instance",
         claims_issued_at=issued_at,
         is_remote=True,
     )
@@ -604,9 +615,17 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
     assert after.is_active_organization_member is True
 
 
-def test_deferred_personal_context_keeps_instance_kind() -> None:
+def test_deferred_personal_context_keeps_instance_kind(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "personal-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+
     context = resource_access_service.ResourceUserContext(
         subject="personal-user",
+        instance_id="personal-instance",
         instance_role="editor",
         instance_access_source="owner",
         instance_kind="personal",
@@ -637,6 +656,38 @@ def test_deferred_context_from_previous_pairing_is_rejected(monkeypatch, tmp_pat
         is_remote=True,
     )
     metadata = resource_access_service.metadata_with_resource_user_context({}, stale_context)
+
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
+@pytest.mark.parametrize("pairing_state", ["disabled", "unreadable"])
+def test_explicit_deferred_context_requires_current_pairing(
+    monkeypatch,
+    tmp_path,
+    pairing_state: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = pairing_state != "disabled"
+    config.remote_access.vibe_cloud.instance_id = "personal-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    if pairing_state == "unreadable":
+        def fail_load(_cls, *_args, **_kwargs):
+            raise OSError("config unavailable")
+
+        monkeypatch.setattr(V2Config, "load", classmethod(fail_load))
+
+    context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="personal-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
 
     assert resource_access_service.resource_user_context_from_metadata(metadata) is None
     assert not resource_access_service.metadata_allows_harness_runtime(metadata)
