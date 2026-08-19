@@ -184,7 +184,11 @@ turn ends because you armed a watch and are waiting, say exactly that.
   reactions from other users do not prove pickup. Before retriggering because
   👀 is absent, check for a current-head Codex verdict or another in-flight
   review signal; a completed review may already have withdrawn 👀. Never use
-  `issues/<pr>/comments --jq '.[-1]'` to identify the trigger.
+  `issues/<pr>/comments --jq '.[-1]'` to identify the trigger, and never find one
+  by matching `@codex review` in comment bodies: the bot quotes that phrase in the
+  boilerplate appended to its own verdicts, so the pattern selects its output as
+  readily as your input. The trigger is the comment ID your own `gh pr comment`
+  call returned — identify it by that ID, never by its text.
   Outside that window every historical trigger reads 0 including the ones that
   were reviewed, so never infer "it never started" from a reaction count after
   the fact — look for a current-head verdict instead.

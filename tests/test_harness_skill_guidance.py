@@ -218,5 +218,8 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     assert "one state slot, not an append-only log" in flat
     assert "Waiting for that comment instead of triggering waits forever." in flat
     assert "produced by an explicit trigger and by nothing else" in flat
+    # The bot quotes `@codex review` in its own boilerplate, so a body-text search
+    # for the trigger matches the verdicts it is supposed to be distinguished from.
+    assert "never find one by matching `@codex review` in comment bodies" in flat
     assert (ROOT / "skills/background-watch-hook/scripts/wait_pr.py").is_file()
     assert (ROOT / "skills/background-watch-hook/scripts/wait_action.py").is_file()
