@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
 import psutil
 from aiohttp import ClientSession, WSMsgType
@@ -106,6 +106,7 @@ SHOW_PAGE_AGENT_MARKDOWN_TIMEOUT_SECONDS = float(
 SHOW_PAGE_AGENT_MARKDOWN_MAX_BYTES = int(
     os.environ.get("VIBE_SHOW_AGENT_MARKDOWN_MAX_BYTES", str(1024 * 1024))
 )
+SHOW_PAGE_AGENT_MARKDOWN_PATH_HEADER = "X-Avibe-Show-Path"
 _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST = {
     "accept",
     "accept-language",
@@ -14165,10 +14166,43 @@ def _rewrite_public_show_agent_markdown(
     return rewritten.encode("utf-8")
 
 
+def _show_page_markdown_has_private_link(markdown_text: str, *, external_prefix: str) -> bool:
+    """Reject public links that resolve to any private Show Page route."""
+    normalized_text = html.unescape(markdown_text)
+    for _ in range(3):
+        decoded = unquote(normalized_text)
+        if decoded == normalized_text:
+            break
+        normalized_text = decoded
+
+    # Match absolute URLs, root-relative routes, and dot-relative routes. The
+    # latter need URL resolution because ``../../show/...`` does not contain a
+    # literal route boundary that a simple negative-lookbehind can recognize.
+    candidate_pattern = re.compile(
+        r"(?:https?://[^\s)\]}>,\"]+|(?:\.\.?/)+show/[^\s)\]}>,\"]+|/?show/[^\s)\]}>,\"]+)",
+        re.IGNORECASE,
+    )
+    base_url = f"https://avibe.invalid{external_prefix.rstrip('/')}/"
+    for match in candidate_pattern.finditer(normalized_text):
+        candidate = match.group(0)
+        resolved = urlsplit(urljoin(base_url, candidate))
+        resolved_path = resolved.path.replace("\\", "/")
+        for _ in range(3):
+            decoded_path = unquote(resolved_path)
+            if decoded_path == resolved_path:
+                break
+            resolved_path = decoded_path
+        resolved_path = "/" + resolved_path.lstrip("/")
+        if resolved_path == "/show" or resolved_path.startswith("/show/"):
+            return True
+    return False
+
+
 async def _show_page_agent_markdown_response(
     session_id: str,
     starlette_request: FastAPIRequest,
     *,
+    asset_path: str = "",
     external_prefix: str | None = None,
 ) -> FastAPIResponse:
     """Proxy the optional page-owned Markdown handler without HTML transforms."""
@@ -14195,6 +14229,12 @@ async def _show_page_agent_markdown_response(
             "range",
         }
     }
+    # The route is carried separately from the handler path so page-owned
+    # handlers can render a history route while keeping the API endpoint fixed.
+    requested_path = _decode_show_page_asset_path(asset_path)
+    request_headers[SHOW_PAGE_AGENT_MARKDOWN_PATH_HEADER] = (
+        "/" if requested_path in {"", "index.html"} else f"/{requested_path.lstrip('/')}"
+    )
     envelope = ShowRuntimeProtocolEnvelope(context)
     try:
         proxied = await asyncio.wait_for(
@@ -14251,19 +14291,7 @@ async def _show_page_agent_markdown_response(
             external_prefix=external_prefix,
         )
         markdown_text = content.decode("utf-8")
-        normalized_text = html.unescape(markdown_text)
-        for _ in range(3):
-            decoded = unquote(normalized_text)
-            if decoded == normalized_text:
-                break
-            normalized_text = decoded
-        if re.search(
-            r"https?://[^\s)\]}>,\"]*/show/[^\s)\]}>,]+",
-            normalized_text,
-            re.IGNORECASE,
-        ):
-            return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
-        if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", normalized_text):
+        if _show_page_markdown_has_private_link(markdown_text, external_prefix=external_prefix):
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
     if starlette_request.method == "HEAD":
         response_headers["Content-Length"] = str(len(content))
@@ -14835,6 +14863,7 @@ async def serve_private_show_page(session_id, asset_path):
                 return await _show_page_agent_markdown_response(
                     page.session_id,
                     request._request,
+                    asset_path=asset_path,
                 )
             except Exception:
                 logger.debug("Show Runtime Markdown handler unavailable", exc_info=True)
@@ -15308,6 +15337,7 @@ async def serve_public_show_page(share_id, asset_path):
                 response = await _show_page_agent_markdown_response(
                     page.session_id,
                     request._request,
+                    asset_path=asset_path,
                     external_prefix=f"/p/{quote(share_id, safe='')}",
                 )
             except Exception:

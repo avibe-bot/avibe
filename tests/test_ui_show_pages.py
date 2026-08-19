@@ -1584,6 +1584,7 @@ def test_show_page_agent_markdown_handler_is_the_document_representation(
     assert manager.calls[0][2]["accept"] == "text/markdown"
     assert manager.calls[0][2]["X-Avibe-Show-Protocol"] == "1"
     assert manager.calls[0][2]["X-Avibe-Show-Context"] == expected_context
+    assert manager.calls[0][2]["X-Avibe-Show-Path"] == "/"
     assert manager.calls[0][3] is None
     assert "authorization" not in manager.calls[0][2]
     assert "cookie" not in manager.calls[0][2]
@@ -1722,6 +1723,56 @@ def test_public_show_page_agent_markdown_rejects_encoded_private_links(monkeypat
 
     assert response.status_code == 502
     assert response.get_json() == {"error": "agent_markdown_private_link"}
+
+
+def test_public_show_page_agent_markdown_rejects_dot_relative_private_links(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=b"# Status\n\n[Other](../../show/other-session/).\n",
+        extra_headers={"content-type": "text/markdown; charset=utf-8"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "agent_markdown_private_link"}
+
+
+def test_show_page_agent_markdown_passes_the_requested_spa_path_to_the_handler(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager(
+        body=b"# Daily report\n",
+        extra_headers={"content-type": "text/markdown; charset=utf-8"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/show/ses123/reports/daily",
+            base_url="http://127.0.0.1:5123",
+            headers={
+                "Accept": "text/markdown",
+                "X-Avibe-Show-Path": "/attacker-controlled",
+            },
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == b"# Daily report\n"
+    assert manager.calls[0][1] == "/sessions/ses123/app/api/agent-markdown"
+    assert manager.calls[0][2]["X-Avibe-Show-Path"] == "/reports/daily"
 
 
 @pytest.mark.parametrize("asset_path", ["app.js", "report.pdf", "images/logo@2x.png"])
