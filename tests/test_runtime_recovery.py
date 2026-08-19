@@ -31,15 +31,15 @@ def _engine(tmp_path: Path):
     return engine
 
 
-def _session(conn, session_id: str) -> None:
+def _session(conn, session_id: str, *, backend: str = "codex") -> None:
     conn.execute(
         agent_sessions.insert().values(
             id=session_id,
             scope_id=None,
             agent_id=None,
-            agent_name="codex",
-            agent_backend="codex",
-            agent_variant="codex",
+            agent_name=backend,
+            agent_backend=backend,
+            agent_variant=backend,
             model=None,
             reasoning_effort=None,
             session_anchor=f"base-{session_id}",
@@ -71,7 +71,14 @@ def _delivery(
         session_id=session_id,
         priority="p3",
         state=state,
-        snapshot={"content_json": json.dumps({"text": delivery_id})},
+        snapshot=delivery_store.message_snapshot(
+            scope_id=None,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            text=delivery_id,
+        ),
         dispatch_text=delivery_id,
         turn_id=None,
     )
@@ -599,7 +606,7 @@ async def test_cancel_settles_durable_owner_when_runtime_is_gone(tmp_path: Path)
 
     engine = _engine(tmp_path)
     with engine.begin() as conn:
-        _session(conn, "ses-zombie")
+        _session(conn, "ses-zombie", backend="opencode")
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == "ses-zombie")
@@ -614,6 +621,16 @@ async def test_cancel_settles_durable_owner_when_runtime_is_gone(tmp_path: Path)
             state="active",
             backend="opencode",
             dispatch_text="stuck",
+        )
+        conn.execute(
+            update(delivery_store.message_deliveries)
+            .where(delivery_store.message_deliveries.c.id == "delivery-zombie")
+            .values(
+                state="claimed",
+                turn_id="trn-zombie",
+                turn_role="initial",
+                turn_position=0,
+            )
         )
 
     manager = SessionTurnManager(SimpleNamespace())
@@ -642,7 +659,7 @@ async def test_cancel_keeps_live_memory_task_on_interrupt_path(tmp_path: Path) -
 
     engine = _engine(tmp_path)
     with engine.begin() as conn:
-        _session(conn, "ses-live")
+        _session(conn, "ses-live", backend="opencode")
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == "ses-live")
@@ -698,7 +715,7 @@ async def test_cancel_keeps_restored_native_runtime_on_interrupt_path(
 
     engine = _engine(tmp_path)
     with engine.begin() as conn:
-        _session(conn, "ses-restored")
+        _session(conn, "ses-restored", backend="opencode")
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == "ses-restored")
@@ -744,3 +761,103 @@ async def test_cancel_keeps_restored_native_runtime_on_interrupt_path(
         ).mappings().one()
     assert turn["state"] == "active"
     assert session["agent_status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_cancel_resumes_queued_successor_after_runtime_gone(
+    tmp_path: Path,
+) -> None:
+    """Settling a leftover owner must start the next claimed successor."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-queue", backend="opencode")
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses-queue")
+            .values(agent_status="running")
+        )
+        _delivery(conn, "delivery-owner", "ses-queue")
+        delivery_store.insert_turn(
+            conn,
+            turn_id="trn-owner",
+            session_id="ses-queue",
+            initial_delivery_id="delivery-owner",
+            state="active",
+            backend="opencode",
+            dispatch_text="owner",
+        )
+
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    started: list[str] = []
+    resumed: list[str] = []
+
+    def _terminalize(turn_id: str, *_args, **_kwargs):
+        assert turn_id == "trn-owner"
+        return {"changed": True, "successor_turn_id": "trn-successor"}
+
+    async def _start(turn_id: str, **_kwargs) -> bool:
+        started.append(turn_id)
+        return True
+
+    async def _resume(session_id: str) -> None:
+        resumed.append(session_id)
+
+    manager._terminalize_durable_turn = _terminalize
+    manager._start_persisted_turn = _start
+    manager._resume_post_terminal = _resume
+    result = await manager.cancel("ses-queue")
+
+    assert result["ok"] is True
+    assert result["status"] == "stale_released"
+    assert result["reason"] == "runtime_gone"
+    assert started == ["trn-successor"]
+    assert resumed == []
+
+
+@pytest.mark.anyio
+async def test_cancel_settles_unaccepted_starting_owner_when_runtime_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A leftover starting owner must settle as not_written, not hang in P0."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-starting", backend="opencode")
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses-starting")
+            .values(agent_status="running")
+        )
+        _delivery(conn, "delivery-starting", "ses-starting")
+        queued = delivery_store.get_delivery(conn, "delivery-starting")
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id="trn-starting",
+            session_id="ses-starting",
+            backend="opencode",
+            deliveries=[queued],
+            dispatch_text="starting",
+            attempt_id="attempt-starting",
+        )
+
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    result = await manager.cancel("ses-starting")
+
+    assert result["ok"] is True
+    assert result["status"] == "stale_released"
+    assert result["reason"] == "runtime_gone"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, "trn-starting")
+        delivery = delivery_store.get_delivery(conn, "delivery-starting")
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == "ses-starting")
+        ).mappings().one()
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "not_written"
+    assert turn["settled_by"] == "stopped"
+    assert turn["terminal_evidence_kind"] == "runtime_gone"
+    assert delivery["state"] == "retired"
+    assert session["agent_status"] != "running"

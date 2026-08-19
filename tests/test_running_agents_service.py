@@ -1427,6 +1427,7 @@ def test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend():
         is_in_flight=lambda sid: True,
         cancel=_cancel,
         in_flight={"chat-1": inflight_entry},
+        _durable_schema_available=lambda: False,
     )
 
     cleared = {}
@@ -1481,6 +1482,61 @@ def test_end_does_not_promote_unrelated_durable_owner_of_other_backend(monkeypat
         sessions_for_cwd=lambda cwd: [],
     )
     treg = _FakeTurnRegistry({}, pending=set())
+    treg.clear_session = lambda b: cleared.__setitem__("treg", b)
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = manager
+    monkeypatch.setattr(
+        running_agents,
+        "_load_durable_owner",
+        lambda _manager, session_id: (
+            {
+                "id": "trn_claude",
+                "state": "active",
+                "backend": "claude",
+                "session_anchor": "claude-base",
+            }
+            if session_id == "chat-1"
+            else None
+        ),
+    )
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="chat-1", base_session_id="codex-base"
+        )
+    )
+    assert res["ok"] is True
+    assert cancel_called["v"] is False
+    assert cleared.get("clr") == "codex-base" and cleared.get("treg") == "codex-base"
+
+
+def test_end_does_not_cancel_unrelated_durable_owner_when_clicked_row_is_live(
+    monkeypatch,
+):
+    """A live idle-to-active Codex row must not cancel a later Claude owner."""
+
+    cancel_called = {"v": False}
+
+    async def _cancel(_sid):
+        cancel_called["v"] = True
+        return {"ok": True, "status": "stale_released", "reason": "runtime_gone"}
+
+    manager = types.SimpleNamespace(
+        is_in_flight=lambda sid: False,
+        cancel=_cancel,
+    )
+    cleared = {}
+    transport = types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = _FakeTurnRegistry({"codex-base": "turn-live"}, pending=set())
     treg.clear_session = lambda b: cleared.__setitem__("treg", b)
     codex = types.SimpleNamespace(
         _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}

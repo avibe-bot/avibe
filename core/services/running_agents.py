@@ -732,16 +732,23 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     return {"ok": True, "action": "ended", "backend": "opencode"}
 
 
-async def _settle_workbench_turn(controller: "Controller", session_id: Optional[str]) -> Optional[dict[str, Any]]:
-    """If a Workbench/chat turn still owns ``session_id``, stop it through
+async def _settle_workbench_turn(
+    controller: "Controller",
+    session_id: Optional[str],
+    *,
+    backend: Optional[str] = None,
+    base_session_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """If a Workbench/chat turn still owns this End/Stop row, stop it through
     ``SessionTurnManager.cancel`` so the turn FSM settles: it interrupts the
     backend, emits the terminal result, AND cancels the ``dispatch_turn`` task the
     Chat page is awaiting. Ownership is either the in-memory task or a leftover
-    durable Turn after that task is gone. Skipping this (and only doing the
-    backend teardown below) would leave the chat session stuck "running".
+    durable Turn after that task is gone, and both still follow last-only
+    identity. Skipping this (and only doing the backend teardown below) would
+    leave the chat session stuck "running".
 
     Returns a success/failure result when the Workbench manager owned the turn;
-    returns ``None`` for IM/agent-run turns and when there is no turn owner.
+    returns ``None`` for IM/agent-run turns and when there is no matching owner.
     """
     if not session_id:
         return None
@@ -749,9 +756,10 @@ async def _settle_workbench_turn(controller: "Controller", session_id: Optional[
     if manager is None or not getattr(manager, "cancel", None):
         return None
     try:
-        in_flight = getattr(manager, "is_in_flight", None)
-        if not (callable(in_flight) and in_flight(session_id)) and not _session_has_durable_owner(
-            manager, session_id
+        if not _inflight_turn_matches_row(
+            controller, session_id=session_id, backend=backend, base_session_id=base_session_id
+        ) and not _durable_owner_matches_row(
+            manager, session_id, backend=backend, base_session_id=base_session_id
         ):
             return None
         result = await manager.cancel(session_id)
@@ -971,7 +979,12 @@ async def _stop_active_agent(
     composite_key: Optional[str],
     base_session_id: Optional[str],
 ) -> dict[str, Any]:
-    settled = await _settle_workbench_turn(controller, session_id)
+    settled = await _settle_workbench_turn(
+        controller,
+        session_id,
+        backend=backend,
+        base_session_id=base_session_id,
+    )
     if settled is not None:
         if settled.get("backend") is None and backend:
             settled["backend"] = backend
@@ -1093,17 +1106,6 @@ def _load_durable_owner(manager: Any, session_id: str) -> Optional[dict[str, Any
     payload = dict(owner)
     payload["session_anchor"] = str((session_row or {}).get("session_anchor") or "")
     return payload
-
-
-def _session_has_durable_owner(manager: Any, session_id: str) -> bool:
-    """True when SQLite still owns an active Turn for ``session_id``.
-
-    A Workbench Stop can leave this row after the in-memory poll/task is gone.
-    End/Stop must still see it as live, or they take the idle teardown and
-    leave the chat stuck on ``running``.
-    """
-
-    return _load_durable_owner(manager, session_id) is not None
 
 
 def _durable_owner_matches_row(
