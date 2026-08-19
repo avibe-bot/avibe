@@ -135,7 +135,6 @@ import {
   type TurnActivityGroupWire,
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
-import { useLatestRef } from '@/lib/useLatestRef';
 import { sessionAgentDisplayName } from './sessionAgentName';
 
 // While a turn is in flight, reconcile the working/Stop state against the
@@ -177,6 +176,12 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
 // detach the live tail (historical-window) instead of growing the DOM with rows
 // below the viewport.
 const MAX_RETAINED_MESSAGES = 300;
+
+// How close to the top of the loaded window counts as "the reader is asking for
+// older history". Handed to the older-page IntersectionObserver as a root margin,
+// so the browser evaluates it continuously as a BAND the reader can sit inside —
+// not as a threshold some event has to be caught crossing.
+const OLDER_TRIGGER_BAND_PX = 120;
 
 // Display label for the archive chord (⇧⌘D / Ctrl+Shift+D). Resolved once at
 // module load — the platform can't change mid-session — and shown as the archive
@@ -3373,7 +3378,10 @@ interface TranscriptProps {
   footer?: React.ReactNode;
 }
 
-const Transcript: React.FC<TranscriptProps> = ({
+// Exported for tests (like ChatHeaderBar / MessageRow / ThinkingBubble below):
+// the older-page trigger is a property of this subtree, and driving it through
+// the whole ChatPage would prove it only for one wiring of the props.
+export const Transcript: React.FC<TranscriptProps> = ({
   messages,
   session,
   agentDisplayName,
@@ -3479,29 +3487,37 @@ const Transcript: React.FC<TranscriptProps> = ({
   // own and is fresh in the commit that changes either side of the comparison.
   const [historyOverflows, setHistoryOverflows] = useState(false);
   // Surfaces a failed older-page fetch. Without it the spinner simply vanishes,
-  // which is indistinguishable from reaching the start of history — and since a
-  // failure adds no content, a reader parked at the top gets no further scroll
-  // event, so the silent retry the re-arm allows would never actually be reached.
+  // which is indistinguishable from reaching the start of history — and a failure
+  // adds no content, so nothing moves and the trigger below has no change to react
+  // to. The explicit retry is the affordance for a reader who stays put.
   const [olderLoadFailed, setOlderLoadFailed] = useState(false);
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
-  // Load ONE older page per scroll gesture, not a cascade. The top threshold can
-  // stay satisfied across many scroll events — momentum/inertial scrolling (iOS
-  // touch AND macOS trackpad in Chrome) keeps firing while the post-load anchor
-  // restore + overshoot ride through the trigger zone — which fired older-page
-  // loads back-to-back all the way to the first message. So disarm on trigger and
-  // re-arm only once scrolling has SETTLED (a continuous fling keeps resetting the
-  // timer; a new deliberate scroll after the pause re-arms). Settle-based re-arm
-  // also recovers a failed load (it re-arms regardless of outcome).
-  const canLoadOlderRef = useRef(true);
-  const settleTimerRef = useRef<number | null>(null);
-  // Mirror loadingOlder so the settle timer (which closes over a stale value)
-  // can avoid re-arming while a page load is still in flight.
-  const loadingOlderPropRef = useLatestRef(loadingOlder);
-  // A failed load adds no content → no anchor restore → the viewport stays at the
-  // top, where the position gate below would never re-arm. Mark it so the settle
-  // re-arms regardless of position and a later scroll can retry. Re-arming at
-  // settle (not immediately) avoids a retry storm within the same fling.
+  // Older pages are triggered by whether a zero-height sentinel at the head of the
+  // transcript is within OLDER_TRIGGER_BAND_PX of the viewport top — a question
+  // about the PRESENT, which the browser re-answers on every geometry change.
+  //
+  // What this replaces: a latch that disarmed on trigger and re-armed only from a
+  // scroll event that had settled for 150ms with ``scrollTop > 300``. Both halves
+  // describe a FUTURE event, and the reader most likely to want another page —
+  // parked at the very top — can produce neither: an upward gesture at scrollTop 0
+  // moves nothing, so the browser emits no scroll event at all. One fling that
+  // rode past the post-load anchor restore back to the top therefore left paging
+  // dead — no spinner, no request, older messages still on the server — until the
+  // reader happened to scroll >300px back down and up again.
+  //
+  // Cascade prevention (the reason that latch existed) no longer needs a position
+  // threshold: a successful page prepends content and the anchor restore pushes
+  // the sentinel out of the band, so the condition goes false on its own. If it is
+  // still true afterwards, the reader really is still at the top of the loaded
+  // window, and loading again is the correct answer rather than a cascade.
+  const topSentinelRef = useRef<HTMLDivElement | null>(null);
+  const atTopRef = useRef(false);
+  // A failed page adds no content, so the sentinel stays exactly where it is and
+  // every later re-evaluation would see the same "reader wants more" answer and
+  // re-ask — a retry storm against a server that is still failing. Latch the
+  // failure to hold the automatic trigger off; it clears when the reader leaves
+  // the band (so coming back retries once) or when a retry starts explicitly.
   const loadFailedRef = useRef(false);
 
   useEffect(() => {
@@ -3607,44 +3623,66 @@ const Transcript: React.FC<TranscriptProps> = ({
     });
   }, [needsLatestReload, scrollToBottom]);
 
-  // Re-arm the older-page loader once scrolling has settled (~150ms idle) AND the
-  // viewport is at rest out of the trigger band (scrollTop > 300, i.e. down in
-  // loaded content) — or a load just failed (no content/restore was added, so the
-  // position gate can never re-arm and we must recover anyway). Evaluating at rest
-  // is what stops a single fling from "crossing" the threshold; the in-flight guard
-  // keeps it disarmed until the load resolves. Called from the scroll handler AND
-  // from a failed load (a slow failure parked at the top emits no further scroll,
-  // so it has to schedule its own re-arm here).
-  const scheduleReArm = useCallback(() => {
-    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
-    settleTimerRef.current = window.setTimeout(() => {
-      const node = scrollRef.current;
-      if (node && !loadingOlderPropRef.current && (node.scrollTop > 300 || loadFailedRef.current)) {
-        canLoadOlderRef.current = true;
-        loadFailedRef.current = false;
-      }
-    }, 150);
-  }, []);
-
-  // The one path that starts an older-page load, so the scroll trigger and the
+  // The one path that starts an older-page load, so the sentinel trigger and the
   // retry affordance cannot drift apart on how a failure is recorded.
   const runLoadOlder = useCallback(() => {
-    canLoadOlderRef.current = false;
     loadFailedRef.current = false;
     setOlderLoadFailed(false);
     void Promise.resolve(loadOlderRef.current()).then((ok) => {
+      // Offer the retry line rather than re-asking (see loadFailedRef): a reader
+      // who stays put needs a way forward that isn't a doomed retry loop.
       if (ok === false) {
-        // Fetch failed: no content/restore, viewport parked at top. A slow failure
-        // already missed the in-flight-skipped settle and won't get another scroll,
-        // so schedule the re-arm here too (it ignores position when loadFailedRef)
-        // and offer an explicit retry, since a reader who stays put emits no scroll
-        // for that re-armed loader to fire on.
         loadFailedRef.current = true;
         setOlderLoadFailed(true);
-        scheduleReArm();
       }
     });
-  }, [scheduleReArm]);
+  }, []);
+
+  // Start an older page when the sentinel is in the band and there is more to
+  // load. Reads props directly — the effect below re-creates the observer when
+  // they change — so it can never act on a stale snapshot.
+  const maybeLoadOlder = useCallback(() => {
+    if (!atTopRef.current || !hasOlder || loadingOlder || loadFailedRef.current) return;
+    // A programmatic deep-link jump owns scrollTop right now, and the anchor
+    // restore is suppressed along with it. Prepending under the jump would have
+    // nothing holding the reader's row in place.
+    if (suppressAnchorRef.current) return;
+    runLoadOlder();
+  }, [hasOlder, loadingOlder, runLoadOlder]);
+
+  // Older-page trigger. The observer answers "is the reader within
+  // OLDER_TRIGGER_BAND_PX of the top of the loaded window?" and re-answers on
+  // every geometry change the browser already tracks. The other two inputs — is
+  // there more history, is a page already in flight — are not geometry, so they
+  // arrive as deps of ``maybeLoadOlder``: re-creating the observer re-observes the
+  // sentinel, and ``observe()`` always reports the CURRENT state instead of
+  // waiting for the next crossing. That is what makes the loader level-triggered.
+  // In particular the ``loadingOlder`` true→false edge re-evaluates the settled
+  // geometry after each page (React has committed the prepended rows and the
+  // ResizeObserver has restored the anchor by the time this passive effect runs),
+  // so a reader who is still at the top gets the next page without having to
+  // produce a scroll event they may be unable to produce at all.
+  // ``empty`` is in the deps for the same reason as the ResizeObserver below: the
+  // scroll container mounts when the empty state goes away.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const sentinel = topSentinelRef.current;
+    if (!root || !sentinel) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        const atTop = entries[entries.length - 1]?.isIntersecting ?? false;
+        atTopRef.current = atTop;
+        // Leaving the band is the reader telling us they moved on. Drop the
+        // failure latch so returning to the top retries once, instead of leaving
+        // the retry line as the only way forward for the rest of the session.
+        if (!atTop) loadFailedRef.current = false;
+        maybeLoadOlder();
+      },
+      { root, rootMargin: `${OLDER_TRIGGER_BAND_PX}px 0px 0px 0px` },
+    );
+    io.observe(sentinel);
+    return () => io.disconnect();
+  }, [maybeLoadOlder, empty]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -3660,13 +3698,9 @@ const Transcript: React.FC<TranscriptProps> = ({
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
     if (pinned) anchorRef.current = null;
     else captureAnchor();
-    // One older page per scroll gesture: re-arm only on settle, at rest, out of the
-    // top zone (see scheduleReArm) — a continuous fling keeps resetting it, so the
-    // anchor-restore scroll + momentum can't cascade more pages.
-    scheduleReArm();
-    if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
-      runLoadOlder();
-    }
+    // Older-page loading is deliberately NOT triggered here: scroll events are the
+    // one thing a reader already at the top cannot produce. See the sentinel
+    // observer above.
   };
 
   // Open each session pinned to the latest message (instant, no animation) —
@@ -3680,8 +3714,7 @@ const Transcript: React.FC<TranscriptProps> = ({
     // Paging state belongs to the session that was open, not to the transcript:
     // the component stays mounted across a switch, so a load that failed in the
     // previous session would otherwise greet the next one with a retry line for
-    // a page it never asked for, and a disarmed loader would wait for a settle.
-    canLoadOlderRef.current = true;
+    // a page it never asked for, and hold its loader off with it.
     loadFailedRef.current = false;
     setOlderLoadFailed(false);
     const id = requestAnimationFrame(() => scrollToBottom());
@@ -3826,6 +3859,11 @@ const Transcript: React.FC<TranscriptProps> = ({
         />
       )}
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
+        {/* Marker for the very top of the loaded window: whether it is in view IS
+            the "load older" condition (see the observer above). Outside
+            ``contentRef`` so it joins neither the column's gap spacing nor the
+            children pickScrollAnchor searches. */}
+        <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
           {forkSourceBanner}
           {/* One slot at the head of the history for every way paging can end, so

@@ -13,9 +13,13 @@
 // viewport keeps the raw top-of-window ``scrollTop`` and the reader is dropped on
 // the oldest row of the page that just arrived. The transient members of that
 // group are worse still — the spinner is unmounted by the very commit that adds
-// the page, so the restore is skipped for a disconnected node — and it was that
-// near-zero ``scrollTop`` which then failed the loader's re-arm gate, leaving
-// paging dead until the reader scrolled back down and up again.
+// the page, so the restore is skipped for a disconnected node.
+//
+// The restore is also what ENDS a page load: the older-page trigger asks whether
+// a sentinel at the head of the transcript is still near the viewport top, and
+// pushing the reader's row back down is what carries that sentinel out of range.
+// An anchor that restores nothing leaves the reader pinned at the top of the
+// loaded window, asking for page after page.
 //
 // So the rule below is structural rather than a list of elements to avoid: the
 // search starts at the first message row and never looks above it. Chrome added
