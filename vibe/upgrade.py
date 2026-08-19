@@ -487,10 +487,10 @@ def installed_package_name(python_executable: str | None = None) -> str | None:
     armed a rollback to `avibe-os==2.x` and spent the one recovery attempt on a
     release that was never published.
 
-    The path heuristic stays as the fallback for the case metadata cannot answer
-    -- a source checkout, or an environment exposing two distributions for the
-    same package, where naming one would be a guess. `None` when neither can say,
-    which is the honest answer for a tree that was never installed at all.
+    The path heuristic stays as the fallback for the case metadata genuinely
+    cannot answer -- a source checkout, or providers that record the same release,
+    where naming one would be a guess. `None` when neither can say, which is the
+    honest answer for a tree that was never installed at all.
     """
 
     executable = (python_executable or sys.executable or "").replace("\\", "/")
@@ -500,6 +500,13 @@ def installed_package_name(python_executable: str | None = None) -> str | None:
         distributions = _distributions_providing_this_package()
         if len(distributions) == 1:
             return distributions[0]
+        # More than one provider is not an unanswerable environment. It is the
+        # state a rollback leaves behind and never cleans up, so it is the state
+        # every subsequent upgrade measures its own rollback target in -- see
+        # `_providers_describing_running_code`.
+        describing = _providers_describing_running_code()
+        if len(describing) == 1:
+            return describing[0]
 
     match = _UV_TOOL_PATH_RE.search(executable)
     return match.group("name") if match else None
@@ -517,6 +524,59 @@ def _distributions_providing_this_package() -> list[str]:
     except Exception:  # pragma: no cover - a broken environment answers nothing
         logger.debug("Failed to read installed distribution metadata", exc_info=True)
         return []
+
+
+def _providers_recording_a_published_release() -> list[tuple[str, str]]:
+    """Every distribution providing this package, with the release it records.
+
+    Unpublished recordings are dropped rather than reported. A `dev` or local
+    version records the tree it was built from, so it can neither confirm nor
+    contradict a released one, and an environment that answers nothing at all --
+    no provider, unreadable metadata, nothing published -- comes back empty. Both
+    callers read empty as "no evidence", never as evidence of disagreement.
+    """
+
+    distributions = _distributions_providing_this_package()
+    if not distributions:
+        return []
+    try:
+        from importlib.metadata import version as distribution_version
+
+        recorded = [(name, distribution_version(name)) for name in distributions]
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read the installed distribution version", exc_info=True)
+        return []
+    return [(name, version) for name, version in recorded if _names_a_published_release(version)]
+
+
+def _providers_describing_running_code() -> list[str]:
+    """The providers whose recorded release is the one this process is running.
+
+    One owner for a question two callers ask for different purposes:
+    `installed_package_name` wants WHICH provider describes the files on disk,
+    and `installed_metadata_describes_running_code` wants WHETHER they all do.
+    Answering them separately is how the rename pair got two different rulings one
+    function apart -- the second was taught that two providers is the state it
+    exists for, while the first went on reading it as unanswerable.
+
+    That asymmetry is not academic, because the pair is permanent: installing
+    `avibe-os` over a `vibe-remote` machine never uninstalls the older
+    distribution, so once a rollback has crossed the rename the tree holds both
+    forever. `avibe-os` records the release that failed and `vibe-remote` records
+    the files actually running, and the metadata is what distinguishes them --
+    naming neither meant every later upgrade armed its rollback with no
+    distribution, and `pinned_package_spec` fell back to the configured forward
+    name. `avibe-os==2.9.0` was never published, so that one recovery attempt
+    could only fail, on a machine that is already down.
+    """
+
+    from vibe import __version__
+
+    return [
+        name
+        for name, recorded in _providers_recording_a_published_release()
+        if recorded == __version__
+    ]
 
 
 def installed_metadata_describes_running_code() -> bool:
@@ -546,30 +606,23 @@ def installed_metadata_describes_running_code() -> bool:
     `avibe-os` the tree holds BOTH, and only one of them can be describing the
     files on disk. Treating "more than one provider" as unknown would have made
     the exact state described above the one state that answers `True` -- the
-    check declining to fire on its own scenario.
+    check declining to fire on its own scenario. `installed_package_name` reads
+    the same measurement for the other half of that state; both go through
+    `_providers_describing_running_code` so neither can be taught it alone.
     """
-
-    distributions = _distributions_providing_this_package()
-    if not distributions:
-        return True
 
     from vibe import __version__
 
     if not _names_a_published_release(__version__):
         return True
 
-    try:
-        from importlib.metadata import version as distribution_version
-
-        recorded = [distribution_version(name) for name in distributions]
-    except Exception:  # pragma: no cover - a broken environment answers nothing
-        logger.debug("Failed to read the installed distribution version", exc_info=True)
-        return True
-
-    published = [version for version in recorded if _names_a_published_release(version)]
+    published = _providers_recording_a_published_release()
     if not published:
         return True
-    return all(version == __version__ for version in published)
+    # Metadata describes the code only if EVERY provider recording a published
+    # release records this one; a single dissenter is a distribution pip would
+    # read as already satisfied.
+    return len(_providers_describing_running_code()) == len(published)
 
 
 def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:

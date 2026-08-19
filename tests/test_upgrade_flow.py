@@ -25,6 +25,7 @@ from vibe.upgrade import (
     get_restart_shell_command,
     get_running_vibe_path,
     get_safe_cwd,
+    installed_package_name,
     pinned_package_spec,
     RollbackTarget,
     rollback_target,
@@ -349,6 +350,67 @@ def test_a_rollback_pins_the_distribution_the_install_actually_came_from(monkeyp
     # An install whose path says nothing about a distribution -- pip into a shared
     # environment -- has only the configured spec to go on, and gets it.
     assert pinned_package_spec("3.0.10", python_executable="/usr/bin/python3") == "avibe-os==3.0.10"
+
+
+def test_the_rename_pair_still_names_the_distribution_that_describes_the_code(monkeypatch):
+    """Two providers is not an unreadable machine, it is the aftermath of a rollback.
+
+    Installing `avibe-os` over a `vibe-remote` machine never uninstalls the older
+    distribution, so once a rollback has crossed the rename the tree holds both
+    for good. Every upgrade after that measures its rollback target in this state,
+    which is why reading two providers as unanswerable does not cost one recovery
+    -- it costs every recovery the machine will ever attempt.
+
+    The metadata is what tells them apart: `avibe-os` records the release that
+    failed, `vibe-remote` records the files that are running. Naming neither left
+    `package=None`, `pinned_package_spec` fell back to the configured forward
+    name, and `avibe-os==2.9.0` was never published under that name -- so the one
+    recovery attempt could only fail, on an instance that is already down.
+    """
+
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    recorded = {"avibe-os": "3.0.11", "vibe-remote": "2.9.0"}
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
+    monkeypatch.setattr("vibe.__version__", "2.9.0", raising=False)
+
+    assert installed_package_name() == "vibe-remote"
+
+    # And the consequence the name is measured for: the pin this machine's next
+    # failed upgrade rolls back to names a release that exists.
+    launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    target = rollback_target()
+    assert target is not None and target.package == "vibe-remote"
+    assert pinned_package_spec(target.version, package_name=target.package) == "vibe-remote==2.9.0"
+
+
+def test_providers_that_cannot_be_told_apart_are_left_to_the_path(monkeypatch):
+    """Metadata answers this only while it distinguishes them.
+
+    Two distributions recording the same release is a vendored or mid-rename
+    environment, not a rollback, and there is nothing in the metadata to prefer
+    one name over the other. Guessing would put the pin on a distribution that may
+    never have published the version -- the same failure, arrived at from the
+    opposite direction -- so the interpreter path answers instead, and `None` when
+    it cannot either.
+    """
+
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "3.0.11")
+    monkeypatch.setattr("vibe.__version__", "3.0.11", raising=False)
+
+    monkeypatch.setattr("vibe.upgrade.sys.executable", "/usr/bin/python3")
+    assert installed_package_name() is None
+
+    monkeypatch.setattr("vibe.upgrade.sys.executable", "/home/ai/.local/share/uv/tools/vibe-remote/bin/python")
+    assert installed_package_name() == "vibe-remote"
 
 
 def test_a_spec_that_cannot_carry_a_pin_is_refused(monkeypatch):
