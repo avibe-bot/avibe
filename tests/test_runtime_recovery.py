@@ -19,7 +19,7 @@ from core.session_turns import SessionTurnManager
 from storage import message_deliveries as delivery_store
 from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
-from storage.models import agent_runs, agent_sessions, metadata
+from storage.models import agent_runs, agent_sessions, metadata, session_turns
 
 
 NOW = "2026-08-03T00:00:00+00:00"
@@ -869,10 +869,10 @@ async def test_cancel_settles_unaccepted_starting_owner_when_runtime_is_gone(
 
 
 @pytest.mark.anyio
-async def test_cancel_replays_unknown_start_instead_of_not_written(
+async def test_cancel_abandons_unknown_start_without_replaying(
     tmp_path: Path,
 ) -> None:
-    """An unknown start may already have written; Stop must not retire it as never-written."""
+    """An unknown start may already have written; Stop must not replay it."""
 
     engine = _engine(tmp_path)
     with engine.begin() as conn:
@@ -904,17 +904,34 @@ async def test_cancel_replays_unknown_start_instead_of_not_written(
 
     manager = SessionTurnManager(SimpleNamespace())
     manager._engine = engine
+    started: list[str] = []
+
+    async def _start(turn_id: str, **_kwargs) -> bool:
+        started.append(turn_id)
+        return True
+
+    manager._start_persisted_turn = _start
     with patch("core.inbox_events.bus.publish"):
         result = await manager.cancel("ses-unknown")
 
     assert result["ok"] is True
     assert result["status"] == "stale_released"
     assert result["reason"] == "runtime_gone"
+    assert started == []
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, "trn-unknown")
         delivery = delivery_store.get_delivery(conn, "delivery-unknown")
+        successors = list(
+            conn.execute(
+                select(session_turns.c.id).where(
+                    session_turns.c.session_id == "ses-unknown",
+                    session_turns.c.id != "trn-unknown",
+                )
+            ).scalars()
+        )
     assert turn["state"] == "terminal"
     assert turn["terminal_outcome"] == "failed"
     assert turn["settled_by"] == "stopped"
     assert turn["terminal_evidence_kind"] == "runtime_gone"
-    assert delivery["state"] != "retired"
+    assert delivery["state"] == "retired"
+    assert successors == []

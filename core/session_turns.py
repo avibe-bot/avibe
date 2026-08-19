@@ -8007,14 +8007,9 @@ class SessionTurnManager:
             )
             if restored_identity is None or restored_identity[0] != owner_id:
                 start_receipt = str(owner.get("start_receipt_outcome") or "")
-                never_started = (
-                    str(owner.get("state") or "") == "starting"
-                    and start_receipt not in {"accepted", "unknown"}
-                )
-                unknown_start = (
-                    str(owner.get("state") or "") == "starting"
-                    and start_receipt == "unknown"
-                )
+                starting = str(owner.get("state") or "") == "starting"
+                never_started = starting and start_receipt not in {"accepted", "unknown"}
+                unknown_start = starting and start_receipt == "unknown"
                 if never_started:
                     with self._sqlite_engine().connect() as conn:
                         initial_delivery_ids = {
@@ -8041,7 +8036,7 @@ class SessionTurnManager:
                         settled_by=SETTLED_BY_STOPPED,
                         evidence_kind="runtime_gone",
                         evidence={"reason": "stop_with_unknown_start"},
-                        replay_unknown_start=True,
+                        abandon_unaccepted_start=True,
                     )
                 else:
                     terminal = self._terminalize_durable_turn(
