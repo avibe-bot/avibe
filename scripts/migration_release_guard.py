@@ -15,7 +15,8 @@ during autogenerate, so today's runtime can drive an older ``version_locations``
     fresh_install_tables()        HEAD_TABLES is what a fresh install actually has, so
                                   the property below derives from something measured
     new_slot_collisions()         a change introduces no new duplicated slot number
-    rechained_revisions()         a released revision keeps its identity and its parent
+    rechained_revisions()         a released revision keeps its identity and every edge
+                                  Alembic orders the graph by
     unrepairable_releases()       a database built by a released graph still comes out
                                   ready when the upgrade users run upgrades it
 
@@ -50,6 +51,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from alembic import command
 from alembic.config import Config
+from alembic.util import to_tuple
 
 from storage.migrations import (
     HEAD_ONLY_REQUIRED_COLUMNS,
@@ -211,32 +213,70 @@ class _ComputedMetadata:
 COMPUTED = _ComputedMetadata()
 
 
-def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, object]]:
-    """``{revision: (filename, down_revision)}``, parsed rather than imported.
+# The module-level names Alembic itself reads out of a migration, mapped to the
+# ``Revision`` constructor arguments they become. Comparing fewer than all of them
+# compares a graph the guard invented rather than the one Alembic builds, and the
+# difference is a hole of exactly the outage's shape: the ordering changes while every
+# comparison here still matches. The mapping is held to that signature by a test, so a
+# field added upstream fails loudly instead of going unwatched.
+GRAPH_FIELDS = {
+    "revision": "revision",
+    "down_revision": "down_revision",
+    "depends_on": "dependencies",
+    "branch_labels": "branch_labels",
+}
+
+GRAPH_EDGES = tuple(field for field in GRAPH_FIELDS if field != "revision")
+
+
+def declared_graph_fields(source: str) -> dict[str, object]:
+    """The graph declarations a migration module makes, in either form Python allows.
+
+    ``revision: str = "..."`` is an ``AnnAssign``, and reading only ``Assign`` does not
+    merely lose the annotation -- it drops the migration out of the graph entirely, so it
+    is compared against nothing and any rechain of it passes.
+
+    Edge values are normalized with Alembic's own ``to_tuple``, exactly as ``Script``
+    does, so the guard's notion of "the same parent" is Alembic's notion and re-spelling
+    a value it already treats as equal is not reported as drift.
+    """
+    declared: dict[str, object] = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if not isinstance(target, ast.Name) or target.id not in GRAPH_FIELDS:
+            continue
+        try:
+            literal = ast.literal_eval(value)
+        except ValueError:
+            declared[target.id] = COMPUTED
+            continue
+        declared[target.id] = literal if target.id == "revision" else to_tuple(literal, default=())
+    return declared
+
+
+def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, dict[str, object]]]:
+    """``{revision: (filename, {edge_field: value})}``, parsed rather than imported.
 
     Parsing keeps this free of import side effects and lets it read a revision from a
     release whose modules would no longer import against today's code. A computed value
     becomes ``COMPUTED``, which compares unequal to everything; a computed *revision*
     additionally cannot identify its file, so it is keyed by filename and can never be
-    mistaken for a literal revision that happens to render the same way.
+    mistaken for a literal revision that happens to render the same way. An edge a module
+    never declares is ``()``, which is what Alembic defaults it to.
     """
-    graph: dict[str, tuple[str, object]] = {}
+    graph: dict[str, tuple[str, dict[str, object]]] = {}
     for name, source in sources.items():
-        assigned: dict[str, object] = {}
-        for node in ast.parse(source).body:
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-                continue
-            target = node.targets[0]
-            if isinstance(target, ast.Name) and target.id in {"revision", "down_revision"}:
-                try:
-                    assigned[target.id] = ast.literal_eval(node.value)
-                except ValueError:
-                    assigned[target.id] = COMPUTED
-        if "revision" not in assigned:
+        declared = declared_graph_fields(source)
+        if "revision" not in declared:
             continue
-        revision = assigned["revision"]
+        revision = declared["revision"]
         key = f"<computed:{name}>" if revision is COMPUTED else str(revision)
-        graph[key] = (name, assigned.get("down_revision"))
+        graph[key] = (name, {field: declared.get(field, ()) for field in GRAPH_EDGES})
     return graph
 
 
@@ -244,13 +284,13 @@ def unverifiable_sources(sources: dict[str, str]) -> list[str]:
     """Filenames whose revision metadata is computed, and so cannot be compared at all."""
     return sorted(
         name
-        for key, (name, down_revision) in revision_graph(sources).items()
-        if down_revision is COMPUTED or key.startswith("<computed:")
+        for key, (name, edges) in revision_graph(sources).items()
+        if key.startswith("<computed:") or any(value is COMPUTED for value in edges.values())
     )
 
 
 def rechained_revisions(baseline: str | None = None) -> list[str]:
-    """Released revisions whose identity or parent has changed since the baseline release.
+    """Released revisions whose identity or graph edges have changed since the baseline.
 
     This is the property the outage broke. Inserting an ancestor behind a revision the
     field has already passed is invisible to Alembic, which only walks forward, and
@@ -265,16 +305,18 @@ def rechained_revisions(baseline: str | None = None) -> list[str]:
         f"{name} computes its migration metadata, so the guard cannot hold it to {baseline}"
         for name in unverifiable_sources(working_tree)
     ]
-    for revision, (name, down_revision) in sorted(revision_graph(released_sources(baseline)).items()):
+    for revision, (name, shipped) in sorted(revision_graph(released_sources(baseline)).items()):
         if revision not in current:
             problems.append(f"{revision} ({name}) shipped in {baseline} and is no longer in the graph")
-        elif current[revision][1] is COMPUTED:
+            continue
+        edges = current[revision][1]
+        if any(value is COMPUTED for value in edges.values()):
             continue  # already reported above, and reporting it twice describes one defect as two
-        elif current[revision][1] != down_revision:
-            problems.append(
-                f"{revision} ({name}) shipped in {baseline} with down_revision={down_revision!r} "
-                f"and now has {current[revision][1]!r}"
-            )
+        drift = "; ".join(
+            f"{field} {value!r} -> {edges[field]!r}" for field, value in shipped.items() if edges[field] != value
+        )
+        if drift:
+            problems.append(f"{revision} ({name}) no longer matches what {baseline} shipped: {drift}")
     return problems
 
 

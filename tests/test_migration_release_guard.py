@@ -13,9 +13,11 @@ properties through the CLI with the full history fetched.
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 
 import pytest
+from alembic.script.revision import Revision
 
 from scripts import migration_release_guard as guard
 from storage.migrations import background_tables_ready
@@ -56,24 +58,29 @@ def _graphs(monkeypatch, shipped: dict[str, str], current: dict[str, str]) -> No
     monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
 
 
-def _revision_file(revision: str, down_revision: str) -> str:
-    return f'"""a migration"""\n\nrevision = "{revision}"\ndown_revision = {down_revision}\n'
+def _revision_file(revision: str, down_revision: str, *, annotated: bool = False, **edges: str) -> str:
+    """A migration module declaring exactly the graph fields it is given."""
+    revision_type, parent_type = (": str", ": str | None") if annotated else ("", "")
+    lines = [f'revision{revision_type} = "{revision}"', f"down_revision{parent_type} = {down_revision}"]
+    lines += [f"{field} = {value}" for field, value in edges.items()]
+    return '"""a migration"""\n\n' + "\n".join(lines) + "\n"
 
 
 # One revision of every shape the real graph contains: a root with no parent, an ordinary
-# linear child, a sibling branch, and a merge whose parent is a tuple. Seeding every shape
-# rather than listing the ones that must not regress means a shape introduced later is
-# covered the moment it joins this table, without editing a single test.
+# linear child declared in the annotated form, a sibling branch carrying a branch label,
+# and a merge with a tuple parent and a dependency edge. Seeding every shape rather than
+# listing the ones that must not regress means a shape introduced later is covered the
+# moment it joins this table, without editing a single test.
 SHIPPED_REVISIONS = (
-    ("20260101_0001", "root", "None"),
-    ("20260102_0002", "linear", '"20260101_0001"'),
-    ("20260103_0003", "branch", '"20260101_0001"'),
-    ("20260104_0004", "merge", '("20260102_0002", "20260103_0003")'),
+    ("20260101_0001", "root", "None", {}),
+    ("20260102_0002", "linear", '"20260101_0001"', {"annotated": True}),
+    ("20260103_0003", "branch", '"20260101_0001"', {"branch_labels": '("side",)'}),
+    ("20260104_0004", "merge", '("20260102_0002", "20260103_0003")', {"depends_on": '"20260103_0003"'}),
 )
 
 SHIPPED_GRAPH = {
-    f"{revision}_{slug}.py": _revision_file(revision, down_revision)
-    for revision, slug, down_revision in SHIPPED_REVISIONS
+    f"{revision}_{slug}.py": _revision_file(revision, down_revision, **edges)
+    for revision, slug, down_revision, edges in SHIPPED_REVISIONS
 }
 
 
@@ -84,15 +91,72 @@ def test_an_unchanged_graph_reports_nothing(monkeypatch):
     assert guard.new_slot_collisions("v0.0.0") == {}
 
 
-@pytest.mark.parametrize(("revision", "slug"), [(revision, slug) for revision, slug, _ in SHIPPED_REVISIONS])
-def test_repointing_any_released_revision_is_reported(monkeypatch, revision, slug):
+@pytest.mark.parametrize(
+    ("revision", "slug", "edges"),
+    [(revision, slug, edges) for revision, slug, _, edges in SHIPPED_REVISIONS],
+)
+def test_repointing_any_released_revision_is_reported(monkeypatch, revision, slug, edges):
     current = dict(SHIPPED_GRAPH)
-    current[f"{revision}_{slug}.py"] = _revision_file(revision, '"20269999_9999"')
+    current[f"{revision}_{slug}.py"] = _revision_file(revision, '"20269999_9999"', **edges)
     _graphs(monkeypatch, SHIPPED_GRAPH, current)
 
     problems = guard.rechained_revisions("v0.0.0")
     assert len(problems) == 1
     assert revision in problems[0]
+
+
+@pytest.mark.parametrize("field", guard.GRAPH_EDGES)
+def test_changing_any_edge_alembic_orders_by_is_reported(monkeypatch, field):
+    """Every field Alembic builds its graph from, not just the parent pointer.
+
+    ``depends_on`` and ``branch_labels`` reorder a graph as surely as ``down_revision``
+    does, and a dependency added behind a revision users are already stamped at is the
+    outage's exact shape: fresh databases traverse it, existing ones record it as
+    satisfied. Parametrizing off ``GRAPH_EDGES`` means a field added to the guard is
+    covered here without editing this test.
+    """
+    declarations = {"down_revision": '"20260101_0001"'} | {field: '"20260103_0003"'}
+    current = dict(SHIPPED_GRAPH)
+    current["20260102_0002_linear.py"] = _revision_file("20260102_0002", annotated=True, **declarations)
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert len(problems) == 1
+    assert field in problems[0]
+
+
+def test_the_compared_fields_are_what_alembic_builds_its_graph_from():
+    """The field list is measured against Alembic, never maintained by hand here.
+
+    A field Alembic orders revisions by and this guard does not read is a hole of exactly
+    the outage's shape -- the graph changes and every comparison still matches. Anchoring
+    to the constructor means a field added upstream fails this test rather than going
+    unwatched for however long it takes someone to notice.
+    """
+    parameters = set(inspect.signature(Revision.__init__).parameters) - {"self"}
+
+    assert set(guard.GRAPH_FIELDS.values()) == parameters
+
+
+@pytest.mark.parametrize(
+    ("shipped", "respelled"),
+    [('"20260101_0001"', '("20260101_0001",)'), ('("20260101_0001",)', '"20260101_0001"')],
+    ids=["scalar-to-tuple", "tuple-to-scalar"],
+)
+def test_a_spelling_alembic_reads_identically_is_not_drift(monkeypatch, shipped, respelled):
+    """Normalization is Alembic's, so the guard agrees with it about what changed.
+
+    A guard that reported a re-spelling would be red for an edit that changes nothing,
+    and a guard people expect to be wrong is one they stop reading.
+    """
+    _graphs(
+        monkeypatch,
+        dict(SHIPPED_GRAPH) | {"20260102_0002_linear.py": _revision_file("20260102_0002", shipped)},
+        dict(SHIPPED_GRAPH) | {"20260102_0002_linear.py": _revision_file("20260102_0002", respelled)},
+    )
+
+    assert guard.rechained_revisions("v0.0.0") == []
 
 
 def test_deleting_a_released_revision_is_reported(monkeypatch):
