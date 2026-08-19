@@ -243,10 +243,29 @@ def _source_identity(source_path: Path) -> dict[str, dict[str, object]]:
         try:
             size = component.stat().st_size
             digest = _file_digest(component)
-        except OSError:
+        except FileNotFoundError:
             # Absence is a state too: a database with no WAL beside it must not
-            # match a copy taken when it had one.
+            # match a copy taken when it had one. This is the only read outcome
+            # that means the component is not there.
             continue
+        except OSError as exc:
+            # Every other read failure fails closed. A permission or I/O error
+            # says the component could not be read -- not that it is absent --
+            # and recording it as absent yields a main-file-only identity that
+            # can equal one recorded before the WAL existed. Reuse would then
+            # hand back a rollback point missing every commit still living in
+            # that unreadable WAL, which is precisely the failure the content
+            # digest was introduced to prevent; collapsing the two states here
+            # would reintroduce it through the error path.
+            #
+            # Refusing leaves the database untouched: the caller takes no backup
+            # and runs no migration. That is the safe direction -- a schema
+            # upgrade whose rollback point cannot be established is the risk this
+            # whole mechanism exists to cover.
+            raise RuntimeError(
+                f"cannot identify database component {component.name}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
         identity[suffix or "-db"] = {"size": size, "sha256": digest}
     return identity
 

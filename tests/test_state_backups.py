@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from storage import backups as backups_module
 from storage.backups import create_sqlite_migration_backup, prune_state_backups
 from storage.background import SQLiteBackgroundTaskStore
 from storage.importer import _backup_json_state, ensure_sqlite_state
@@ -357,6 +358,76 @@ def test_backup_reuse_sees_a_commit_that_only_touched_the_wal(tmp_path: Path) ->
         assert fresh != first, "a commit living only in the WAL is still a new state"
         with sqlite3.connect(fresh / "vibe.sqlite") as backup:
             assert backup.execute("select count(*) from records").fetchone() == (2,)
+    finally:
+        writer.close()
+
+
+def test_unreadable_wal_refuses_instead_of_reading_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Absence and unreadability are different facts, and only one of them is safe
+    # to record. SQLite deletes the WAL on a clean close, so a database really can
+    # have a main-file-only identity -- which means treating an unreadable WAL as
+    # absent does not degrade the identity, it forges a previously valid one. This
+    # test builds that exact collision: the same main file, once with no WAL beside
+    # it and once with a WAL holding a commit, so an identity that drops the WAL
+    # makes the two states equal and hands back a rollback point missing the commit.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    backups_dir = state_dir / "backups"
+
+    seed = sqlite3.connect(db_path)
+    try:
+        seed.execute("PRAGMA journal_mode = WAL")
+        seed.execute("create table records (value text not null)")
+        seed.execute("insert into records values ('before')")
+        seed.commit()
+    finally:
+        seed.close()
+    wal_path = db_path.with_name(db_path.name + "-wal")
+    assert not wal_path.exists(), "a clean close must leave no WAL, or the collision is not real"
+
+    first = create_sqlite_migration_backup(
+        db_path, backups_dir=backups_dir, from_revisions={"old"}, to_revisions={"new"}
+    )
+
+    writer = sqlite3.connect(db_path)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        before = db_path.stat()
+        writer.execute("insert into records values ('after')")
+        writer.commit()
+        after = db_path.stat()
+        assert wal_path.exists()
+        assert (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), (
+            "this test is only meaningful while the commit stays out of the main file"
+        )
+
+        # Deny the read at the digest rather than with chmod: a permission bit is
+        # ignored when the suite runs as root, and the property under test is what
+        # the code does with a failed read, not which errno produced it.
+        real_digest = backups_module._file_digest
+
+        def _deny_wal(path: Path) -> str:
+            if path.name.endswith("-wal"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_digest(path)
+
+        monkeypatch.setattr(backups_module, "_file_digest", _deny_wal)
+
+        existing = set(backups_dir.iterdir())
+        with pytest.raises(RuntimeError, match="cannot identify database component"):
+            create_sqlite_migration_backup(
+                db_path, backups_dir=backups_dir, from_revisions={"old"}, to_revisions={"new"}
+            )
+        assert set(backups_dir.iterdir()) == existing, (
+            "refusing must leave the database and its backups untouched"
+        )
+        with sqlite3.connect(first / "vibe.sqlite") as stale:
+            assert stale.execute("select count(*) from records").fetchone() == (1,), (
+                "the backup that must not be reused is the one taken before the WAL commit"
+            )
     finally:
         writer.close()
 

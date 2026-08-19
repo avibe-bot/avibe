@@ -699,6 +699,46 @@ def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
         ]
 
 
+def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path) -> None:
+    # A table is not the unit of interruption; a schema object is. Each branch
+    # revision creates its table and then its index as two statements, so a run
+    # interrupted between them leaves the table present and the index missing --
+    # and a guard covering both reads the table as proof that neither is needed.
+    # That state is exactly the one the repair exists to fix, and it is also the
+    # one where skipping is permanent: the repair stamps, and a stamped revision
+    # never runs again. Derive the objects from the two sides of the merge rather
+    # than naming them, so an index added to the branch later is covered here
+    # without editing the test.
+    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
+    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
+    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+    branch_names = {name for _, name, _ in with_branch} - {name for _, name, _ in without_branch}
+    branch_indexes = {name for kind, name, _ in with_branch if kind == "index"} & branch_names
+    assert branch_indexes, "the spliced branch must own at least one index"
+    expected = {obj for obj in reference if obj[1] in branch_names}
+
+    db_path = _upgraded_db(tmp_path / "indexless.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        for name in sorted(branch_indexes):
+            conn.execute(f'drop index "{name}"')
+        conn.commit()
+    surviving = {name for _, name, _ in _schema_of(db_path)}
+    assert not branch_indexes & surviving, "the seeded database must really be missing the indexes"
+    assert {name for kind, name, _ in with_branch if kind == "table"} & branch_names <= surviving, (
+        "only the indexes may be missing -- a dropped table would let the table guard "
+        "recreate the index and the test would pass without proving anything"
+    )
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    missing = expected - _schema_of(db_path)
+    assert not missing, f"the repair left branch objects short of a fresh install: {sorted(missing)}"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
 def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: Path) -> None:
     # The repair replays unconditionally, so every database that reaches head replays
     # the branch over a schema that already has it -- including the backfill in
