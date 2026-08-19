@@ -620,6 +620,28 @@ def test_deferred_personal_context_keeps_instance_kind() -> None:
     assert restored.is_personal_instance
 
 
+def test_deferred_context_from_previous_pairing_is_rejected(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "current-instance"
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.save()
+
+    stale_context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="previous-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, stale_context)
+
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
 @pytest.mark.parametrize(
     ("paired_kind", "expected_kind"),
     [("personal", "personal"), ("organization", "organization"), ("", None)],

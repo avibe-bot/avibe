@@ -324,18 +324,36 @@ def resource_user_context_from_metadata(
     if not isinstance(snapshot, Mapping):
         return None
     context = current_resource_context(snapshot, is_remote=True)
+
+    # A persisted context is durable across re-pairing, so a Personal snapshot
+    # must not authorize work after this installation moves to another
+    # instance. Compare the server-owned binding whenever the current pairing
+    # exposes one; legacy snapshots without an instance id remain covered by
+    # the kind fallback below.
+    configured = _configured_resource_instance()
+    if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE and configured is not None:
+        paired_instance_id, paired_kind = configured
+        snapshot_instance_id = context.instance_id
+        if (
+            snapshot_instance_id
+            and paired_instance_id
+            and snapshot_instance_id != paired_instance_id
+        ):
+            return None
+        if context.instance_kind and paired_kind and context.instance_kind != paired_kind:
+            return None
     if context.instance_kind is not None or "vibe_instance_kind" in snapshot:
         return context
 
     # Released snapshots predate the instance-kind field. Recover their kind
     # only from the currently paired, server-owned config; an unavailable or
     # unknown pairing remains fail-closed rather than being guessed as Personal.
-    try:
-        from config.v2_config import V2Config
-
-        paired_kind = V2Config.load().remote_access.vibe_cloud.instance_kind
-    except Exception:
-        paired_kind = None
+    paired_kind = (
+        configured[1]
+        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        and configured is not None
+        else None
+    )
     if paired_kind not in {"personal", "organization"}:
         return context
     return replace(context, instance_kind=paired_kind)
@@ -383,6 +401,26 @@ def _configured_show_page_instance() -> tuple[str, str] | None | object:
     ):
         return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
     return instance_id, cloud.instance_kind
+
+
+def _configured_resource_instance() -> tuple[str | None, str | None] | None | object:
+    """Return the current pairing identity used to fence deferred resources."""
+
+    try:
+        from config.v2_config import V2Config
+
+        cloud = V2Config.load().remote_access.vibe_cloud
+        if not cloud.enabled:
+            return None
+        instance_id = _clean_optional_string(cloud.instance_id)
+        instance_kind = (
+            cloud.instance_kind if cloud.instance_kind in {"personal", "organization"} else None
+        )
+    except Exception:
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    if instance_id is None and instance_kind is None:
+        return None
+    return instance_id, instance_kind
 
 
 def _configuration_unavailable_ownership() -> dict[str, Any]:

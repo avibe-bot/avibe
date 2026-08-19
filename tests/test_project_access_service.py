@@ -148,6 +148,11 @@ def test_personal_editor_ignores_project_organization_acl(tmp_path) -> None:
         email="personal@example.com",
         instance_kind="personal",
     )
+    personal_viewer = _context(
+        "viewer",
+        email="personal@example.com",
+        instance_kind="personal",
+    )
     organization_editor = _context("editor", email="organization@example.com")
 
     with engine.begin() as conn:
@@ -155,6 +160,9 @@ def test_personal_editor_ignores_project_organization_acl(tmp_path) -> None:
         assert project_access_service.get_effective_project_role(
             conn, personal_editor, project["id"]
         ) == "editor"
+        assert project_access_service.get_effective_project_role(
+            conn, personal_viewer, project["id"]
+        ) is None
         assert project_access_service.get_effective_project_role(
             conn, organization_editor, project["id"]
         ) is None
