@@ -312,9 +312,16 @@ class RuntimeServiceLockTests(unittest.TestCase):
                                     pid = runtime.start_service()
 
             self.assertEqual(pid, 78901)
-            wait_for_ready.assert_called_once_with(
-                67890,
-                timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+            # Which pid the adopted scope is waited on is this test's subject.
+            # How long it may be waited on is not a constant any more but what
+            # the one start budget has left once the lock phase is done, so the
+            # bound is asserted as a bound; `ServiceReadinessGateTests` pins how
+            # it is spent.
+            wait_for_ready.assert_called_once()
+            self.assertEqual(wait_for_ready.call_args.args, (67890,))
+            self.assertLessEqual(
+                wait_for_ready.call_args.kwargs["timeout"],
+                runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
             )
             spawn_background.assert_not_called()
 
@@ -1028,6 +1035,58 @@ class ServiceReadinessGateTests(unittest.TestCase):
         for already_recorded in (True, False):
             with self.subTest(already_recorded=already_recorded):
                 self.assertEqual(self._start_with_phase("running", already_recorded=already_recorded), 12345)
+
+    def _start_against_a_lock_phase_lasting(self, seconds: float):
+        """Run `start_service()` with the phases on a clock this test drives.
+
+        Returns the timeout the readiness phase was handed, so the assertion is
+        about the bound itself rather than about how long the test took.
+        """
+
+        clock = {"now": 1000.0}
+        handed: list[float] = []
+
+        def slow_resolve(**kwargs):
+            clock["now"] += seconds
+            return 12345
+
+        def record_timeout(pid, timeout=None):
+            handed.append(timeout)
+            return pid
+
+        with patch("vibe.runtime.time", SimpleNamespace(monotonic=lambda: clock["now"])):
+            with patch("vibe.runtime._resolve_service_pid", side_effect=slow_resolve):
+                with patch("vibe.runtime.wait_for_service_ready", side_effect=record_timeout):
+                    pid = runtime.start_service()
+
+        self.assertEqual(pid, 12345)
+        self.assertEqual(len(handed), 1)
+        return handed[0]
+
+    def test_the_two_start_phases_spend_one_budget_between_them(self):
+        """A start is one event, so it costs the caller one timeout.
+
+        `SERVICE_SLOW_START_TIMEOUT_SECONDS` is what the configuration says a
+        service is allowed to take to start. Taking the spawn lock and reaching
+        the serving state are two phases of that one event, so handing the
+        constant to each in turn made a start that is slow in both cost twice
+        the stated number -- on the Dashboard and doctor paths, where someone is
+        waiting for the answer.
+        """
+
+        # The budget is 0.2s here (see setUp); the lock phase eats three
+        # quarters of it, so the readiness phase may have the rest and no more.
+        self.assertAlmostEqual(self._start_against_a_lock_phase_lasting(0.15), 0.05)
+
+    def test_a_lock_phase_that_spends_the_whole_budget_leaves_nothing_to_wait_with(self):
+        """And the remainder floors at zero rather than going negative.
+
+        A negative timeout is not a shorter wait; depending on what receives it
+        it is an error or an unbounded one, which would put the doubled wait
+        back in a less visible form.
+        """
+
+        self.assertEqual(self._start_against_a_lock_phase_lasting(0.5), 0.0)
 
     def test_nothing_reaches_a_service_pid_without_passing_the_gate(self):
         """The other half: no shipped caller can route around `start_service()`.

@@ -34,6 +34,52 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SHIPPED_SOURCE_ROOTS = ("main.py", "config", "core", "modules", "storage", "vibe")
 
 
+def _install_runtime_ready_dependencies(controller, events: list[str]) -> None:
+    """The collaborators `_on_runtime_ready` starts, each recording that it ran.
+
+    Kept out of the fixture body because their order is the subject rather than
+    the setup: the readiness line is drawn between the steps whose failure ends
+    startup and the steps that catch their own, so each one has to be visible.
+    """
+
+    async def restore_polls(_platforms):
+        events.append("restore polls")
+
+    async def recover_owners():
+        events.append("recover owners")
+
+    async def post_update_notification(*, ready_platform):
+        events.append("post-update notification")
+
+    async def start_command_watcher():
+        events.append("runtime command watcher")
+
+    controller.primary_platform = "avibe"
+    controller._restore_active_polls = restore_polls
+    controller._recover_runtime_owners = recover_owners
+    controller.update_checker = SimpleNamespace(
+        check_and_send_post_update_notification=post_update_notification,
+        start=lambda: events.append("update checker"),
+    )
+    controller.scheduled_task_service = SimpleNamespace(start=lambda: events.append("scheduled tasks"))
+    controller.watch_service = SimpleNamespace(start=lambda: events.append("watch service"))
+    controller.runtime_command_watcher = SimpleNamespace(start=start_command_watcher)
+    controller._get_idle_cleanup_timeouts = lambda: (0, 0)
+    controller.cleanup_task = None
+
+    def request_shutdown(reason):
+        # Stands in for the real one by its effect, not its mechanism: what a
+        # startup step gets by asking for shutdown is a process on its way out,
+        # and here that is the loop stopping. Left as a bare recorder, a test
+        # whose release fails before readiness would hang instead of failing,
+        # because the fixture's only other way out of `run_forever()` is the
+        # readiness callback the failure is supposed to prevent.
+        events.append(f"shutdown requested: {reason}")
+        controller._loop.call_soon(controller._loop.stop)
+
+    controller.request_shutdown = request_shutdown
+
+
 @pytest.fixture
 def startup(monkeypatch):
     """A controller stripped to the startup steps `run()` performs itself.
@@ -55,11 +101,20 @@ def startup(monkeypatch):
     controller.show_git_checkpoint_service = SimpleNamespace(start=lambda: events.append("show checkpoints"))
     controller._shutdown_requested = False
     controller._im_run_exception = None
-    # Real thread, doing nothing and exiting: the IM runtime is genuinely
-    # concurrent with everything after it, so it is left out of `events` rather
-    # than given an order it does not have.
-    controller._run_im_runtime = Mock()
     controller.cleanup_sync = Mock()
+    _install_runtime_ready_dependencies(controller, events)
+
+    def fake_im_runtime():
+        # What `MultiIMClient.run()` does, and the reason readiness can be
+        # announced from the ready callback at all: the platform threads are
+        # started and then the callback is fired unconditionally -- with no
+        # platform configured too. Dispatched onto the loop from this thread the
+        # way the real client dispatches it, which a loop that has not started
+        # yet accepts and runs on its first pass.
+        events.append("im runtime")
+        asyncio.run_coroutine_threadsafe(Controller._on_runtime_ready(controller), controller._loop)
+
+    controller._run_im_runtime = fake_im_runtime
 
     def publish_readiness():
         events.append("published ready")
@@ -82,19 +137,53 @@ def startup(monkeypatch):
 
 
 def test_readiness_is_published_by_the_code_that_reaches_the_serving_loop(startup):
-    """Announced last, from inside the function that does the starting.
+    """Announced from inside the function that does the starting, not from `run()`.
 
     Not a claim about which line the call sits on, but about what stands behind
     it: every structural step a new release can die in has already succeeded, and
-    the only thing left is the loop that is the service serving.
+    the loop it speaks for is serving. `run()` starts startup and does not finish
+    it, so announcing from there put every step written afterwards outside the
+    claim -- which is how durable-owner recovery came to be able to fail after
+    the supervisor had already been told the upgrade worked.
     """
 
     Controller.run(startup.controller)
 
-    assert startup.events[-2:] == ["published ready", "serving"]
+    assert "published ready" in startup.events
+    # After the steps whose failure ends startup...
+    assert startup.events.index("recover owners") < startup.events.index("published ready")
+    # ...and the loop it speaks for did reach serving.
+    assert startup.events[-1] == "serving"
     # And there was a startup for it to be speaking for, rather than the publish
-    # being last in an otherwise empty sequence.
-    assert startup.events[:-2]
+    # standing at the head of an otherwise empty sequence.
+    assert startup.events[0] != "published ready"
+
+
+def test_recovery_that_fails_takes_readiness_down_with_it(startup):
+    """The round-10 instance, and the reason the line moved rather than grew.
+
+    Durable-owner recovery is a startup step like any other: it can fail on a new
+    release, and when it does it asks for shutdown and re-raises, so the process
+    is on its way out. Announced from `run()`, readiness had already been
+    published by then and the supervisor read the instance as upgraded -- a dark
+    machine with a successful upgrade recorded against it, which is this PR's
+    whole subject arriving through a door it had not been closed on.
+    """
+
+    async def recovery_the_new_release_cannot_do():
+        startup.events.append("recover owners")
+        raise RuntimeError("durable delivery owners are not recoverable on this release")
+
+    startup.controller._recover_runtime_owners = recovery_the_new_release_cannot_do
+
+    Controller.run(startup.controller)
+
+    assert "recover owners" in startup.events
+    assert "published ready" not in startup.events
+    assert "serving" not in startup.events
+    assert [event for event in startup.events if event.startswith("shutdown requested")] == [
+        "shutdown requested: runtime owner recovery failed"
+    ]
 
 
 def test_a_release_that_dies_in_its_own_startup_never_publishes_readiness(startup):
@@ -196,6 +285,48 @@ def test_an_im_runtime_that_fails_before_the_loop_starts_still_stops_it(startup)
         startup.controller._loop.close()
 
     assert stopped, "the loop never stopped: the IM runtime's stop was dropped"
+
+
+def _on_runtime_ready_body() -> list[ast.stmt]:
+    tree = ast.parse((REPO_ROOT / "core" / "controller.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_on_runtime_ready":
+            return node.body
+    raise AssertionError("_on_runtime_ready is gone, and the readiness boundary went with it")
+
+
+def test_every_startup_step_below_the_readiness_line_catches_its_own_failure():
+    """The boundary, checked where it actually gets broken: by the next step added.
+
+    Readiness claims every step whose failure means the service is not up has
+    completed. What makes that claim true is not where the call sits but the rule
+    about its two sides -- above it a failure ends startup, below it each step
+    catches its own and the service is up either way. Nobody has ever moved this
+    announcement to the wrong place; what happened four times is that startup grew
+    past it and the new step joined the wrong side in silence. So the rule is
+    asserted rather than the position, and an unguarded step appended below fails
+    here when it is written instead of in someone's dark instance.
+    """
+
+    body = _on_runtime_ready_body()
+    published = [
+        index
+        for index, statement in enumerate(body)
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and getattr(statement.value.func, "attr", None) == "_publish_readiness_unless_im_runtime_failed"
+    ]
+    assert len(published) == 1, "readiness is not announced exactly once from the boundary"
+
+    unguarded = [
+        ast.unparse(statement).splitlines()[0]
+        for statement in body[published[0] + 1 :]
+        if not isinstance(statement, ast.Try)
+    ]
+    assert unguarded == [], (
+        "these startup steps run after readiness is announced but do not catch their own "
+        "failure, so failing one of them aborts a service that has already been reported up"
+    )
 
 
 def _readiness_calls_in(path: Path) -> int:

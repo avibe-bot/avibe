@@ -663,6 +663,11 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
     database and call the result recovered. Moving them under the displaced
     database's own name keeps them where SQLite will find them for it instead.
 
+    That rule is about the name, not about the database, so it holds equally
+    when there is no database to displace. Sidecars are therefore collected
+    before the two paths divide, and every path out of here clears the live name
+    of sidecars it did not bring with it.
+
     A previous displacement into this same rollback point is replaced, but only
     once the new one is whole on disk -- staged under its own name, then renamed
     over. The bound has to come from somewhere: a full copy of the database per
@@ -683,25 +688,47 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
     only copy is in flight.
     """
 
-    if not db_path.exists():
-        os.replace(replacement, db_path)
-        return None
-    replaced = into / REPLACED_DATABASE_NAME
-    staging = into / f"{REPLACED_DATABASE_NAME}.incoming"
     sidecar_suffixes = ("-wal", "-shm")
 
     def sidecars_of(base: Path) -> tuple[Path, ...]:
         return tuple(base.with_name(base.name + suffix) for suffix in sidecar_suffixes)
 
+    live_sidecars = [
+        sidecar for sidecar in sidecars_of(db_path) if sidecar.is_file() and not sidecar.is_symlink()
+    ]
+
+    if not db_path.exists():
+        # Nothing to displace, but the sidecars are not therefore nothing. A
+        # migration that removed the database and left its log behind leaves a
+        # log belonging to a generation that no longer exists anywhere, and
+        # SQLite pairs a log with a database by name -- it validates the log's
+        # own checksum chain, not the database it came from. Renaming the
+        # rollback point in over that name hands the failed generation's tail to
+        # the older database and SQLite replays it, which puts back precisely
+        # what the rollback exists to remove.
+        #
+        # So the same rule the displacing branch enforces below applies here,
+        # for the same reason and by the same call: whatever arrives under this
+        # name must not inherit sidecars that are not its own. They are unlinked
+        # rather than archived because a log without its database is not
+        # recoverable evidence -- its pages need that database's header to mean
+        # anything -- while a log kept beside a name is a log something can
+        # still be paired with later.
+        for orphan in live_sidecars:
+            orphan.unlink(missing_ok=True)
+        os.replace(replacement, db_path)
+        return None
+
+    replaced = into / REPLACED_DATABASE_NAME
+    staging = into / f"{REPLACED_DATABASE_NAME}.incoming"
+
     for stale in (staging, *sidecars_of(staging)):
         stale.unlink(missing_ok=True)
 
-    live_sidecars: list[Path] = []
     duplications: list[tuple[Path, Path]] = [(db_path, staging)]
     for suffix in sidecar_suffixes:
         sidecar = db_path.with_name(db_path.name + suffix)
-        if sidecar.is_file() and not sidecar.is_symlink():
-            live_sidecars.append(sidecar)
+        if sidecar in live_sidecars:
             duplications.append((sidecar, staging.with_name(staging.name + suffix)))
 
     for source, destination in duplications:

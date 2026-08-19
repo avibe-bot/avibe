@@ -888,6 +888,38 @@ def test_a_restore_leaves_no_journal_from_the_displaced_generation(tmp_path: Pat
     assert replaced is not None and replaced.exists()
 
 
+def test_a_restore_over_a_missing_database_leaves_no_orphan_journal(tmp_path: Path) -> None:
+    # Same rule, on the branch that has nothing to displace. A migration can end
+    # with the live name holding no database and its log still beside it, and a
+    # log is paired to a database by name -- SQLite validates the log's own
+    # checksum chain, not the database it was written for. Renaming the rollback
+    # point in over that name therefore hands the failed generation's tail to the
+    # older database, and SQLite replays it and reports a recovered database:
+    # back comes exactly what the rollback was removing, in the one code path
+    # that only ever runs when something has already gone wrong.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    point_contents = _db_contents(rollback_point / "vibe.sqlite")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("create table added_by_the_new_version (value text)")
+    orphans = [db_path.with_name(db_path.name + suffix) for suffix in ("-wal", "-shm")]
+    assert [orphan.name for orphan in orphans if orphan.exists()] == [orphan.name for orphan in orphans]
+    db_path.unlink()
+
+    replaced = backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert replaced is None
+    assert [orphan.name for orphan in orphans if orphan.exists()] == []
+    assert _db_contents(db_path) == point_contents
+
+
 def test_a_restore_that_cannot_be_staged_leaves_the_database_alone(tmp_path: Path) -> None:
     # The replacement is copied and verified before anything about the live
     # database changes, so a rollback point that turns out to be unreadable costs

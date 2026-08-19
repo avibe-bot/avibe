@@ -1809,8 +1809,18 @@ def start_service(
 
     Waiting out here also takes the wait off the spawn lock, where a slow start
     used to block every other caller for the length of it.
+
+    Both phases spend one deadline, not one each. `SERVICE_SLOW_START_TIMEOUT_SECONDS`
+    is the budget for a service starting, and taking the lock and reaching the
+    serving state are two phases of that single event -- so passing the constant
+    to each in turn let a start that is slow in both cost a caller twice the
+    number the configuration states, on the Dashboard and doctor paths where
+    someone is waiting for the answer. Measuring from here also makes the bound
+    mean what it says whichever of `_resolve_service_pid`'s several returns
+    produced the pid, including the ones that did no waiting at all.
     """
 
+    deadline = time.monotonic() + SERVICE_SLOW_START_TIMEOUT_SECONDS
     pid = _resolve_service_pid(
         wait_for_ready=wait_for_ready,
         initial_ready_timeout=initial_ready_timeout,
@@ -1819,7 +1829,7 @@ def start_service(
     )
     if not wait_for_ready:
         return pid
-    ready_pid = wait_for_service_ready(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    ready_pid = wait_for_service_ready(pid, timeout=max(0.0, deadline - time.monotonic()))
     if ready_pid is None:
         _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
     return ready_pid
