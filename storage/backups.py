@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -205,120 +204,6 @@ def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
     return candidate
 
 
-# Every on-disk file SQLite reads to answer for this database. ``-shm`` is
-# deliberately absent: it is a volatile index into the WAL, rebuilt from it, and
-# never content of its own.
-_DB_COMPONENT_SUFFIXES = ("", "-wal", "-journal")
-
-
-def _file_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _source_identity(source_path: Path) -> dict[str, dict[str, object]]:
-    """Fingerprint the bytes a copy of this database would read.
-
-    Metadata cannot answer this. Avibe runs SQLite in WAL mode (``storage/db.py``,
-    ``storage/alembic/env.py``), so a commit can land entirely in
-    ``vibe.sqlite-wal`` and leave the main file's size and mtime untouched, and
-    timestamp resolution is a property of the filesystem rather than of SQLite. An
-    identity built from either would match a copy taken before that commit and hand
-    back a rollback point missing it, which is the one failure this whole mechanism
-    exists to prevent. So the identity is content, for every component.
-
-    Read before the copy, never after. A commit landing between this read and the
-    copy makes the copy strictly newer than the identity recorded beside it, so the
-    next attempt sees a changed database and takes a fresh backup. Reuse therefore
-    can only return a copy at or after the state it is being reused for -- never one
-    missing a commit the live database already has.
-    """
-
-    identity: dict[str, dict[str, object]] = {}
-    for suffix in _DB_COMPONENT_SUFFIXES:
-        component = source_path.with_name(source_path.name + suffix)
-        try:
-            size = component.stat().st_size
-            digest = _file_digest(component)
-        except FileNotFoundError:
-            # Absence is a state too: a database with no WAL beside it must not
-            # match a copy taken when it had one. This is the only read outcome
-            # that means the component is not there.
-            continue
-        except OSError as exc:
-            # Every other read failure fails closed. A permission or I/O error
-            # says the component could not be read -- not that it is absent --
-            # and recording it as absent yields a main-file-only identity that
-            # can equal one recorded before the WAL existed. Reuse would then
-            # hand back a rollback point missing every commit still living in
-            # that unreadable WAL, which is precisely the failure the content
-            # digest was introduced to prevent; collapsing the two states here
-            # would reintroduce it through the error path.
-            #
-            # Refusing leaves the database untouched: the caller takes no backup
-            # and runs no migration. That is the safe direction -- a schema
-            # upgrade whose rollback point cannot be established is the risk this
-            # whole mechanism exists to cover.
-            raise RuntimeError(
-                f"cannot identify database component {component.name}: "
-                f"{exc.__class__.__name__}: {exc}"
-            ) from exc
-        identity[suffix or "-db"] = {"size": size, "sha256": digest}
-    return identity
-
-
-def _backup_already_covering(
-    target_root: Path,
-    *,
-    source: dict[str, dict[str, object]],
-    from_revisions: list[str],
-    to_revisions: list[str],
-) -> Path | None:
-    """Return a backup of this exact upgrade attempt, if one is already on disk.
-
-    A failed upgrade rolls back and leaves the source database untouched, so the
-    next attempt copies bytes that are already backed up. Retrying an upgrade that
-    cannot succeed therefore grew the backup directory without bound, and because
-    a rollback copy must outlive the failure that made it necessary, retention
-    could not reclaim any of it. Reusing the copy keeps every rollback point while
-    bounding the directory by distinct states rather than by attempts.
-    """
-
-    try:
-        entries = sorted(target_root.iterdir())
-    except OSError:
-        return None
-
-    reusable: list[_BackupCandidate] = []
-    for entry in entries:
-        # Accept exactly what the pruner recognizes as a managed SQLite backup:
-        # reusing a directory it does not track would move the copy outside the
-        # retention window that is supposed to reclaim it.
-        candidate = _directory_candidate(entry)
-        if candidate is None or candidate.kind != "sqlite":
-            continue
-        manifest = _read_manifest(entry / "manifest.json")
-        if manifest is None:
-            continue
-        # Match the target as well as the source: a backup names the upgrade it
-        # protects, and reusing one across a different target would leave a
-        # manifest that misdescribes its own contents.
-        if (
-            manifest.get("source") != source
-            or manifest.get("from_revisions") != from_revisions
-            or manifest.get("to_revisions") != to_revisions
-        ):
-            continue
-        reusable.append(candidate)
-    if not reusable:
-        return None
-    # Newest, so a reused backup is the one retention would keep longest.
-    return max(reusable, key=lambda item: item.order_key).root
-
-
 def create_sqlite_migration_backup(
     db_path: Path,
     *,
@@ -333,18 +218,6 @@ def create_sqlite_migration_backup(
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
     target_root.mkdir(parents=True, exist_ok=True)
-    source_identity = _source_identity(source_path)
-    sorted_from = sorted(set(from_revisions))
-    sorted_to = sorted(set(to_revisions))
-    reusable = _backup_already_covering(
-        target_root,
-        source=source_identity,
-        from_revisions=sorted_from,
-        to_revisions=sorted_to,
-    )
-    if reusable is not None:
-        logger.info("Reusing pre-migration SQLite backup at %s", reusable)
-        return reusable
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
     temp_db = backup_dir / "vibe.sqlite.tmp"
@@ -366,12 +239,8 @@ def create_sqlite_migration_backup(
             "kind": "sqlite-migration",
             "created_at": created_at.astimezone(timezone.utc).isoformat(),
             "database": "vibe.sqlite",
-            "from_revisions": sorted_from,
-            "to_revisions": sorted_to,
-            # Identifies the bytes this copy holds, so a retry of the same upgrade
-            # can recognize its own backup instead of making another. Backups
-            # written before this field simply never match and are left alone.
-            "source": source_identity,
+            "from_revisions": sorted(set(from_revisions)),
+            "to_revisions": sorted(set(to_revisions)),
         }
         (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     except Exception:
