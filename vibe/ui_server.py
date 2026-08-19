@@ -9583,9 +9583,9 @@ async def _archive_publish_run_updates(
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
-    For an active row, the controller owns one closed lifecycle operation: it
-    holds Memory capture admission across final flush and the first irreversible
-    archive write. If that controller seam is unavailable, archive fails closed.
+    For an active row, the controller owns the terminal session write. Memory
+    final flush is best-effort after that write and never blocks archive. If the
+    controller seam itself is unavailable, archive fails closed.
 
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in
     ``archive_session``. Cancelling an in-flight chat turn lives in the controller

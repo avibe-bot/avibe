@@ -2219,22 +2219,83 @@ class Controller:
             logger.debug("Memory multi-scope final flush failed", exc_info=True)
             return False
 
+    def _schedule_best_effort_archive_memory_flush(self, raw_session_id: str) -> None:
+        """Flush Memory for an archived session without owning the archive result."""
+
+        async def _flush() -> None:
+            try:
+                await self.final_flush_memory_cli_session(raw_session_id)
+            except Exception:
+                logger.debug(
+                    "archive: best-effort Memory flush failed for %s",
+                    raw_session_id,
+                    exc_info=True,
+                )
+
+        def _consume(task: asyncio.Task[None]) -> None:
+            tasks = getattr(self, "_archive_memory_flush_tasks", None)
+            if tasks is not None:
+                tasks.discard(task)
+            try:
+                task.result()
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                return
+            except Exception:
+                logger.debug(
+                    "archive: best-effort Memory flush failed for %s",
+                    raw_session_id,
+                    exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(self, "_loop", None)
+            if loop is None or loop.is_closed():
+                logger.debug(
+                    "archive: Memory flush dropped; no event loop for %s",
+                    raw_session_id,
+                )
+                return
+            future = asyncio.run_coroutine_threadsafe(_flush(), loop)
+
+            def _consume_future(completed: concurrent.futures.Future[None]) -> None:
+                if completed.cancelled():
+                    return
+                error = completed.exception()
+                if error is not None:
+                    logger.debug(
+                        "archive: best-effort Memory flush failed for %s",
+                        raw_session_id,
+                        exc_info=error,
+                    )
+
+            future.add_done_callback(_consume_future)
+            return
+
+        task = loop.create_task(
+            _flush(),
+            name=f"archive-memory-flush:{raw_session_id}",
+        )
+        tasks = getattr(self, "_archive_memory_flush_tasks", None)
+        if tasks is None:
+            self._archive_memory_flush_tasks = tasks = set()
+        tasks.add(task)
+        task.add_done_callback(_consume)
+
     async def archive_memory_cli_session(
         self,
         raw_session_id: str,
         *,
         deadline_seconds: float = 5.0,
     ) -> dict[str, Any]:
-        """Archive one Workbench session inside its exact Memory capture fence.
+        """Archive one Workbench session without waiting on Memory.
 
-        This is a closed controller-owned use case for the UI process. The UI
-        supplies only the durable Workbench session ID; canonical Memory identity
-        is resolved here, and the terminal database mutation stays inside the same
-        runtime lifecycle operation as final flush.
+        The controller still owns the terminal session write. Memory final flush
+        is best-effort after that write commits: a failed, busy, or fenced Memory
+        runtime must not block or roll back archive.
         """
 
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
-        from core.memory.store import is_principal_id, is_project_id
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
         from storage.db import create_sqlite_engine
@@ -2275,59 +2336,34 @@ class Controller:
                 engine.dispose()
 
         async def archive_operation() -> dict[str, Any]:
-            # Cancelling the socket request must not release Memory admission
-            # while SQLite is still committing the terminal transition.
-            return await run_blocking(archive_session)
+            loop = asyncio.get_running_loop()
 
-        async def run_memory_lifecycle() -> dict[str, Any]:
-            live_scope = self.memory_scope_for_cli_session(raw_session_id)
-            runtime = getattr(self, "memory_runtime", None)
-            resolve_scopes = getattr(runtime, "resolve_current_session_scopes", None)
-            if not callable(resolve_scopes):
-                raise RuntimeError("Memory session scope recovery is unavailable")
-            durable_scopes = await resolve_scopes(raw_session_id)
-            if durable_scopes is None:
-                raise RuntimeError("Memory session scopes could not be recovered safely")
+            def archive_and_schedule() -> dict[str, Any]:
+                session = archive_session()
+                # Schedule before run_blocking can re-raise a pending cancellation.
+                try:
+                    loop.call_soon_threadsafe(
+                        self._schedule_best_effort_archive_memory_flush,
+                        raw_session_id,
+                    )
+                except RuntimeError:
+                    logger.debug(
+                        "archive: Memory flush dropped; event loop closed for %s",
+                        raw_session_id,
+                    )
+                return session
 
-            scopes = set(durable_scopes)
-            if live_scope is not None:
-                scopes.add(live_scope)
-            if not scopes:
-                return await archive_operation()
-            for scope in scopes:
-                if (
-                    not isinstance(scope, tuple)
-                    or len(scope) != 2
-                    or not is_principal_id(scope[0])
-                    or not is_project_id(scope[1])
-                ):
-                    raise RuntimeError("invalid canonical Memory session scope")
-            canonical_scopes = tuple(
-                sorted(
-                    scopes,
-                    key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
-                )
-            )
-
-            run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
-            if not callable(run_lifecycle):
-                raise RuntimeError("Memory session lifecycle is unavailable")
-            return await run_lifecycle(
-                scopes=canonical_scopes,
-                raw_session_id=raw_session_id,
-                operation=archive_operation,
-                deadline_seconds=deadline_seconds,
-            )
+            return await run_blocking(archive_and_schedule)
 
         turn_manager = getattr(self, "session_turns", None)
         turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
         if callable(turn_lifecycle):
             return await turn_lifecycle(
                 raw_session_id,
-                run_memory_lifecycle,
+                archive_operation,
                 deadline_seconds=deadline_seconds,
             )
-        return await run_memory_lifecycle()
+        return await archive_operation()
 
     async def _final_flush_memory_scope(
         self,

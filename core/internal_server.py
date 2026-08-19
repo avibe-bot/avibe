@@ -1281,7 +1281,7 @@ def create_app(
 
     @app.post("/internal/memory/archive-session")
     async def _memory_archive_session(request: Request) -> Any:
-        """Archive one Workbench session through the controller lifecycle."""
+        """Archive one Workbench session through the controller-owned write."""
 
         payload = await _safe_json(request)
         if (

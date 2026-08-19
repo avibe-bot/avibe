@@ -479,8 +479,8 @@ def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() 
         "ok": True,
         "session": {"id": "ses-memory", "status": "archived"},
     }
-    # The UI transport waits without a reporting deadline, while the controller
-    # still bounds provider lifecycle work before its shielded archive commit.
+    # The UI transport waits without a reporting deadline so the controller can
+    # finish the terminal archive write. Memory flush is scheduled afterwards.
     controller.archive_memory_cli_session.assert_awaited_once_with(
         "ses-memory",
         deadline_seconds=5.0,
