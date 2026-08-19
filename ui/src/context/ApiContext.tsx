@@ -1836,6 +1836,8 @@ export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
 
 // Memory plugin contract: docs/plans/memory-plugin-system.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
+export type MemoryRerankProvider = 'deepinfra' | 'vllm' | 'dashscope';
+
 export type MemoryEndpointConfig = {
   base_url: string | null;
   model: string | null;
@@ -1843,6 +1845,7 @@ export type MemoryEndpointConfig = {
   // Typed as `null` so no caller can read a saved key back off the response.
   api_key: null;
   has_api_key: boolean;
+  provider?: MemoryRerankProvider | null;
 };
 
 export type MemoryProcessingConfig = {
@@ -1875,6 +1878,7 @@ export type MemoryEndpointPatch = {
   base_url?: string | null;
   model?: string | null;
   api_key?: string | null;
+  provider?: MemoryRerankProvider | null;
 };
 
 export type MemorySettingsPatch = {

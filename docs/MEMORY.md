@@ -55,12 +55,15 @@ non-empty query switches the same tab back to relevance-ordered search.
 
 ## Optional reranking endpoint
 
-The third processing endpoint in **Settings > Memory** is optional. Configure
-its Base URL, model, and API key together to let the pinned Memory runtime use
-its reranking capability; changing a configured endpoint is admitted by the
-same bounded preflight before it is saved. Leave all three fields empty to keep
-the standard Memory search tier. Removing the saved reranking endpoint clears
-all three values and does not rebuild the embedding index.
+The third processing endpoint in **Settings > Memory** is optional. Choose one
+EverOS rerank provider (`deepinfra`, `vllm`, or `dashscope`) and configure that
+provider's Base URL, model, and API key together. Changing a configured
+endpoint is admitted by a provider-specific bounded preflight before it is
+saved. Older configs without `provider` keep the DeepInfra probe and sidecar
+protocol. Leave the rerank fields empty to keep the standard Memory search
+tier. Removing the saved reranking endpoint clears the provider and the three
+endpoint values and does not rebuild the embedding index. DashScope currently
+accepts only `gte-rerank-v2` at `https://dashscope.aliyuncs.com`.
 
 ## Processing Record
 

@@ -1917,6 +1917,10 @@ _MEMORY_CLOUD_MULTIMODAL_ALIAS = "avibe-cloud-multimodal"
 MemoryMode = Literal["platform", "custom"]
 MemoryCloudScope = Literal["organization", "platform"]
 MemoryCloudLlmSource = Literal["dedicated", "chat_fallback"]
+MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
+MEMORY_RERANK_PROVIDERS = frozenset(get_args(MemoryRerankProvider))
+DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
+DASHSCOPE_RERANK_MODEL = "gte-rerank-v2"
 
 
 @dataclass
@@ -1926,6 +1930,7 @@ class MemoryEndpointConfig:
     base_url: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = field(default=None, repr=False)
+    provider: Optional[str] = None
 
     def validate(self, *, name: str) -> None:
         self.base_url = _validate_memory_url(
@@ -1941,9 +1946,31 @@ class MemoryEndpointConfig:
             self.api_key,
             path=f"memory.processing.{name}.api_key",
         )
+        if name != "rerank":
+            self.provider = None
+            return
+        if not any((self.base_url, self.model, self.api_key)):
+            self.provider = None
+            return
+        provider = (self.provider or "").strip() or DEFAULT_MEMORY_RERANK_PROVIDER
+        if provider not in MEMORY_RERANK_PROVIDERS:
+            raise ValueError(
+                "Memory rerank endpoint provider must be deepinfra, vllm, or dashscope"
+            )
+        if provider == "dashscope" and self.model != DASHSCOPE_RERANK_MODEL:
+            raise ValueError(
+                "Memory DashScope rerank endpoint model must be gte-rerank-v2"
+            )
+        self.provider = provider
 
     def complete(self) -> bool:
         return bool(self.base_url and self.model and self.api_key)
+
+    def rerank_provider(self) -> MemoryRerankProvider:
+        provider = (self.provider or "").strip()
+        if provider in MEMORY_RERANK_PROVIDERS:
+            return provider
+        return DEFAULT_MEMORY_RERANK_PROVIDER
 
 
 @dataclass
@@ -1958,7 +1985,13 @@ class MemoryProcessingConfig:
         self.embedding.validate(name="embedding")
         if self.rerank is not None:
             self.rerank.validate(name="rerank")
-            if not any((self.rerank.base_url, self.rerank.model, self.rerank.api_key)):
+            if not any(
+                (
+                    self.rerank.base_url,
+                    self.rerank.model,
+                    self.rerank.api_key,
+                )
+            ):
                 self.rerank = None
             elif not self.rerank.complete():
                 raise ValueError(
@@ -2345,21 +2378,31 @@ def memory_config_to_payload(
 ) -> dict:
     """Project Memory config without ever returning a reusable API key."""
 
-    def endpoint_payload(endpoint: MemoryEndpointConfig) -> dict:
+    def endpoint_payload(
+        endpoint: MemoryEndpointConfig,
+        *,
+        include_provider: bool = False,
+    ) -> dict:
         key = endpoint.api_key
-        return {
+        payload = {
             "base_url": endpoint.base_url,
             "model": endpoint.model,
             "api_key": key if include_secrets else None,
             "has_api_key": bool(key),
         }
+        if include_provider:
+            payload["provider"] = endpoint.rerank_provider()
+        return payload
 
     processing = {
         "llm": endpoint_payload(memory.processing.llm),
         "embedding": endpoint_payload(memory.processing.embedding),
     }
     if memory.processing.rerank is not None:
-        processing["rerank"] = endpoint_payload(memory.processing.rerank)
+        processing["rerank"] = endpoint_payload(
+            memory.processing.rerank,
+            include_provider=True,
+        )
     if memory.processing.multimodal is not None:
         processing["multimodal"] = endpoint_payload(memory.processing.multimodal)
     payload = {

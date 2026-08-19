@@ -258,7 +258,10 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
             endpoint_patch = processing_patch.get(endpoint)
             if endpoint_patch is None:
                 continue
-            if not isinstance(endpoint_patch, dict) or not set(endpoint_patch).issubset({"base_url", "model", "api_key"}):
+            allowed = {"base_url", "model", "api_key"}
+            if endpoint == "rerank":
+                allowed.add("provider")
+            if not isinstance(endpoint_patch, dict) or not set(endpoint_patch).issubset(allowed):
                 raise ValueError("invalid_memory_patch")
             target["processing"].setdefault(
                 endpoint,
@@ -269,11 +272,14 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[di
                 and set(endpoint_patch) == {"api_key"}
                 and endpoint_patch["api_key"] in {None, ""}
             ):
-                target["processing"][endpoint] = {
+                cleared = {
                     "base_url": None,
                     "model": None,
                     "api_key": None,
                 }
+                if endpoint == "rerank":
+                    cleared["provider"] = None
+                target["processing"][endpoint] = cleared
 
     explicit_required_key_clear = any(
         endpoint_patch.get("api_key") in {None, ""}
@@ -306,11 +312,18 @@ def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Conf
 def _memory_rerank_configuration_changed(current: V2Config, candidate: V2Config) -> bool:
     """Return whether the optional reranking provider configuration changed."""
 
-    def endpoint_values(config: V2Config) -> tuple[str | None, str | None, str | None]:
+    def endpoint_values(
+        config: V2Config,
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         endpoint = config.memory.processing.rerank
         if endpoint is None:
-            return (None, None, None)
-        return (endpoint.base_url, endpoint.model, endpoint.api_key)
+            return (None, None, None, None)
+        return (
+            endpoint.base_url,
+            endpoint.model,
+            endpoint.api_key,
+            endpoint.rerank_provider(),
+        )
 
     return endpoint_values(current) != endpoint_values(candidate)
 
@@ -376,7 +389,7 @@ def _memory_factory_reset_repair_patch(patch_payload: object) -> bool:
     return all(
         isinstance(endpoint, dict)
         and bool(endpoint)
-        and set(endpoint).issubset({"base_url", "model", "api_key"})
+        and set(endpoint).issubset({"base_url", "model", "api_key", "provider"})
         for endpoint in processing.values()
     )
 

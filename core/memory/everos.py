@@ -78,6 +78,10 @@ _PREFLIGHT_IMAGE_DATA_URI = (
 )
 MULTIMODAL_EXPLICIT_ENV = "AVIBE_MEMORY_MULTIMODAL_EXPLICIT"
 _PROFILE_QUERY = "profile"
+MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
+DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
+DASHSCOPE_RERANK_PATH = "api/v1/services/rerank/text-rerank/text-rerank"
+
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
@@ -260,6 +264,7 @@ class EverOSPort:
         rerank_base_url: str | None = None,
         rerank_model: str | None = None,
         rerank_api_key: str | None = None,
+        rerank_provider: str | None = None,
         multimodal_base_url: str | None = None,
         multimodal_model: str | None = None,
         multimodal_api_key: str | None = None,
@@ -280,6 +285,7 @@ class EverOSPort:
         self._rerank_base_url = _normalized_endpoint_url(rerank_base_url)
         self._rerank_model = _optional_string(rerank_model)
         self._rerank_api_key = _optional_string(rerank_api_key)
+        self._rerank_provider = _normalized_rerank_provider(rerank_provider)
         self._multimodal_base_url = _normalized_endpoint_url(multimodal_base_url)
         self._multimodal_model = _optional_string(multimodal_model)
         self._multimodal_api_key = _optional_string(multimodal_api_key)
@@ -647,15 +653,7 @@ class EverOSPort:
                 ),
             ]
             if self._rerank_configured():
-                probes.append(
-                    _ProcessingProbeSpec(
-                        base_url=self._rerank_base_url,
-                        api_key=self._rerank_api_key,
-                        path=self._rerank_model or "",
-                        payload={"queries": ["OK"], "documents": ["OK"]},
-                        validator=_valid_rerank_probe_response,
-                    )
-                )
+                probes.append(self._rerank_probe_spec())
             if self._multimodal_configured():
                 probes.append(
                     _ProcessingProbeSpec(
@@ -699,14 +697,15 @@ class EverOSPort:
             }, _valid_embedding_probe_response),
         ]
         if self._rerank_configured():
+            probe = self._rerank_probe_spec()
             checks.append(
                 (
                     "rerank",
-                    self._rerank_base_url,
-                    self._rerank_api_key,
-                    self._rerank_model or "",
-                    {"queries": ["OK"], "documents": ["OK"]},
-                    _valid_rerank_probe_response,
+                    probe.base_url,
+                    probe.api_key,
+                    probe.path,
+                    probe.payload,
+                    probe.validator,
                 )
             )
         if self._multimodal_configured():
@@ -772,6 +771,14 @@ class EverOSPort:
 
     def _rerank_configured(self) -> bool:
         return all((self._rerank_base_url, self._rerank_model, self._rerank_api_key))
+
+    def _rerank_probe_spec(self) -> _ProcessingProbeSpec:
+        return _rerank_probe_spec(
+            base_url=self._rerank_base_url,
+            api_key=self._rerank_api_key,
+            model=self._rerank_model,
+            provider=self._rerank_provider,
+        )
 
     def _multimodal_configured(self) -> bool:
         return all(
@@ -1640,6 +1647,10 @@ def _valid_embedding_probe_response(value: Any) -> bool:
 
 
 def _valid_rerank_probe_response(value: Any) -> bool:
+    return _valid_deepinfra_rerank_probe_response(value)
+
+
+def _valid_deepinfra_rerank_probe_response(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     scores = value.get("scores")
@@ -1651,6 +1662,61 @@ def _valid_rerank_probe_response(value: Any) -> bool:
         and isinstance(scores[0][0], (int, float))
         and not isinstance(scores[0][0], bool)
         and math.isfinite(scores[0][0])
+    )
+
+
+def _valid_ranked_results_probe_response(
+    value: Any,
+    *,
+    results_key: tuple[str, ...] = ("results",),
+) -> bool:
+    current: Any = value
+    for key in results_key:
+        if not isinstance(current, dict):
+            return False
+        current = current.get(key)
+    if not isinstance(current, list) or len(current) != 1 or not isinstance(current[0], dict):
+        return False
+    score = current[0].get("relevance_score")
+    return isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+
+
+def _rerank_probe_spec(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    model: str | None,
+    provider: MemoryRerankProvider,
+) -> _ProcessingProbeSpec:
+    if provider == "vllm":
+        return _ProcessingProbeSpec(
+            base_url=base_url,
+            api_key=api_key,
+            path="rerank",
+            payload={"model": model, "query": "OK", "documents": ["OK"]},
+            validator=_valid_ranked_results_probe_response,
+        )
+    if provider == "dashscope":
+        return _ProcessingProbeSpec(
+            base_url=base_url,
+            api_key=api_key,
+            path=DASHSCOPE_RERANK_PATH,
+            payload={
+                "model": model,
+                "input": {"query": "OK", "documents": ["OK"]},
+                "parameters": {"return_documents": False, "top_n": 1},
+            },
+            validator=lambda value: _valid_ranked_results_probe_response(
+                value,
+                results_key=("output", "results"),
+            ),
+        )
+    return _ProcessingProbeSpec(
+        base_url=base_url,
+        api_key=api_key,
+        path=model or "",
+        payload={"queries": ["OK"], "documents": ["OK"]},
+        validator=_valid_deepinfra_rerank_probe_response,
     )
 
 
@@ -1865,6 +1931,13 @@ def _safe_health_token(value: object, *, max_bytes: int, allow_dot: bool = False
 def _normalized_endpoint_url(value: str | None) -> str | None:
     normalized = _optional_string(value)
     return normalized.rstrip("/") if normalized else None
+
+
+def _normalized_rerank_provider(value: str | None) -> MemoryRerankProvider:
+    provider = _optional_string(value)
+    if provider in {"deepinfra", "vllm", "dashscope"}:
+        return provider
+    return DEFAULT_MEMORY_RERANK_PROVIDER
 
 
 def _positive_timeout(value: object, fallback: float) -> float:

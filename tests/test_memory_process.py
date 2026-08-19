@@ -459,8 +459,31 @@ def test_configured_rerank_stays_env_only_when_env_overrides_toml(tmp_path: Path
     assert environment["EVEROS_RERANK__BASE_URL"] == settings.rerank_base_url
     assert environment["EVEROS_RERANK__MODEL"] == settings.rerank_model
     assert environment["EVEROS_RERANK__API_KEY"] == "rerank-secret"
+    assert environment["EVEROS_RERANK__PROVIDER"] == "deepinfra"
     assert parsed["rerank"] == {"model": "", "base_url": ""}
     assert "rerank-secret" not in generated
+
+
+def test_configured_rerank_provider_is_injected_into_child_env(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(),
+        timezone="UTC",
+        rerank_base_url="https://dashscope.aliyuncs.com",
+        rerank_model="gte-rerank-v2",
+        rerank_api_key="rerank-secret",
+        rerank_provider="dashscope",
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=settings,
+    )
+    process._prepare_owned_directories()
+    process._write_generated_config()
+
+    environment = process._child_environment()
+    assert environment["EVEROS_RERANK__PROVIDER"] == "dashscope"
+    assert environment["EVEROS_RERANK__MODEL"] == "gte-rerank-v2"
 
 
 def test_sidecar_child_home_preparation_hardens_every_created_directory(

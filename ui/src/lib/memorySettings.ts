@@ -1,12 +1,31 @@
 import type {
   MemoryEndpointConfig,
   MemoryEndpointPatch,
+  MemoryRerankProvider,
   MemorySettingsResult,
 } from '../context/ApiContext';
 import { isMemoryOk } from './memoryRead';
 
 
-export type EndpointDraft = { baseUrl: string; model: string; apiKey: string; clearKey: boolean };
+export const MEMORY_RERANK_PROVIDERS = ['deepinfra', 'vllm', 'dashscope'] as const;
+export const DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = 'deepinfra';
+export const DASHSCOPE_RERANK_MODEL = 'gte-rerank-v2';
+
+export type EndpointDraft = {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  clearKey: boolean;
+  provider?: MemoryRerankProvider;
+};
+
+export const normalizeRerankProvider = (
+  value: string | null | undefined,
+): MemoryRerankProvider => (
+  MEMORY_RERANK_PROVIDERS.includes(value as MemoryRerankProvider)
+    ? value as MemoryRerankProvider
+    : DEFAULT_MEMORY_RERANK_PROVIDER
+);
 export type MemorySetupStage = 'loading' | 'runtime-required' | 'setup' | 'manage';
 
 export function memorySetupStage(runtimeInstalled: boolean | null, enabled: boolean | null): MemorySetupStage {
@@ -28,6 +47,7 @@ export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => 
   model: config.model ?? '',
   apiKey: '',
   clearKey: false,
+  provider: normalizeRerankProvider(config.provider),
 });
 
 // `allowClear` gates the explicit `api_key: null` clear. `identityLocked` protects
@@ -52,6 +72,13 @@ export function buildEndpointPatch(
       patch.model = model;
       changed = true;
     }
+    if (draft.provider !== undefined) {
+      const provider = normalizeRerankProvider(draft.provider);
+      if (provider !== normalizeRerankProvider(original.provider)) {
+        patch.provider = provider;
+        changed = true;
+      }
+    }
   }
   const trimmedKey = draft.apiKey.trim();
   if (trimmedKey) {
@@ -62,6 +89,9 @@ export function buildEndpointPatch(
     if (clearEndpoint) {
       patch.base_url = null;
       patch.model = null;
+      if (original.provider != null) {
+        patch.provider = null;
+      }
     }
     changed = true;
   }

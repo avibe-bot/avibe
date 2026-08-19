@@ -97,4 +97,30 @@ describe('buildEndpointPatch', () => {
       true,
     )).toEqual({ api_key: null, base_url: null, model: null });
   });
+
+  it('includes an explicit rerank provider when it differs from the saved endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com',
+        model: 'gte-rerank-v2',
+        apiKey: 'rerank-secret',
+        clearKey: false,
+        provider: 'dashscope',
+      },
+      {
+        base_url: null,
+        model: null,
+        api_key: null,
+        has_api_key: false,
+      },
+      true,
+      false,
+      true,
+    )).toEqual({
+      base_url: 'https://dashscope.aliyuncs.com',
+      model: 'gte-rerank-v2',
+      api_key: 'rerank-secret',
+      provider: 'dashscope',
+    });
+  });
 });

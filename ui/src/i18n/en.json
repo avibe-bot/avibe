@@ -4569,9 +4569,15 @@
       "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing the embedding endpoint or model requires rebuilding the index.",
       "embeddingHelpLabel": "About the embedding model",
       "rerankTitle": "Reranking model (optional)",
-      "rerankHelp": "Memory uses this model to score search results for advanced recall. Enter a reranking base URL, model name, and API key to enable it.",
+      "rerankHelp": "Memory uses this model to score search results for advanced recall. Choose the EverOS rerank provider, then enter that provider's base URL, model name, and API key.",
       "rerankHelpLabel": "About the reranking model",
       "rerankClearLabel": "Remove reranking endpoint",
+      "rerankProvider": "Rerank provider",
+      "rerankProviders": {
+        "deepinfra": "DeepInfra",
+        "vllm": "vLLM / OpenAI-compatible",
+        "dashscope": "DashScope"
+      },
       "multimodalTitle": "IM attachment processing model (optional)",
       "multimodalHelp": "When fully configured, eligible attachments from bound direct messages are sent to this OpenAI-compatible vision endpoint for Memory capture.",
       "multimodalHelpLabel": "About IM attachment processing",
@@ -4621,7 +4627,7 @@
       "rebuildCompleted": "Memory index rebuild completed.",
       "rebuildFailed": "Memory index rebuild failed.",
       "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept.",
-      "rerankIdentityHint": "Leave all three fields empty to keep the standard Memory search tier.",
+      "rerankIdentityHint": "Leave the rerank fields empty to keep the standard Memory search tier. DashScope currently accepts only gte-rerank-v2.",
       "multimodalIdentityHint": "A complete base URL, model, and API key is the opt-in. Leave all three empty to keep IM attachment capture off."
     },
     "clear": {
