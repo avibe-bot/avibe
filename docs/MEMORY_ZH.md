@@ -12,7 +12,8 @@ Avibe 记忆会把符合条件的 Workbench 和私聊消息提炼为按用户隔
 只有人类直接分享的普通文件才符合条件。机器人、系统、转发、编辑、引用、富内容和无法
 识别的原生消息形状都会被排除。随后，Avibe 使用同一套格式与内容策略检查每个符合条件
 的文件。支持纯文本、Markdown、CSV/TSV、VTT、PDF、位图图片、音频、HTML、EML，以及在已安装
-LibreOffice 时的 Office / iWork / ODF / RTF 文档。SVG 和视频仍不支持。
+LibreOffice 时的 Office / iWork / ODF / RTF 文档。原生 Windows 当前会跳过这些 Office
+格式；Linux 与 macOS 可通过 Memory 子进程能够访问的 LibreOffice 安装来启用。SVG 和视频仍不支持。
 不支持或格式异常的文件会被单独跳过，符合条件的文本和其它有效附件仍可进入捕获。
 
 每轮最多捕获 8 个附件，单个附件最大 25 MiB，总计最大 100 MiB。通过准入的文件会复制

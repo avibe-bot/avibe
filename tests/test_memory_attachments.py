@@ -227,7 +227,7 @@ def test_workbench_long_office_display_name_keeps_suffix_through_pin(
     )
     monkeypatch.setattr(
         "core.memory.modality.office_document_conversion_succeeds",
-        lambda _path: True,
+        lambda _path, **_kwargs: True,
     )
     office = _source_file(source_root, "upload.xlsx", _xlsx_bytes())
     long_name = f"{'report' * 100}.xlsx"
@@ -259,7 +259,7 @@ def test_pin_requires_office_conversion_proof_without_losing_siblings(
     )
     monkeypatch.setattr(
         "core.memory.modality.office_document_conversion_succeeds",
-        lambda _path: False,
+        lambda _path, **_kwargs: False,
     )
     office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
     notes = _source_file(source_root, "notes.txt", b"keep this sibling")
@@ -282,6 +282,46 @@ def test_pin_requires_office_conversion_proof_without_losing_siblings(
 
     assert [attachment.name for attachment in bundle.attachments] == ["notes.txt"]
     assert bundle.attachments[0].storage_key.endswith("/00.txt")
+
+
+def test_office_conversion_uses_one_bounded_budget_per_pin(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    observed_timeouts: list[float] = []
+
+    def conversion_succeeds(_path: Path, *, timeout_seconds: float) -> bool:
+        observed_timeouts.append(timeout_seconds)
+        return True
+
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        conversion_succeeds,
+    )
+    clock = iter([100.0, 105.0, 131.0])
+    monkeypatch.setattr(attachment_module.time, "monotonic", lambda: next(clock))
+    first = _source_file(source_root, "first.xlsx", _xlsx_bytes())
+    second = _source_file(source_root, "second.xlsx", _xlsx_bytes())
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name=path.name,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(path),
+            )
+            for path in (first, second)
+        ]
+    )
+
+    bundle = AttachmentPinStore().pin(converted)
+
+    assert [attachment.name for attachment in bundle.attachments] == ["first.xlsx"]
+    assert observed_timeouts == [25.0]
 
 
 @pytest.mark.parametrize(

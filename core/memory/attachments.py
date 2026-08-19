@@ -10,6 +10,7 @@ import re
 import secrets
 import stat
 import threading
+import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -48,6 +49,7 @@ IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset(
 
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MAX_ATTACHMENT_NAME_BYTES = 512
+_OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS = 30.0
 _MAX_FILE_URI_BYTES = 8 * 1024
 _BUNDLE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -279,6 +281,7 @@ class AttachmentPinStore:
         source_root, allowed_records = self._pin_source(source_lease)
         with self._lock:
             self._verify_private_layout()
+            office_conversion_deadline = _office_conversion_deadline(source_items)
             staging_fd = _open_private_directory(self._effective_home, self._staging, "attachment staging root")
             bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             bundle_id: str | None = None
@@ -324,6 +327,11 @@ class AttachmentPinStore:
                                     source.ext,
                                     conversion_path=(
                                         self._staging / stage_name / filename
+                                    ),
+                                    conversion_timeout_seconds=(
+                                        _remaining_office_conversion_seconds(
+                                            office_conversion_deadline
+                                        )
                                     ),
                                 )
                             ):
@@ -444,6 +452,9 @@ class AttachmentPinStore:
                 )
                 try:
                     projected: list[CaptureAttachment] = []
+                    office_conversion_deadline = _office_conversion_deadline(
+                        checked.attachments
+                    )
                     for index, pinned in enumerate(checked.attachments):
                         filename = _bundle_filename(index, pinned.ext)
                         _verify_pinned_file(bundle_fd, filename, pinned)
@@ -454,6 +465,16 @@ class AttachmentPinStore:
                                 filename,
                                 pinned.kind,
                                 pinned.ext,
+                                conversion_path=(
+                                    self._bundles
+                                    / checked.bundle_id
+                                    / filename
+                                ),
+                                conversion_timeout_seconds=(
+                                    _remaining_office_conversion_seconds(
+                                        office_conversion_deadline
+                                    )
+                                ),
                             )
                         ):
                             continue
@@ -1043,6 +1064,23 @@ def _require_safe_source_file(info: os.stat_result) -> None:
     _require_current_owner(info, "attachment source", storage=False)
 
 
+def _office_conversion_deadline(
+    attachments: Sequence[CaptureAttachment] | tuple[PinnedAttachment, ...],
+) -> float | None:
+    if not any(
+        attachment.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+        for attachment in attachments
+    ):
+        return None
+    return time.monotonic() + _OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS
+
+
+def _remaining_office_conversion_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
 def _pinned_office_matches(
     directory_fd: int,
     filename: str,
@@ -1050,6 +1088,7 @@ def _pinned_office_matches(
     extension: str,
     *,
     conversion_path: Path | None = None,
+    conversion_timeout_seconds: float | None = None,
 ) -> bool:
     try:
         descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
@@ -1063,11 +1102,18 @@ def _pinned_office_matches(
             Path(filename),
             file_fd=descriptor,
         )
-        return classification == (kind, extension) and (
-            conversion_path is None
-            or memory_modality.office_document_conversion_succeeds(
-                conversion_path
-            )
+        if classification != (kind, extension):
+            return False
+        if conversion_path is None:
+            return True
+        if (
+            conversion_timeout_seconds is None
+            or conversion_timeout_seconds <= 0
+        ):
+            return False
+        return memory_modality.office_document_conversion_succeeds(
+            conversion_path,
+            timeout_seconds=conversion_timeout_seconds,
         )
     finally:
         os.close(descriptor)

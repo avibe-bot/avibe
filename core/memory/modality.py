@@ -173,6 +173,8 @@ _ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
 _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES = 46
 _MAX_ZIP_COMMENT_BYTES = 65_535
 _MAX_OFFICE_ZIP_ENTRIES = 4_096
+_MAX_OFFICE_ZIP_MEMBER_BYTES = 32 * 1024 * 1024
+_MAX_OFFICE_ZIP_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 _OFFICE_CONVERSION_TIMEOUT_SECONDS = 30
 
 
@@ -196,11 +198,19 @@ def office_conversion_available() -> bool:
     return _office_converter_path() is not None
 
 
-def office_document_conversion_succeeds(path: Path) -> bool:
+def office_document_conversion_succeeds(
+    path: Path,
+    *,
+    timeout_seconds: float = _OFFICE_CONVERSION_TIMEOUT_SECONDS,
+) -> bool:
     """Prove that the sidecar-visible converter accepts one private staged file."""
 
     converter = _office_converter_path()
-    if converter is None:
+    bounded_timeout = min(
+        float(_OFFICE_CONVERSION_TIMEOUT_SECONDS),
+        max(0.0, float(timeout_seconds)),
+    )
+    if converter is None or bounded_timeout <= 0:
         return False
     try:
         with tempfile.TemporaryDirectory(prefix="avibe-office-preflight-") as temp_dir:
@@ -225,7 +235,7 @@ def office_document_conversion_succeeds(path: Path) -> bool:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=_OFFICE_CONVERSION_TIMEOUT_SECONDS,
+                timeout=bounded_timeout,
                 check=False,
             )
             output = output_dir / f"{path.stem}.pdf"
@@ -396,6 +406,16 @@ def _office_zip_matches(extension: str, path: Path, file_fd: int | None) -> bool
                 names = archive.namelist()
                 if len(names) != len(set(names)):
                     return False
+                total_uncompressed = 0
+                for info in archive.infolist():
+                    if (
+                        info.file_size < 0
+                        or info.file_size > _MAX_OFFICE_ZIP_MEMBER_BYTES
+                    ):
+                        return False
+                    total_uncompressed += info.file_size
+                    if total_uncompressed > _MAX_OFFICE_ZIP_TOTAL_UNCOMPRESSED_BYTES:
+                        return False
                 if not _OFFICE_ZIP_MARKERS[extension].issubset(names):
                     return False
                 expected_mime = _ODF_MIME_BY_EXTENSION.get(extension)

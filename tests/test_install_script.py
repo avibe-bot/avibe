@@ -412,7 +412,9 @@ def test_install_script_probes_the_same_libreoffice_path_as_memory(tmp_path):
     assert 'PATH="/usr/bin:/bin" command -v soffice' in INSTALL_SCRIPT.read_text()
     powershell = INSTALL_POWERSHELL.read_text()
     assert 'Test-Command "soffice"' not in powershell
-    assert '@("/usr/bin/soffice", "/bin/soffice")' in powershell
+    assert '@("/usr/bin/soffice", "/bin/soffice")' not in powershell
+    assert "Memory Office attachment capture is unavailable on native Windows" in powershell
+    assert "Install LibreOffice from https://www.libreoffice.org/" not in powershell
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):

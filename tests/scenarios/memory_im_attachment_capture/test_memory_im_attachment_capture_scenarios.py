@@ -332,7 +332,7 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
 
     monkeypatch.setattr(
         "core.memory.modality.office_document_conversion_succeeds",
-        lambda _path: True,
+        lambda _path, **_kwargs: True,
     )
     monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
     without_home = tmp_path / "without-soffice"

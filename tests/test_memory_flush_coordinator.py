@@ -3613,7 +3613,7 @@ async def test_delivery_rechecks_soffice_and_preserves_non_office_siblings(
     monkeypatch.setattr(
         attachment_module.memory_modality,
         "office_document_conversion_succeeds",
-        lambda _path: True,
+        lambda _path, **_kwargs: True,
     )
     attachment_store, bundle = _pin_office_bundle(include_pdf=True)
     original = _enqueue_attachment_bundle(
@@ -3648,6 +3648,53 @@ async def test_delivery_rechecks_soffice_and_preserves_non_office_siblings(
     assert store.attachment_bundle_sets() == (frozenset(), frozenset())
 
 
+async def test_delivery_reproves_office_conversion_with_a_resolvable_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_conversion_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_document_conversion_succeeds",
+        lambda _path, **_kwargs: True,
+    )
+    attachment_store, bundle = _pin_office_bundle(include_pdf=True)
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="soffice-broken-before-delivery",
+    )
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_document_conversion_succeeds",
+        lambda _path, **_kwargs: False,
+    )
+    provider = FakeMemoryProvider()
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert await coordinator.deliver(claimed, lease_owner="worker")
+
+    settled = store.get_queue_row(original.source_message_digest)
+    assert settled is not None
+    assert settled.state == "delivered"
+    assert [item.name for item in provider.captures[0].attachments] == ["evidence.pdf"]
+
+
 async def test_delivery_settles_captionless_office_when_soffice_disappears(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3661,7 +3708,7 @@ async def test_delivery_settles_captionless_office_when_soffice_disappears(
     monkeypatch.setattr(
         attachment_module.memory_modality,
         "office_document_conversion_succeeds",
-        lambda _path: True,
+        lambda _path, **_kwargs: True,
     )
     attachment_store, bundle = _pin_office_bundle(include_pdf=False)
     original = _enqueue_attachment_bundle(

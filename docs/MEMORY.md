@@ -26,7 +26,9 @@ forwarded, edited, quoted, rich, and unrecognized native message shapes are
 excluded. Avibe then validates each eligible file against one shared format and
 content policy. Supported formats are plain text, Markdown, CSV/TSV, VTT, PDF,
 bitmap images, audio, HTML, EML, and Office / iWork / ODF / RTF documents when
-LibreOffice is installed. SVG and video stay excluded. Unsupported or malformed
+LibreOffice is installed. Native Windows currently skips these Office formats;
+Linux and macOS hosts can enable them with a sidecar-visible LibreOffice install.
+SVG and video stay excluded. Unsupported or malformed
 files are skipped independently, so eligible text and valid siblings can still
 be captured.
 

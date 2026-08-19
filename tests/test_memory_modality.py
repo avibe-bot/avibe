@@ -376,6 +376,50 @@ def test_classifier_rejects_office_zip_entry_amplification_before_opening(
     ) is None
 
 
+@pytest.mark.parametrize("budget", ["member", "aggregate"])
+def test_classifier_rejects_office_zip_uncompressed_size_amplification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    budget: str,
+) -> None:
+    entries = ["[Content_Types].xml", "word/document.xml"]
+    if budget == "aggregate":
+        entries.extend(f"padding/{index}" for index in range(4))
+    payload = bytearray(_office_zip(*entries))
+    central_offsets: list[int] = []
+    search_offset = 0
+    while True:
+        central_offset = payload.find(
+            modality_module._ZIP_CENTRAL_DIRECTORY_SIGNATURE,
+            search_offset,
+        )
+        if central_offset < 0:
+            break
+        central_offsets.append(central_offset)
+        search_offset = central_offset + 4
+    assert len(central_offsets) == len(entries)
+
+    if budget == "member":
+        sizes = [modality_module._MAX_OFFICE_ZIP_MEMBER_BYTES + 1]
+    else:
+        aggregate_member_size = (
+            modality_module._MAX_OFFICE_ZIP_TOTAL_UNCOMPRESSED_BYTES // 4
+        ) + 1
+        assert aggregate_member_size < modality_module._MAX_OFFICE_ZIP_MEMBER_BYTES
+        sizes = [1, 1, *([aggregate_member_size] * 4)]
+    for central_offset, uncompressed_size in zip(central_offsets, sizes):
+        struct.pack_into("<L", payload, central_offset + 24, uncompressed_size)
+
+    path = _write_private(tmp_path / "report.docx", bytes(payload))
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+
+    assert classify_pinned_attachment(
+        "report.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        path,
+    ) is None
+
+
 @pytest.mark.parametrize(
     ("filename", "mimetype"),
     [

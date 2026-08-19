@@ -135,16 +135,7 @@ function Install-Node {
 }
 
 function Warn-IfLibreOfficeMissing {
-    $runtimeSoffice = @("/usr/bin/soffice", "/bin/soffice") |
-        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-        Select-Object -First 1
-    if ($runtimeSoffice) {
-        Write-Success "LibreOffice is available for Memory Office attachment capture"
-        return
-    }
-
-    Write-Warning "LibreOffice is not available, so Memory will skip Word, Excel, PowerPoint, and other Office attachments."
-    Write-Warning "Install LibreOffice from https://www.libreoffice.org/ if you want Memory to capture those files."
+    Write-Warning "Memory Office attachment capture is unavailable on native Windows. LibreOffice installed on Windows is not used by the managed Memory runtime."
 }
 
 function Install-NodeOptional {
