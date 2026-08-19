@@ -688,6 +688,10 @@ JSON_TYPE_MEMBERS: dict[str, object] = {
 # table it refuses every repeat of must still carry.
 SEED_ROWS = 2
 
+# The step a restored duplicate moves its other columns by. Past every step the seeding used,
+# so a row offered after the references settle cannot land on one offered before them.
+RESTORE_STEP = SEED_ATTEMPTS
+
 
 def representative_value(column: str, declared_type: str) -> object:
     """A value of ``declared_type`` that SQLite will store in ``column``.
@@ -789,6 +793,127 @@ def json_proposals(
     return proposals
 
 
+def moved_row(base: dict[str, object], step: int, *, held: str | None) -> dict[str, object]:
+    """``base`` with every column moved to its ``step`` variant, except ``held``.
+
+    ``held`` is the one column a repeat probe exists to repeat.
+    """
+    return {
+        name: value if name == held else varied(value, step) for name, value in base.items()
+    }
+
+
+def resolve_references(connection: sqlite3.Connection, table: str) -> None:
+    """Point ``table``'s references at values its parents actually hold.
+
+    A reference is the one kind of column a fixture may not simply invent a value for. Every
+    other fabricated value is merely arbitrary, but a fabricated reference is a dangling one,
+    and a dangling reference is a state no release can be in: ``20260806_0047`` rebuilds
+    tables and then runs ``pragma foreign_key_check``, aborting the upgrade if anything
+    dangles. A fixture that manufactures one turns a correct migration red, which is worse
+    than a missed defect because it is indistinguishable from a real catch. That is not
+    hypothetical -- it is what a hundred and two of them did here, and the reason this pass
+    exists rather than a rule about which columns to leave alone.
+
+    Which columns those are is read from the database rather than from the DDL, because the
+    DDL spells a foreign key four different ways and SQLite has already parsed all of them.
+
+    Run after every table is seeded rather than while seeding, which is what makes it
+    ordering-free. A reference needs its parent's row to exist, and the reference graph has
+    cycles -- ``session_turns`` and ``message_deliveries`` each point at the other -- so no
+    seeding order satisfies every reference. Afterwards every parent has rows and the only
+    question left is which of their values to copy. Nothing is asserted here: seeding runs
+    with SQLite's default ``foreign_keys=OFF``, so the rows land regardless and
+    ``dangling_references`` is what reads the result back.
+
+    Copying is necessary because a parent's value is not predictable from its column. The
+    repair in ``insert_seed_row`` moves values until a CHECK is satisfied, so a parent whose
+    key is held to a list of literals ends up holding one of those rather than what
+    ``representative_value`` proposed, and a child that assumed the latter dangles.
+
+    Whether every row may share one parent is the database's answer, not this function's
+    guess: one value for the whole table is offered first, and only if that is refused does
+    each row get its own. Refusal means a unique index covers the column, which is a table
+    like ``scope_settings`` whose primary key *is* its reference -- there, sharing would
+    collapse the fixture to a single row, and one row is the shape five review rounds went
+    into getting away from. Where sharing is accepted it is also preferred, because a
+    reference held still across rows is what the repeat probes proved and what
+    ``seeded_rows_prove_repetition`` reads back.
+    """
+    groups: dict[int, list[tuple[str, str, str | None]]] = {}
+    for row in connection.execute(f'pragma foreign_key_list("{table}")'):
+        groups.setdefault(int(row[0]), []).append((str(row[2]), str(row[3]), row[4] and str(row[4])))
+    for members in groups.values():
+        parent = members[0][0]
+        # An omitted parent column means the parent's primary key, in its declared order.
+        keys = [name for _, _, name in members]
+        if None in keys:
+            keys = [
+                str(column[1])
+                for column in sorted(
+                    (row for row in connection.execute(f'pragma table_info("{parent}")') if row[5]),
+                    key=lambda row: row[5],
+                )
+            ]
+        selected = ", ".join('"{}"'.format(key) for key in keys)
+        held = connection.execute(f'select distinct {selected} from "{parent}"').fetchall()
+        if not held:
+            continue
+        assignments = ", ".join(f'"{name}" = ?' for _, name, _ in members)
+        try:
+            connection.execute(f'update "{table}" set {assignments}', list(held[0]))
+            continue
+        except sqlite3.Error:
+            pass
+        nullable = {
+            str(row[1]): not (row[3] or row[5])
+            for row in connection.execute(f'pragma table_info("{table}")')
+        }
+        blanked = ", ".join(f'"{name}" = null' for _, name, _ in members)
+        rows = [row[0] for row in connection.execute(f'select rowid from "{table}"')]
+        for index, rowid in enumerate(rows):
+            # Offsets so two rows start from different parents; the whole rotation because a
+            # row already holding a later parent's value is in the way of the earlier one.
+            for offset in range(len(held)):
+                try:
+                    connection.execute(
+                        f'update "{table}" set {assignments} where rowid = ?',
+                        [*held[(index + offset) % len(held)], rowid],
+                    )
+                    break
+                except sqlite3.Error:
+                    continue
+            else:
+                # Every parent is taken, which happens when a unique reference has more rows
+                # to point than the parent has rows to point at. A release is in the same
+                # position and answers it the same two ways: the reference is empty where the
+                # column allows it, and the row does not exist where it does not.
+                remove = not all(nullable[name] for _, name, _ in members)
+                if not remove:
+                    try:
+                        connection.execute(f'update "{table}" set {blanked} where rowid = ?', [rowid])
+                    except sqlite3.Error:
+                        remove = True
+                if remove:
+                    connection.execute(f'delete from "{table}" where rowid = ?', [rowid])
+
+
+def dangling_references(connection: sqlite3.Connection) -> str:
+    """Which of the seeded rows point at a parent that is not there, or ``''``.
+
+    The seeding's own check on itself. Every referencing column keeps the value its parent
+    was seeded with, so the references resolve by construction -- but "by construction" is a
+    claim about this code, and ``pragma foreign_key_check`` is the database's answer. They
+    coincided by accident once already: both sides of a reference happened to be handed the
+    same representative value, so nothing dangled while nothing was making sure of it.
+    """
+    violations = connection.execute("pragma foreign_key_check").fetchall()
+    if not violations:
+        return ""
+    tables = sorted({str(row[0]) for row in violations})
+    return f"{len(violations)} row(s) reference a parent that was never seeded, in {', '.join(tables)}"
+
+
 def seeded_rows_prove_repetition(
     connection: sqlite3.Connection, table: str, repeated: Iterable[str]
 ) -> str:
@@ -799,12 +924,18 @@ def seeded_rows_prove_repetition(
     row whose other columns moved, and the repair is free to answer by moving the one column
     that row existed to hold still. The insert is then accepted having proved nothing, and
     reading the column back is the only way to notice.
+
+    The duplicate is counted the way a unique index counts one, which is not the way
+    ``count(distinct c)`` does: SQLite drops NULLs from the latter, so a column NULL in
+    every row but one reads as perfectly distinct and a column NULL in every row reads as
+    empty. Both are rows a unique index would accept and this would have called a repeat.
     """
     for column in repeated:
-        seeded, distinct = connection.execute(
-            f'select count(*), count(distinct "{column}") from "{table}"'
-        ).fetchone()
-        if seeded == distinct:
+        shared = connection.execute(
+            f'select count(*) from (select "{column}" from "{table}" '
+            f'where "{column}" is not null group by "{column}" having count(*) > 1)'
+        ).fetchone()[0]
+        if not shared:
             return f"no two rows share a {column}, though a row repeating it was accepted"
     return ""
 
@@ -846,26 +977,90 @@ def varied(value: object, step: int) -> object:
     return f"{value}-{step}"
 
 
+def restore_repeat(
+    connection: sqlite3.Connection,
+    table: str,
+    ddl: str,
+    offered: list[tuple[str, str]],
+    column: str,
+    references: set[str],
+) -> tuple[str, bool]:
+    """Offer ``table`` one more row repeating ``column``, copied off a row that is still there.
+
+    Reference resolution removes a row when a unique reference has no parent left for it to
+    point at, and the row it removes was carrying some column's only duplicate. The duplicate
+    is not optional: it is what a migration adding a unique index has to meet, and asserting
+    it without it being there is the defect an earlier review round found. So it is offered
+    again here, after the references are settled rather than before, which is what makes the
+    offer survivable.
+
+    The references come from a surviving row instead of being invented, for the reason
+    ``resolve_references`` exists at all, and they are the columns held rather than moved --
+    together with ``column`` itself, which is the point of the row. Everything else moves, so
+    a composite unique index covering the repeated column has something left to separate the
+    two rows by.
+
+    A reference that is itself uniquely indexed cannot be copied, since the row copied from
+    still holds it. Which references those are is not asked but tried: the copy is offered
+    first, and only what the database refuses is offered again with its optional references
+    empty -- a shape released rows already have, so the second offer is a row a release can be
+    in rather than a concession to make the fixture fit. A reference the table demands keeps the
+    copy either way, because the alternative to a shared parent there is no row at all, and
+    then the refusal stands and is reported. ``session_turns`` is that case:
+    ``uq_session_turns_message_written_attempt`` keeps ``initial_delivery_id`` unique among
+    non-terminal turns and the column is NOT NULL, so the table cannot hold more such rows than
+    there are deliveries to point at, and eleven of its columns lose the duplicate they were
+    granted in isolation.
+    """
+    names = [name for name, _ in offered]
+    selected = ", ".join(f'"{name}"' for name in names)
+    survivor = connection.execute(f'select {selected} from "{table}" limit 1').fetchone()
+    if survivor is None:
+        return "no row is left to copy a reference from", True
+    row = {
+        name: value if value is None or name == column or name in references else varied(value, RESTORE_STEP)
+        for name, value in zip(names, survivor)
+    }
+    objection, settled = insert_seed_row(connection, table, ddl, offered, row)
+    if not objection or column in references:
+        return objection, settled
+    optional = {
+        str(info[1])
+        for info in connection.execute(f'pragma table_info("{table}")')
+        if not (info[3] or info[5]) and str(info[1]) in references
+    }
+    emptied = {name: None if name in optional else value for name, value in row.items()}
+    return insert_seed_row(connection, table, ddl, offered, emptied)
+
+
 def insert_seed_row(
     connection: sqlite3.Connection,
     table: str,
     ddl: str,
     required: list[tuple[str, str]],
     values: dict[str, object],
-) -> str:
-    """Insert ``values`` into ``table``, repairing what the schema objects to; ``""`` if it landed.
+) -> tuple[str, bool]:
+    """Insert ``values`` into ``table``, repairing what the schema objects to.
+
+    Returns ``(objection, settled)``. ``objection`` is ``""`` when the row landed, and
+    otherwise the schema's own last words. ``settled`` says whose answer that is, and it is
+    the distinction the caller cannot do without: the database refusing a row is a fact
+    about the schema, while this function running out of attempts with proposals still
+    untried is a fact about this function. Reported as one, a limit in the seeder reads as a
+    property of the release -- which is the failure mode the guard exists to prevent, aimed
+    at itself.
 
     Where a CHECK rejects the row, SQLite names the constraint and the constraint states
     what it wants -- accepted literals, or a JSON shape -- so the repair proposes that and
     asks again. SQLite is the judge throughout: the row is admissible only if the schema
-    accepted it, and the returned message is the schema's own last objection.
+    accepted it, and a refusal is settled once nothing remains to offer.
     """
     if not required:
         try:
             connection.execute(f'insert into "{table}" default values')
         except sqlite3.Error as exc:
-            return str(exc)
-        return ""
+            return str(exc), True
+        return "", True
 
     columns = ", ".join(f'"{column}"' for column, _ in required)
     placeholders = ", ".join("?" for _ in required)
@@ -879,10 +1074,11 @@ def insert_seed_row(
         except sqlite3.Error as exc:
             objection = str(exc)
             # However else SQLite refuses the row, the table is one this cannot seed. Only
-            # a named CHECK carries a repair, so anything else ends here.
+            # a named CHECK carries a repair, so anything else ends here -- settled, because
+            # the refusal is the schema's and there is no next thing to try.
             failure = CHECK_FAILURE.search(objection)
             if failure is None:
-                return objection
+                return objection, True
             expression = check_expression(ddl, failure.group(1))
             untried = [
                 pair
@@ -893,17 +1089,17 @@ def insert_seed_row(
                 if pair not in proposed
             ]
             if not untried:
-                return objection
+                return objection, True
             column, literal = untried[0]
             proposed.add((column, literal))
             values[column] = literal
         else:
-            return ""
-    return objection or f"{SEED_ATTEMPTS} attempts did not produce a row the schema accepts"
+            return "", True
+    return f"{SEED_ATTEMPTS} attempts did not produce a row the schema accepts; last was {objection}", False
 
 
-def seed_representative_rows(db_path: Path) -> dict[str, str]:
-    """Fill every table of the schema ``db_path`` holds; ``{table: objection}`` for what fell short.
+def seed_representative_rows(db_path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Fill every table of the schema ``db_path`` holds.
 
     A migration is only as safe as the data it runs over. On an empty database, adding a
     NOT NULL column with no default, tightening a nullable one, backfilling from a column
@@ -914,52 +1110,68 @@ def seed_representative_rows(db_path: Path) -> dict[str, str]:
     The rows are derived from the schema, because the schema is what differs in every
     release and ``pragma table_info`` already knows it; a fixture written per release
     would cover the graphs that existed when it was written and quietly stop at the next
-    one. What gets filled is what every row of that table must hold -- NOT NULL or primary
-    key -- whether or not a default would have supplied it, because a released application
-    writes those columns and a seeder that leans on the defaults instead is measuring the
-    defaults. Leaving the rest NULL is deliberate and the more adversarial choice: a
-    migration that later makes a nullable column NOT NULL has to survive the NULLs a real
-    database has, and the NULL branch is the one a disjunctive CHECK admits.
+    one.
 
-    More than one row, and what the extra rows are for is stated rather than constructed:
-    **a column the schema still lets two rows share has to be shared by two of them.** One
-    row makes every unique index buildable, which is the property most worth testing and the
-    one a single row silently grants; a row that differs everywhere grants it just as
-    silently.
+    Returns ``(short, refused)``, and the split is the whole design. ``short`` is what this
+    seeder failed to do and is a guard failure. ``refused`` is what the database declined and
+    is data: each offer it turned down, mapped to SQLite's own words. Five review rounds went
+    into the difference. Each round named a shape the fixture did not hold -- one row, then
+    unioned distinct groups, then one member per group, then overlapping groups, then columns
+    never made non-NULL -- and each fix widened the fixture and asserted the widening was now
+    complete. It never was, and the reason is structural rather than a missing case: the rows
+    a released database can hold are the schema's satisfiable states, and enumerating those is
+    constraint solving. ``message_deliveries`` settles it by construction -- four CHECKs key
+    twelve columns off ``state``, each state requiring some of them NULL, so **no row of that
+    table has every column non-NULL** and no fixture can be asked for one.
 
-    Which columns those are is asked of the database instead of derived from its schema.
-    Each column gets a row that holds it still and moves every other one, and SQLite either
-    takes it or names the constraint it broke. Moving every other column is not a preference:
-    a differing column can only help a uniqueness constraint accept the row, and the one
-    thing that undoes a difference -- a CHECK holding a column to a list of literals, whose
-    repair puts an accepted one back -- does so whatever else the row does. So this is the
-    likeliest row to be accepted that still repeats the column, and there is no second choice
-    to tune.
+    So the claim stops where the evidence does. What is proved is bounded by the offers this
+    makes, which it controls, not by the value space, which it does not:
 
-    Deriving the answer instead cost three review rounds, each spent on a model of the
-    constraint topology -- one row, unioned members, overlapping groups -- and each fix was
-    another argument that the model was now complete. A partial unique index, an index over
-    an expression, and a CHECK pinning one member of a group to a literal were all still
-    outside it, and this schema ships all three. Offering the row removes the model, and with
-    it the next topology.
+    **every column is offered, and every column the database accepts a repeat of is repeated
+    by two rows that were read back to confirm it.**
 
-    What a refusal means is exactly what it says, and no more: the schema rejected *this*
-    row. For ``uq_constrained_slug`` that is also the schema forbidding the repeat outright,
-    but a partial unique index is conditional -- ``unique (session_id) where state in
-    ('starting', 'active')`` permits a repeated ``session_id`` on a terminal turn -- and
-    reaching the permitted side means giving ``state`` a value whose whole multi-column shape
-    another CHECK then dictates. That is constraint solving, which this deliberately is not,
-    so the column goes uncovered carrying SQLite's message as the reason. The floor below and
-    ``seeded_rows_prove_repetition`` bound what the fixture is allowed to prove instead of
-    the refusal being read as proof of anything.
+    Three offers per table. The maximal row, holding a value in every column, because a
+    nullable column left NULL is a column no migration touching it is tested against. The
+    mandatory row, holding only what NOT NULL and the primary key demand, because the NULL
+    branch is what a released database mostly carries and what a disjunctive CHECK admits.
+    Then one row per column that holds that column still and moves every other one -- moving
+    the rest is not a preference but the likeliest-accepted shape that still repeats the
+    column, since a differing column can only help a uniqueness constraint and the one thing
+    that undoes a difference (a CHECK pinning a column to a literal list, whose repair
+    restores an accepted literal) does so however the row is built.
 
-    What this proves is that the upgrade runs over rows, not over meaningful ones --
-    foreign keys are off, which is SQLite's default and is what lets each table be seeded
-    on its own, so the rows are individually well-formed and collectively inconsistent.
-    A table this cannot fill is returned with the schema's own objection rather than
-    skipped, because a coverage limit the caller cannot see reads as coverage.
+    Then the references are pointed at parents that exist, which is a separate pass because
+    every table has to be seeded before any reference can resolve, and it is what stops the
+    fixture from being a database no release could be in: ``20260806_0047`` aborts the upgrade
+    on a dangling reference, so inventing one turns a correct migration red. Resolution can
+    take rows away -- a demanded, uniquely indexed reference bounds a table by its parent's
+    size -- so the counting and the reading back happen after it, over the fixture the
+    migrations will actually run against, and any duplicate it cost is offered again.
+
+    A refusal means what it says and nothing more: the schema rejected *this* row. Sometimes
+    that is also the schema forbidding the repeat outright, and sometimes it is a partial
+    unique index whose permitted side needs a multi-column state another CHECK dictates.
+    Telling those apart is the constraint solving this is not, so both are reported the same
+    way and neither is read as proof. What that leaves is measured rather than asserted: over
+    every released schema the guard runs, the ledger holds fifty-two entries. One is the
+    maximal row ``message_deliveries`` refuses by construction, above. Of the fifty-one repeat
+    refusals, thirty-six come from a primary key or a total unique index and three from a
+    ``where <column> is not null`` index that a non-NULL repeat check treats as total anyway.
+    The remaining twelve are all one genuinely conditional index,
+    ``uq_session_turns_message_written_attempt``, unique on ``initial_delivery_id`` where the
+    turn is not terminal: one is that column's own repeat, and eleven are other columns of
+    ``session_turns`` whose repeat the table accepted alone and lost once the rest of the
+    fixture was there, because the same index bounds the table at the number of deliveries its
+    rows may point at. Those eleven are the one refusal that is about the whole database rather
+    than one table, and the reason the claim is over what this fixture can hold.
+
+    What this proves is that the upgrade runs over rows whose references resolve, not over
+    meaningful ones -- each table is seeded on its own with foreign keys off, which is
+    SQLite's default, so the rows are individually well-formed and collectively arbitrary.
     """
-    short = {}
+    short: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    accepted: dict[str, tuple[list[str], str, str, list[tuple[str, str]]]] = {}
     with sqlite3.connect(db_path) as connection:
         schema = [
             (str(name), str(ddl))
@@ -969,57 +1181,123 @@ def seed_representative_rows(db_path: Path) -> dict[str, str]:
             if name != ALEMBIC_BOOKKEEPING_TABLE
         ]
         for table, ddl in schema:
-            required = [
-                (str(row[1]), str(row[2]))
+            info = [
+                (str(row[1]), str(row[2]), bool(row[3] or row[5]))
                 for row in connection.execute(f'pragma table_info("{table}")')
-                if row[3] or row[5]
             ]
+            every = [(column, declared) for column, declared, _ in info]
+            mandatory = [(column, declared) for column, declared, required in info if required]
             # The first row is where the repairs happen, so every later row moves the values
-            # the schema has already accepted rather than the ones it rejected.
-            base = {column: representative_value(column, declared) for column, declared in required}
-            objection = insert_seed_row(connection, table, ddl, required, base)
-            excused: dict[str, str] = {}
+            # the schema has already accepted rather than the ones it rejected. Offer every
+            # column first and fall back to what the table demands, because a table whose
+            # CHECKs make some columns mutually exclusive refuses the maximal row by
+            # construction and still has to be seeded.
+            base = {column: representative_value(column, declared) for column, declared in every}
+            objection, settled = insert_seed_row(connection, table, ddl, every, dict(base))
+            offered = every
+            if objection:
+                refused[f"{table}, every column at once"] = objection
+                offered = mandatory
+                base = {column: base[column] for column, _ in mandatory}
+                objection, settled = insert_seed_row(connection, table, ddl, mandatory, base)
+            unsettled = {} if settled else {table: objection}
             repeated: list[str] = []
             # One row per column, holding that column still and moving every other one. The
             # step is the row's, so two of these rows differ from each other wherever they
             # differ from the base row.
-            for step, column in enumerate(() if objection else base, start=1):
-                refusal = insert_seed_row(
+            steps = 0
+            for steps, column in enumerate(() if objection else base, start=1):
+                refusal, decided = insert_seed_row(
+                    connection, table, ddl, offered, moved_row(base, steps, held=column)
+                )
+                if not refusal:
+                    repeated.append(column)
+                elif decided:
+                    refused[f"{table}.{column}"] = refusal
+                else:
+                    unsettled[f"{table}.{column}"] = refusal
+            # Nothing this table holds may repeat, so one more row that differs everywhere --
+            # less than the table was asked for, and all a unique index needs to be buildable
+            # against.
+            if not objection and not repeated:
+                insert_seed_row(
+                    connection, table, ddl, offered, moved_row(base, 1, held=None)
+                )
+            # The shape the maximal row cannot also be. Offered last and one step past the
+            # rows above, so it cannot collide with them on a column they hold still.
+            if not objection and set(offered) != set(mandatory):
+                mandatory_only = {column: base[column] for column, _ in mandatory}
+                refusal, _ = insert_seed_row(
                     connection,
                     table,
                     ddl,
-                    required,
-                    {name: value if name == column else varied(value, step) for name, value in base.items()},
+                    mandatory,
+                    moved_row(mandatory_only, steps + 1, held=None),
                 )
                 if refusal:
-                    excused[column] = refusal
+                    refused[f"{table}, nothing but its mandatory columns"] = refusal
+            short.update(unsettled)
+            accepted[table] = (repeated, objection, ddl, offered)
+        # Reference resolution comes between the seeding and the reading back, because it
+        # rewrites the columns both of them are about: a row counted before it may afterwards
+        # be gone from a unique reference's rotation, and a repeat proved before it may
+        # afterwards have been split apart. What the checks below measure is the fixture the
+        # migrations will actually run against.
+        for _ in range(len(schema)):
+            for table, _ in schema:
+                resolve_references(connection, table)
+            if not connection.execute("pragma foreign_key_check").fetchall():
+                break
+        for table, (repeated, objection, ddl, offered) in accepted.items():
+            # A reference is dropped from the repeat claim rather than proved, because whether
+            # two rows may share one is not this fixture's answer to give: the value belongs to
+            # the parent, and the resolution above hands out as many distinct ones as the
+            # child's unique indexes turn out to require. Composite indexes are why that is not
+            # knowable in advance -- ``resource_access_groups`` is unique on its two reference
+            # columns together with a third, so sharing both at once is refused while sharing
+            # either alone is fine. What the fixture claims for a reference is that it resolves,
+            # and ``dangling_references`` is where that claim is read back.
+            references = {str(row[3]) for row in connection.execute(f'pragma foreign_key_list("{table}")')}
+            claimed = []
+            for column in [name for name in repeated if name not in references]:
+                if not seeded_rows_prove_repetition(connection, table, [column]):
+                    claimed.append(column)
+                    continue
+                refusal, _ = restore_repeat(connection, table, ddl, offered, column, references)
+                if refusal:
+                    # Accepted when the table stood alone and refused now that the rest of the
+                    # fixture is around it, which is the database answering about the whole
+                    # database rather than about one table -- ``session_turns`` may not hold more
+                    # rows than ``message_deliveries`` does, because its reference to one is
+                    # both demanded and unique. So it goes to the ledger with every other
+                    # refusal, and out of the claim, rather than failing the guard: the claim is
+                    # over what this fixture can hold, and this is where that ends.
+                    refused[f"{table}.{column}, once the rest of the fixture is there"] = refusal
                 else:
-                    repeated.append(column)
-            # Nothing this table holds may repeat, so the second row is the one that differs
-            # everywhere -- less than the table was asked for, and all a unique index needs to
-            # be buildable against.
-            if not objection and not repeated:
-                insert_seed_row(
-                    connection, table, ddl, required, {name: varied(value, 1) for name, value in base.items()}
-                )
+                    claimed.append(column)
+            repeated = claimed
             rows = connection.execute(f'select count(*) from "{table}"').fetchone()[0]
             if rows < SEED_ROWS:
-                reason = objection or next(iter(excused.values()), "") or "the schema accepted no more"
-                short[table] = f"{rows} of {SEED_ROWS} rows; {reason}"
+                short[table] = f"{rows} of {SEED_ROWS} rows; {objection or 'the schema accepted no more'}"
                 continue
             unproven = seeded_rows_prove_repetition(connection, table, repeated)
             if unproven:
                 short[table] = unproven
+        dangling = dangling_references(connection)
+        if dangling:
+            short["the seeded database"] = dangling
         connection.commit()
-    return short
+    return short, refused
 
 
-def schema_gap_after_upgrade(tag: str) -> tuple[str | None, dict[str, str]]:
-    """``(gap, short)`` -- why a database built by ``tag``'s graph is not ready, and what it could not carry.
+def schema_gap_after_upgrade(tag: str) -> tuple[str | None, dict[str, str], dict[str, str]]:
+    """``(gap, short, refused)`` -- how a database built by ``tag``'s graph came through the upgrade.
 
-    ``gap`` is ``None`` when the database comes out ready. ``short`` is the tables the
-    upgrade therefore ran over with fewer rows than intended; both are failures, because
-    a property proved over less than its subject is not the property.
+    ``gap`` is ``None`` when the database comes out ready. ``short`` is where the seeding
+    fell short of what it set out to do; both are failures, because a property proved over
+    less than its subject is not the property. ``refused`` is what the schema itself declined
+    to hold and is carried for the report rather than the verdict -- see
+    ``seed_representative_rows`` for why those two cannot be the same list.
 
     What the rows are *for* is the run, not the tally afterwards. Adding a NOT NULL column,
     tightening a nullable one, backfilling from a column being dropped, and building a
@@ -1040,6 +1318,14 @@ def schema_gap_after_upgrade(tag: str) -> tuple[str | None, dict[str, str]]:
     actually run, so a regression in the pre-Alembic repair or stamping path has to fail
     here too, and readiness has to mean what production means by it -- required columns
     included, not merely a full set of table names.
+
+    Readiness is necessary and not sufficient, so the stamp is checked against today's head
+    as well. ``background_tables_ready`` asks whether the tables the product needs are
+    present, which a database can satisfy while stopping short of the graph's end -- a
+    migration that bails out after the last table-creating revision leaves exactly that,
+    and the tail it skipped is where index and constraint changes live. Today's head is read
+    from the working tree's own sources by the same function that reads the released one, so
+    the two stages are held to the same kind of statement about where the chain ends.
 
     Whatever the upgrade raises when it aborts propagates: a crash and a silently
     incomplete schema are the same failure of the same property.
@@ -1064,36 +1350,54 @@ def schema_gap_after_upgrade(tag: str) -> tuple[str | None, dict[str, str]]:
                 f"its head {sorted(shipped_heads)!r}; the released graph was not applied in full"
             )
 
-        short = seed_representative_rows(db_path)
+        short, refused = seed_representative_rows(db_path)
         run_migrations(db_path)
+
+        current_heads = shipped_head_revisions(working_tree_sources())
+        landed = stamped_revision(db_path)
+        if landed is None or landed not in current_heads:
+            raise MigrationGuardError(
+                f"upgrading {tag}'s database with today's graph left it stamped {landed!r} rather "
+                f"than at the current head {sorted(current_heads)!r}; the upgrade stopped early"
+            )
+
         gap = None if background_tables_ready(db_path) else describe_schema_gap(db_path)
-        return gap, short
+        return gap, short, refused
 
 
-def unrepairable_releases() -> dict[str, list[str]]:
-    """``{tag: reasons}`` for every release today's graph cannot bring to head over real rows.
+def unrepairable_releases() -> tuple[dict[str, list[str]], dict[str, str]]:
+    """``({tag: reasons}, refused)`` for every release today's graph runs over real rows.
 
-    A table the seeding could not fill is one of the reasons, not a footnote beside them.
-    The property is that a populated released database survives the upgrade, so a table
-    the run left short is a piece of that property it did not test, and reporting it as
-    anything other than a failure would let the guard read as stronger than its evidence.
+    A limit in the seeding is one of the reasons, not a footnote beside them. The property is
+    that a populated released database survives the upgrade, so anything the run left short is
+    a piece of that property it did not test, and reporting it as less than a failure would
+    let the guard read as stronger than its evidence.
+
+    What the schema itself declined to hold is the other half and is returned separately, to
+    be printed rather than counted. It is the honest boundary of the fixture -- the columns no
+    two rows share and SQLite's reason for each -- and calling it a failure would leave the
+    guard permanently red over primary keys, which is the same as not having one.
     """
     failures: dict[str, list[str]] = {}
+    refused: dict[str, str] = {}
     for tag in released_graphs():
         try:
-            gap, short = schema_gap_after_upgrade(tag)
+            gap, short, declined = schema_gap_after_upgrade(tag)
         except Exception as exc:  # noqa: BLE001 - however the upgrade fails, the verdict is the same
             failures[tag] = [f"upgrade aborted with {type(exc).__name__}: {str(exc).splitlines()[0]}"]
         else:
+            refused.update(declined)
             reasons = [] if gap is None else [f"upgrade left the database not ready: {gap}"]
             reasons += [f"could not seed {table}: {objection}" for table, objection in sorted(short.items())]
             if reasons:
                 failures[tag] = reasons
-    return failures
+    return failures, refused
 
 
-def collect_problems(baseline: str | None = None, *, include_upgrade: bool = True) -> tuple[str, list[str]]:
-    """``(baseline, problems)`` -- every property checked, every violation reported at once.
+def collect_problems(
+    baseline: str | None = None, *, include_upgrade: bool = True
+) -> tuple[str, list[str], dict[str, str]]:
+    """``(baseline, problems, refused)`` -- every property checked, every violation reported at once.
 
     Reporting all of them together rather than stopping at the first is deliberate: a
     graph defect usually shows up in more than one property, and seeing which ones fire
@@ -1102,9 +1406,14 @@ def collect_problems(baseline: str | None = None, *, include_upgrade: bool = Tru
     A limit on what the run could cover is a problem here too, not a note beside them.
     Anything this guard cannot exercise is something it passes without having checked, and
     the two are indistinguishable to whoever reads the exit code.
+
+    ``refused`` is not a problem and is not silence either. It is what the schema declined to
+    hold, printed on every run including a passing one, because the alternative to reporting a
+    boundary is asserting there isn't one.
     """
     baseline = baseline or latest_released_tag()
     problems: list[str] = []
+    refused: dict[str, str] = {}
 
     for tag in releases_with_state_but_no_graph():
         problems.append(
@@ -1126,10 +1435,11 @@ def collect_problems(baseline: str | None = None, *, include_upgrade: bool = Tru
     problems.extend(edited_released_bodies(baseline))
 
     if include_upgrade:
-        for tag, reasons in sorted(unrepairable_releases().items(), key=lambda item: version_key(item[0])):
+        failures, refused = unrepairable_releases()
+        for tag, reasons in sorted(failures.items(), key=lambda item: version_key(item[0])):
             problems.extend(f"{tag}: {reason}" for reason in reasons)
 
-    return baseline, problems
+    return baseline, problems, refused
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1149,10 +1459,18 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        baseline, problems = collect_problems(args.baseline, include_upgrade=not args.skip_upgrade)
+        baseline, problems, refused = collect_problems(args.baseline, include_upgrade=not args.skip_upgrade)
     except MigrationGuardError as exc:
         print(f"migration release guard could not run: {exc}", file=sys.stderr)
         return 2
+
+    # Printed on the way out whatever the verdict is: the columns the fixture holds no repeat
+    # of are the edge of what a pass covers, and a pass that does not say where its edge is
+    # invites being read as covering everything.
+    if refused:
+        print(f"the schema refused a repeat of {len(refused)} column(s), which the upgrade was not proved over:")
+        for target, objection in sorted(refused.items()):
+            print(f"  - {target}: {objection}")
 
     if problems:
         print(f"migration release guard failed (baseline {baseline}):", file=sys.stderr)

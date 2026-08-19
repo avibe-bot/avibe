@@ -458,7 +458,7 @@ def test_the_real_graph_is_wholly_comparable():
 @pytest.mark.parametrize(("problems", "expected_exit"), [([], 0), (["a released revision was rechained"], 1)])
 def test_the_command_line_exit_code_follows_the_verdict(monkeypatch, capsys, problems, expected_exit):
     """The CLI is how a developer runs this outside CI, so its wiring is part of the guard."""
-    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems))
+    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems, {}))
 
     assert guard.main([]) == expected_exit
     for problem in problems:
@@ -565,9 +565,9 @@ def test_a_release_the_property_could_not_cover_is_reported_as_a_failure(monkeyp
     being visible: the run says both "passed" and "did not look", and only one is read.
     """
     monkeypatch.setattr(guard, "released_graphs", lambda: ["v9.9.9"])
-    monkeypatch.setattr(guard, "schema_gap_after_upgrade", lambda tag: (gap, short))
+    monkeypatch.setattr(guard, "schema_gap_after_upgrade", lambda tag: (gap, short, {}))
 
-    reasons = guard.unrepairable_releases().get("v9.9.9", [])
+    reasons = guard.unrepairable_releases()[0].get("v9.9.9", [])
 
     assert len(reasons) == len(expected)
     assert all(fragment in reason for reason, fragment in zip(reasons, expected))
@@ -640,15 +640,38 @@ def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
         )
         connection.execute("create unique index ux_overlapping_ab on overlapping (a, b)")
         connection.execute("create unique index ux_overlapping_bc on overlapping (b, c)")
+        connection.execute("create table nullable (id text primary key, tag text, note text)")
+        connection.execute(
+            "create table exclusive (id text primary key, kind text not null, left_ref text, right_ref text, "
+            "constraint ck_exclusive_shape check ("
+            "(kind = 'left' and left_ref is not null and right_ref is null) or "
+            "(kind = 'right' and right_ref is not null and left_ref is null) or "
+            "(kind = 'none' and left_ref is null and right_ref is null)))"
+        )
         connection.execute(
             "create table impossible (id text primary key, shape text not null "
             "constraint ck_impossible_shape check (shape in ('a', 'b') and shape in ('c', 'd')))"
+        )
+        # A parent whose key a CHECK holds to one literal, so a child cannot guess the value it
+        # ends up with, and two children of it: one whose reference may repeat, and one whose
+        # reference is its own primary key and therefore may not.
+        connection.execute(
+            "create table parented (id text primary key "
+            "constraint ck_parented_id check (id in ('kept')), note text)"
+        )
+        connection.execute(
+            "create table sharing (id text primary key, parent_id text not null references parented (id), "
+            "note text)"
+        )
+        connection.execute(
+            "create table exclusively_owned (parent_id text primary key references parented (id), "
+            "note text)"
         )
         connection.commit()
     finally:
         connection.close()
 
-    short = guard.seed_representative_rows(db_path)
+    short, refused = guard.seed_representative_rows(db_path)
 
     connection = sqlite3.connect(db_path)
     try:
@@ -663,10 +686,15 @@ def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
         pairs = [tuple(row) for row in connection.execute("select platform, native_id from paired")]
         pins = [tuple(row) for row in connection.execute("select kind, ref from pinned")]
         overlaps = [tuple(row) for row in connection.execute("select a, b, c from overlapping")]
+        tags = [row[0] for row in connection.execute("select tag from nullable")]
+        kinds = [tuple(row) for row in connection.execute("select kind, left_ref, right_ref from exclusive")]
+        shared = [row[0] for row in connection.execute("select parent_id from sharing")]
+        owned = [row[0] for row in connection.execute("select parent_id from exclusively_owned")]
+        dangling = connection.execute("pragma foreign_key_check").fetchall()
     finally:
         connection.close()
 
-    assert set(short) == {"impossible"}
+    assert set(short) == {"impossible", "parented", "exclusively_owned"}
     assert "ck_impossible_shape" in short["impossible"]
     assert all(count >= guard.SEED_ROWS for table, count in counted.items() if table not in short)
     # Every repair came from the constraint that rejected the row before it, not from a guess.
@@ -693,6 +721,38 @@ def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
     # other's repeat: every row that holds `ref` still carries `kind = 'only'` and collides.
     assert len(set(pins)) == len(pins)
     assert len({kind for kind, _ in pins}) == 1
+    # A nullable column carries both shapes a release holds. Only the non-NULL one is new: a
+    # migration tightening the column or reading its value is untested against NULLs alone,
+    # and one made non-NULL everywhere is untested against the NULLs it will actually meet.
+    assert None in tags
+    assert [tag for tag in tags if tag is not None]
+    # Some tables have no row with every column non-NULL, and no fixture can be asked for one:
+    # `ck_exclusive_shape` keys `left_ref` and `right_ref` off `kind`, so each state requires
+    # one of them NULL. The table still gets rows, in whichever state the repair reached, and
+    # the columns that leaves NULL are what `refused` exists to say out loud rather than to
+    # pass over. Reaching every state instead is constraint solving, which this is not.
+    assert "exclusive, every column at once" in refused
+    assert "ck_exclusive_shape" in refused["exclusive, every column at once"]
+    assert "exclusive" not in short
+    assert {(left, right) for _, left, right in kinds} == {(None, None)}
+    # Every reference resolves, which is not a nicety: `20260806_0047` rebuilds tables and then
+    # runs this same check, aborting the upgrade if anything dangles, so a fabricated reference
+    # turns a correct migration red. It cannot be resolved by guessing either -- `ck_parented_id`
+    # holds the parent's key to one literal, so only reading back what the parent ended up with
+    # gets it right.
+    assert dangling == []
+    assert set(shared) == {"kept"}
+    # Whether the children may share that parent is the database's answer: `sharing` keeps its
+    # reference in every row, while `exclusively_owned` has it as a primary key and so is bounded
+    # by the one parent row there is. Sharing regardless would collapse it to a single row, and
+    # one row is what this whole fixture exists to stop being.
+    assert owned == ["kept"]
+    assert f"of {guard.SEED_ROWS} rows" in short["exclusively_owned"]
+    # And the bound is reported at both ends rather than only where it bites. `parented` may hold
+    # one row because its key is held to one literal; `exclusively_owned` may hold one because
+    # each of its rows needs a parent of its own. Naming only the child would read as the child's
+    # problem, and naming neither is the shortfall-as-a-note this whole split exists to refuse.
+    assert f"of {guard.SEED_ROWS} rows" in short["parented"]
 
 
 def test_a_repeat_the_rows_do_not_carry_is_a_violation_however_it_got_there():
@@ -740,7 +800,7 @@ def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch
         return upgrade(db_path)
 
     monkeypatch.setattr(guard, "run_migrations", counting)
-    _, short = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
+    _, short, _ = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
 
     assert observed
     assert all(count >= guard.SEED_ROWS for table, count in observed.items() if table not in short)
@@ -779,7 +839,7 @@ def test_every_released_database_still_reaches_head():
     replaying the current chain from empty, which produces the schema the current graph
     intends rather than the schema a release actually left behind.
     """
-    assert guard.unrepairable_releases() == {}
+    assert guard.unrepairable_releases()[0] == {}
 
 
 @requires_release_history
