@@ -624,7 +624,7 @@ class SessionTurnManager:
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._session_lifecycle_epochs: dict[str, int] = {}
-        self._session_lifecycle_held: set[str] = set()
+        self._session_lifecycle_ops: dict[str, asyncio.Lock] = {}
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
@@ -737,38 +737,37 @@ class SessionTurnManager:
         must not fail ``/new`` or archive.
         """
 
+        op_lock = self._session_lifecycle_ops.setdefault(
+            raw_session_id,
+            asyncio.Lock(),
+        )
+        await op_lock.acquire()
         admission = None
         try:
-            admission = await asyncio.wait_for(
-                self.acquire_lifecycle_admission(raw_session_id),
-                timeout=max(float(deadline_seconds), 0.001),
-            )
-        except asyncio.TimeoutError:
-            if raw_session_id in self._session_lifecycle_held:
-                admission = await self.acquire_lifecycle_admission(raw_session_id)
-            else:
+            try:
+                admission = await asyncio.wait_for(
+                    self.acquire_lifecycle_admission(raw_session_id),
+                    timeout=max(float(deadline_seconds), 0.001),
+                )
+            except asyncio.TimeoutError:
                 logger.warning(
                     "session lifecycle admission did not quiesce before the "
                     "deadline; proceeding without the capture lock "
                     "session=%s",
                     raw_session_id,
                 )
-                result = await operation()
-                self._advance_session_lifecycle_epoch(
-                    raw_session_id,
-                    abandon_captures=True,
-                )
-                return result
-        self._session_lifecycle_held.add(raw_session_id)
-        try:
             pre_epoch = self.session_lifecycle_epoch(raw_session_id)
             result = await operation()
             if self.session_lifecycle_epoch(raw_session_id) == pre_epoch:
-                self._advance_session_lifecycle_epoch(raw_session_id)
+                self._advance_session_lifecycle_epoch(
+                    raw_session_id,
+                    abandon_captures=admission is None,
+                )
             return result
         finally:
-            self._session_lifecycle_held.discard(raw_session_id)
-            admission.release()
+            if admission is not None:
+                admission.release()
+            op_lock.release()
 
     @staticmethod
     def _agent_run_ids_from_spec(spec: Any) -> set[str]:

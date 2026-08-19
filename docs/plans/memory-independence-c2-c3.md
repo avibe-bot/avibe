@@ -168,9 +168,10 @@ unchanged. A successful `/new`/archive that acquired the lock only
 advances the epoch. The capture task's epoch check discards stale
 work without killing a capture admitted for the new generation.
 
-If a second `/new`/archive times out while another lifecycle operation
-already holds the lock, it waits for that holder instead of fail-opening
-into a concurrent reset.
+Destructive ops serialize on a dedicated per-session op lock, independent
+of the capture lock. `/new` may wait for another `/new`; it never waits
+unboundedly on Memory. A hung capture only costs the bounded capture
+quiesce, then the op proceeds.
 
 ### Dead error surfaces
 
