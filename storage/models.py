@@ -779,7 +779,17 @@ message_deliveries = Table(
     Column("current_receipt_outcome", String, nullable=True),
     Column("current_receipt_json", Text, nullable=False, server_default="{}"),
     Column("current_attempt_opened_at", String, nullable=True),
-    Column("delivery_history_json", Text, nullable=False, server_default='{"version":1,"events":[]}'),
+    Column(
+        "delivery_history_json",
+        Text,
+        nullable=False,
+        # Declared as an expression rather than a JSON literal on purpose: a literal
+        # default containing ``:1`` is re-read as a bind parameter every time a table
+        # rebuild reflects and recompiles it, which is how 20260811_0050 turned this
+        # default into invalid JSON. json_object() has no colon to lose. See
+        # 20260819_0057.
+        server_default=text("(json_object('version', 1, 'events', json_array()))"),
+    ),
     Column("version", Integer, nullable=False, server_default="1"),
     Column("submitted_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
