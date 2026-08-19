@@ -22,6 +22,7 @@ from starlette.websockets import WebSocketDisconnect
 from config import paths
 from core.show_pages import (
     SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS,
+    VISIBILITIES,
     ShowPageStore,
     ensure_show_page_dir,
     show_cli_event_token,
@@ -1826,6 +1827,58 @@ def test_remote_show_page_icon_is_not_persistently_cached(monkeypatch, tmp_path)
     assert response.status_code == 200
     assert response.content == b"<svg/>"
     assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def _show_page_rows() -> dict[str, dict]:
+    from sqlalchemy import select
+
+    from core.show_pages import show_pages
+
+    store = ShowPageStore()
+    try:
+        with store.engine.connect() as connection:
+            return {
+                row["session_id"]: dict(row)
+                for row in connection.execute(select(show_pages)).mappings()
+            }
+    finally:
+        store.close()
+
+
+def test_show_page_read_returns_a_page_without_writing_the_table(monkeypatch, tmp_path):
+    # `GET /api/show-pages/<sid>` is the read-only counterpart of `POST .../ensure`.
+    # The property: reading a Show Page NEVER writes the show_pages table. It returns
+    # an existing page byte-identical and reports show_page_not_found where ensure
+    # would have created one — which is what leaves ensure's one-shot `existed` edge,
+    # and the "visualize this session" prompt it triggers, to its single owner.
+    # Seeded with one page of every visibility that exists, so a visibility added
+    # later is covered here without editing this test.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    seeded = sorted(VISIBILITIES)
+    for index, visibility in enumerate(seeded):
+        _create_show_page(f"ses{index}", visibility)
+    before = _show_page_rows()
+    assert len(before) == len(seeded)
+    client = app.test_client()
+
+    for index, visibility in enumerate(seeded):
+        response = client.get(f"/api/show-pages/ses{index}", base_url="http://127.0.0.1:5123")
+        assert response.status_code == 200, visibility
+        body = response.get_json()
+        assert body["ok"] is True
+        assert body["session_id"] == f"ses{index}"
+        # The read reports no creation fact, so no caller can consume one.
+        assert "existed" not in body
+        # A GET carries per-caller page data, so it must not be stored by caches.
+        assert response.headers["Cache-Control"] == "no-store, private"
+        assert response.headers["Vary"] == "Cookie"
+
+    missing = client.get("/api/show-pages/sesabsent", base_url="http://127.0.0.1:5123")
+    assert missing.status_code == 404
+    assert missing.get_json()["code"] == "show_page_not_found"
+
+    assert _show_page_rows() == before
 
 
 def test_remote_personal_owner_can_ensure_show_page(monkeypatch, tmp_path):

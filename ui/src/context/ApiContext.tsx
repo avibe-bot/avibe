@@ -527,7 +527,14 @@ export type ApiContextType = {
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
-  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
+  /** Read the session's Show Page without creating it; rejects when there is none.
+   *  Everything that only DISPLAYS the page uses this — `ensureShowPage` is reserved
+   *  for the one caller that owns the first-creation prompt. */
+  getShowPage: (sessionId: string) => Promise<any>;
+  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. Callers
+   *  MUST honor `existed === false` by sending the visualize prompt: that edge is
+   *  reported once, so a caller that ignores it silently consumes it. To only read the
+   *  page, use `getShowPage`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
   /** Upload an image as the page's workspace-root favicon (multipart); resolves to the
    *  refreshed page payload carrying the fresh `icon_version` (§7.1j). */
@@ -3319,6 +3326,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
       { offline },
     ),
+    getShowPage: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}`),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes

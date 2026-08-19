@@ -90,7 +90,7 @@ export const ShowPageShareControl: React.FC<{
       return;
     }
     try {
-      const next: ShowPagePayload = await api.ensureShowPage(sessionId);
+      const next: ShowPagePayload = await api.getShowPage(sessionId);
       if (seq === reqSeq.current) applyPayload(next);
     } catch {
       reload();
@@ -123,12 +123,14 @@ export const ShowPageShareControl: React.FC<{
       }
       setLoading(!payload);
       try {
-        const result: ShowPagePayload = await api.ensureShowPage(sessionId);
+        const result: ShowPagePayload = await api.getShowPage(sessionId);
         if (seq !== reqSeq.current) return;
         applyPayload(result);
         if (!inventoryPage) reload();
       } catch {
-        // Archived pages can still expose access metadata, but cannot be ensured.
+        // A page can expose access metadata and still not be readable here (no
+        // page row yet, or use access revoked). Opening this panel must never
+        // create one, so there is nothing to recover — leave the link empty.
       } finally {
         setLoading(false);
       }

@@ -5759,6 +5759,28 @@ def show_page_availability_post(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>", methods=["GET"])
+def show_page_get(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        context = _request_authorization_context()
+        response = jsonify(
+            _show_page_payload_for_request(
+                api.get_show_page(session_id, user_context=context),
+                context,
+            )
+        )
+        # Same per-caller page data the ensure POST returned, now over a method
+        # caches are allowed to store by default.
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Vary"] = "Cookie"
+        return response
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
 @app.route("/api/show-pages/<session_id>/ensure", methods=["POST"])
 def show_page_ensure_post(session_id):
     from core.show_pages import ShowPageError

@@ -403,6 +403,10 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/config$"),
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
+        # Reading one page stays at the role its ensure POST already required, so
+        # replacing that POST with this GET changes no caller's authorization
+        # outcome. Widening to viewer would be a policy change, not a read.
+        ("GET", r"^/api/show-pages/[^/]+$"),
         ("POST", r"^/api/show-pages/[^/]+/icon$"),
         ("POST", r"^/api/show-pages/[^/]+/(?:ensure|availability)$"),
         ("POST", r"^/api/show-pages/[^/]+/access-settings/(?:read|apply)$"),

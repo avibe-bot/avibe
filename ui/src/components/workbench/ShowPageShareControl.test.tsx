@@ -23,6 +23,7 @@ vi.mock('@/features/permissions/api', async (importOriginal) => ({
 }));
 
 const api = {
+  getShowPage: vi.fn(),
   ensureShowPage: vi.fn(),
   getShowPageAccess: vi.fn(),
   getShowAccessSettings: vi.fn(),
@@ -142,7 +143,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_manage: false,
       can_publish_public: false,
     }));
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
       active_url: '/show/ses-1/',
@@ -160,7 +161,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
     await waitFor(() => {
-      expect(api.ensureShowPage).toHaveBeenCalledWith('ses-1');
+      expect(api.getShowPage).toHaveBeenCalledWith('ses-1');
     });
     await waitFor(() => {
       expect((screen.getByDisplayValue(/\/show\/ses-1\//) as HTMLInputElement).value).toContain('/show/ses-1/');
@@ -181,7 +182,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     permissionsApi.getPermissions.mockReturnValue(pending);
     permissionsApi.getResourceAccess.mockReturnValue(pending);
     api.getShowPageAccess.mockResolvedValue(organizationAccess);
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
       active_url: '/show/ses-1/',
@@ -243,7 +244,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     // Metadata-only manager: no payload read is ever issued.
     await vi.waitFor(
       () => {
-        expect(api.ensureShowPage).not.toHaveBeenCalled();
+        expect(api.getShowPage).not.toHaveBeenCalled();
       },
       { timeout: 250 },
     );
@@ -258,7 +259,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_manage: true,
       can_publish_public: true,
     }));
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
       active_url: '/show/ses-1/',
@@ -286,7 +287,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       expect(api.getShowPageAccess).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(api.ensureShowPage).toHaveBeenCalledTimes(1);
+      expect(api.getShowPage).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -296,7 +297,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_manage: false,
       can_publish_public: false,
     }));
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'limited',
       active_url: null,
@@ -327,7 +328,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_manage: false,
       can_publish_public: false,
     }));
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'limited',
       active_url: null,
@@ -345,7 +346,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    await waitFor(() => expect(api.ensureShowPage).toHaveBeenCalledWith('ses-1'));
+    await waitFor(() => expect(api.getShowPage).toHaveBeenCalledWith('ses-1'));
     expect((screen.getByRole('button', { name: 'Open' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Copy link' }) as HTMLButtonElement).disabled).toBe(
       true,
@@ -368,7 +369,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     permissionsApi.getPermissions.mockReturnValue(pending);
     permissionsApi.getResourceAccess.mockReturnValue(pending);
     api.getShowPageAccess.mockResolvedValue(organizationAccess);
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
       active_url: '/show/ses-1/',
@@ -417,7 +418,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_publish_public: true,
     });
     api.getShowPageAccess.mockResolvedValue(personalAccess);
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
       active_url: '/show/ses-1/',
@@ -465,7 +466,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_publish_public: false,
     });
     api.getShowPageAccess.mockResolvedValue(conflict);
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'private',
       active_url: '/show/ses-1/',
@@ -494,7 +495,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_manage: true,
       can_publish_public: true,
     }));
-    api.ensureShowPage.mockResolvedValue({
+    api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
       visibility: 'public',
       active_url: '/p/stable-link/',
@@ -584,5 +585,88 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     await waitFor(() => {
       expect(api.getShowPageAccess).toHaveBeenCalled();
     });
+  });
+});
+
+describe('ShowPageShareControl request surface', () => {
+  // The property: opening this panel READS a Show Page, it never creates one.
+  // `POST .../ensure` reports the first-creation edge exactly once, and only the
+  // caller that sends the "visualize this session" prompt may consume it — so
+  // this panel must stay off that endpoint no matter which branch it opens
+  // through. Asserted as a subset check against the declared read-only surface
+  // instead of a list of forbidden calls: an API this component starts calling
+  // later fails here until someone declares it read-only, and one that is not
+  // even on the mocked surface fails louder still.
+  const READ_ONLY_ON_OPEN = new Set([
+    'getShowPage',
+    'getShowPageAccess',
+    'getShowAccessSettings',
+    'listOrganizationResources',
+    'listOrganizationGroups',
+  ]);
+
+  const mutatingCallsSoFar = () => Object.entries(api)
+    .filter(([name, fn]) => !READ_ONLY_ON_OPEN.has(name) && fn.mock.calls.length > 0)
+    .map(([name]) => name);
+
+  const page = {
+    session_id: 'ses-1',
+    visibility: 'private',
+    active_url: '/show/ses-1/',
+    share_id: null,
+    url_available: true,
+    offline: false,
+    title: null,
+  };
+
+  it.each([
+    // Both mount shapes: ChatPage passes access it already has, AppWindow does
+    // not and makes the panel resolve access first. They open through different
+    // branches, so the property is asserted on each.
+    ['with access already resolved', true],
+    ['resolving access on open', false],
+  ])('reaches only read-only APIs when opening %s', async (_label, seeded) => {
+    const access = showPageAccess({ can_use: true, can_manage: true, can_publish_public: true });
+    api.getShowPageAccess.mockResolvedValue(access);
+    api.getShowPage.mockResolvedValue(page);
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: {
+        page_id: 'ses-1',
+        access_mode: 'private',
+        share_id: null,
+        revision: 1,
+        normalized_emails: [],
+      },
+    });
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" initialAccess={seeded ? access : null} />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => expect(api.getShowPage).toHaveBeenCalledWith('ses-1'));
+    await waitFor(() => {
+      expect((screen.getByDisplayValue(/\/show\/ses-1\//) as HTMLInputElement).value).toContain('/show/ses-1/');
+    });
+    expect(mutatingCallsSoFar()).toEqual([]);
+  });
+
+  it('reaches only read-only APIs when the page it wants does not exist', async () => {
+    // The case that used to CREATE one: a framed session whose page row is gone.
+    // The read fails and the panel stays empty; it must not fall back to ensure.
+    api.getShowPageAccess.mockResolvedValue(showPageAccess({ can_use: true, can_manage: true }));
+    api.getShowPage.mockRejectedValue(new Error('show_page_not_found'));
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+
+    await waitFor(() => expect(api.getShowPage).toHaveBeenCalledWith('ses-1'));
+    expect(mutatingCallsSoFar()).toEqual([]);
   });
 });
