@@ -27,6 +27,7 @@ from __future__ import annotations
 import codecs
 import os
 import shutil
+import struct
 import zipfile
 from pathlib import Path
 
@@ -163,6 +164,12 @@ _ODF_MIME_BY_EXTENSION = {
 }
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _RTF_MAGIC = b"{\\rtf"
+_ZIP_EOCD = struct.Struct("<4s4H2LH")
+_ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
+_ZIP_CENTRAL_DIRECTORY_HEADER_BYTES = 46
+_MAX_ZIP_COMMENT_BYTES = 65_535
+_MAX_OFFICE_ZIP_ENTRIES = 4_096
 
 
 def office_conversion_available() -> bool:
@@ -332,6 +339,8 @@ def _office_ole_matches(
 def _office_zip_matches(extension: str, path: Path, file_fd: int | None) -> bool:
     try:
         with _open_attachment_file(path, file_fd) as file_obj:
+            if not _office_zip_entry_count_bounded(file_obj):
+                return False
             file_obj.seek(0)
             with zipfile.ZipFile(file_obj) as archive:
                 names = archive.namelist()
@@ -356,6 +365,89 @@ def _office_zip_matches(extension: str, path: Path, file_fd: int | None) -> bool
         zipfile.LargeZipFile,
     ):
         return False
+
+
+def _office_zip_entry_count_bounded(file_obj) -> bool:
+    file_obj.seek(0, os.SEEK_END)
+    archive_size = file_obj.tell()
+    tail_size = min(archive_size, _ZIP_EOCD.size + _MAX_ZIP_COMMENT_BYTES)
+    if tail_size < _ZIP_EOCD.size:
+        return False
+    file_obj.seek(-tail_size, os.SEEK_END)
+    tail = file_obj.read(tail_size)
+    eocd_offset = tail.rfind(_ZIP_EOCD_SIGNATURE)
+    if eocd_offset < 0:
+        return False
+    try:
+        (
+            signature,
+            disk_number,
+            central_directory_disk,
+            entries_on_disk,
+            total_entries,
+            central_directory_size,
+            central_directory_offset,
+            comment_size,
+        ) = _ZIP_EOCD.unpack_from(tail, eocd_offset)
+    except struct.error:
+        return False
+    eocd_absolute_offset = archive_size - tail_size + eocd_offset
+    if not (
+        signature == _ZIP_EOCD_SIGNATURE
+        and eocd_offset + _ZIP_EOCD.size + comment_size == len(tail)
+        and disk_number == central_directory_disk == 0
+        and entries_on_disk == total_entries
+        and 0 < total_entries <= _MAX_OFFICE_ZIP_ENTRIES
+        and total_entries != 0xFFFF
+        and central_directory_size != 0xFFFFFFFF
+        and central_directory_offset != 0xFFFFFFFF
+        and central_directory_offset + central_directory_size
+        <= eocd_absolute_offset
+    ):
+        return False
+    return _office_zip_central_directory_matches(
+        file_obj,
+        eocd_absolute_offset=eocd_absolute_offset,
+        central_directory_size=central_directory_size,
+        expected_entries=total_entries,
+    )
+
+
+def _office_zip_central_directory_matches(
+    file_obj,
+    *,
+    eocd_absolute_offset: int,
+    central_directory_size: int,
+    expected_entries: int,
+) -> bool:
+    central_directory_start = eocd_absolute_offset - central_directory_size
+    if central_directory_start < 0:
+        return False
+    file_obj.seek(central_directory_start)
+    consumed = 0
+    observed_entries = 0
+    while consumed < central_directory_size:
+        header = file_obj.read(_ZIP_CENTRAL_DIRECTORY_HEADER_BYTES)
+        if (
+            len(header) != _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES
+            or not header.startswith(_ZIP_CENTRAL_DIRECTORY_SIGNATURE)
+        ):
+            return False
+        filename_size, extra_size, comment_size = struct.unpack_from("<3H", header, 28)
+        variable_size = filename_size + extra_size + comment_size
+        entry_size = _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES + variable_size
+        consumed += entry_size
+        observed_entries += 1
+        if (
+            consumed > central_directory_size
+            or observed_entries > _MAX_OFFICE_ZIP_ENTRIES
+        ):
+            return False
+        file_obj.seek(variable_size, os.SEEK_CUR)
+    return (
+        consumed == central_directory_size
+        and observed_entries == expected_entries
+    )
 
 
 def _image_extension(data: bytes) -> str | None:

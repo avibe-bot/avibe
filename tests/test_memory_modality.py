@@ -7,6 +7,7 @@ from types import ModuleType
 
 import pytest
 
+import core.memory.modality as modality_module
 from core.memory.modality import (
     OFFICE_ATTACHMENT_EXTENSIONS,
     PINNED_UPSTREAM_EXCLUDED_EXTENSIONS,
@@ -309,6 +310,34 @@ def test_classifier_rejects_an_ordinary_zip_renamed_as_office(
 ) -> None:
     monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
     path = _write_private(tmp_path / "report.docx", _office_zip("notes.txt"))
+
+    assert classify_pinned_attachment(
+        "report.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        path,
+    ) is None
+
+
+def test_classifier_rejects_office_zip_entry_amplification_before_opening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = ["[Content_Types].xml", "word/document.xml"]
+    entries.extend(
+        f"padding/{index}"
+        for index in range(modality_module._MAX_OFFICE_ZIP_ENTRIES - 1)
+    )
+    payload = bytearray(_office_zip(*entries))
+    eocd_offset = payload.rfind(modality_module._ZIP_EOCD_SIGNATURE)
+    assert eocd_offset >= 0
+    struct.pack_into("<HH", payload, eocd_offset + 8, 1, 1)
+    path = _write_private(tmp_path / "report.docx", bytes(payload))
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+
+    def refuse_zipfile(*_args, **_kwargs):
+        raise AssertionError("entry-count rejection must precede ZipFile construction")
+
+    monkeypatch.setattr(modality_module.zipfile, "ZipFile", refuse_zipfile)
 
     assert classify_pinned_attachment(
         "report.docx",

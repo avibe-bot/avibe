@@ -216,6 +216,34 @@ def test_pin_revalidates_workbench_office_copy_without_losing_siblings(
     store.release(bundle.bundle_id)
 
 
+def test_workbench_long_office_display_name_keeps_suffix_through_pin(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    office = _source_file(source_root, "upload.xlsx", _xlsx_bytes())
+    long_name = f"{'report' * 100}.xlsx"
+
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name=long_name,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(office),
+            )
+        ]
+    )
+    bundle = AttachmentPinStore().pin(converted)
+
+    assert len(converted[0].name.encode("utf-8")) <= 512
+    assert converted[0].name.endswith(".xlsx")
+    assert bundle.attachments[0].name == converted[0].name
+
+
 @pytest.mark.parametrize(
     "uri_factory",
     [

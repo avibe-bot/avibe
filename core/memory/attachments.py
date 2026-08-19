@@ -320,7 +320,6 @@ class AttachmentPinStore:
                                 and not _pinned_office_matches(
                                     stage_fd,
                                     filename,
-                                    source.name,
                                     source.kind,
                                     source.ext,
                                 )
@@ -450,7 +449,6 @@ class AttachmentPinStore:
                             and not _pinned_office_matches(
                                 bundle_fd,
                                 filename,
-                                pinned.name,
                                 pinned.kind,
                                 pinned.ext,
                             )
@@ -795,16 +793,7 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
             kind = "email"
         else:
             kind = "doc"
-        display_name = Path(name).name
-        try:
-            encoded_name = display_name.encode("utf-8")
-        except UnicodeError:
-            continue
-        if len(encoded_name) > _MAX_ATTACHMENT_NAME_BYTES:
-            display_name = encoded_name[:_MAX_ATTACHMENT_NAME_BYTES].decode(
-                "utf-8",
-                errors="ignore",
-            )
+        display_name = _bounded_attachment_name(Path(name).name)
         if display_name:
             converted.append(
                 CaptureAttachment(
@@ -815,6 +804,29 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
                 )
             )
     return tuple(converted)
+
+
+def _bounded_attachment_name(name: str) -> str:
+    try:
+        encoded_name = name.encode("utf-8")
+    except UnicodeError:
+        return ""
+    if len(encoded_name) <= _MAX_ATTACHMENT_NAME_BYTES:
+        return name
+    suffix = Path(name).suffix
+    encoded_suffix = suffix.encode("utf-8", errors="ignore")
+    if not suffix or len(encoded_suffix) >= _MAX_ATTACHMENT_NAME_BYTES:
+        return encoded_name[:_MAX_ATTACHMENT_NAME_BYTES].decode(
+            "utf-8",
+            errors="ignore",
+        )
+    stem = name[: -len(suffix)]
+    stem_budget = _MAX_ATTACHMENT_NAME_BYTES - len(encoded_suffix)
+    bounded_stem = stem.encode("utf-8")[:stem_budget].decode(
+        "utf-8",
+        errors="ignore",
+    )
+    return f"{bounded_stem}{suffix}"
 
 
 def _absolute_lexical(value: Path | str) -> Path:
@@ -1031,7 +1043,6 @@ def _require_safe_source_file(info: os.stat_result) -> None:
 def _pinned_office_matches(
     directory_fd: int,
     filename: str,
-    display_name: str,
     kind: MemoryContentKind,
     extension: str,
 ) -> bool:
@@ -1042,7 +1053,7 @@ def _pinned_office_matches(
     try:
         _require_private_file(os.fstat(descriptor), "pinned Office attachment")
         return memory_modality.classify_pinned_attachment(
-            display_name,
+            filename,
             "application/octet-stream",
             Path(filename),
             file_fd=descriptor,
