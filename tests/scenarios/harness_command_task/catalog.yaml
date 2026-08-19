@@ -132,7 +132,7 @@ scenarios:
     kind: config
     layer: unit
     backend: shared
-    test: ui/src/components/workbench/harnessLifecycle.test.ts::taskCommandPreview quotes argv the way the shell would read it back
+    test: ui/src/components/workbench/harnessLifecycle.test.ts::taskCommandPreview quotes an argv part that would otherwise lose its boundary
   - id: SCT-017
     name: a fire that produced no exit code clears the one the last fire left
     status: covered

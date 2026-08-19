@@ -1208,3 +1208,77 @@ rendered as a *sibling* of the image (inside it, it would be hidden with everyth
 No new i18n key: `byDay.column` is the same wording, so the two readings cannot disagree —
 which is how MH-USAGE-023 asserts it, tooltips against list items rather than against a
 list of days.
+
+### Stage 2, round 4 (head `82c46d5a0`) — breaker tripped again
+
+Two P2 findings, **both class repeats**, so the breaker trips a second time and both
+closures are made at the class owner rather than at the flagged site.
+
+| Class | Heads | What recurs |
+| --- | --- | --- |
+| A | 1, 3, 4 | A row can read `covered` while nothing executable backs it |
+| B | 3, 4 | The report states per-row figures through visual position alone |
+
+**Class A — the gate asked one catalog and passed three in silence.** Round 3's gate
+selected rows through each catalog's own `status_legend`, and `status_legend` maps a status
+to a *description string* in every catalog here but `model_hub`. Reading `test_required`
+off a string yields `undefined`, so `harness_command_task`, `memory_list`, and
+`message_delivery` contributed zero rows — the gate reported a clean 9/9 while three
+catalogs went unasked. That is the same failure the gate exists to prevent, one level up.
+
+The reviewer proposed normalizing the scalar legends. Rejected: inferring `test_required`
+from prose (`'deterministic scenario or contract coverage exists'` → true?) is a heuristic
+over English, the exact species of thing round 3 deleted from the Python side. **A row that
+*cites* a UI file must resolve, whatever its legend looks like** — simpler and strictly
+stronger. A citation is the row's own claim, exists in every catalog, and no legend shape
+can switch it off. Coverage went 9 rows / 1 catalog → 20 rows / 4 catalogs; collection
+still rides `npm test`, 1.7 s.
+
+Three citation shapes now resolve under one rule, because one notion (prefix) is what they
+have in common — a rule per catalog would be a policy each new catalog could contradict:
+
+| Shape | Written as | Resolves against |
+| --- | --- | --- |
+| Catalog ID | `path::MH-USAGE-024` | the case's own name |
+| Readable full name | `path::taskCommandPreview quotes an argv part …` | the full name with `' > '` flattened to `' '` |
+| File only | `path` | the file being collected at all |
+
+Two shapes that resolve to a running case and still prove nothing are rejected explicitly: a
+row citing a **sibling row's ID** (checked against the whole catalog's ID set, including
+pytest-evidenced rows), and a file-only citation whose file collects nothing.
+
+The gate immediately caught a real pre-existing defect it had been unable to see:
+`harness_command_task` **SCT-016** was `covered` on `taskCommandPreview quotes argv the way
+the shell would read it back`, a case name that no longer exists. Re-pointed to the live
+case; the row's claim was true, its citation had rotted.
+
+**Class B — one mechanism for every panel of per-row figures.** Round 3 answered the by-day
+chart with an `sr-only` sentence per day; head 4 flagged the by-source table, whose figures
+were unattributed `<span>`s in a CSS grid. Answering the second panel with a second
+mechanism invites a fifth round, so both panels now carry the same structure.
+
+Why roles and not a native `<table>` for the visible panel: the layout is a CSS grid
+(`--model-hub-usage-columns`) that collapses to one column below 767px, and a `<table>` can
+only stack through a `display` override — overriding `display` is exactly what strips the
+native table semantics it was chosen for. Explicit roles are unaffected by `display` and
+keep both the grid and the structure at every width. The by-day list became an `sr-only`
+native `<table>` (Tailwind's `sr-only` does not touch `display`), so the tab has one answer
+for "figures need row and column association" instead of two.
+
+A figure's column is **its position in its row** — which is what makes the header row an
+answer rather than decoration, in an ARIA table exactly as in a native one — and the cell
+repeats its header as a `md:hidden` label for the width where the header row is `display:none`.
+Between them the two cover both widths, so a per-cell `aria-colindex` restates what position
+already says; it earns its keep only for a row that skips a *middle* column, and the model
+row's empty `lastMetered` cell is the simpler way to not have one. Mutation-checked before
+deciding: dropping `aria-colindex` changed no observable association and no assertion, so it
+went.
+
+MH-USAGE-023 is reframed against the table (its `<li>`s are gone), still deriving every
+expectation from the tooltips so the two readings of a day cannot answer differently.
+MH-USAGE-024 is the class property, asked of *whatever* tables the tab renders: every body
+row has exactly one row header, states as many figures as there are columns (no row ends
+early and shifts the ones before it), and — where the headers can leave the accessibility
+tree — labels every figure with the header at its own position. Four mutations were run
+against it and all four fail: dropping `role="table"`, removing the model row's placeholder
+cell, removing the stacked labels, and reordering `SOURCE_COLUMNS`.

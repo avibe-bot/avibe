@@ -4,7 +4,7 @@
 // the tab could make that the payload does not support — a span it was not
 // served, an identity it cannot render, an empty window drawn as zeroes, or a
 // shortfall presented as spare capacity.
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -72,6 +72,16 @@ const draw = (
       />
     </I18nextProvider>,
   );
+
+/** A table's rows that carry figures — the ones headed by a row rather than by a column. */
+const bodyRows = (table: HTMLElement) =>
+  within(table).getAllByRole('row').filter((row) => within(row).queryAllByRole('rowheader').length > 0);
+
+/**
+ * One row's stated figures, its row header first — which is the order that decides
+ * which column each of them answers.
+ */
+const figures = (row: HTMLElement) => [...within(row).getAllByRole('rowheader'), ...within(row).getAllByRole('cell')];
 
 afterEach(cleanup);
 
@@ -159,15 +169,78 @@ describe('UsageTab', () => {
 
   it('MH-USAGE-023: states every day of the window in text, not only in a pointer tooltip', () => {
     const { container } = draw(readyRegion(summary()));
-    const chart = screen.getByRole('img', { name: /Metered tokens per day/ });
-    const tooltips = [...container.querySelectorAll('.model-hub-usage-track')].map((track) => track.getAttribute('title'));
+    const tooltips = [...container.querySelectorAll('.model-hub-usage-track')].map((track) => track.getAttribute('title') ?? '');
 
     // A `title` opens on hover alone, and the chart is one image whose columns
-    // assistive tech never enumerates — so the same readouts have to exist as
-    // text outside it. Asserted against the tooltips rather than against a list
-    // of days: the two readings cannot disagree, whatever the window holds.
-    const items = [...container.querySelectorAll('li')].filter((item) => !chart.contains(item));
-    expect(items.map((item) => item.textContent)).toEqual(tooltips);
+    // assistive tech never enumerates — so the same three figures have to exist
+    // as cells outside it. Read out of the tooltips rather than out of a list of
+    // days: the two readings of a day cannot disagree, whatever the window holds.
+    const rows = bodyRows(screen.getByRole('table', { name: /Metered tokens and requests per day/ }));
+    expect(rows).toHaveLength(tooltips.length);
+    rows.forEach((row, index) => {
+      const said = tooltips[index].split(' · ');
+      const stated = figures(row).map((figure) => figure.textContent ?? '');
+      expect(stated).toHaveLength(said.length);
+      stated.forEach((text, column) => expect(said[column]).toContain(text));
+    });
+  });
+
+  it('MH-USAGE-024: every figure the report states names the row and the column it answers', () => {
+    // The class this closes: a per-row figure stated by visual position alone,
+    // which no reader who cannot see the layout can recover. Asked of whatever
+    // tables the tab renders rather than of a list of them, so a third panel of
+    // figures is covered by existing instead of by an edit here.
+    const { container } = draw(readyRegion(summary({
+      sources: [
+        source({ models: [model({ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6' })] }),
+        // The ragged shape: a Source with no metering timestamp, over a model that
+        // has none by definition. Both stop before the last column.
+        source({
+          source_id: 'src_probe002',
+          label: 'Probe source',
+          last_metered_at: null,
+          models: [model({ model_id: 'claude-haiku-4-5', label: 'claude-haiku-4-5' })],
+        }),
+      ],
+    })));
+
+    const named: string[] = [];
+    for (const table of screen.getAllByRole('table')) {
+      const headers = within(table).getAllByRole('columnheader');
+      expect(headers.length).toBeGreaterThan(1);
+      // Whether this table's headers can leave the accessibility tree, which is
+      // what decides whether position alone is enough. jsdom loads no stylesheet,
+      // so the class is the only readable statement of it.
+      const stacks = /(^|\s)hidden(\s|$)/.test(headers[0].parentElement?.className ?? '');
+      const rows = bodyRows(table);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        const heads = within(row).getAllByRole('rowheader');
+        expect(heads).toHaveLength(1);
+        named.push(heads[0].textContent ?? '');
+        const stated = figures(row);
+        // A figure answers the column it sits in, so no row may end early: the
+        // model row has no metering timestamp of its own and holds that column
+        // open with an empty cell rather than shifting the ones before it under
+        // the wrong header.
+        expect(stated).toHaveLength(headers.length);
+        stated.forEach((figure, column) => {
+          const label = figure.querySelector('.model-hub-usage-cell-label');
+          // Where the headers go, the cell's own label is the association that
+          // stays — so every figure that states something has to carry one, and it
+          // has to name the column the figure sits in. Two statements about one
+          // cell, which a drifting column order would answer differently.
+          if (stacks && figure !== heads[0] && figure.textContent !== '') expect(label).not.toBeNull();
+          if (label !== null) expect(label.textContent).toBe(headers[column].textContent);
+        });
+      }
+    }
+
+    // …and the rows are the whole report's, not the subset that happens to render:
+    // every Source, every model under it, and every day the chart draws.
+    const days = container.querySelectorAll('.model-hub-usage-track').length;
+    expect(named).toHaveLength(4 + days);
+    expect(named).toEqual(expect.arrayContaining(['Contract source', 'Probe source', 'claude-opus-4-6', 'claude-haiku-4-5']));
   });
 
   it('keeps the last report on screen while a new one is read, and claims no failure', () => {

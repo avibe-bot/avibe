@@ -67,19 +67,39 @@ const RowIdentity: React.FC<{ identity: UsageIdentity; goneKey: string }> = ({ i
 };
 
 /**
- * One measured cell.
+ * The by-source table's columns, in the order the rows state them.
  *
- * The label is carried on the cell rather than only in the header because the
- * header is the first thing that goes when the surface narrows — the row keeps
- * its own labels there, so a stacked cell is still a labelled number instead of
- * an unattributed one.
+ * One list, read by the header row and by every cell's own label, so the two
+ * cannot come to name a column differently.
  */
-const Cell: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <span className="model-hub-usage-cell flex items-baseline justify-between gap-2 md:justify-end">
-    <span className="model-hub-usage-cell-label md:hidden">{label}</span>
-    <span className="min-w-0 truncate">{children}</span>
-  </span>
-);
+const SOURCE_COLUMNS = ['source', 'tokens', 'requests', 'cached', 'lastMetered'] as const;
+
+type SourceColumn = (typeof SOURCE_COLUMNS)[number];
+
+const columnLabel = (column: SourceColumn) => `settings.models.usage.bySource.col.${column}`;
+
+/**
+ * One measured cell, told which column it answers.
+ *
+ * A cell's column is the position it holds in its row, which is what makes the
+ * header row above it an answer and not decoration — so no row may end early: the
+ * model row holds its empty column open below rather than shifting the cells after
+ * it. The label repeats the header on the cell itself because the header is the
+ * first thing that goes when the surface narrows, and a stacked cell has to remain
+ * a labelled number rather than an unattributed one. Between them the two cover
+ * both widths, so a per-cell `aria-colindex` would restate what position already
+ * says; the index earns its keep only for a row that skips a column in the middle,
+ * and holding the place with an empty cell is the simpler way to not have one.
+ */
+const Cell: React.FC<{ column: SourceColumn; children: React.ReactNode }> = ({ column, children }) => {
+  const { t } = useTranslation();
+  return (
+    <span role="cell" className="model-hub-usage-cell flex items-baseline justify-between gap-2 md:justify-end">
+      <span className="model-hub-usage-cell-label md:hidden">{t(columnLabel(column))}</span>
+      <span className="min-w-0 truncate">{children}</span>
+    </span>
+  );
+};
 
 const StatCard: React.FC<{ label: string; value: string; note: string }> = ({ label, value, note }) => (
   <div className="model-hub-usage-stat flex flex-col rounded-xl border border-border bg-background">
@@ -127,16 +147,19 @@ const ModelRow: React.FC<{ model: UsageByModel }> = ({ model }) => {
   const count = useCount();
   const share = usageCachedInputShare(model);
   return (
-    <div className="model-hub-usage-row model-hub-usage-row--model grid border-t border-border md:items-center">
-      <span className="model-hub-usage-model flex min-w-0 items-baseline">
+    <div role="row" className="model-hub-usage-row model-hub-usage-row--model grid border-t border-border md:items-center">
+      <span role="rowheader" className="model-hub-usage-model flex min-w-0 items-baseline">
         <RowIdentity identity={modelIdentity(model)} goneKey="settings.models.usage.bySource.goneModel" />
       </span>
-      <Cell label={t('settings.models.usage.bySource.col.tokens') as string}>{count(usageTotalTokens(model))}</Cell>
-      <Cell label={t('settings.models.usage.bySource.col.requests') as string}>{count(model.requests)}</Cell>
-      <Cell label={t('settings.models.usage.bySource.col.cached') as string}>
+      <Cell column="tokens">{count(usageTotalTokens(model))}</Cell>
+      <Cell column="requests">{count(model.requests)}</Cell>
+      <Cell column="cached">
         {share === null ? (t('settings.models.usage.blank') as string) : formatPercent(share, i18n.language)}
       </Cell>
-      <span className="hidden md:block" />
+      {/* A model has no metering timestamp of its own; the column stays empty
+          rather than repeating the Source's, and holds its place so every cell
+          before it still sits under the header it answers. */}
+      <span role="cell" className="hidden md:block" />
     </div>
   );
 };
@@ -146,17 +169,19 @@ const SourceRows: React.FC<{ source: UsageBySource }> = ({ source }) => {
   const count = useCount();
   const share = usageCachedInputShare(source);
   return (
-    <div className="border-b border-border last:border-b-0">
-      <div className="model-hub-usage-row grid md:items-center">
-        <span className="model-hub-usage-source flex min-w-0 items-baseline font-semibold text-foreground">
+    // A Source and the models under it are one group of rows, which is also what
+    // the border draws: the group is the unit a reader scans, not each line.
+    <div role="rowgroup" className="border-b border-border last:border-b-0">
+      <div role="row" className="model-hub-usage-row grid md:items-center">
+        <span role="rowheader" className="model-hub-usage-source flex min-w-0 items-baseline font-semibold text-foreground">
           <RowIdentity identity={sourceIdentity(source)} goneKey="settings.models.usage.bySource.goneSource" />
         </span>
-        <Cell label={t('settings.models.usage.bySource.col.tokens') as string}>{count(usageTotalTokens(source))}</Cell>
-        <Cell label={t('settings.models.usage.bySource.col.requests') as string}>{count(source.requests)}</Cell>
-        <Cell label={t('settings.models.usage.bySource.col.cached') as string}>
+        <Cell column="tokens">{count(usageTotalTokens(source))}</Cell>
+        <Cell column="requests">{count(source.requests)}</Cell>
+        <Cell column="cached">
           {share === null ? (t('settings.models.usage.blank') as string) : formatPercent(share, i18n.language)}
         </Cell>
-        <Cell label={t('settings.models.usage.bySource.col.lastMetered') as string}>
+        <Cell column="lastMetered">
           {source.last_metered_at === null ? (t('settings.models.usage.blank') as string) : formatDayTime(source.last_metered_at, i18n.language)}
         </Cell>
       </div>
@@ -167,19 +192,27 @@ const SourceRows: React.FC<{ source: UsageBySource }> = ({ source }) => {
 
 const BySourcePanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
   const { t } = useTranslation();
+  const titleId = React.useId();
   return (
     <section className="model-hub-usage-card overflow-hidden rounded-xl border border-border bg-background">
-      <h3 className="model-hub-usage-card-head model-hub-usage-section-title border-b border-border font-semibold text-foreground">
+      <h3 id={titleId} className="model-hub-usage-card-head model-hub-usage-section-title border-b border-border font-semibold text-foreground">
         {t('settings.models.usage.bySource.title')}
       </h3>
-      <div className="model-hub-usage-head hidden border-b border-border font-semibold md:grid">
-        <span className="truncate">{t('settings.models.usage.bySource.col.source')}</span>
-        <span className="flex justify-end truncate">{t('settings.models.usage.bySource.col.tokens')}</span>
-        <span className="flex justify-end truncate">{t('settings.models.usage.bySource.col.requests')}</span>
-        <span className="flex justify-end truncate">{t('settings.models.usage.bySource.col.cached')}</span>
-        <span className="flex justify-end truncate">{t('settings.models.usage.bySource.col.lastMetered')}</span>
+      {/* A table by role rather than by tag. The layout is a CSS grid that stacks
+          into labelled lines on a narrow surface, which a `<table>` can only do
+          through a `display` override — and overriding `display` is exactly what
+          strips a table of the semantics it was chosen for. Explicit roles keep
+          the grid and the structure at every width. */}
+      <div role="table" aria-labelledby={titleId}>
+        <div role="row" className="model-hub-usage-head hidden border-b border-border font-semibold md:grid">
+          {SOURCE_COLUMNS.map((column, index) => (
+            <span key={column} role="columnheader" className={index === 0 ? 'truncate' : 'flex justify-end truncate'}>
+              {t(columnLabel(column))}
+            </span>
+          ))}
+        </div>
+        {summary.sources.map((source) => <SourceRows key={source.source_id} source={source} />)}
       </div>
-      {summary.sources.map((source) => <SourceRows key={source.source_id} source={source} />)}
     </section>
   );
 };
@@ -203,8 +236,9 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
   const peak = columns.reduce<UsageDayColumn | null>((best, column) => (column.tokens > (best?.tokens ?? 0) ? column : best), null);
   const metered = columns.some(usageDayIsMetered);
   const day = (value: string) => formatLocalDay(value, i18n.language);
-  // One day's figures, in the one wording both the pointer tooltip and the list
-  // below read from — a second phrasing would be a second answer to drift from.
+  // One day's figures as a hover readout. The table below states the same three
+  // values in cells, and MH-USAGE-023 derives its expectation from this sentence
+  // so the two readings of a day cannot answer differently.
   const readout = (column: UsageDayColumn) =>
     t('settings.models.usage.byDay.column', {
       day: day(column.day),
@@ -237,17 +271,32 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
             </div>
           ))}
         </div>
-        {/* Every day's figures, in text. A pointer tooltip is the one readout a
-            keyboard or screen-reader user cannot open, and `role="img"` above
-            hides the columns from assistive tech by design — so the series is
-            also a list, and the axis stops being the only reachable reading of
-            it. Sibling rather than child: inside the image it would be hidden
-            with everything else. */}
-        <ul className="sr-only">
-          {columns.map((column) => (
-            <li key={column.day}>{readout(column)}</li>
-          ))}
-        </ul>
+        {/* Every day's figures again, as a table. A pointer tooltip is the one
+            readout a keyboard or screen-reader user cannot open, and `role="img"`
+            above hides the columns from assistive tech by design — so the series
+            needs a second reading, in cells rather than one sentence per day,
+            which is the same per-column association the Source table carries.
+            Sibling of the image, never a child: inside it, it would be hidden
+            along with everything else. */}
+        <table className="sr-only">
+          <caption>{t('settings.models.usage.byDay.table', { from: day(summary.from_day), to: day(summary.to_day) })}</caption>
+          <thead>
+            <tr>
+              <th scope="col">{t('settings.models.usage.byDay.col.day')}</th>
+              <th scope="col">{t('settings.models.usage.tokens.label')}</th>
+              <th scope="col">{t('settings.models.usage.requests.label')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {columns.map((column) => (
+              <tr key={column.day}>
+                <th scope="row">{day(column.day)}</th>
+                <td>{count(column.tokens)}</td>
+                <td>{count(column.requests)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
         <div className="model-hub-usage-axis flex items-baseline justify-between gap-3">
           <span className="truncate">{day(summary.from_day)}</span>
           <span className="model-hub-usage-peak truncate">

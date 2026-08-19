@@ -270,6 +270,12 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-023
+  - id: MH-USAGE-024
+    name: Every figure in the usage report names the row and the column it answers, not a position on screen
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-024
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

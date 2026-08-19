@@ -86,6 +86,7 @@ describe('UI evidence resolution', () => {
       { name: 'suite > MH-ROW-B: runs, but in another file', file: '/checkout/other.test.tsx' },
       { name: 'suite > MH-ROW-C: runs', file: `/checkout/${FIXTURE_FILE}` },
       { name: 'suite > MH-ROW-C: runs again', file: `/checkout/${FIXTURE_FILE}` },
+      { name: 'TaskDetail > command task > states the timeout', file: `/checkout/${FIXTURE_FILE}` },
     ];
     const row = (id, extra = {}) => ({ id, cited: id, file: FIXTURE_FILE, ...extra });
 
@@ -94,23 +95,37 @@ describe('UI evidence resolution', () => {
     expect(resolveUiEvidence([row('MH-ROW-B')], collected)).toHaveLength(1);
     expect(resolveUiEvidence([row('MH-ROW-C')], collected)).toHaveLength(1);
     expect(resolveUiEvidence([row('MH-ROW-D')], collected)).toHaveLength(1);
-    // A row may only resolve through a case named for itself, so it cannot pass
-    // by citing a sibling's evidence.
-    expect(resolveUiEvidence([row('MH-ROW-D', { cited: 'MH-ROW-A' })], collected)).toHaveLength(1);
+    // A row may only resolve through evidence named for itself, so it cannot pass
+    // by citing a sibling's — which is a citation that does resolve, to a case
+    // that is another row's answer.
+    const ids = new Set(['MH-ROW-A', 'MH-ROW-D']);
+    expect(resolveUiEvidence([row('MH-ROW-D', { cited: 'MH-ROW-A' })], collected, ids)).toHaveLength(1);
+    // The other convention in the checkout: the case's readable full name, which
+    // the catalogs write with vitest's separator flattened to a space.
+    expect(resolveUiEvidence([row('SCT-018', { cited: 'TaskDetail command task states the timeout' })], collected)).toEqual([]);
+    // A row that names a file and no case in it claims only that the file runs.
+    expect(resolveUiEvidence([row('MH-ROW-E', { cited: null })], collected)).toEqual([]);
+    expect(resolveUiEvidence([row('MH-ROW-E', { cited: null, file: 'absent.test.tsx' })], collected)).toHaveLength(1);
   });
 
-  it('asks about a row only when its declared status requires a test', () => {
-    const catalog = {
-      status_legend: { covered: { test_required: true }, gap: { test_required: false } },
-      scenarios: [
-        { id: 'MH-UI', status: 'covered', test: 'ui/src/a.test.tsx::MH-UI' },
-        { id: 'MH-SCRIPT', status: 'covered', test: 'ui/scripts/a.test.mjs::MH-SCRIPT' },
-        { id: 'MH-PY', status: 'covered', test: 'tests/test_a.py::test_a' },
-        { id: 'MH-GAP', status: 'gap', test: null },
-      ],
-    };
+  it('asks about every row that cites a UI file, whatever its legend looks like', () => {
+    // The legend shape is the hole this closes: `status_legend` is a description
+    // string in every catalog but one, so selecting rows by `test_required` asked
+    // about one catalog and passed the rest without saying so. A citation is the
+    // row's own claim and reads the same in both shapes.
+    const scenarios = [
+      { id: 'MH-UI', status: 'covered', test: 'ui/src/a.test.tsx::MH-UI' },
+      { id: 'MH-SCRIPT', status: 'covered', test: 'ui/scripts/a.test.mjs::MH-SCRIPT' },
+      { id: 'MH-FILE', status: 'covered', test: 'ui/src/b.test.tsx' },
+      { id: 'MH-PY', status: 'covered', test: 'tests/test_a.py::test_a' },
+      { id: 'MH-GAP', status: 'gap', test: null },
+    ];
+    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE'];
 
-    expect(uiEvidenceRows(catalog).map((row) => row.id)).toEqual(['MH-UI', 'MH-SCRIPT']);
+    expect(uiEvidenceRows({ status_legend: { covered: { test_required: true } }, scenarios }).map((row) => row.id)).toEqual(asked);
+    expect(uiEvidenceRows({ status_legend: { covered: 'executable evidence exists' }, scenarios }).map((row) => row.id)).toEqual(asked);
+    expect(uiEvidenceRows({ scenarios }).map((row) => row.id)).toEqual(asked);
+    expect(uiEvidenceRows({ scenarios }).find((row) => row.id === 'MH-FILE').cited).toBe(null);
     expect(isUiEvidence('tests/test_a.py::test_a')).toBe(false);
   });
 });

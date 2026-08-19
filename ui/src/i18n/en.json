@@ -979,6 +979,8 @@
         "byDay": {
           "title": "By day",
           "chart": "Metered tokens per day, {{from}} to {{to}}",
+          "table": "Metered tokens and requests per day, {{from}} to {{to}}",
+          "col": { "day": "Day" },
           "column": "{{day}} · {{tokens}} tokens · {{requests}} requests",
           "peak": "Peak {{tokens}} on {{day}}",
           "quiet": "No day in this window carried a metered turn",

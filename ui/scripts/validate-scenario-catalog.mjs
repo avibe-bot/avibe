@@ -41,17 +41,27 @@ const catalogPaths = () => {
 };
 
 const main = () => {
-  const rows = catalogPaths().flatMap((file) => {
+  const catalogs = catalogPaths().map((file) => {
     const catalog = yaml.load(fs.readFileSync(file, 'utf8'));
-    return uiEvidenceRows(catalog).map((row) => ({ ...row, catalog: path.relative(REPO_ROOT, file) }));
+    const name = path.relative(REPO_ROOT, file);
+    return {
+      // The whole ID set, not just the UI rows': a UI row may borrow the ID of a
+      // row evidenced by pytest, and that is the same empty citation.
+      ids: new Set((catalog.scenarios ?? []).map((row) => row.id)),
+      rows: uiEvidenceRows(catalog).map((row) => ({ ...row, catalog: name })),
+    };
   });
+  const rows = catalogs.flatMap((catalog) => catalog.rows);
   if (rows.length === 0) {
     console.log('scenario catalogs: no rows are evidenced by a UI case');
     return;
   }
 
   const files = [...new Set(rows.map((row) => path.relative(UI_ROOT, path.join(REPO_ROOT, row.file))))];
-  const problems = resolveUiEvidence(rows, collectCases({ files }));
+  // One collection for every catalog: `list` costs a vitest startup, and the
+  // question each row asks is answered by the same collected set.
+  const collected = collectCases({ files });
+  const problems = catalogs.flatMap((catalog) => resolveUiEvidence(catalog.rows, collected, catalog.ids));
   if (problems.length > 0) {
     console.error(`\nUI-evidenced scenario rows that do not resolve to a collected vitest case:\n`);
     for (const problem of problems) console.error(`  - ${problem}`);

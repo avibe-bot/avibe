@@ -979,6 +979,8 @@
         "byDay": {
           "title": "按日",
           "chart": "每日计量 token，{{from}} 至 {{to}}",
+          "table": "每日计量 token 与请求数，{{from}} 至 {{to}}",
+          "col": { "day": "日期" },
           "column": "{{day}} · {{tokens}} tokens · {{requests}} 次请求",
           "peak": "峰值 {{tokens}}，出现在 {{day}}",
           "quiet": "这个区间没有任何一天有计量数据",
