@@ -8,9 +8,10 @@
 // as a single merged follow-up) — and what the user is left looking at when the
 // server refuses the burst.
 
+import { useEffect } from 'react';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { AgentRoutePatch } from './AgentRoutePicker';
 
@@ -158,6 +159,7 @@ import { ChatPage } from './ChatPage';
 import { resetCoalescedWrites } from '../../lib/useCoalescedWrite';
 
 const SESSION_ID = 'session-route';
+const OTHER_SESSION_ID = 'session-other';
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -193,6 +195,27 @@ const sessionRow = {
   reasoning_effort: null,
 };
 
+// A second chat, for the cases about two rows being edited at once. Same route on
+// purpose: only the id distinguishes whose rollback is whose.
+const otherRow = { ...sessionRow, id: OTHER_SESSION_ID, title: 'The other chat' };
+
+const rowsById: Record<string, typeof sessionRow> = {
+  [SESSION_ID]: sessionRow,
+  [OTHER_SESSION_ID]: otherRow,
+};
+
+// Switching chats keeps ChatPage mounted (same route, new param) — which is why a
+// burst opened on the chat the user has left can still settle into this component.
+let navigate: ((to: string) => void) | null = null;
+
+function NavProbe() {
+  const to = useNavigate();
+  useEffect(() => {
+    navigate = to;
+  }, [to]);
+  return null;
+}
+
 function settle() {
   return act(async () => {
     await Promise.resolve();
@@ -212,6 +235,7 @@ function shownRoute() {
 async function mountChat() {
   render(
     <MemoryRouter initialEntries={[`/chat/${SESSION_ID}`]}>
+      <NavProbe />
       <Routes>
         <Route path="/chat/:sessionId" element={<ChatPage />} />
       </Routes>
@@ -240,6 +264,7 @@ describe('the chat row under an optimistic write', () => {
     mocks.onPatch = null;
     mocks.onSend = null;
     mocks.onStop = null;
+    navigate = null;
     vi.clearAllMocks();
     // The writer's store is module state (a session row outlives the page that
     // edits it), so each case starts from an empty one.
@@ -247,9 +272,9 @@ describe('the chat row under an optimistic write', () => {
 
     mocks.api.connectWorkbenchEvents.mockImplementation(() => () => {});
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
-    mocks.api.getSession.mockResolvedValue(sessionRow);
-    mocks.api.getSessionBootstrap.mockResolvedValue({
-      session: sessionRow,
+    mocks.api.getSession.mockImplementation(async (id: string) => rowsById[id] ?? sessionRow);
+    mocks.api.getSessionBootstrap.mockImplementation(async (id: string) => ({
+      session: rowsById[id] ?? sessionRow,
       capabilities: { can_chat: true },
       agents: [],
       default_agent_name: null,
@@ -259,7 +284,7 @@ describe('the chat row under an optimistic write', () => {
       turn_state: idleTurnState,
       queued: [],
       draft: { text: '' },
-    });
+    }));
     mocks.api.getTurnState.mockResolvedValue(idleTurnState);
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
@@ -385,5 +410,83 @@ describe('the chat row under an optimistic write', () => {
     // route the server refused with the indicator already gone.
     expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', effort: '', saving: 'no' });
     expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the fields a partly committed burst persisted, reverting only the refused ones', async () => {
+    const gates = [deferred<unknown>(), deferred<unknown>()];
+    let call = 0;
+    mocks.api.updateSession.mockImplementation(() => gates[call++].promise);
+    await mountChat();
+
+    act(() => {
+      mocks.onPatch!({ agent_name: 'codex', agent_variant: 'codex', model: 'gpt-5' });
+      mocks.onPatch!({ reasoning_effort: 'high' });
+    });
+    await act(async () => {
+      gates[0].resolve({ ...sessionRow, agent_name: 'codex', model: 'gpt-5' });
+      await gates[0].promise;
+    });
+    await settle();
+    // The Agent switch is on the server; the effort follows it in one request.
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, { reasoning_effort: 'high' });
+
+    // Offline for reads too, so the local revert is the only thing acting.
+    mocks.api.getSession.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      gates[1].reject(new Error('nope'));
+      await gates[1].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // Only the effort goes back. This burst committed in PARTS, and reverting to
+    // the row it started from would undo an Agent switch the server is holding —
+    // leaving the header showing a route that exists nowhere.
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: '', saving: 'no' });
+  });
+
+  it('keeps each chat rollback to itself when two rows have a write in flight', async () => {
+    const gates = new Map<string, Deferred<unknown>>();
+    mocks.api.updateSession.mockImplementation((id: string) => {
+      const gate = deferred<unknown>();
+      gates.set(id, gate);
+      return gate.promise;
+    });
+    await mountChat();
+
+    // A pick on the first chat, left in flight.
+    act(() => mocks.onPatch!({ model: 'opus' }));
+    expect(gates.has(SESSION_ID)).toBe(true);
+
+    // The user switches chats while it is still deciding. ChatPage stays mounted,
+    // so both bursts are live in the same component.
+    await act(async () => {
+      navigate!(`/chat/${OTHER_SESSION_ID}`);
+    });
+    await settle();
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet' });
+
+    act(() => mocks.onPatch!({ model: 'haiku' }));
+    expect(shownRoute()).toMatchObject({ model: 'haiku', saving: 'yes' });
+    expect(gates.has(OTHER_SESSION_ID)).toBe(true);
+
+    mocks.api.getSession.mockRejectedValue(new Error('offline'));
+    // The FIRST chat's write fails. Its row is not on screen, so there is nothing
+    // to revert there — but its settle must not take the open chat's rollback with
+    // it. One slot for both would do exactly that, and the failure below would then
+    // leave a refused model on screen with the indicator already gone.
+    await act(async () => {
+      gates.get(SESSION_ID)!.reject(new Error('nope'));
+      await gates.get(SESSION_ID)!.promise.catch(() => undefined);
+    });
+    await settle();
+    expect(shownRoute()).toMatchObject({ model: 'haiku', saving: 'yes' });
+
+    await act(async () => {
+      gates.get(OTHER_SESSION_ID)!.reject(new Error('nope'));
+      await gates.get(OTHER_SESSION_ID)!.promise.catch(() => undefined);
+    });
+    await settle();
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', saving: 'no' });
   });
 });

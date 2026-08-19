@@ -148,6 +148,13 @@ export type CoalescedWrite<P> = {
  * state with the server (a re-read, or a revert), and the resource stays
  * `isSaving` until that reconciliation finishes.
  *
+ * `committed` is the outcome of the burst's LAST send, not a claim that nothing
+ * was persisted: a burst commits in parts when one request lands and the patch
+ * folded in behind it is refused. How much survived is the owner's to know — the
+ * writer never inspects a payload's fields — so an owner that reverts a rejected
+ * burst must advance its rollback target as each send commits, or it will undo a
+ * change the server is holding.
+ *
  * A burst is served by the LIVE owner of its scope, not by the mount that opened
  * it: navigating away mid-request and back hands the remaining request and the
  * settle to the view that is on screen when they happen. A scope therefore names

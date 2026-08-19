@@ -269,6 +269,55 @@ describe('useCoalescedWrite', () => {
     expect(result.current.isSaving('s1')).toBe(false);
   });
 
+  it('reports a burst that committed in parts as uncommitted, leaving the extent to the owner', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const settled: Array<[string, boolean]> = [];
+    const { result } = renderHook(() =>
+      useCoalescedWrite<string>('t', send, {
+        merge: joinMerge,
+        onSettled: (key, committed) => {
+          settled.push([key, committed]);
+        },
+      }),
+    );
+
+    act(() => {
+      result.current.write('s1', 'agent');
+    });
+    await settle();
+    act(() => {
+      result.current.write('s1', 'effort');
+    });
+    await act(async () => {
+      pending.get('s1:agent')!.resolve(true);
+      await pending.get('s1:agent')!.promise;
+    });
+    await settle();
+    expect(started).toEqual(['s1:agent', 's1:effort']);
+
+    await act(async () => {
+      pending.get('s1:effort')!.resolve(false);
+      await pending.get('s1:effort')!.promise;
+    });
+    await settle();
+
+    // A burst can commit in PARTS: the first request landed, the patch folded in
+    // behind it was refused. There is still ONE settle, and `committed` reports
+    // the burst's outcome — false, because the state the owner is showing is not
+    // the state the server holds.
+    //
+    // What it deliberately does NOT say is how much of the burst survived. The
+    // writer never sees the payloads' fields (they are the owner's shape, merged
+    // by the owner's `merge`), so only the owner can know that the Agent pick is
+    // on the server and the effort pick is not. An owner that reverts to where its
+    // burst STARTED would undo the committed part; the owners here advance their
+    // rollback target on each successful send instead.
+    expect(settled).toEqual([['s1', false]]);
+    expect(result.current.isSaving('s1')).toBe(false);
+  });
+
   it('stays mid-write until the reconcile finishes and folds a pick made during it into the same writer', async () => {
     const started: string[] = [];
     const pending = new Map<string, Deferred>();

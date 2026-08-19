@@ -885,6 +885,17 @@ export const ChatPage: React.FC = () => {
     await read(true);
   }, [api]);
 
+  // Where a rejected burst puts each field back — the values that row held before
+  // the burst replaced them, advanced past every field a request in the burst has
+  // since committed. Recorded in ``patch`` below, because the click is the last
+  // moment the row still holds them.
+  //
+  // Keyed by session id, one entry per row with a burst open. The writer serializes
+  // per key, not globally: renaming one session while another's route write is in
+  // flight is two live bursts, and a single slot would let whichever settles first
+  // take the other's base with it — leaving a rejected write nothing to revert to.
+  const rollbackBaseRef = useRef(new Map<string, Partial<WorkbenchSession>>());
+
   // Persistence for the header's optimistic edits.
   const sendSessionPatch = useCallback(
     async ({ changes, gate }: SessionPatchWrite, patchedId: string): Promise<boolean> => {
@@ -894,6 +905,14 @@ export const ChatPage: React.FC = () => {
         // Do not install the PATCH response: it is only a mutation snapshot and
         // can be older than another committed write. The authoritative refresh
         // on settle is guarded by session id and runs after every active write.
+        //
+        // The server now holds these fields, so the rollback base moves PAST them:
+        // a burst commits in parts (the Agent pick lands, the effort pick folded in
+        // behind it is refused), and reverting to where the burst started would
+        // undo a change the server took. Only the fields this request carried —
+        // the rest of the base is still the pre-burst row.
+        const base = rollbackBaseRef.current.get(patchedId);
+        if (base) Object.assign(base, changes);
         return true;
       } catch (err) {
         if (patchedId !== sessionIdRef.current) return false;
@@ -911,11 +930,6 @@ export const ChatPage: React.FC = () => {
     },
     [api, t],
   );
-
-  // The values an in-flight burst REPLACED, field by field — where a rejected
-  // burst goes back to. Recorded in ``patch`` below, because the click is the last
-  // moment the row still holds them.
-  const preBurstRowRef = useRef<{ id: string; changes: Partial<WorkbenchSession> } | null>(null);
 
   const { write: writeSessionPatch, isSaving: isPatchSaving } = useCoalescedWrite<SessionPatchWrite>('session-row', sendSessionPatch, {
     // A title edit and a route pick are independent fields of one row, so the
@@ -940,8 +954,8 @@ export const ChatPage: React.FC = () => {
     // open.
     onSettled: useCallback(
       (patchedId: string, committed: boolean) => {
-        const base = preBurstRowRef.current;
-        preBurstRowRef.current = null;
+        const base = rollbackBaseRef.current.get(patchedId);
+        rollbackBaseRef.current.delete(patchedId);
         if (patchedId !== sessionIdRef.current) return;
         if (committed) return refreshSessionRow();
         // A rejected burst lives only in this row, and the re-read is best-effort
@@ -952,9 +966,9 @@ export const ChatPage: React.FC = () => {
         // pre-burst row back would also undo what arrived meanwhile over SSE (a
         // status flip that made the chat read-only, say), which the burst never
         // touched and must not revert.
-        if (base?.id === patchedId) {
+        if (base) {
           sessionRowRefreshGateRef.current.invalidate();
-          setSession((prev) => (prev && prev.id === patchedId ? { ...prev, ...base.changes } : prev));
+          setSession((prev) => (prev && prev.id === patchedId ? { ...prev, ...base } : prev));
         }
         // Converge anyway, unawaited: the restored values are the ones this tab
         // last saw, and only a read can show a field someone else moved. The row on
@@ -2295,17 +2309,15 @@ export const ChatPage: React.FC = () => {
       // chat's reads.
       const opened = writeSessionPatch(patchedId, { changes, gate });
       // Record what this burst is replacing. ``write`` reports which call OPENED
-      // the burst; the picks folded into it are already looking at optimistic
-      // state, so a field recorded once keeps its first value — the one the server
-      // is still known to hold.
-      const base =
-        opened || preBurstRowRef.current?.id !== patchedId
-          ? { id: patchedId, changes: {} as Partial<WorkbenchSession> }
-          : preBurstRowRef.current;
+      // the burst, and that call starts this row's base over; the picks folded into
+      // it are already looking at optimistic state, so a field already recorded
+      // keeps the value it has — the pre-burst one, or the newer one a committed
+      // request in this same burst moved it to.
+      const base = (opened ? undefined : rollbackBaseRef.current.get(patchedId)) ?? {};
       for (const field of Object.keys(changes) as (keyof WorkbenchSession)[]) {
-        if (!(field in base.changes)) Object.assign(base.changes, { [field]: session[field] });
+        if (!(field in base)) Object.assign(base, { [field]: session[field] });
       }
-      preBurstRowRef.current = base;
+      rollbackBaseRef.current.set(patchedId, base);
     },
     [session, writeSessionPatch],
   );

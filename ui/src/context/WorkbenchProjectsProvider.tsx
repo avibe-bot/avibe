@@ -161,16 +161,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // The newest default-Agent pick per project, so an earlier write's response can
   // be recognised as already outdated by the time it arrives.
   const latestProjectRouteRef = useRef(new Map<string, ProjectDefaultAgent>());
-  // The Agent each project was last CONFIRMED to hold by the server — the token a
-  // compare-and-set route write has to expect. It cannot be read off the list
-  // below, because that list also carries picks the server has not accepted yet,
-  // and expecting one of those is what turns a rejected pick into a deterministic
-  // ``project_agent_conflict`` on the retry.
-  const confirmedProjectAgentRef = useRef(new Map<string, string | null>());
-  // The route each in-flight burst REPLACED, which is where a rejected burst goes
-  // back to. Recorded when the burst opens, because that is the last moment the
-  // cache still holds it.
-  const preBurstRouteRef = useRef(new Map<string, ProjectDefaultAgent | null>());
+  // The route each project was last CONFIRMED to hold by the server. It cannot be
+  // read off the list below, because that list also carries picks the server has
+  // not accepted yet. Two things read it, and both need the same value:
+  //
+  //  - the compare-and-set token a route write must expect — expecting a pick the
+  //    server refused is what turns one rejected write into a deterministic
+  //    ``project_agent_conflict`` on the retry;
+  //  - where a REJECTED burst puts the row back. That is this ref rather than a
+  //    per-burst snapshot because a burst can commit in PARTS: the Agent pick can
+  //    land and the effort pick folded in behind it can fail, and rolling back to
+  //    where the burst started would then undo a change the server is holding.
+  //    Every commit and every read advances this ref, so "the last state the
+  //    server confirmed" needs no bookkeeping of its own.
+  const confirmedProjectRouteRef = useRef(new Map<string, ProjectDefaultAgent | null>());
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
 
@@ -219,11 +223,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           : requested;
       projectsRef.current = resolved;
       if (options && 'confirmed' in options) {
-        const confirmed = confirmedProjectAgentRef.current;
+        const confirmed = confirmedProjectRouteRef.current;
         if (options.confirmed === null) confirmed.clear();
         else {
           for (const project of options.confirmed ?? []) {
-            confirmed.set(project.id, project.default_agent?.agent_id ?? null);
+            confirmed.set(project.id, project.default_agent ?? null);
           }
         }
       }
@@ -1142,7 +1146,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // pick this very request is trying to install. That is what keeps a
       // rejected pick from poisoning the next one: expecting the route the server
       // refused would make every retry a deterministic conflict.
-      const expectedAgentId = confirmedProjectAgentRef.current.get(projectId) ?? null;
+      const expectedAgentId = confirmedProjectRouteRef.current.get(projectId)?.agent_id ?? null;
       try {
         // Always send the full 5-field route: a complete set is coherent whether
         // the user picked an agent (all set) or cleared it (all null → default
@@ -1163,6 +1167,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         // recorded as confirmed, because the server did take it: that is what the
         // follow-up write must expect to find.
         const superseded = route !== latestProjectRouteRef.current.get(projectId);
+        // Nothing is left for the overlay to protect once THIS pick is the newest
+        // one, and leaving it up would re-apply the optimistic route on top of the
+        // row the server just derived — the picker composes a route with no
+        // backend (only the server knows which backend an Agent belongs to), so
+        // the cache would keep a route the server never sent until an unrelated
+        // refresh, and a picker that has lost the Agent list could no longer tell
+        // which model or effort options to offer.
+        if (!superseded) latestProjectRouteRef.current.delete(projectId);
         commitProjects(
           (prev) =>
             prev && !superseded ? prev.map((p) => (p.id === projectId ? updated : p)) : prev,
@@ -1186,26 +1198,28 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       onSettled: useCallback(
         (projectId: string, committed: boolean) => {
           latestProjectRouteRef.current.delete(projectId);
-          const replaced = preBurstRouteRef.current.get(projectId) ?? null;
-          const hadBase = preBurstRouteRef.current.delete(projectId);
           if (committed) return;
           // A rejected pick lives only in this cache, so the rollback is local:
-          // put back the route the burst replaced. Synchronous and complete on its
-          // own — the previous revision awaited a whole-tree re-read instead, which
-          // is a read this provider may only be able to QUEUE (``fetchProjects``
-          // records a trailing intent when one is already in flight), so the
-          // refused route stayed on screen after the indicator had gone.
-          if (hadBase) {
+          // put back the last route the server CONFIRMED. Synchronous and complete
+          // on its own — the previous revision awaited a whole-tree re-read
+          // instead, which is a read this provider may only be able to QUEUE
+          // (``fetchProjects`` records a trailing intent when one is already in
+          // flight), so the refused route stayed on screen after the indicator had
+          // gone. The confirmation, not a snapshot of where the burst started: a
+          // burst that committed its Agent pick and then had an effort pick refused
+          // must keep the Agent the server took.
+          const confirmed = confirmedProjectRouteRef.current;
+          if (confirmed.has(projectId)) {
+            const restored = confirmed.get(projectId) ?? null;
             commitProjects((prev) =>
-              prev ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: replaced } : p)) : prev,
+              prev ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: restored } : p)) : prev,
             );
           }
-          // Still re-read, unawaited: the base is the last route the server
-          // CONFIRMED, so it is right for a rejected write — but a compare-and-set
-          // conflict means someone else moved the route, and only a read can say
-          // to what. The revert above is already on screen, so nothing waits for
-          // it, and a pick made meanwhile fences it through
-          // ``acceptProjectsMutation``.
+          // Still re-read, unawaited: the confirmation is what the server told THIS
+          // document, and a compare-and-set conflict means someone else has moved
+          // the route since — only a read can say to what. The revert above is
+          // already on screen, so nothing waits for it, and a pick made meanwhile
+          // fences it through ``acceptProjectsMutation``.
           void fetchProjects({ cache: false });
         },
         [commitProjects, fetchProjects],
@@ -1220,10 +1234,6 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // stops a projects read that is already in flight from re-installing the
       // pre-pick route on top of it.
       acceptProjectsMutation();
-      // Read the route this pick replaces BEFORE the commit below overwrites it:
-      // on failure that is what the row goes back to, and it is available here
-      // and nowhere later.
-      const replaced = projectsRef.current?.find((p) => p.id === projectId)?.default_agent ?? null;
       latestProjectRouteRef.current.set(projectId, route);
       // ``commitProjects``, not ``setProjects``: the ref it keeps in step is what
       // every read and reconcile of this cache addresses, so an optimistic row
@@ -1231,9 +1241,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       commitProjects((prev) =>
         prev ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: appliedRoute(route) } : p)) : prev,
       );
-      // Only the pick that OPENS the burst records the base; the ones folded into
-      // it are already looking at optimistic state.
-      if (writeProjectRoute(projectId, route)) preBurstRouteRef.current.set(projectId, replaced);
+      // Nothing to record for a rollback: the settle above restores the last
+      // CONFIRMED route, which every commit and read already maintains.
+      writeProjectRoute(projectId, route);
     },
     [acceptProjectsMutation, commitProjects, writeProjectRoute],
   );

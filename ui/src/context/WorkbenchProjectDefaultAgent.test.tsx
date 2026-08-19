@@ -172,6 +172,98 @@ describe('project default Agent route', () => {
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
   });
 
+  it('takes the route the server derived once the pick is no longer superseded', async () => {
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap: vi.fn().mockResolvedValue({ projects: [project], sessions: {} }),
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    // The picker composes a route with NO backend — only the server knows which
+    // backend an Agent belongs to — so the optimistic route is knowingly partial.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ agent_backend: null }));
+    });
+    expect(tree()!.projects?.[0].default_agent).toEqual(route({ agent_backend: null }));
+
+    await act(async () => {
+      gates[0].resolve({ ...project, default_agent: route({ agent_backend: 'claude' }) });
+      await gates[0].promise;
+    });
+    await settle();
+
+    // Nothing is left for the optimistic route to protect once this pick is the
+    // newest one, so the response's route is installed as it stands. Keeping the
+    // overlay up would hold a backend-less route in the cache until an unrelated
+    // refresh — and a picker that has lost the Agent list could no longer tell
+    // which model or effort options to offer.
+    expect(tree()!.projects?.[0].default_agent).toEqual(route({ agent_backend: 'claude' }));
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
+  it('reverts a partly committed burst to what the server took, not to where the burst started', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stuck = deferred<unknown>();
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [{ ...project, default_agent: route() }], sessions: {} })
+      // Left unanswered on purpose: the local revert is the only thing acting.
+      .mockReturnValueOnce(stuck.promise);
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    const codex = route({ agent_id: 'agt_codex', agent_name: 'codex', agent_variant: 'codex', model: 'gpt-5' });
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, codex);
+    });
+    // A second pick while that request is in flight — the effort for the Agent the
+    // first pick switched to.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, { ...codex, reasoning_effort: 'high' });
+    });
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      gates[0].resolve({ ...project, default_agent: { ...codex, agent_backend: 'codex' } });
+      await gates[0].promise;
+    });
+    await settle();
+    // The Agent switch is on the server now; the effort follows it in one request.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].payload).toMatchObject({ expected_agent_id: 'agt_codex', reasoning_effort: 'high' });
+
+    await act(async () => {
+      gates[1].reject(new Error('boom'));
+      await gates[1].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // Only the effort goes back. This burst committed in PARTS, so reverting to
+    // the route it started from would undo an Agent switch the server is holding —
+    // a rollback that invents a state nobody is in. The target is the last
+    // CONFIRMED route, which is also why the backend the server derived survives.
+    expect(tree()!.projects?.[0].default_agent).toEqual({ ...codex, agent_backend: 'codex' });
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+
+    // And the next pick expects that same confirmed route, so it is not born into
+    // a deterministic conflict.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, { ...codex, model: 'gpt-5-codex' });
+    });
+    expect(calls).toHaveLength(3);
+    expect(calls[2].payload).toMatchObject({ expected_agent_id: 'agt_codex', model: 'gpt-5-codex' });
+  });
+
   it('drops the pick waiting behind a rejected write, rolling the whole burst back', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const getWorkbenchProjectsBootstrap = vi.fn()
