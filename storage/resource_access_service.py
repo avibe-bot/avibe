@@ -7,6 +7,7 @@ content, prompts, paths, outputs, or secret values.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
@@ -15,12 +16,19 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
 from config.v2_config import config_file_lock
 from storage.db import get_cached_sqlite_engine
-from storage.models import resource_access_groups, resource_access_policies, state_meta
+from storage.models import (
+    agent_runs,
+    message_deliveries,
+    resource_access_groups,
+    resource_access_policies,
+    run_definitions,
+    state_meta,
+)
 from vibe.authorization import (
     AuthorizationContext,
     context_from_session_payload,
@@ -435,6 +443,239 @@ def _configured_resource_instance() -> tuple[str | None, str | None] | None | ob
     if instance_id is None and instance_kind is None:
         return None
     return instance_id, instance_kind
+
+
+def _legacy_snapshot_has_organization_context(
+    context: ResourceUserContext,
+    snapshot: Mapping[str, Any],
+) -> bool:
+    """Detect Organization semantics retained by pre-binding snapshots."""
+
+    return bool(
+        context.organization_id
+        or context.organization_member_id
+        or context.organization_role
+        or context.instance_access_source == "organization_group"
+        or context.group_ids
+        or any(
+            snapshot.get(key)
+            for key in (
+                "vibe_organization_id",
+                "vibe_organization_member_id",
+                "vibe_organization_role",
+                "vibe_group_ids",
+            )
+        )
+    )
+
+
+def _legacy_deferred_context_binding(
+    snapshot: Mapping[str, Any],
+    *,
+    paired_instance_id: str,
+    paired_kind: str,
+) -> dict[str, str] | None:
+    """Return a safe current binding for one pre-instance metadata snapshot."""
+
+    context = current_resource_context(snapshot, is_remote=True)
+    if context.instance_role not in {"owner", "editor", "viewer"}:
+        return None
+
+    raw_instance_id = snapshot.get("vibe_instance_id")
+    snapshot_instance_id = _clean_optional_string(raw_instance_id)
+    if raw_instance_id is not None and snapshot_instance_id is None:
+        return None
+    if snapshot_instance_id and snapshot_instance_id != paired_instance_id:
+        return None
+
+    raw_kind = snapshot.get("vibe_instance_kind")
+    if raw_kind is not None and raw_kind not in {"personal", "organization"}:
+        return None
+    if raw_kind is not None and raw_kind != paired_kind:
+        return None
+
+    # An id already matching the live pairing is sufficient to recover a
+    # missing kind. If both fields are absent, infer only the instance kind
+    # retained in the old signed claims; this prevents old Organization work
+    # from being adopted by a Personal pairing (and vice versa).
+    inferred_kind = raw_kind or (
+        paired_kind
+        if snapshot_instance_id
+        else (
+            "organization"
+            if _legacy_snapshot_has_organization_context(context, snapshot)
+            else "personal"
+        )
+    )
+    if inferred_kind != paired_kind:
+        return None
+    return {
+        "vibe_instance_id": paired_instance_id,
+        "vibe_instance_kind": paired_kind,
+    }
+
+
+def _migrate_deferred_metadata_value(
+    metadata: Any,
+    *,
+    paired_instance_id: str,
+    paired_kind: str,
+) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return None
+    binding = _legacy_deferred_context_binding(
+        snapshot,
+        paired_instance_id=paired_instance_id,
+        paired_kind=paired_kind,
+    )
+    if binding is None:
+        return None
+    if all(snapshot.get(key) == value for key, value in binding.items()):
+        return None
+    migrated = dict(metadata)
+    migrated_snapshot = dict(snapshot)
+    migrated_snapshot.update(binding)
+    migrated[RESOURCE_USER_CONTEXT_METADATA_KEY] = migrated_snapshot
+    return migrated
+
+
+def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[str, int]:
+    """Bind released deferred metadata to the still-current runtime pairing.
+
+    The migration is deliberately conservative. It needs complete runtime
+    credentials and a known server-owned instance kind, and it only updates a
+    legacy snapshot when its existing instance evidence or Organization
+    claims agree with that pairing. Unreadable, ambiguous, or stale records
+    remain unchanged and are rejected by the runtime restore checks.
+    """
+
+    configured = _configured_resource_instance()
+    if (
+        configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        or configured is None
+        or configured[0] is None
+        or configured[1] not in {"personal", "organization"}
+    ):
+        return {
+            "legacy_deferred_definitions": 0,
+            "legacy_deferred_runs": 0,
+            "legacy_deferred_deliveries": 0,
+        }
+    paired_instance_id, paired_kind = configured
+
+    counts = {
+        "legacy_deferred_definitions": 0,
+        "legacy_deferred_runs": 0,
+        "legacy_deferred_deliveries": 0,
+    }
+    definition_rows = connection.execute(
+        select(run_definitions.c.id, run_definitions.c.metadata_json).where(
+            run_definitions.c.definition_type.in_(("scheduled", "watch"))
+        )
+    ).mappings()
+    for row in definition_rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        migrated = _migrate_deferred_metadata_value(
+            metadata,
+            paired_instance_id=paired_instance_id,
+            paired_kind=paired_kind,
+        )
+        if migrated is None:
+            continue
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            .values(
+                metadata_json=json.dumps(
+                    migrated,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        )
+        counts["legacy_deferred_definitions"] += 1
+
+    run_rows = connection.execute(
+        select(agent_runs.c.id, agent_runs.c.metadata_json)
+        .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
+    ).mappings()
+    for row in run_rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        migrated = _migrate_deferred_metadata_value(
+            metadata,
+            paired_instance_id=paired_instance_id,
+            paired_kind=paired_kind,
+        )
+        if migrated is None:
+            continue
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == row["id"])
+            .values(
+                metadata_json=json.dumps(
+                    migrated,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                updated_at=_utc_now_iso(),
+            )
+        )
+        counts["legacy_deferred_runs"] += 1
+
+    delivery_rows = connection.execute(
+        select(
+            message_deliveries.c.id,
+            message_deliveries.c.snapshot_json,
+        ).where(message_deliveries.c.snapshot_json.is_not(None))
+    ).mappings()
+    for row in delivery_rows:
+        try:
+            snapshot = json.loads(row["snapshot_json"] or "{}")
+            metadata = json.loads(snapshot.get("metadata_json") or "{}")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        migrated_metadata = _migrate_deferred_metadata_value(
+            metadata,
+            paired_instance_id=paired_instance_id,
+            paired_kind=paired_kind,
+        )
+        if migrated_metadata is None:
+            continue
+        snapshot["metadata_json"] = json.dumps(
+            migrated_metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        snapshot_json = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        snapshot_sha256 = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        connection.execute(
+            update(message_deliveries)
+            .where(message_deliveries.c.id == row["id"])
+            .values(
+                snapshot_json=snapshot_json,
+                snapshot_sha256=snapshot_sha256,
+                updated_at=_utc_now_iso(),
+            )
+        )
+        counts["legacy_deferred_deliveries"] += 1
+    return counts
 
 
 def _configuration_unavailable_ownership() -> dict[str, Any]:
