@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_settings import SettingsStore, UserSettings
 from core.auth import AuthResult
-from modules.im import MessageContext
+from modules.im import InlineButton, InlineKeyboard, MessageContext
 from modules.im.wechat import WeChatBot, WeChatConfig, _get_updates_error_code
 from modules.im import wechat_api as wechat_api_module
 from modules.settings_manager import SettingsManager
@@ -880,7 +880,6 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                     channel_id="user-1",
                     platform_specific={"context_token": "ctx-1"},
                 )
-                bot._auth_manager.is_logged_in = True
                 bot._remember_context_token("user-1", "ctx-1")
 
                 with patch(
@@ -893,7 +892,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                 cache_path = Path(tmpdir) / "state" / "wechat_context_tokens.json"
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
 
-        self.assertFalse(bot._auth_manager.is_logged_in)
+        self.assertTrue(bot._session_expired_logged)
         self.assertEqual(data["tokens"], {})
 
     async def test_upload_file_from_path_uses_cdn_workflow(self):
@@ -957,6 +956,159 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                     result = await bot.upload_image_from_path(context, str(image_path))
 
         self.assertEqual(result, "")
+
+    async def test_startup_does_not_emit_false_session_warning_or_call_non_ilink_urls(self):
+        captured_urls: list[str] = []
+
+        class _Response:
+            ok = True
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def text(self):
+                return '{"ret": 0}'
+
+            async def json(self):
+                return {"ret": 0}
+
+        class _Session:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, *args, **kwargs):
+                captured_urls.append(str(url))
+                return _Response()
+
+            def get(self, url, *args, **kwargs):
+                captured_urls.append(str(url))
+                return _Response()
+
+        async def _stop_immediately() -> None:
+            assert bot._stop_event is not None
+            bot._stop_event.set()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
+                bot = self._make_bot()
+                with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=_Session):
+                    with patch("modules.im.wechat.aiohttp.ClientSession", side_effect=_Session):
+                        with patch.object(bot, "_poll_loop", new=_stop_immediately):
+                            with self.assertLogs("modules.im.wechat", level="INFO") as captured:
+                                await bot._run_until_stopped()
+
+        messages = [record.getMessage() for record in captured.records]
+        self.assertFalse(
+            any("session is not active" in message for message in messages),
+            messages,
+        )
+        self.assertTrue(
+            any("session health is reported by the first poll" in message for message in messages),
+            messages,
+        )
+        self.assertTrue(captured_urls, "startup should still use real iLink endpoints")
+        for url in captured_urls:
+            self.assertIn("/ilink/bot/", url, url)
+            self.assertNotIn("getLoginStatus", url)
+            self.assertNotIn("getQRCode", url)
+            self.assertNotIn("getconfig", url)
+
+    async def test_send_message_rejects_empty_recipient_without_http(self):
+        bot = self._make_bot()
+        for recipient in (None, ""):
+            context = MessageContext(
+                user_id=recipient,  # type: ignore[arg-type]
+                channel_id="channel-1",
+                platform_specific={"context_token": "ctx-1"},
+            )
+            with patch(
+                "modules.im.wechat.wechat_api.send_message",
+                new=AsyncMock(return_value={}),
+            ) as mock_send:
+                with patch("modules.im.wechat_api.aiohttp.ClientSession") as mock_session:
+                    with self.assertRaises(ValueError) as raised:
+                        await bot.send_message(context, "hello")
+            self.assertIn("empty", str(raised.exception).lower())
+            self.assertIn("recipient", str(raised.exception).lower())
+            mock_send.assert_not_awaited()
+            mock_session.assert_not_called()
+
+    async def test_send_message_with_buttons_rejects_empty_recipient_without_http(self):
+        bot = self._make_bot()
+        context = MessageContext(
+            user_id="",
+            channel_id="channel-1",
+            platform_specific={"context_token": "ctx-1"},
+        )
+        keyboard = InlineKeyboard(buttons=[[InlineButton(text="A", callback_data="a")]])
+        with patch(
+            "modules.im.wechat.wechat_api.send_message",
+            new=AsyncMock(return_value={}),
+        ) as mock_send:
+            with self.assertRaises(ValueError) as raised:
+                await bot.send_message_with_buttons(context, "hello", keyboard)
+        self.assertIn("empty recipient", str(raised.exception).lower())
+        mock_send.assert_not_awaited()
+
+    async def test_send_message_passes_valid_recipient_through_as_to_user_id(self):
+        bot = self._make_bot()
+        recipient = "o9cq800wPaRTvvjcyu2rceLrVCpg@im.wechat"
+        context = MessageContext(
+            user_id=recipient,
+            channel_id=recipient,
+            platform_specific={"context_token": "ctx-1"},
+        )
+        with patch(
+            "modules.im.wechat.wechat_api.send_message",
+            new=AsyncMock(return_value={}),
+        ) as mock_send:
+            result = await bot.send_message(context, "hello")
+
+        self.assertTrue(result.startswith("wc-"))
+        mock_send.assert_awaited_once()
+        self.assertEqual(mock_send.await_args.args[2], recipient)  # type: ignore[union-attr]
+
+    async def test_file_and_typing_paths_reject_empty_recipient_without_http(self):
+        bot = self._make_bot()
+        context = MessageContext(
+            user_id="",
+            channel_id="channel-1",
+            platform_specific={"context_token": "ctx-1"},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = str(Path(tmpdir) / "note.txt")
+            Path(file_path).write_text("x", encoding="utf-8")
+            with patch("modules.im.wechat.wechat_api.send_message", new=AsyncMock()) as mock_send:
+                with patch("modules.im.wechat.wechat_cdn.upload_file_to_cdn", new=AsyncMock()) as mock_file:
+                    with patch("modules.im.wechat.wechat_cdn.upload_image_to_cdn", new=AsyncMock()) as mock_image:
+                        with patch("modules.im.wechat.wechat_api.get_config", new=AsyncMock()) as mock_config:
+                            with patch("modules.im.wechat.wechat_api.send_typing", new=AsyncMock()) as mock_typing:
+                                for action in (
+                                    lambda: bot.send_typing_indicator(context),
+                                    lambda: bot.clear_typing_indicator(context),
+                                    lambda: bot.upload_file_from_path(context, file_path),
+                                    lambda: bot.upload_image_from_path(context, file_path),
+                                    lambda: bot.upload_video_from_path(context, file_path),
+                                ):
+                                    with self.assertRaises(ValueError) as raised:
+                                        await action()
+                                    self.assertIn("empty recipient", str(raised.exception).lower())
+
+        mock_send.assert_not_awaited()
+        mock_file.assert_not_awaited()
+        mock_image.assert_not_awaited()
+        mock_config.assert_not_awaited()
+        mock_typing.assert_not_awaited()
 
 
 if __name__ == "__main__":
