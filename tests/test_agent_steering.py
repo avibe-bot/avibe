@@ -1749,7 +1749,7 @@ async def test_opencode_idle_post_boundary_error_clears_awaiting_boundary() -> N
         assert snapshot[-1]["info"]["id"] == "retry-error"
         assert snapshot[-1]["info"]["error"]["name"] == "UnknownError"
         assert state.awaiting_after_message_ids is None
-        assert state.closing is True
+        assert state.closing is False
     finally:
         await _cancel_tasks(gate_task)
 

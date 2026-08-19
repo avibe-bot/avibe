@@ -87,6 +87,33 @@ def _has_post_boundary_assistant(
     )
 
 
+def _snapshot_needs_native_liveness(
+    messages: list[Dict[str, Any]],
+    baseline_message_ids: set[str],
+    awaiting_after_ids: Optional[set[str]] = None,
+) -> bool:
+    """True only when idle vs busy can change which completed assistant settles."""
+
+    if awaiting_after_ids and not _has_post_boundary_assistant(
+        messages, awaiting_after_ids
+    ):
+        return False
+    latest_new: Optional[Dict[str, Any]] = None
+    for message in reversed(messages):
+        info = _message_info(message)
+        message_id = info.get("id")
+        if not message_id or message_id in baseline_message_ids:
+            continue
+        latest_new = message
+        break
+    if latest_new is None:
+        return False
+    info = _message_info(latest_new)
+    if info.get("role") == "assistant" and not info.get("time", {}).get("completed"):
+        return False
+    return info.get("role") == "user"
+
+
 def _settlement_assistant_message(
     messages: list[Dict[str, Any]],
     baseline_message_ids: set[str],
@@ -118,9 +145,7 @@ def _settlement_assistant_message(
                 skipped_user = True
             continue
         if not info.get("time", {}).get("completed"):
-            if native_live or (message.get("parts") or []):
-                return None
-            continue
+            return None
         if skipped_user and native_live:
             return None
         return message
@@ -618,21 +643,27 @@ class OpenCodePollLoop:
 
             if messages:
                 remaining = deadline - time.monotonic()
-                last_message = _settlement_assistant_message(
-                    messages,
-                    baseline_message_ids,
-                    native_live=await self._native_session_is_live(
+                awaiting_after_ids = getattr(
+                    getattr(server, "_state", None),
+                    "awaiting_after_message_ids",
+                    None,
+                )
+                native_live = False
+                if _snapshot_needs_native_liveness(
+                    messages, baseline_message_ids, awaiting_after_ids
+                ):
+                    native_live = await self._native_session_is_live(
                         server,
                         session_id,
                         request.working_path,
                         remaining=remaining,
                         pending_inject_until=pending_inject_until,
-                    ),
-                    awaiting_after_ids=getattr(
-                        getattr(server, "_state", None),
-                        "awaiting_after_message_ids",
-                        None,
-                    ),
+                    )
+                last_message = _settlement_assistant_message(
+                    messages,
+                    baseline_message_ids,
+                    native_live=native_live,
+                    awaiting_after_ids=awaiting_after_ids,
                 )
                 last_info = _message_info(last_message) if last_message else {}
                 last_id = last_info.get("id")
@@ -673,6 +704,11 @@ class OpenCodePollLoop:
                                     model=model_dict,
                                     reasoning_effort=reasoning_effort,
                                     tools={"question": False},
+                                    awaiting_after_ids={
+                                        str(_message_info(item).get("id"))
+                                        for item in messages
+                                        if _message_info(item).get("id")
+                                    },
                                 )
                                 pending_inject_until = (
                                     time.monotonic() + _POST_INJECT_CONFIRMATION_SECONDS
@@ -934,21 +970,27 @@ class OpenCodePollLoop:
 
                 if messages:
                     remaining = deadline - time.monotonic()
-                    last_message = _settlement_assistant_message(
-                        messages,
-                        baseline_message_ids,
-                        native_live=await self._native_session_is_live(
+                    awaiting_after_ids = getattr(
+                        getattr(server, "_state", None),
+                        "awaiting_after_message_ids",
+                        None,
+                    )
+                    native_live = False
+                    if _snapshot_needs_native_liveness(
+                        messages, baseline_message_ids, awaiting_after_ids
+                    ):
+                        native_live = await self._native_session_is_live(
                             server,
                             session_id,
                             poll_info.working_path,
                             remaining=remaining,
                             pending_inject_until=pending_inject_until,
-                        ),
-                        awaiting_after_ids=getattr(
-                            getattr(server, "_state", None),
-                            "awaiting_after_message_ids",
-                            None,
-                        ),
+                        )
+                    last_message = _settlement_assistant_message(
+                        messages,
+                        baseline_message_ids,
+                        native_live=native_live,
+                        awaiting_after_ids=awaiting_after_ids,
                     )
                     last_info = _message_info(last_message) if last_message else {}
                     if last_info.get("id"):

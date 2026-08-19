@@ -1546,7 +1546,7 @@ def test_settlement_assistant_message_walks_back_to_the_owning_turn():
         ([error_assistant], True, "msg-err"),
         ([error_assistant, trailing_user], False, "msg-err"),
         ([error_assistant, trailing_user], True, None),
-        ([error_assistant, trailing_user, empty_inflight], False, "msg-err"),
+        ([error_assistant, trailing_user, empty_inflight], False, None),
         ([error_assistant, trailing_user, empty_inflight], True, None),
         ([error_assistant, live_followup], True, None),
         ([error_assistant, live_followup], False, None),

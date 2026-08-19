@@ -515,7 +515,8 @@ class _SteeringAwareOpenCodeServer:
                                 )
                                 if has_final_insert_result or has_post_boundary_error:
                                     self._clear_awaiting_reconciliation()
-                                    self._state.closing = True
+                                    if has_final_insert_result:
+                                        self._state.closing = True
                                     return messages
                                 start_deadline = (
                                     self._state.awaiting_start_confirmation_deadline
@@ -599,22 +600,26 @@ class _SteeringAwareOpenCodeServer:
                 ]
                 return
             kwargs_map = dict(kwargs)
-            session_id = str(kwargs_map.get("session_id") or "")
-            directory = str(kwargs_map.get("directory") or "")
             prompt_text = str(kwargs_map.get("text") or "")
-            if session_id and directory:
-                try:
-                    current = await self._server.list_messages(session_id, directory)
-                except Exception:
-                    current = []
-                self._state.awaiting_after_message_ids = self._message_ids(current)
+            snapshot_ids = kwargs_map.pop("awaiting_after_ids", None)
+            if snapshot_ids is None:
+                session_id = str(kwargs_map.get("session_id") or "")
+                directory = str(kwargs_map.get("directory") or "")
+                if session_id and directory:
+                    try:
+                        current = await self._server.list_messages(session_id, directory)
+                    except Exception:
+                        current = []
+                    snapshot_ids = self._message_ids(current)
+            if snapshot_ids is not None:
+                self._state.awaiting_after_message_ids = set(snapshot_ids)
                 self._state.awaiting_user_text = prompt_text or None
                 self._state.awaiting_start_confirmation_deadline = (
                     time.monotonic() + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
                 )
                 self._state.awaiting_active_status_observed = False
                 self._state.awaiting_result_confirmation_deadline = None
-            await self._server.prompt_async(*args, **kwargs)
+            await self._server.prompt_async(*args, **{k: v for k, v in kwargs.items() if k != "awaiting_after_ids"})
 
     async def abort_session(self, *args, **kwargs) -> bool:
         async with self._state.lock:
