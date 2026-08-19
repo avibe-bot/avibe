@@ -15,6 +15,7 @@ import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
@@ -206,7 +207,7 @@ export const ShowPageShareControl: React.FC<{
       </PopoverTrigger>
       <PopoverContent
         align="end"
-        className="w-[min(23rem,calc(100vw-1rem))] space-y-3"
+        className="max-h-[var(--radix-popover-content-available-height)] w-[min(23rem,calc(100vw-1rem))] space-y-3 overflow-y-auto"
         data-window-owner-id={ownerWindowId}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
@@ -291,6 +292,24 @@ export const ShowPageShareControl: React.FC<{
               canManage
               sessionId={sessionId}
               onApplied={handleShowAccessApplied}
+              ownerWindowId={ownerWindowId}
+              showCustomLink={access.mode !== 'organization' && access.mode !== 'organization_pending'}
+            />
+          </div>
+        ) : null}
+
+        {access && (
+          access.ownership_status === 'conflict'
+          || access.mode === 'organization'
+          || access.mode === 'organization_pending'
+          || access.mode === 'configuration_unavailable'
+        ) ? (
+          <div className="border-t border-border pt-3">
+            <ShowPageWorkspaceAccessControl
+              access={access}
+              active={open}
+              canManageInstance={canManageInstance}
+              sessionId={sessionId}
               ownerWindowId={ownerWindowId}
             />
           </div>

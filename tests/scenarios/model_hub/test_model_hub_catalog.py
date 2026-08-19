@@ -12,6 +12,11 @@ SCENARIO_ROOT = Path("tests/scenarios/model_hub")
 PROJECT_INDEX = Path("tests/scenarios/INDEX.yaml")
 CAPABILITY_ID = "model_hub"
 
+#: Suffixes whose evidence is a vitest case rather than a pytest function. Kept in
+#: step with `UI_SUFFIXES` in `ui/scripts/scenarioCatalog.mjs`, which resolves those
+#: rows against vitest's own collection.
+_UI_SUFFIXES = {".ts", ".tsx", ".mts", ".mjs"}
+
 
 def _document(name: str) -> dict:
     return yaml.safe_load((SCENARIO_ROOT / name).read_text())
@@ -74,12 +79,29 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         path = Path(path_text)
         assert path_text in canonical_tests
         assert path.is_file()
-        function = _test_function(path, function_name)
-        expected_fail = "xfail" in _decorator_names(function)
-        assert expected_fail == status["expected_fail"]
-        assert scenario["id"] in (ast.get_docstring(function) or ""), (
+        if path.suffix in _UI_SUFFIXES:
+            # An expected failure is declared here with `pytest.mark.xfail`, which a
+            # UI case cannot carry, so a UI-evidenced row may not claim one.
+            assert not status["expected_fail"], (
+                f"Scenario {scenario['id']} is evidenced by a UI case, which cannot carry an expected failure"
+            )
+            # Whether that ID names a case vitest actually *runs* is a question only
+            # vitest answers; `ui/scripts/validate-scenario-catalog.mjs` asks it in
+            # the `npm test` run CI already does over this suite. Approximating it
+            # here would mean re-deciding, from text, which declarations execute —
+            # the answer would be wrong for a skipped, unreachable, or run-time-named
+            # case, and wrong quietly. So this side stops at what it reads exactly:
+            # the file exists and states the ID.
+            evidence = path.read_text()
+        else:
+            function = _test_function(path, function_name)
+            expected_fail = "xfail" in _decorator_names(function)
+            assert expected_fail == status["expected_fail"]
+            evidence = ast.get_docstring(function) or ""
+        assert scenario["id"] in evidence, (
             f"Scenario {scenario['id']} is not named inside {test_ref}; "
-            "state the catalog ID in the test docstring so the executable evidence is greppable by ID"
+            "state the catalog ID in the test docstring — for a UI case, in its name — "
+            "so the executable evidence is greppable by ID"
         )
         if scenario["status"] == "partial":
             missing_layer = scenario.get("missing_layer")

@@ -32,7 +32,16 @@ def sqlite_url(db_path: Path | None = None) -> str:
 def create_sqlite_engine(db_path: Path | None = None) -> Engine:
     path = _resolve_sqlite_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(sqlite_url(path), future=True)
+    # ``hide_parameters`` keeps bound values out of ``str(exc)`` on every
+    # SQLAlchemy error. Those values are the user's identity and access-control
+    # data -- emails, subjects, instance and scope ids, serialized authorization
+    # claims -- and any caller that logs a database failure with a traceback
+    # otherwise writes them into the unrotated service log. Owning it here rather
+    # than at each log site is what makes that true for callers not yet written:
+    # this is the only ``create_engine`` in the codebase, so every engine
+    # inherits it. The statement text, the traceback, and the underlying sqlite3
+    # error all survive, which is what a diagnostic actually needs.
+    engine = create_engine(sqlite_url(path), future=True, hide_parameters=True)
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:

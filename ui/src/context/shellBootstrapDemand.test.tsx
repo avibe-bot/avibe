@@ -158,6 +158,20 @@ const InboxProbe = ({
   return null;
 };
 
+// A resume is an EDGE, and ``onPageReactivated`` deliberately refuses to read a
+// bare ``focus`` as one: focus moving between elements of a page that never left
+// is the common case, and treating it as a return is what made the old listener
+// over-fire. So drive the transition the sampler actually reads — system focus
+// lost, then regained — rather than the event that used to stand in for it.
+const resumePage = async () => {
+  await act(async () => {
+    document.hasFocus = () => false;
+    window.dispatchEvent(new Event('blur'));
+    document.hasFocus = () => true;
+    window.dispatchEvent(new Event('focus'));
+  });
+};
+
 describe('Demand-driven shell bootstrap', () => {
   beforeEach(() => {
     apiRef.current = null;
@@ -166,6 +180,9 @@ describe('Demand-driven shell bootstrap', () => {
   afterEach(() => {
     cleanup();
     apiRef.current = null;
+    // Own property, so the prototype's real implementation comes back for tests
+    // that never resume.
+    Reflect.deleteProperty(document, 'hasFocus');
   });
 
   describe('projects tree', () => {
@@ -630,9 +647,7 @@ describe('Demand-driven shell bootstrap', () => {
       listInbox.mockImplementation((args: ListInboxArgs) =>
         args.limit > 1 ? stale.promise : Promise.resolve(countsOnly),
       );
-      await act(async () => {
-        window.dispatchEvent(new Event('focus'));
-      });
+      await resumePage();
       expect(feedReads()).toBe(2);
 
       rerender(
@@ -2164,9 +2179,7 @@ describe('Demand-driven shell bootstrap', () => {
       listInbox.mockImplementation((args: ListInboxArgs) =>
         args.limit > 1 ? stale.promise : Promise.resolve(countsOnly),
       );
-      await act(async () => {
-        window.dispatchEvent(new Event('focus'));
-      });
+      await resumePage();
 
       // The change lands while the feed still has a reader, so a replacement read
       // is queued behind the one in flight...

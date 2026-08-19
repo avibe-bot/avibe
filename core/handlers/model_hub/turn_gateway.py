@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Final, Optional
 
 from aiohttp import web
@@ -37,10 +38,13 @@ from .provenance import (
 from .request import ModelHubRequest
 from .stream_wire import (
     ProtocolSSEState,
+    ProtocolUsageReport,
     StreamTerminalOutcome,
+    observe_protocol_response,
     render_protocol_terminal_event,
     render_protocol_terminal_frame,
 )
+from .usage import BoundedUsageLedger, UsageWriter
 from .service import (
     HandleSettlement,
     HandleTerminationOrigin,
@@ -66,6 +70,10 @@ _REQUEST_PROTOCOLS: Final = {
 logger = logging.getLogger(__name__)
 
 
+def _gateway_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 _PROTOCOL_HEADERS: Final = frozenset(
     {
         "anthropic-beta",
@@ -80,22 +88,130 @@ class _TurnExecution:
     """Resources and settlement state owned by one gateway request boundary."""
 
     resolved: ResolvedInvocation | None = None
+    # Set the moment this gateway takes the upstream body, which is also the
+    # moment it takes the call's metering from the resolver. Assigned before
+    # anything downstream can fail, so it outlives every ending after it.
     handle: InvokeHandle | None = None
     settlement_task: asyncio.Task[tuple[RawCallOutcome | None, HandleSettlement]] | None = None
     settlement_origin: HandleTerminationOrigin | None = None
     settlement_recorded: bool = False
     terminal_fact_committed: bool = False
     rendered_turn_outcome: _RenderedTurnOutcome | None = None
+    # The live stream tracker, published here so a boundary that ends the turn
+    # without reaching the end of the chunk loop can still read the tokens the
+    # upstream had already reported.
+    wire_state: ProtocolSSEState | None = None
+    # The same two facts for a response the gateway buffered whole, which has no
+    # wire tracker to read them from.
+    buffered_usage: ProtocolUsageReport | None = None
+    buffered_outcome: StreamTerminalOutcome | None = None
+    # When the upstream body ended, published here for the same reason the two
+    # facts above are: it is the instant the call belongs to, and everything after
+    # it is bookkeeping whose duration is not the call's. A settlement that hangs
+    # for a minute, or across local midnight, would otherwise move the row to a
+    # day the vendor never billed.
+    completed_at: datetime | None = None
+    # The writer-owned task that persists this turn's row, and by its existence
+    # the record that this turn has already been metered. A flag would only say
+    # the write was started by something whose own death could still take it.
+    usage_write: asyncio.Future[None] | None = None
+
+    @property
+    def upstream_observation(self) -> ProtocolSSEState | None:
+        """What the engine read of this body, from before it was ours to forward.
+
+        Every other fact this turn holds is built from bytes this gateway has
+        already pulled, and the pulling starts after the downstream response is
+        prepared. The engine read the head of the same body to decide there was
+        one and keeps reading as it yields, so its tracker answers in the window
+        where ours does not exist yet and is never behind it afterwards.
+
+        Which is what makes it the first thing both facts below ask. They used
+        to ask the shapes this gateway builds, and each new ending that opened
+        before those shapes existed cost a review round teaching one more fact
+        to survive it.
+        """
+
+        return self.handle.observed if self.handle is not None else None
+
+    @property
+    def reported_usage(self) -> ProtocolUsageReport | None:
+        """Tokens upstream reported for this turn, whichever shape it answered in.
+
+        One owner for the question, because a boundary that ends the turn early
+        cannot know which shape the response took — and a turn the vendor billed
+        was billed in both.
+        """
+
+        upstream = self.upstream_observation
+        if upstream is not None and upstream.usage is not None:
+            return upstream.usage
+        if self.wire_state is not None:
+            return self.wire_state.usage
+        return self.buffered_usage
+
+    @property
+    def reached_model(self) -> bool:
+        """Whether this turn's upstream call was billed, whichever shape it took.
+
+        Sibling of `reported_usage`, for the same reason and with the same owner:
+        a boundary that ends the turn early cannot know which shape the response
+        took. Leaving it to the endings meant each one answered in the vocabulary
+        of the shape it happened to see — the boundary read a wire tracker a
+        buffered turn never has, so a complete upstream body that reported no
+        tokens counted as never having reached the model.
+
+        The buffered half is the observation the gateway already made of the whole
+        body: a complete model answer was served upstream exactly as a stream that
+        reached its terminal was, and an error envelope reached no model exactly as
+        a stream that forwarded no output did.
+
+        Both halves are observations *of the body* this gateway made itself, and
+        the turn can end before either one exists: the gateway adopts the body
+        first, and only then prepares the downstream response and starts reading.
+        A client that goes away in that gap leaves neither behind — which is why
+        the engine's own observation is asked first, here and in `reported_usage`.
+        It read the same body earlier than we did, so it is the one answer that
+        exists in that window rather than a weaker stand-in for it.
+
+        The adoption itself remains the floor, for a handle that tokenized no
+        stream to hand over. It is an answer, not a guess: the engine hands this
+        gateway a body only after the prelude observed the first model output, or
+        for a call it had already completed upstream, and it keeps every other
+        call to meter in the resolver. An adopted body is therefore a call the
+        vendor billed, and `token_reports` staying at zero is how the ledger says
+        nobody got to read its tokens.
+        """
+
+        upstream = self.upstream_observation
+        if upstream is not None and upstream.reached_model:
+            return True
+        if self.wire_state is not None:
+            return self.wire_state.reached_model
+        if self.buffered_outcome is not None:
+            return self.buffered_outcome == "served"
+        return self.handle is not None
+
+    @property
+    def owes_metering(self) -> bool:
+        """Whether a row for this turn is still owed to the ledger.
+
+        Asked by the recorder, and by the boundary deciding whether an ending has
+        anything left to do. Two readers, one answer: a boundary that asked
+        "settled?" instead skipped the ending for a turn that was settled by force
+        after its upstream call had already reported tokens, and the vendor billed
+        that call either way.
+        """
+
+        if self.usage_write is not None or self.resolved is None:
+            return False
+        return self.reached_model or self.reported_usage is not None
 
 
 @dataclass(frozen=True)
 class _RenderedTurnOutcome:
     key: str | None
     message: str | None
-
-
-class _SSEWireState(ProtocolSSEState):
-    """Gateway-local name for the shared protocol stream tracker."""
 
 
 class _DownstreamDisconnected(ConnectionError):
@@ -110,12 +226,17 @@ class ModelHubTurnGateway:
         service: ModelHubService,
         *,
         correlation: Optional[TurnCorrelationRegistry] = None,
+        usage: Optional[BoundedUsageLedger] = None,
         language_provider: Callable[[], str] | None = None,
         transport_timeout: float = ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.service = service
         self._language_provider = language_provider or (lambda: "en")
         self._transport_timeout = transport_timeout
+        # One clock per hub: the service already owns it, so a test that fixes the
+        # service clock gets deterministic usage days without a second injection.
+        self._now = now or getattr(service, "now", None) or _gateway_utc_now
         self._resource_leak_records: deque[tuple[str, str | None]] = deque(maxlen=100)
         self.correlation = correlation or TurnCorrelationRegistry(
             getattr(
@@ -123,6 +244,22 @@ class ModelHubTurnGateway:
                 "provenance",
                 BoundedProvenanceStore(paths.get_state_dir() / "model_hub_turn_provenance.json"),
             )
+        )
+        self.usage = (
+            usage
+            or getattr(service, "usage", None)
+            or BoundedUsageLedger(
+                paths.get_state_dir() / "model_hub_usage.json",
+                now=self._now,
+            )
+        )
+        # The service's writer whenever both write the same ledger, so one drain
+        # covers both metering populations rather than one per population.
+        service_writer = getattr(service, "usage_writer", None)
+        self._usage_writer = (
+            service_writer
+            if isinstance(service_writer, UsageWriter) and service_writer.ledger is self.usage
+            else UsageWriter(self.usage)
         )
         self._start_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
@@ -194,6 +331,15 @@ class ModelHubTurnGateway:
         self._base_url = None
         if runner is not None:
             await runner.cleanup()
+        # After the runner, so the handlers it cancels have queued their last
+        # writes first. Bounded like every other owned drain: a ledger that
+        # cannot be reached must not hold shutdown open.
+        unfinished = await self._usage_writer.drain(timeout=self._transport_timeout)
+        if unfinished:
+            logger.warning(
+                "Model Hub usage metering left %d write(s) unfinished at shutdown",
+                unfinished,
+            )
 
     async def _ensure_started(self) -> None:
         if self._runner is not None:
@@ -298,17 +444,11 @@ class ModelHubTurnGateway:
                     )
                     raise error
                 if error is not None:
-                    if execution.handle is not None and not execution.settlement_recorded:
-                        _outcome, settlement = await self._settle_turn_handle(
-                            execution,
-                            terminalizer,
-                            termination_origin="upstream_terminal",
-                        )
-                        self._commit_and_render_handle_settlement(
-                            execution,
-                            terminalizer,
-                            settlement,
-                        )
+                    await self._settle_boundary_termination(
+                        execution,
+                        terminalizer,
+                        termination_origin="upstream_terminal",
+                    )
                     raise error
                 assert response is not None
                 return response
@@ -378,7 +518,16 @@ class ModelHubTurnGateway:
                             terminalizer,
                             timeout_settlement,
                         )
-                if not execution.settlement_recorded:
+                # Settle if unsettled, meter if unmetered — two debts, either one
+                # worth the ending. Asking only about settlement dropped the row for
+                # a call the upstream had already answered, because abandoning the
+                # request above writes an engine-down terminal and that made the turn
+                # settled. Asking about neither would be simpler still, but the
+                # deadline is spent by the time we get here in exactly the case that
+                # matters, and a task with no debt to discharge could not be drained
+                # before it was abandoned — a resource leak recorded against a turn
+                # that had nothing left to do.
+                if not execution.settlement_recorded or execution.owes_metering:
                     settlement_task = asyncio.create_task(
                         self._settle_boundary_termination(
                             execution,
@@ -543,6 +692,8 @@ class ModelHubTurnGateway:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
         if resolved.outcome is not None:
+            # A call that reached the resolver's own hands has already been
+            # metered there; its body never becomes this gateway's to forward.
             return self._outcome_response(resolved.outcome)
         handle = resolved.handle
         if handle is None or handle.stream is None:
@@ -559,17 +710,24 @@ class ModelHubTurnGateway:
             payload = bytearray()
             async for chunk in handle.stream:
                 payload.extend(chunk)
-            outcome, settlement = await self._settle_turn_handle(
+            execution.completed_at = self._now()
+            # Published before settling, not after: settling can be cancelled by a
+            # downstream disconnect, and facts only this frame's local knew about
+            # would leave the boundary with nothing to meter.
+            observation = observe_protocol_response(
+                protocol,
+                streamed=False,
+                data=bytes(payload),
+            )
+            execution.buffered_usage = observation.usage
+            execution.buffered_outcome = observation.outcome
+            outcome, settlement, rendered = await self._settle_metered_turn(
                 execution,
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
-            rendered = self._commit_and_render_handle_settlement(
-                execution,
-                terminalizer,
-                settlement,
-            )
             assert outcome is not None
+            assert settlement is not None
             assert settlement.decision is not None
             if settlement.decision.action != "return":
                 return self._outcome_response(
@@ -595,22 +753,19 @@ class ModelHubTurnGateway:
             },
         )
         await self._downstream_io(response.prepare(request))
-        wire_state = _SSEWireState(protocol)
+        wire_state = ProtocolSSEState(protocol)
+        execution.wire_state = wire_state
         async for chunk in handle.stream:
             output_started_before = wire_state.model_output_started
             wire_state.observe(chunk)
             if wire_state.model_output_started and not output_started_before:
                 terminalizer.mark_stream_started()
             await self._downstream_io(response.write(chunk))
-        _outcome, settlement = await self._settle_turn_handle(
+        execution.completed_at = self._now()
+        _outcome, _settlement, rendered = await self._settle_metered_turn(
             execution,
             terminalizer,
             termination_origin="upstream_terminal",
-        )
-        rendered = self._commit_and_render_handle_settlement(
-            execution,
-            terminalizer,
-            settlement,
         )
         await self._write_stream_terminal_copy(
             response,
@@ -622,12 +777,80 @@ class ModelHubTurnGateway:
         await self._downstream_io(response.write_eof())
         return response
 
+    async def _record_usage(self, execution: _TurnExecution) -> None:
+        """Fold one forwarded upstream call into the usage ledger, best-effort.
+
+        A call counts when it reached the model: either the hub returned upstream
+        output downstream, or upstream reported usage for it — a vendor that
+        reported tokens billed us even when the stream ended in an error. Calls
+        that never reached the model already have their own surface in the
+        resolution feed and source health, so counting them here would duplicate
+        that concept.
+
+        This is the gateway's half of metering, and it covers exactly the calls
+        whose body the gateway forwards. A call the resolver consumed itself was
+        already metered by ``ModelHubService._meter_call``, so no call is counted
+        twice and none is missed.
+
+        Sole metering owner for the boundary, and it takes only the turn. Several
+        endings can reach it for one forwarded call — a stream that finished and
+        then failed to flush, a disconnect that raced the terminal chunk — so the
+        first ending to describe it wins and every later one is a no-op. One call
+        is one request, whatever killed it.
+
+        The no-op is `execution.owes_metering` rather than a condition spelled
+        here, because an ending that has to decide whether to run at all asks the
+        same question. Answering it in two places is how the abandonment path came
+        to skip a billed call: it asked whether the turn was *settled*, which a
+        forced terminal had already made true.
+
+        Which is why no ending is asked what the call did. Both facts are read from
+        the turn itself, so an ending is only ever a *when*, never a *what*: a
+        boundary that ends the turn early sees one shape's evidence and cannot
+        answer for the other, and every ending that answered locally answered
+        differently. A future ending cannot get it wrong, because it has nothing to
+        get wrong.
+
+        The ledger read-modify-write is file I/O, so it runs off the event loop;
+        metering is a report, never a control input, and a ledger failure must not
+        change the turn the caller sees.
+
+        Which also means the turn cannot own the write. `UsageWriter` holds it, and
+        holds the waiting for it too, so an ending is a *when* in one more sense: it
+        decides when a call is metered and never whether the metering survives, nor
+        how long the turn waits on a disk. Nothing suspends between reading the
+        facts and handing the write over, so a cancellation lands either before this
+        turn was ever going to be metered or after the write is already someone
+        else's to finish.
+
+        Every ending calls this before it settles, and the completion instant is
+        read from the turn rather than here. Both say the same thing: a metered call
+        is the upstream call, and settlement, history, and rendering are bookkeeping
+        that happens to follow it. Reading the clock here dated the row by when the
+        bookkeeping got around to it — across local midnight, the wrong day — and
+        settling first meant an ending that raised on the way through never reached
+        this at all, for a call the vendor had already billed.
+        """
+
+        if not execution.owes_metering:
+            return
+        resolved = execution.resolved
+        assert resolved is not None
+        usage = execution.reported_usage
+        execution.usage_write = self._usage_writer.record(
+            source_id=resolved.source_id,
+            model_id=resolved.model_id,
+            usage=usage,
+            at=execution.completed_at or self._now(),
+        )
+        await self._usage_writer.wait_recorded(execution.usage_write)
+
     async def _write_stream_terminal_copy(
         self,
         response: web.StreamResponse,
         protocol: str,
         rendered: _RenderedTurnOutcome | None,
-        wire_state: _SSEWireState,
+        wire_state: ProtocolSSEState,
         *,
         forwarded_terminal: StreamTerminalOutcome | None,
     ) -> None:
@@ -655,6 +878,52 @@ class ModelHubTurnGateway:
         except (ConnectionResetError, BrokenPipeError) as exc:
             raise _DownstreamDisconnected(str(exc)) from exc
 
+    async def _settle_metered_turn(
+        self,
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        *,
+        termination_origin: HandleTerminationOrigin,
+    ) -> tuple[RawCallOutcome | None, HandleSettlement | None, _RenderedTurnOutcome | None]:
+        """End one turn: meter the call, then settle it, then commit what it was.
+
+        One owner for the order, because the order is the whole property. Metering
+        used to be each ending's own step, and every ending placed it after its
+        bookkeeping — where a settlement that raised skipped it entirely, for a call
+        the vendor had already billed. It cannot be placed wrongly here: it is this
+        function's first statement, and there is nowhere else to place it.
+
+        Bookkeeping after metering is also why the recorder needs no ending to be
+        careful. A settlement is a fact about a handle and the settlement owner
+        rejects one without it, so a turn that failed before adopting a body has
+        nothing to settle — and, having reached no model, nothing to meter either.
+        The guard for that sits behind the recorder rather than in front of it,
+        which is what makes "settled here" imply "metered here" for every ending
+        there is and every ending there will be.
+
+        Answers with all three facts so an ending can render its own response
+        without settling a second time. An ending that arrives after the turn was
+        already committed gets the committed rendering and no settlement, which is
+        the same thing the projection choke would have handed it.
+        """
+
+        await self._record_usage(execution)
+        if execution.settlement_recorded:
+            return None, None, execution.rendered_turn_outcome
+        if termination_origin == "upstream_terminal" and execution.handle is None:
+            return None, None, execution.rendered_turn_outcome
+        outcome, settlement = await self._settle_turn_handle(
+            execution,
+            terminalizer,
+            termination_origin=termination_origin,
+        )
+        rendered = self._commit_and_render_handle_settlement(
+            execution,
+            terminalizer,
+            settlement,
+        )
+        return outcome, settlement, rendered
+
     async def _settle_boundary_termination(
         self,
         execution: _TurnExecution,
@@ -662,17 +931,18 @@ class ModelHubTurnGateway:
         *,
         termination_origin: HandleTerminationOrigin,
     ) -> None:
-        if execution.settlement_recorded:
-            return
-        _outcome, settlement = await self._settle_turn_handle(
+        """End a turn the boundary is ending, rather than the request path.
+
+        A downstream disconnect can arrive after the upstream already answered, so
+        the turn was billed even though the request path never reached its own
+        ending. Which is the whole of what a boundary ending adds over that ending:
+        it is a *when*, and the turn already holds every *what*.
+        """
+
+        await self._settle_metered_turn(
             execution,
             terminalizer,
             termination_origin=termination_origin,
-        )
-        self._commit_and_render_handle_settlement(
-            execution,
-            terminalizer,
-            settlement,
         )
         if execution.settlement_origin == "downstream_cancel":
             terminalizer.mark_downstream_canceled()

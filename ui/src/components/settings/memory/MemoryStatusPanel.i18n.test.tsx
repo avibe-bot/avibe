@@ -79,6 +79,35 @@ const renderUnobservedSource = (language: 'en' | 'zh') => {
   );
 };
 
+const renderRepairButton = (language: 'en' | 'zh') => {
+  const i18n = createInstance();
+  void i18n.use(initReactI18next).init({
+    lng: language,
+    fallbackLng: 'en',
+    resources: { en: { translation: en }, zh: { translation: zh } },
+    interpolation: { escapeValue: false },
+  });
+
+  render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryStatusPanel
+        status={null}
+        failures={[]}
+        clearInProgress={null}
+        logSections={null}
+        statusLoading={false}
+        failuresLoading={false}
+        statusError={null}
+        failuresError={null}
+        refreshPending={false}
+        onRefresh={vi.fn()}
+        repairSupported
+        onRepair={vi.fn()}
+      />
+    </I18nextProvider>,
+  );
+};
+
 const renderClearState = (language: 'en' | 'zh', errorCode: string) => {
   const i18n = createInstance();
   void i18n.use(initReactI18next).init({
@@ -161,5 +190,15 @@ describe('MemoryStatusPanel anomaly error localization', () => {
 
     expect(screen.getAllByText(state).length).toBeGreaterThan(0);
     expect(screen.getAllByText(timestamp).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['en', en.memory.processingRecord.repair.action],
+    ['zh', zh.memory.processingRecord.repair.action],
+  ] as const)('localizes the Repair action in %s', (language, action) => {
+    renderRepairButton(language);
+
+    expect(screen.getByRole('button', { name: action })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeNull();
   });
 });

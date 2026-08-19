@@ -60,7 +60,7 @@ describe('isOwnerOnlyPath', () => {
 
   it('leaves remotely usable destinations open', () => {
     expect(isOwnerOnlyPath('/admin/settings/messaging')).toBe(false);
-    expect(isOwnerOnlyPath('/admin/organization/overview')).toBe(false);
+    expect(isOwnerOnlyPath('/admin/permissions')).toBe(false);
     expect(isOwnerOnlyPath('/apps/files')).toBe(false);
     expect(isOwnerOnlyPath('/apps/editor')).toBe(false);
     expect(isOwnerOnlyPath('/apps/terminal')).toBe(false);

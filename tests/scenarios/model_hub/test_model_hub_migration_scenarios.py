@@ -192,8 +192,11 @@ def _assert_sources_validated_before_commit(
     original_validator = ModelHubSourceConfig.from_payload.__func__
     validated_source_ids: set[str] = set()
 
-    def tracked_validator(cls, payload):
-        source = original_validator(cls, payload)
+    # Pass-through on purpose: what this double observes is which sources were
+    # validated, so it must not pin the validator's signature. Spelling out today's
+    # arguments made a policy flag the owner grew into a migration conflict.
+    def tracked_validator(cls, *args, **kwargs):
+        source = original_validator(cls, *args, **kwargs)
         validated_source_ids.add(source.id)
         return source
 

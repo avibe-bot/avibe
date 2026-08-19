@@ -19,8 +19,10 @@ from config.v2_config import (
 )
 from tests.ui_server_test_helpers import csrf_headers
 from storage import remote_access_authorization_service
+from storage.lock import MigrationLockTimeout
 from vibe import remote_access, ui_server
 from vibe.authorization import context_from_session_payload
+from vibe.sse_broker import broker
 from vibe.ui_compat import g
 from vibe.ui_server import app
 
@@ -846,6 +848,63 @@ def test_remote_authorization_failure_serves_spa_shell_but_rejects_api(
     assert protected.get_json()["error"] == error
 
 
+def _delayed_authorization_revision_sync_writer(
+    home: str,
+    entered: Any,
+    release: Any,
+    result_queue: Any,
+) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import V2Config as _V2Config
+    from vibe import remote_access as _remote_access
+
+    config = _V2Config.load()
+    state_path = _remote_access._authorization_revision_state_path()
+    original_read_json = _remote_access.runtime.read_json
+    paused = False
+
+    def delayed_read_json(path):
+        nonlocal paused
+
+        payload = original_read_json(path)
+        if path == state_path and not paused:
+            paused = True
+            entered.set()
+            if not release.wait(timeout=15):
+                raise AssertionError("delayed revision writer was never released")
+        return payload
+
+    _remote_access.runtime.read_json = delayed_read_json
+    try:
+        result_queue.put(("ok", _remote_access._replace_authorization_revision(config, 42)))
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
+
+
+def _authorization_revision_acknowledgement_writer(
+    home: str,
+    attempted: Any,
+    done: Any,
+    result_queue: Any,
+) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import V2Config as _V2Config
+    from vibe import remote_access as _remote_access
+
+    config = _V2Config.load()
+    attempted.set()
+    try:
+        result_queue.put(("ok", _remote_access.acknowledge_authorization_revision(config, 43)))
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
+    finally:
+        done.set()
+
+
 def test_authorization_revision_device_contract_is_monotonic(monkeypatch, tmp_path):
     """I1057-AC2/AC3: one paired-device watermark drives every hostname."""
 
@@ -876,6 +935,279 @@ def test_authorization_revision_device_contract_is_monotonic(monkeypatch, tmp_pa
         "error": "authorization_revision_regressed",
     }
     assert remote_access.current_authorization_revision(config) == 42
+
+
+def test_authorization_revision_writes_are_monotonic_across_processes(
+    monkeypatch,
+    tmp_path,
+):
+    """A delayed synchronization write cannot replace a newer acknowledgement."""
+
+    import multiprocessing as mp
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _paired_config(tmp_path, revision=41)
+    ctx = mp.get_context("spawn")
+    sync_entered = ctx.Event()
+    release_sync = ctx.Event()
+    acknowledgement_attempted = ctx.Event()
+    acknowledgement_done = ctx.Event()
+    sync_result = ctx.Queue()
+    acknowledgement_result = ctx.Queue()
+    sync_writer = ctx.Process(
+        target=_delayed_authorization_revision_sync_writer,
+        args=(str(tmp_path), sync_entered, release_sync, sync_result),
+    )
+    acknowledgement_writer = ctx.Process(
+        target=_authorization_revision_acknowledgement_writer,
+        args=(
+            str(tmp_path),
+            acknowledgement_attempted,
+            acknowledgement_done,
+            acknowledgement_result,
+        ),
+    )
+
+    sync_writer.start()
+    assert sync_entered.wait(timeout=15), "sync writer never entered its transaction"
+    acknowledgement_writer.start()
+    assert acknowledgement_attempted.wait(timeout=15), "acknowledgement writer never attempted"
+    assert not acknowledgement_done.wait(timeout=1), (
+        "acknowledgement writer bypassed the synchronization transaction"
+    )
+    release_sync.set()
+    sync_writer.join(timeout=15)
+    acknowledgement_writer.join(timeout=15)
+
+    assert sync_writer.exitcode == 0, f"sync writer failed: {sync_writer.exitcode}"
+    assert acknowledgement_writer.exitcode == 0, (
+        f"acknowledgement writer failed: {acknowledgement_writer.exitcode}"
+    )
+    assert sync_result.get(timeout=5) == ("ok", 42)
+    assert acknowledgement_result.get(timeout=5) == ("ok", 43)
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()
+    )
+    assert persisted["authorization_revision"] == 43
+
+
+def test_authorization_revision_cache_observes_another_process_watermark(
+    monkeypatch,
+    tmp_path,
+):
+    """A controller cache must observe a mutation persisted by the UI server."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, revision=41)
+    claims = _organization_claims(config, revision=41)
+    source_updated_at = time.time()
+
+    assert remote_access.session_authorization_revision_state(
+        config,
+        claims,
+        now=source_updated_at,
+    ) == "current"
+
+    remote_access.runtime.write_json(
+        remote_access._authorization_revision_state_path(),  # noqa: SLF001
+        {
+            "schema_version": 1,
+            "instance_id": "inst_123",
+            "authorization_revision": 42,
+            "source_updated_at": source_updated_at,
+        },
+    )
+
+    assert remote_access.session_authorization_revision_state(
+        config,
+        claims,
+        now=source_updated_at,
+    ) == "mismatch"
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "replacement"),
+    (
+        ("backend_url", "https://other-backend.test"),
+        ("instance_id", "inst_new"),
+        ("instance_secret", "other-secret"),
+    ),
+)
+def test_authorization_revision_acknowledgement_rejects_a_stale_pairing(
+    monkeypatch,
+    tmp_path,
+    changed_field,
+    replacement,
+):
+    """A mutation from instance A cannot replace the watermark after pairing B."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, revision=41)
+    current = V2Config.load()
+    setattr(current.remote_access.vibe_cloud, changed_field, replacement)
+    current.save()
+
+    with pytest.raises(
+        remote_access.AuthorizationRevisionPairingChangedError,
+        match="authorization_revision_pairing_changed",
+    ):
+        remote_access.acknowledge_authorization_revision(config, 42)
+
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()
+    )
+    assert persisted["instance_id"] == "inst_123"
+    assert persisted["authorization_revision"] == 41
+
+
+def test_authorization_revision_acknowledgement_rechecks_pairing_at_locked_write(
+    monkeypatch,
+    tmp_path,
+):
+    """A pairing switch at the watermark lock cannot let the old write through."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path, revision=41)
+    original_lock = remote_access._authorization_revision_file_lock  # noqa: SLF001
+    switched = False
+
+    def switch_before_locked_read(path):
+        nonlocal switched
+        if not switched:
+            switched = True
+            current = V2Config.load()
+            current.remote_access.vibe_cloud.instance_id = "inst_new"
+            current.save()
+        return original_lock(path)
+
+    monkeypatch.setattr(
+        remote_access,
+        "_authorization_revision_file_lock",
+        switch_before_locked_read,
+    )
+
+    with pytest.raises(
+        remote_access.AuthorizationRevisionPairingChangedError,
+        match="authorization_revision_pairing_changed",
+    ):
+        remote_access.acknowledge_authorization_revision(config, 42)
+
+    persisted = remote_access.runtime.read_json(
+        remote_access._authorization_revision_state_path()
+    )
+    assert persisted["instance_id"] == "inst_123"
+    assert persisted["authorization_revision"] == 41
+
+
+@pytest.mark.parametrize("persistence_failure", ("write_error", "lock_timeout"))
+def test_authorization_revision_sync_rejects_an_unpersisted_watermark(
+    monkeypatch,
+    tmp_path,
+    persistence_failure,
+):
+    config = _paired_config(tmp_path)
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda *_args, **_kwargs: {"authorization_revision": 42},
+    )
+    if persistence_failure == "write_error":
+        monkeypatch.setattr(
+            remote_access.runtime,
+            "write_json",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+        )
+    else:
+        def timed_out_lock(_path):
+            raise MigrationLockTimeout("watermark lock timed out")
+
+        monkeypatch.setattr(
+            remote_access,
+            "_authorization_revision_file_lock",
+            timed_out_lock,
+        )
+
+    assert remote_access.sync_authorization_revision_once(config) == {
+        "ok": False,
+        "error": "authorization_revision_sync_failed",
+    }
+    assert remote_access.current_authorization_revision(config) == 41
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        b"\xff",
+        b"{not-json",
+        b'{"schema_version":1,"instance_id":"inst_123","authorization_revision":"bad","source_updated_at":0}',
+    ),
+)
+def test_authorization_revision_read_treats_malformed_content_as_absent(
+    monkeypatch,
+    tmp_path,
+    malformed,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    remote_access._authorization_revision_state_path().write_bytes(malformed)  # noqa: SLF001
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+
+    assert remote_access.current_authorization_revision(config) is None
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        b"\xff",
+        b"{not-json",
+        b'{"schema_version":1,"instance_id":"inst_123","authorization_revision":"bad","source_updated_at":0}',
+    ),
+)
+def test_authorization_acknowledgement_keeps_memory_revision_when_rewrite_fails(
+    monkeypatch,
+    tmp_path,
+    malformed,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    state_path = remote_access._authorization_revision_state_path()  # noqa: SLF001
+    state_path.write_bytes(malformed)
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    published = []
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+    monkeypatch.setattr(
+        broker,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+
+    assert remote_access.acknowledge_authorization_revision(config, 42) == 42
+    assert remote_access.current_authorization_revision(config) == 42
+    assert published == [
+        ("authorization.changed", {"instance_authorization_revision": 42})
+    ]
+
+
+def test_authorization_revision_sync_keeps_strict_write_after_malformed_read(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    remote_access._authorization_revision_state_path().write_bytes(b"\xff")  # noqa: SLF001
+    remote_access._clear_authorization_revision_cache()  # noqa: SLF001
+    monkeypatch.setattr(
+        remote_access.runtime,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only state")),
+    )
+
+    with pytest.raises(OSError, match="read-only state"):
+        remote_access._replace_authorization_revision(config, 42)  # noqa: SLF001
 
 
 def test_paired_session_requires_signed_current_revision(monkeypatch, tmp_path):

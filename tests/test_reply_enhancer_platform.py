@@ -101,13 +101,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("## Silent replies", prompt)
         self.assertIn("<silent>reason not shown to the user</silent>", prompt)
+        # One positive trigger, so its complement does the excluding and there is
+        # no carve-out list to erode: `logs`/`runtime` keep read-only inspection
+        # gated (that is where agents learn to read logs through the API and treat
+        # internal state as opaque), and "does not cover" gates every Avibe
+        # explanation this prompt cannot answer. Phrasing it as gate-plus-carve-out
+        # cost two review rounds re-adding cases each compression shaved off.
         self.assertIn(
-            "Use the `use-avibe` playbook for Avibe configuration, repair, explanation, "
-            "and operations",
-            prompt,
-        )
-        self.assertIn(
-            "Before changing Avibe state or disrupting its running service, consult that playbook",
+            "Consult the `use-avibe` playbook to operate Avibe "
+            "(config, state, service, logs, runtime) or answer anything about it "
+            "this prompt does not cover",
             prompt,
         )
         self.assertIn(
@@ -115,6 +118,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "when it is not installed locally",
             prompt,
         )
+        self.assertNotIn("configuration, repair, explanation, and operations", prompt)
         self.assertIn("skills/use-avibe/SKILL.md", prompt)
         self.assertNotIn("new user turn", prompt)
         self.assertNotIn("active Agent Session context", prompt)

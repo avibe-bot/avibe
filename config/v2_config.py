@@ -13,7 +13,18 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union, get_args
+from typing import (
+    Callable,
+    ClassVar,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    TypeVar,
+    Union,
+    get_args,
+)
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
@@ -34,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
 _memory_config_tx_state = threading.local()
+_config_file_lock_state = threading.local()
 
 
 def _acquire_memory_config_file_lock(descriptor: int) -> None:
@@ -1293,6 +1305,13 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
     cloud.pop(field_name, None)
     if field_name == "runtime_apply_pending":
         cloud["runtime_apply_pending"] = True
+    elif field_name == "memory_llm_source":
+        # A source mismatch means the cached effective LLM cannot be trusted.
+        # Keep the rest of the cloud identity for diagnostics, but fail closed
+        # until the next authoritative status refresh supplies a new pair.
+        capabilities = cloud.get("capabilities")
+        if isinstance(capabilities, dict):
+            capabilities["memory_llm"] = False
     elif field_name == "applied_embedding_identity":
         live_identity = cloud.get("embedding_identity")
         if isinstance(live_identity, str) and live_identity.strip():
@@ -1495,12 +1514,59 @@ def _config_file_lock(path: Path):
     return MigrationFileLock(path.with_name(f".{path.name}.lock"))
 
 
+@contextmanager
+def _config_file_transaction_lock(path: Path) -> Iterator[None]:
+    """Hold one config migration lock, re-entering it within this thread."""
+
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    locks = getattr(_config_file_lock_state, "locks", None)
+    if locks is None:
+        locks = {}
+        _config_file_lock_state.locks = locks
+    active = locks.get(key)
+    if active is not None:
+        lock, depth = active
+        locks[key] = (lock, depth + 1)
+        try:
+            yield
+        finally:
+            locks[key] = (lock, depth)
+        return
+
+    lock = _config_file_lock(path)
+    with lock:
+        locks[key] = (lock, 1)
+        try:
+            yield
+        finally:
+            del locks[key]
+
+
+@contextmanager
+def config_file_lock(config_path: Optional[Path] = None) -> Iterator[None]:
+    """Serialize work that must observe one exact persisted config snapshot.
+
+    This is the same cross-process transaction used by ``V2Config.save`` and
+    ``config_write_transaction``. It also takes the migration lock used by
+    ``V2Config.load`` while persisting migrations, so ordinary saves cannot
+    replace a file between migration verification and replacement. Keeping one
+    lock path for ordinary config writes and guarded state transitions prevents
+    a pairing update from racing a reader that is about to persist
+    instance-owned state.
+    """
+
+    path = config_path or paths.get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _memory_config_transaction(path):
+        with _config_file_transaction_lock(path):
+            yield
+
+
 def _write_config_payload(path: Path, payload: dict) -> None:
     content = json.dumps(payload, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with CONFIG_LOCK:
-        with _config_file_lock(path):
-            _atomic_write_text(path, content)
+    with config_file_lock(path):
+        _atomic_write_text(path, content)
 
 
 def _write_config_payload_if_unchanged(
@@ -1549,7 +1615,7 @@ def _persist_migrated_config_payload(
 
     try:
         with CONFIG_LOCK:
-            with _config_file_lock(path):
+            with _config_file_transaction_lock(path):
                 try:
                     current_raw = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as exc:
@@ -1850,6 +1916,7 @@ _MEMORY_CLOUD_MULTIMODAL_ALIAS = "avibe-cloud-multimodal"
 
 MemoryMode = Literal["platform", "custom"]
 MemoryCloudScope = Literal["organization", "platform"]
+MemoryCloudLlmSource = Literal["dedicated", "chat_fallback"]
 
 
 @dataclass
@@ -1919,16 +1986,26 @@ class MemoryCloudCapabilities:
     chat: bool = False
     embedding: bool = False
     multimodal: bool = False
+    # Older persisted cloud caches did not have the effective Memory LLM
+    # capability. ``None`` keeps that shape distinguishable while the helper
+    # methods treat it as Chat fallback until the next status sync.
+    memory_llm: bool | None = None
 
     def validate(self) -> None:
         if any(
             not isinstance(value, bool)
-            for value in (self.asr, self.chat, self.embedding, self.multimodal)
-        ):
+            for value in (
+                self.asr,
+                self.chat,
+                self.embedding,
+                self.multimodal,
+            )
+        ) or (self.memory_llm is not None and not isinstance(self.memory_llm, bool)):
             raise ValueError("Config 'memory.cloud.capabilities' values must be booleans")
 
     def memory_available(self) -> bool:
-        return self.chat and self.embedding
+        effective_memory_llm = self.chat if self.memory_llm is None else self.memory_llm
+        return effective_memory_llm and self.embedding
 
 
 @dataclass
@@ -1937,6 +2014,7 @@ class MemoryCloudConfig:
 
     scope: MemoryCloudScope | None = None
     capabilities: MemoryCloudCapabilities = field(default_factory=MemoryCloudCapabilities)
+    memory_llm_source: MemoryCloudLlmSource | None = None
     embedding_identity: str | None = None
     revision: int | None = None
     quota_enforced: bool = False
@@ -1952,7 +2030,25 @@ class MemoryCloudConfig:
     def validate(self) -> None:
         if self.scope is not None and self.scope not in get_args(MemoryCloudScope):
             raise ValueError("Config 'memory.cloud.scope' must be 'organization', 'platform', or null")
+        if self.memory_llm_source is not None and self.memory_llm_source not in get_args(
+            MemoryCloudLlmSource
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' must be 'dedicated', 'chat_fallback', or null"
+            )
         self.capabilities.validate()
+        if self.memory_llm_source == "dedicated" and self.capabilities.memory_llm is False:
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' dedicated requires memory_llm"
+            )
+        if (
+            self.memory_llm_source == "chat_fallback"
+            and self.capabilities.memory_llm is not None
+            and self.capabilities.memory_llm != self.capabilities.chat
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' chat_fallback requires chat"
+            )
         if self.embedding_identity is not None:
             self.embedding_identity = _validate_memory_text(
                 self.embedding_identity,
@@ -2160,8 +2256,11 @@ class MemoryConfig:
 
     def effective_multimodal_available(self) -> bool:
         if self.cloud_runtime_selected():
-            # Cloud chat is the declared fallback when no dedicated mm slot exists.
-            return self.cloud.runtime_ready() and self.cloud.capabilities.chat
+            # Cloud chat is the declared fallback when no dedicated mm slot exists;
+            # a dedicated multimodal slot remains valid without Chat.
+            return self.cloud.runtime_ready() and (
+                self.cloud.capabilities.multimodal or self.cloud.capabilities.chat
+            )
         return bool(self.processing.multimodal and self.processing.multimodal.complete())
 
 
@@ -2274,7 +2373,9 @@ def memory_config_to_payload(
                 "chat": memory.cloud.capabilities.chat,
                 "embedding": memory.cloud.capabilities.embedding,
                 "multimodal": memory.cloud.capabilities.multimodal,
+                "memory_llm": memory.cloud.capabilities.memory_llm,
             },
+            "memory_llm_source": memory.cloud.memory_llm_source,
             "embedding_identity": memory.cloud.embedding_identity,
             "revision": memory.cloud.revision,
             "quota_enforced": memory.cloud.quota_enforced,
@@ -2533,6 +2634,64 @@ class AgentsConfig:
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
+_SettledItem = TypeVar("_SettledItem")
+
+
+def _collapse_settled_duplicates(
+    parsed: list[_SettledItem],
+    identity: Callable[[_SettledItem], object],
+    as_written: list,
+    message: str,
+    *,
+    repairing: bool,
+) -> list[_SettledItem]:
+    """Keep a collection of model identifiers unique after spelling is settled.
+
+    `normalized_model_id` is a many-to-one map applied inside the leaf validator,
+    while the uniqueness check belongs to the parent holding the collection. So
+    every such parent is checking pre-images while the object it builds carries
+    post-images, and the difference is not cosmetic: the loaded config keeps both
+    entries, `to_payload` writes one spelling for both, and the next load of what
+    this one wrote raises. Loading a file must produce something loadable, and
+    that round trip is what this restores.
+
+    Duplicates **as written** are a malformed payload either way and raise.
+    Duplicates that appear only once spelling is settled depend on where the
+    payload came from, which is what `repairing` names:
+
+    - Repairing a payload already on disk, the later entry collapses into the
+      earlier. It was already unreachable — an inventory lookup and an exact hop
+      comparison both find the first — and raising would fail exactly the load the
+      persisted-shape rule requires to succeed.
+    - Admitting a payload from a caller, the same pair is a request to name one
+      model twice, and silently keeping one half answers with a collection the
+      caller did not send. It raises, so the caller learns which spelling survived
+      by being told rather than by reading the response.
+
+    Required, and not defaulted, because the answer is a property of the caller
+    rather than of the collection: a parser cannot infer whether it is repairing
+    history or admitting a request, and a default would let the next call site
+    inherit whichever guess this one made.
+    """
+
+    if len(set(as_written)) != len(as_written):
+        raise ValueError(message)
+    if not repairing:
+        settled_ids = [identity(item) for item in parsed]
+        if len(set(settled_ids)) != len(settled_ids):
+            raise ValueError(message)
+        return list(parsed)
+    collapsed: list[_SettledItem] = []
+    seen: set[object] = set()
+    for item in parsed:
+        settled = identity(item)
+        if settled in seen:
+            continue
+        seen.add(settled)
+        collapsed.append(item)
+    return collapsed
+
+
 @dataclass
 class ModelHubModelConfig:
     id: str
@@ -2589,8 +2748,15 @@ class ModelHubModelConfig:
             raise ValueError(
                 "Config 'model_hub.sources.models.retired' must be false for manual models"
             )
+        # Spelling is settled here, at the one place a payload becomes a model
+        # config, so no admission path can invent a second spelling for one
+        # model and split its usage across two ledger rows. The length bound
+        # stays with the admission surfaces: this constructor also reads files
+        # older releases wrote, and rejecting one of those would fail config load.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
         return cls(
-            id=model_id,
+            id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
             display_name=display_name,
@@ -2745,7 +2911,7 @@ class ModelHubSourceConfig:
     masked_credential: Optional[str] = None
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
+    def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources' entries must be objects")
         allowed_fields = {
@@ -2801,8 +2967,13 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
         if any(not isinstance(model_id, str) for model_id in model_ids):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if len(set(model_ids)) != len(model_ids):
-            raise ValueError("Config 'model_hub.sources.models' contains duplicate ids")
+        models = _collapse_settled_duplicates(
+            [ModelHubModelConfig.from_payload(model) for model in models_payload],
+            lambda model: model.id,
+            model_ids,
+            "Config 'model_hub.sources.models' contains duplicate ids",
+            repairing=repairing,
+        )
         usage_payload = payload.get("usage")
         base_url = payload.get("base_url")
         credential_ref = payload.get("credential_ref")
@@ -2843,7 +3014,7 @@ class ModelHubSourceConfig:
             supply_channel=supply_channel,
             billing=billing,
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
-            models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            models=models,
             created_at=(
                 _validate_optional_datetime(
                     created_at,
@@ -2907,7 +3078,13 @@ class ModelHubRouteHopConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
-        return cls(source_id=source_id, model_id=model_id)
+        # A hop names a model in some source's inventory, and membership is decided
+        # by an exact comparison against that inventory. So the reference has to be
+        # spelled by whatever spells the thing it refers to: normalizing one side
+        # only would turn a working chain into `model_unsupported` on upgrade.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
+        return cls(source_id=source_id, model_id=normalized_model_id(model_id))
 
     def to_payload(self) -> dict:
         return {"source_id": self.source_id, "model_id": self.model_id}
@@ -2918,17 +3095,23 @@ class ModelHubRouteConfig:
     hops: tuple[ModelHubRouteHopConfig, ...] = ()
 
     @classmethod
-    def from_payload(cls, payload: object) -> "ModelHubRouteConfig":
+    def from_payload(cls, payload: object, *, repairing: bool = False) -> "ModelHubRouteConfig":
         if not isinstance(payload, dict) or set(payload) != {"hops"}:
             raise ValueError("Config 'model_hub.agents.routes' entries must contain hops")
         hops = payload.get("hops")
         if not isinstance(hops, list):
             raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
-        parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
-        pairs = [(hop.source_id, hop.model_id) for hop in parsed]
-        if len(set(pairs)) != len(pairs):
-            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
-        return cls(hops=parsed)
+        return cls(
+            hops=tuple(
+                _collapse_settled_duplicates(
+                    [ModelHubRouteHopConfig.from_payload(hop) for hop in hops],
+                    lambda hop: (hop.source_id, hop.model_id),
+                    [(hop["source_id"], hop["model_id"]) for hop in hops],
+                    "Config 'model_hub.agents.routes.hops' must contain unique pairs",
+                    repairing=repairing,
+                )
+            )
+        )
 
     def to_payload(self) -> dict:
         return {"hops": [hop.to_payload() for hop in self.hops]}
@@ -3005,7 +3188,13 @@ class ModelHubAgentSupplyConfig:
         )
 
     @classmethod
-    def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
+    def from_payload(
+        cls,
+        payload: dict,
+        *,
+        expected_backend: Optional[str] = None,
+        repairing: bool = False,
+    ) -> "ModelHubAgentSupplyConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents' entries must be objects")
         if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
@@ -3035,7 +3224,7 @@ class ModelHubAgentSupplyConfig:
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
         routes = {
-            model_id: ModelHubRouteConfig.from_payload(route)
+            model_id: ModelHubRouteConfig.from_payload(route, repairing=repairing)
             for model_id, route in routes_payload.items()
         }
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
@@ -3115,7 +3304,7 @@ class ModelHubConfig:
         return list(self.agents[backend].sources.order)
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubConfig":
+    def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
         if set(payload) - {"sources", "agents"}:
@@ -3128,7 +3317,10 @@ class ModelHubConfig:
             raise ValueError("Config 'model_hub.agents' must be an object")
         if set(agents_payload) - set(MODEL_HUB_BACKENDS):
             raise ValueError("Config 'model_hub.agents' contains unknown backends")
-        sources = [ModelHubSourceConfig.from_payload(source) for source in sources_payload]
+        sources = [
+            ModelHubSourceConfig.from_payload(source, repairing=repairing)
+            for source in sources_payload
+        ]
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
@@ -3163,6 +3355,7 @@ class ModelHubConfig:
             agents[backend] = ModelHubAgentSupplyConfig.from_payload(
                 raw_agent,
                 expected_backend=backend,
+                repairing=repairing,
             )
             expected_menu_ids = (
                 model_hub_fixed_menu_ids(backend)
@@ -3746,7 +3939,15 @@ class V2Config:
             # the user explicitly opts in after the release capability is enabled.
             model_hub = ModelHubConfig()
         else:
-            model_hub = ModelHubConfig.from_payload(model_hub_payload)
+            # The one repairing door, because this is the one caller parsing a
+            # document a previous release wrote. Every other entry into these
+            # constructors is either a request from a client — which must be told
+            # it named a model twice rather than answered with half of what it
+            # sent — or a round trip of objects this process already settled. The
+            # save paths reach here too, but never with this subtree: the config
+            # API drops ``model_hub`` from what the client sends, so the payload
+            # under this key is always what was last read off disk.
+            model_hub = ModelHubConfig.from_payload(model_hub_payload, repairing=True)
 
         ui_payload = payload.get("ui") or {}
         if not isinstance(ui_payload, dict):

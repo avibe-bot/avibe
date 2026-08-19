@@ -60,11 +60,16 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("project_id"),
             sa.UniqueConstraint("scope_id", name="uq_project_access_policies_scope"),
         )
-        op.create_index(
-            "ix_project_access_policies_organization",
-            "project_access_policies",
-            ["organization_id"],
-        )
+    # Outside the table guard on purpose. A run interrupted between the table and
+    # its index leaves the table present, and a guard that covers both would then
+    # skip the index forever -- permanently, once 20260819_0056 replays this
+    # revision and stamps, because a stamped revision never runs again.
+    op.create_index(
+        "ix_project_access_policies_organization",
+        "project_access_policies",
+        ["organization_id"],
+        if_not_exists=True,
+    )
 
     tables = _tables(bind)
     if "project_access_bindings" not in tables:
@@ -90,11 +95,12 @@ def upgrade() -> None:
             ),
             sa.PrimaryKeyConstraint("project_id", "principal_kind", "principal_value"),
         )
-        op.create_index(
-            "ix_project_access_bindings_principal",
-            "project_access_bindings",
-            ["principal_kind", "principal_value"],
-        )
+    op.create_index(
+        "ix_project_access_bindings_principal",
+        "project_access_bindings",
+        ["principal_kind", "principal_value"],
+        if_not_exists=True,
+    )
 
 
 def downgrade() -> None:

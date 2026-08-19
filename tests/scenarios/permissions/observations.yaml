@@ -1,0 +1,42 @@
+version: 1
+capability: current_instance_permissions
+observations:
+  - id: OBS-PERMISSIONS-001
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-001
+      - PERMISSIONS-002
+      - PERMISSIONS-003
+      - PERMISSIONS-009
+    summary: Permissions authority is the existing Avibe session plus the paired exact-instance credential, not a second Cloud user session.
+    previous_assumption: Embedded Organization management needed a browser-held Management OAuth grant.
+    observed_behavior: Backend now accepts a device-secret capability bound to exactly one instance and independently enforces policy authority.
+    required_updates:
+      - never accept target instance or Organization identifiers from the browser
+      - require owner or can_manage_instance before paired mutations
+      - remove Management OAuth cookies callbacks and proxy routes
+  - id: OBS-PERMISSIONS-002
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-005
+      - PERMISSIONS-006
+      - PERMISSIONS-007
+      - PERMISSIONS-008
+    summary: Authority connectivity convergence and conflict are separate user-visible states.
+    previous_assumption: A failed Cloud request could collapse to one generic empty or login-required state.
+    observed_behavior: Cloud-owned policy is readable, offline uses last-known exact-instance data, applying waits for acknowledgement, and conflict retains the draft for explicit retry.
+    required_updates:
+      - cache only sanitized successful projections bound to the paired instance
+      - never mask credential or authorization failures with cached policy
+      - keep revisions explicit on every mutation
+  - id: OBS-PERMISSIONS-003
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-011
+    summary: Show Page Workspace access is the exact-current-instance Resource ACL while link and Limited-email access remain local and independent.
+    previous_assumption: The Show Page access panel could derive Organization ownership from a browser claim or a hidden Cloud-management session.
+    observed_behavior: The local service resolves pairing ownership, proxies canonical Resource ACL reads and writes, and preserves stale drafts on revision conflict.
+    required_updates:
+      - bind every Resource ACL request to the paired instance and strip the browser match field before Backend contact
+      - preserve local link visibility and Limited-email grants as separate policy dimensions
+      - treat ownership uncertainty or mismatch as fail-closed without overwriting an existing policy

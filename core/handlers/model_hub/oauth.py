@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Literal, Optional, Protocol, get_args
 
 from .adapter import OAuthFlowState
+from .state_file import write_state_document
 
 OAuthChannel = Literal["native_cli", "hub"]
 OAuthNonceStatus = Literal["released", "in_flight", "committed"]
@@ -266,9 +265,9 @@ class OAuthFlowRegistry:
         return flows
 
     def _write(self, payload: dict[str, OAuthFlowBinding]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         bounded = dict(list(payload.items())[-self.max_entries :])
-        content = json.dumps(
+        write_state_document(
+            self.path,
             {
                 flow_id: {
                     "channel": binding.channel,
@@ -284,16 +283,7 @@ class OAuthFlowRegistry:
                 }
                 for flow_id, binding in bounded.items()
             },
-            ensure_ascii=False,
-            separators=(",", ":"),
         )
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, self.path)
 
     def remember(
         self,

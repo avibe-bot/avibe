@@ -1,449 +1,515 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import clsx from 'clsx';
-import {
-  Building2,
-  CloudOff,
-  Loader2,
-  LockKeyhole,
-  LogIn,
-  RefreshCw,
-  TriangleAlert,
-  Users,
-} from 'lucide-react';
+import { CloudOff, Loader2, RefreshCw, Save, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
-import { Select } from '@/components/ui/select';
+import { SegmentedRadio } from '@/components/ui/segmented';
 import {
+  getPermissions,
+  getResourceAccess,
   isRevisionConflict,
-  jsonBody,
-  OrganizationApiError,
-  organizationRequest,
-} from '@/features/organization/api/client';
+  PermissionsApiError,
+  updateResourceAccess,
+} from '@/features/permissions/api';
+import { requiresResourcePolicyNarrowing } from '@/features/permissions/policy';
 import type {
-  CloudManagementSession,
-  OrganizationGroup,
-  OrganizationResource,
+  DirectoryGroup,
+  PermissionResource,
+  PermissionsResponse,
   ResourceAccessLevel,
-} from '@/features/organization/api/types';
-import {
-  organizationAuthorizationReturnPath,
-  requiresResourceAccessNarrowingConfirmation,
-} from '@/features/organization/policy';
-import {
-  buildShowPageAccessPatch,
-  showPageAudienceLabelKey,
-  showPageAudienceLevels,
-  showPageSyncPresentation,
-  type ShowPageAccess,
-} from '@/lib/showPageAccess';
+} from '@/features/permissions/types';
+import type { ShowPageAccess } from '@/lib/showPageAccess';
 
-type ManagementGate =
-  | 'idle'
-  | 'loading'
-  | 'authorization_required'
-  | 'cloud_not_connected'
-  | 'subject_mismatch'
-  | 'ready'
-  | 'conflict'
-  | 'unreachable'
-  | 'error';
+type Gate = 'idle' | 'loading' | 'ready' | 'conflict' | 'error';
 
-type ResourceResponse = { resource: OrganizationResource };
-type OrganizationAuthorizationGate = 'authorization_required' | 'subject_mismatch';
+type Draft = {
+  level: ResourceAccessLevel;
+  groupIds: string[];
+};
 
-const LEVEL_ICONS = {
-  private: LockKeyhole,
-  public: Building2,
-  scope: Users,
-} satisfies Record<ResourceAccessLevel, typeof LockKeyhole>;
+const RESOURCE_SYNC_POLL_INTERVAL_MS = 2_000;
 
-function gateForError(error: unknown): ManagementGate {
-  if (!(error instanceof OrganizationApiError)) return 'unreachable';
-  if (error.code === 'cloud_management_subject_mismatch') return 'subject_mismatch';
-  if (error.status === 401) return 'authorization_required';
-  if (error.status === 409 && error.code === 'cloud_management_not_connected') {
-    return 'cloud_not_connected';
-  }
-  if (error.retryable || error.status >= 500) return 'unreachable';
-  return 'error';
-}
+const uniqueSorted = (values: string[]): string[] => [...new Set(values)].sort();
 
-function sessionGate(session: CloudManagementSession): ManagementGate {
-  if (session.connected) return 'ready';
-  return session.state;
-}
+const resourceIdentityMatches = (
+  resource: PermissionResource,
+  sessionId: string,
+  instanceId: string,
+): boolean => resource.instance_id === instanceId
+  && resource.resource_kind === 'show_page'
+  && resource.resource_id === sessionId;
 
-export function ShowPageOrganizationAuthorizationPrompt({
-  gate,
-  onAuthorize,
-}: {
-  gate: OrganizationAuthorizationGate;
-  onAuthorize: () => void;
-}) {
-  const { t } = useTranslation();
-  const subjectMismatch = gate === 'subject_mismatch';
-  return (
-    <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
-      <span className={clsx(
-        'flex min-w-0 items-start gap-1.5 text-[11px] leading-snug',
-        subjectMismatch ? 'text-destructive-ink' : 'text-muted',
-      )}>
-        {subjectMismatch ? <TriangleAlert className="mt-0.5 size-3.5 shrink-0" /> : null}
-        <span>
-          {t(subjectMismatch
-            ? 'chat.showPage.organizationSubjectMismatch'
-            : 'chat.showPage.organizationSignInDesc')}
-        </span>
-      </span>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        className="h-7 shrink-0"
-        onClick={onAuthorize}
-      >
-        <LogIn className="size-3.5" />
-        {t(subjectMismatch
-          ? 'chat.showPage.organizationSignInAgain'
-          : 'chat.showPage.organizationSignIn')}
-      </Button>
-    </div>
-  );
-}
+const organizationMatches = (
+  permissions: PermissionsResponse,
+  instanceId: string,
+  organizationId: string,
+): boolean => permissions.projection.instance.id === instanceId
+  && permissions.projection.instance.organization?.id === organizationId;
 
 export function ShowPageWorkspaceAccessControl({
   access,
   active,
+  canManageInstance,
   sessionId,
-  onConfirmationOpenChange,
   ownerWindowId,
 }: {
   access: ShowPageAccess | null;
   active: boolean;
+  canManageInstance: boolean;
   sessionId: string;
-  onConfirmationOpenChange?: (open: boolean) => void;
-  /** Attribute this control's body-portalled ConfirmDialog to its owning app window. */
   ownerWindowId?: string;
 }) {
   const { t } = useTranslation();
-  const [gate, setGate] = useState<ManagementGate>('idle');
-  const [resource, setResource] = useState<OrganizationResource | null>(null);
-  const [groups, setGroups] = useState<OrganizationGroup[]>([]);
-  const [level, setLevel] = useState<ResourceAccessLevel>(access?.access_level ?? 'private');
-  const [groupIds, setGroupIds] = useState<string[]>(access?.group_ids ?? []);
+  const [gate, setGate] = useState<Gate>('idle');
+  const [resource, setResource] = useState<PermissionResource | null>(null);
+  const [permissions, setPermissions] = useState<PermissionsResponse | null>(null);
+  const [groups, setGroups] = useState<DirectoryGroup[]>([]);
+  const [level, setLevel] = useState<ResourceAccessLevel>('private');
+  const [groupIds, setGroupIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [confirmNarrowing, setConfirmNarrowing] = useState(false);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const generationRef = useRef(0);
+  const sessionIdRef = useRef(sessionId);
+  const resourceRef = useRef<PermissionResource | null>(resource);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftRef = useRef<Draft>({ level, groupIds });
+  sessionIdRef.current = sessionId;
+  resourceRef.current = resource;
+  draftRef.current = { level, groupIds };
 
-  const organizationId = access?.organization_id ?? null;
   const instanceId = access?.instance_id ?? null;
-  const canManage = access?.can_manage === true;
-  const setNarrowingConfirmationOpen = useCallback((next: boolean) => {
-    setConfirmNarrowing(next);
-    onConfirmationOpenChange?.(next);
-  }, [onConfirmationOpenChange]);
+  const organizationId = access?.organization_id ?? null;
+  const resourceSyncStatus = resource?.sync.status;
+  const ownershipConflict = access?.ownership_status === 'conflict';
+  const organizationReady = access?.mode === 'organization'
+    && !ownershipConflict
+    && Boolean(instanceId && organizationId);
 
-  const accessPath = useMemo(() => {
-    if (!organizationId || !instanceId) return null;
-    return `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/resources/${encodeURIComponent(instanceId)}/show_page/${encodeURIComponent(sessionId)}/access`;
-  }, [instanceId, organizationId, sessionId]);
+  const adopt = useCallback((next: PermissionResource, nextGroups: DirectoryGroup[]) => {
+    setResource(next);
+    setGroups(nextGroups);
+    setLevel(next.access.access_level);
+    setGroupIds(uniqueSorted(next.access.group_ids));
+  }, []);
 
-  const loadManagement = useCallback(async () => {
-    if (!access || access.mode !== 'organization' || !canManage || !organizationId || !accessPath) {
-      return;
-    }
+  const load = useCallback(async (
+    settledGate: Gate = 'ready',
+    preservedDraft?: Draft,
+  ) => {
+    if (!instanceId || !organizationId) return;
     const generation = ++generationRef.current;
+    const requestSessionId = sessionId;
     setGate('loading');
+    setErrorCode(null);
     try {
-      const session = await organizationRequest<CloudManagementSession>('/api/cloud-management/session');
-      if (generation !== generationRef.current) return;
-      const nextGate = sessionGate(session);
-      if (!session.connected) {
-        setGate(nextGate);
-        setResource(null);
-        setGroups([]);
-        return;
-      }
-      const [resourceResult, groupResult] = await Promise.all([
-        organizationRequest<ResourceResponse>(accessPath),
-        organizationRequest<{ groups: OrganizationGroup[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups`,
-        ),
+      const [nextPermissions, nextResource] = await Promise.all([
+        getPermissions(),
+        getResourceAccess({ resource_kind: 'show_page', resource_id: requestSessionId }),
       ]);
-      if (generation !== generationRef.current) return;
-      const nextResource = resourceResult.resource;
-      setResource(nextResource);
-      setGroups(groupResult.groups);
-      setLevel(nextResource.access?.access_level ?? access.access_level);
-      setGroupIds(nextResource.access?.group_ids ?? access.group_ids);
-      setGate('ready');
-    } catch (error) {
-      if (generation !== generationRef.current) return;
-      setGate(gateForError(error));
+      if (
+        generation !== generationRef.current
+        || requestSessionId !== sessionIdRef.current
+      ) return;
+      if (
+        !organizationMatches(nextPermissions, instanceId, organizationId)
+        || !resourceIdentityMatches(nextResource.resource, requestSessionId, instanceId)
+      ) {
+        throw new Error('Show Page Organization identity mismatch');
+      }
+      const directoryGroups = [...nextPermissions.projection.directory.groups];
+      const knownIds = new Set(directoryGroups.map((group) => group.id));
+      for (const boundId of nextResource.resource.access.group_ids) {
+        if (!knownIds.has(boundId)) {
+          directoryGroups.push({ id: boundId, name: boundId, archived_at: 'unknown' });
+        }
+      }
+      setPermissions(nextPermissions);
+      if (preservedDraft) {
+        const archivedIds = new Set(
+          directoryGroups
+            .filter((group) => group.archived_at !== null)
+            .map((group) => group.id),
+        );
+        const newlyBoundArchived = nextResource.resource.access.group_ids.filter(
+          (groupId) => archivedIds.has(groupId),
+        );
+        setResource(nextResource.resource);
+        setGroups(directoryGroups);
+        setLevel(preservedDraft.level);
+        setGroupIds(preservedDraft.level === 'scope'
+          ? uniqueSorted([...preservedDraft.groupIds, ...newlyBoundArchived])
+          : []);
+      } else {
+        adopt(nextResource.resource, directoryGroups);
+      }
+      setGate(settledGate);
+    } catch (caught) {
+      if (
+        generation !== generationRef.current
+        || requestSessionId !== sessionIdRef.current
+      ) return;
+      setErrorCode(caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable');
+      setGate('error');
     }
-  }, [access, accessPath, canManage, organizationId]);
+  }, [adopt, instanceId, organizationId, sessionId]);
 
   useEffect(() => {
     generationRef.current += 1;
-    setResource(null);
-    setGroups([]);
-    setLevel(access?.access_level ?? 'private');
-    setGroupIds(access?.group_ids ?? []);
-    setNarrowingConfirmationOpen(false);
     setGate('idle');
-    if (active && access?.mode === 'organization' && access.can_manage) {
-      void loadManagement();
-    }
+    setResource(null);
+    setPermissions(null);
+    setGroups([]);
+    setLevel('private');
+    setGroupIds([]);
+    setSaving(false);
+    setConfirmNarrowing(false);
+    setErrorCode(null);
+    if (active && organizationReady) void load();
     return () => {
       generationRef.current += 1;
     };
-  }, [access, active, loadManagement, setNarrowingConfirmationOpen]);
+  }, [active, load, organizationReady, sessionId]);
 
-  const visibleGroups = groups.filter((group) => !group.archived_at || groupIds.includes(group.id));
-  const toggleGroup = (group: OrganizationGroup) => {
-    const selected = groupIds.includes(group.id);
-    if (group.archived_at && !selected) return;
-    setGroupIds((current) => selected
-      ? current.filter((id) => id !== group.id)
-      : [...current, group.id]);
-  };
+  useEffect(() => {
+    if (
+      !active
+      || !organizationReady
+      || !instanceId
+      || resourceSyncStatus !== 'pending'
+    ) {
+      return undefined;
+    }
+    let cancelled = false;
+    const generation = generationRef.current;
+    const requestSessionId = sessionId;
+    const requestInstanceId = instanceId;
 
-  const currentLevel = resource?.access?.access_level ?? access?.access_level ?? 'private';
-  const currentGroupIds = resource?.access?.group_ids ?? access?.group_ids ?? [];
-  const revision = resource?.access?.revision ?? access?.policy_revision ?? null;
-  const patch = revision === null ? null : buildShowPageAccessPatch(level, groupIds, revision);
-  const normalizedCurrentGroups = currentLevel === 'scope' ? [...currentGroupIds].sort() : [];
-  const normalizedDraftGroups = patch?.group_ids ? [...patch.group_ids].sort() : [];
-  const dirty = Boolean(
-    patch
-    && (level !== currentLevel
-      || normalizedCurrentGroups.join('\u0000') !== normalizedDraftGroups.join('\u0000')),
+    const schedule = () => {
+      if (!cancelled) {
+        pollTimerRef.current = setTimeout(() => void poll(), RESOURCE_SYNC_POLL_INTERVAL_MS);
+      }
+    };
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const next = await getResourceAccess({
+          resource_kind: 'show_page',
+          resource_id: requestSessionId,
+        });
+        if (
+          cancelled
+          || generation !== generationRef.current
+          || requestSessionId !== sessionIdRef.current
+          || requestInstanceId !== instanceId
+          || !resourceIdentityMatches(next.resource, requestSessionId, requestInstanceId)
+        ) return;
+        const currentResource = resourceRef.current;
+        const currentDraft = draftRef.current;
+        const draftIsDirty = Boolean(
+          currentResource
+          && (
+            currentResource.access.access_level !== currentDraft.level
+            || uniqueSorted(currentResource.access.group_ids).join('\u0000')
+              !== uniqueSorted(currentDraft.groupIds).join('\u0000')
+          )
+        );
+        setResource(next.resource);
+        if (!draftIsDirty) {
+          setLevel(next.resource.access.access_level);
+          setGroupIds(uniqueSorted(next.resource.access.group_ids));
+        }
+        if (next.resource.sync.status === 'pending') schedule();
+      } catch {
+        // A transient transport failure must not discard the pending resource;
+        // retry while this exact instance remains mounted.
+        schedule();
+      }
+    };
+
+    schedule();
+    return () => {
+      cancelled = true;
+      if (pollTimerRef.current !== null) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [active, instanceId, organizationReady, resourceSyncStatus, sessionId]);
+
+  const visibleGroups = useMemo(() => {
+    const bound = new Set(resource?.access.group_ids ?? []);
+    return groups.filter((group) => group.archived_at === null || bound.has(group.id));
+  }, [groups, resource]);
+  const targetGroupIds = level === 'scope' ? uniqueSorted(groupIds) : [];
+  const ownerMember = useMemo(
+    () => permissions?.projection.directory.members.find(
+      (member) => member.id === resource?.owner_user_id,
+    ) ?? null,
+    [permissions, resource],
   );
-  const editable = access?.mode === 'organization' && canManage && gate === 'ready' && !saving;
+  const ownerContext = useMemo(() => ({
+    isInstanceOwner: resource?.owner_user_id === null
+      || Boolean(
+        ownerMember
+        && permissions?.projection.access.owner.email
+        && ownerMember.email.trim().toLowerCase()
+          === permissions.projection.access.owner.email.trim().toLowerCase(),
+      ),
+    organizationGroupIds: ownerMember?.group_ids ?? null,
+  }), [ownerMember, permissions, resource]);
+  const dirty = Boolean(
+    resource
+    && (
+      resource.access.access_level !== level
+      || uniqueSorted(resource.access.group_ids).join('\u0000') !== targetGroupIds.join('\u0000')
+    )
+  );
+  const localMutationAllowed = Boolean(
+    permissions
+    && !permissions.offline
+    && permissions.projection.instance.local_mutation_allowed
+    && permissions.projection.capabilities.includes('instance.permissions.mutate')
+  );
+  const editable = canManageInstance
+    && localMutationAllowed
+    && (gate === 'ready' || gate === 'conflict')
+    && !saving;
+  const invalid = level === 'scope' && targetGroupIds.length === 0;
 
   const commit = async () => {
-    if (!accessPath || !patch || !dirty || !editable) return;
+    if (!resource || !instanceId || !dirty || invalid || !editable) return;
+    const generation = generationRef.current;
+    const requestSessionId = sessionId;
+    const draft = draftRef.current;
     setSaving(true);
+    setErrorCode(null);
     try {
-      const result = await organizationRequest<ResourceResponse>(accessPath, {
-        method: 'PATCH',
-        body: jsonBody(patch),
-      });
-      setResource(result.resource);
-      setLevel(result.resource.access?.access_level ?? level);
-      setGroupIds(result.resource.access?.group_ids ?? []);
+      const result = await updateResourceAccess(
+        { resource_kind: 'show_page', resource_id: requestSessionId },
+        draft.level,
+        draft.level === 'scope' ? uniqueSorted(draft.groupIds) : [],
+        resource.access.revision,
+        instanceId,
+      );
+      if (
+        generation !== generationRef.current
+        || requestSessionId !== sessionIdRef.current
+      ) return;
+      if (!resourceIdentityMatches(result.resource, requestSessionId, instanceId)) {
+        throw new Error('Show Page Organization identity mismatch');
+      }
+      adopt(result.resource, groups);
       setGate('ready');
-    } catch (error) {
-      setGate(isRevisionConflict(error) ? 'conflict' : gateForError(error));
+    } catch (caught) {
+      if (
+        generation !== generationRef.current
+        || requestSessionId !== sessionIdRef.current
+      ) return;
+      if (isRevisionConflict(caught)) {
+        setSaving(false);
+        setConfirmNarrowing(false);
+        await load('conflict', draft);
+        return;
+      }
+      setErrorCode(caught instanceof PermissionsApiError ? caught.code : 'permissions_unavailable');
+      setGate('error');
     } finally {
-      setSaving(false);
-      setNarrowingConfirmationOpen(false);
+      if (
+        generation === generationRef.current
+        && requestSessionId === sessionIdRef.current
+      ) {
+        setSaving(false);
+        setConfirmNarrowing(false);
+      }
     }
   };
 
-  const save = () => {
-    if (!patch || !dirty || !editable) return;
-    if (requiresResourceAccessNarrowingConfirmation(
-      currentLevel,
-      currentGroupIds,
-      patch.access_level,
-      patch.group_ids,
+  const save = async () => {
+    if (!resource || !instanceId || !dirty || invalid || !editable) return;
+    const draft = draftRef.current;
+    if (requiresResourcePolicyNarrowing(
+      resource.access.access_level,
+      resource.access.group_ids,
+      draft.level,
+      draft.level === 'scope' ? uniqueSorted(draft.groupIds) : [],
+      ownerContext,
     )) {
-      setNarrowingConfirmationOpen(true);
+      setConfirmNarrowing(true);
       return;
     }
-    void commit();
+    await commit();
   };
 
-  const startAuthorization = async () => {
-    setGate('loading');
-    try {
-      const result = await organizationRequest<{ authorize_url: string }>(
-        '/api/cloud-management/session/start',
-        {
-          method: 'POST',
-          body: jsonBody({
-            mode: 'interactive',
-            next: organizationAuthorizationReturnPath(
-              window.location.pathname,
-              window.location.search,
-            ),
-          }),
-        },
-      );
-      window.location.assign(result.authorize_url);
-    } catch (error) {
-      setGate(gateForError(error));
-    }
-  };
-
-  const LevelIcon = LEVEL_ICONS[level];
-  const syncPresentation = resource ? showPageSyncPresentation(resource.sync.status) : null;
+  const retryLoad = useCallback(() => {
+    void load('ready', resource ? draftRef.current : undefined);
+  }, [load, resource]);
 
   return (
-    <>
-      <section className="space-y-2.5" aria-label={t('chat.showPage.workspaceAccess')}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-medium">{t('chat.showPage.workspaceAccess')}</div>
-          <div className="mt-0.5 text-[11px] leading-snug text-muted">
-            {t('chat.showPage.workspaceAccessDesc')}
-          </div>
-        </div>
-        {!access ? (
-          <Loader2 className="size-4 shrink-0 animate-spin text-muted" />
-        ) : access.mode === 'personal' ? (
-          <span className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs">
-            <LockKeyhole className="size-3.5 text-muted" />
-            {t(showPageAudienceLabelKey('private'))}
-          </span>
-        ) : (
-          <Select
-            value={level}
-            disabled={!editable}
-            onChange={(event) => setLevel(event.target.value as ResourceAccessLevel)}
-            wrapperClassName="w-[148px] shrink-0"
-            className="h-8 text-xs"
-            aria-label={t('chat.showPage.workspaceAccess')}
-          >
-            {showPageAudienceLevels('organization').map((candidate) => (
-              <option key={candidate} value={candidate}>
-                {t(showPageAudienceLabelKey(candidate))}
-              </option>
-            ))}
-          </Select>
-        )}
+    <section className="space-y-2.5" aria-label={t('chat.showPage.workspaceAccess')}>
+      <div>
+        <div className="text-sm font-medium">{t('chat.showPage.workspaceAccess')}</div>
+        <p className="mt-0.5 text-[11px] leading-snug text-muted">
+          {t('chat.showPage.workspaceAccessDesc')}
+        </p>
       </div>
 
-      {access?.mode === 'organization' ? (
-        <div className="flex items-start gap-2 text-[11px] leading-snug text-muted">
-          <LevelIcon className="mt-0.5 size-3.5 shrink-0" />
-          <span>{t(`chat.showPage.workspaceHelp.${level}`)}</span>
+      {ownershipConflict ? (
+        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-destructive-ink">
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+          {t('chat.showPage.workspaceOwnershipConflict')}
         </div>
-      ) : null}
-
-      {access?.mode === 'organization' && level === 'scope' && gate === 'ready' ? (
-        <fieldset>
-          <legend className="mb-1.5 text-[11px] font-medium">
-            {t('chat.showPage.selectedGroups')}
-          </legend>
-          <div className="max-h-36 space-y-0.5 overflow-y-auto rounded-md border border-border p-1">
-            {visibleGroups.map((group) => {
-              const selected = groupIds.includes(group.id);
-              const disabled = !editable || Boolean(group.archived_at && !selected);
-              return (
-                <button
-                  key={group.id}
-                  type="button"
-                  role="checkbox"
-                  aria-checked={selected}
-                  disabled={disabled}
-                  className={clsx(
-                    'flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left text-xs',
-                    disabled ? 'cursor-not-allowed opacity-60' : 'hover:bg-foreground/[0.04]',
-                  )}
-                  onClick={() => toggleGroup(group)}
-                >
-                  <Checkbox checked={selected} presentational />
-                  <span className="min-w-0 flex-1 truncate">{group.name}</span>
-                  {group.archived_at ? (
-                    <span className="text-[10px] text-muted">{t('chat.showPage.archivedGroup')}</span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-          {!patch ? (
-            <p className="mt-1.5 text-[11px] text-gold-ink">{t('chat.showPage.groupRequired')}</p>
-          ) : null}
-        </fieldset>
-      ) : null}
-
-      {access?.mode === 'organization' && canManage && gate === 'loading' ? (
-        <div className="flex items-center gap-1.5 text-[11px] text-muted">
+      ) : access?.mode === 'configuration_unavailable' ? (
+        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-gold-ink">
+          <CloudOff className="mt-0.5 size-3.5 shrink-0" />
+          {t('chat.showPage.workspaceConfigurationUnavailable')}
+        </div>
+      ) : access?.mode === 'personal' || access?.mode === 'unmanaged' ? (
+        <p className="text-[11px] leading-snug text-muted">
+          {t(access.mode === 'personal'
+            ? 'chat.showPage.workspacePersonal'
+            : 'chat.showPage.workspaceUnmanaged')}
+        </p>
+      ) : access?.mode === 'organization_pending' ? (
+        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-gold-ink">
+          <CloudOff className="mt-0.5 size-3.5 shrink-0" />
+          {t('chat.showPage.workspacePending')}
+        </div>
+      ) : gate === 'loading' || gate === 'idle' ? (
+        <div className="flex h-9 items-center gap-1.5 text-[11px] text-muted">
           <Loader2 className="size-3.5 animate-spin" />
           {t('chat.showPage.loadingWorkspaceAccess')}
         </div>
-      ) : null}
-
-      {access?.mode === 'organization'
-        && canManage
-        && (gate === 'authorization_required' || gate === 'subject_mismatch') ? (
-          <ShowPageOrganizationAuthorizationPrompt
-            gate={gate}
-            onAuthorize={() => void startAuthorization()}
+      ) : resource ? (
+        <>
+          <SegmentedRadio<ResourceAccessLevel>
+            value={level}
+            onChange={(next) => {
+              if (!editable) return;
+              setLevel(next);
+            }}
+            disabled={!editable}
+            ariaLabel={t('chat.showPage.workspaceAccess')}
+            tone="muted"
+            className="max-w-full [&>button]:min-w-0 [&>button]:whitespace-normal [&>button]:px-1.5 [&>button]:text-center [&>button]:leading-tight"
+            options={[
+              { id: 'private', label: t('chat.showPage.workspaceModes.private') },
+              { id: 'scope', label: t('chat.showPage.workspaceModes.scope') },
+              { id: 'public', label: t('chat.showPage.workspaceModes.organization') },
+            ]}
           />
-        ) : null}
+          <p className="text-[11px] leading-snug text-muted">
+            {t(`chat.showPage.workspaceHelp.${level}`)}
+          </p>
 
-      {access?.mode === 'organization' && canManage && gate === 'cloud_not_connected' ? (
-        <div className="flex items-start gap-1.5 text-[11px] leading-snug text-muted">
-          <CloudOff className="mt-0.5 size-3.5 shrink-0" />
-          {t('chat.showPage.organizationUnavailable')}
-        </div>
+          {level === 'scope' ? (
+            <div className="space-y-1" aria-label={t('chat.showPage.workspaceGroups')}>
+              {visibleGroups.length ? visibleGroups.map((group) => {
+                const checked = groupIds.includes(group.id);
+                const archived = group.archived_at !== null;
+                return (
+                  <div
+                    key={group.id}
+                    className="flex min-h-8 items-center gap-2 rounded-md px-1.5 py-1 text-xs"
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={!editable || archived}
+                      onCheckedChange={(next) => {
+                        if (!editable || archived) return;
+                        setGroupIds((current) => uniqueSorted(
+                          next
+                            ? [...current, group.id]
+                            : current.filter((value) => value !== group.id),
+                        ));
+                      }}
+                      label={group.name}
+                    />
+                    <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                    {archived ? (
+                      <span className="shrink-0 text-[10px] text-muted">
+                        {t('chat.showPage.workspaceArchived')}
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              }) : (
+                <p className="text-[11px] text-muted">{t('chat.showPage.workspaceNoGroups')}</p>
+              )}
+              {invalid ? (
+                <p className="text-[11px] text-gold-ink">
+                  {t('chat.showPage.workspaceGroupRequired')}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {gate === 'conflict' ? (
+            <div className="flex items-start gap-1.5 text-[11px] leading-snug text-gold-ink">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              {t('chat.showPage.workspaceRevisionConflict')}
+            </div>
+          ) : null}
+          {!localMutationAllowed ? (
+            <p className="text-[11px] leading-snug text-muted">
+              {t(permissions?.offline
+                ? 'chat.showPage.workspaceOffline'
+                : 'chat.showPage.workspaceReadOnly')}
+            </p>
+          ) : !canManageInstance ? (
+            <p className="text-[11px] leading-snug text-muted">
+              {t('chat.showPage.workspaceOwnerOnly')}
+            </p>
+          ) : null}
+          {resource.sync.status !== 'in_sync' ? (
+            <p className="text-[11px] leading-snug text-muted">
+              {t(`chat.showPage.workspaceSync.${resource.sync.status}`)}
+            </p>
+          ) : null}
+          <div className="flex justify-end">
+            <Button
+              type="button"
+              size="sm"
+              className="h-7"
+              disabled={!dirty || invalid || !editable}
+              onClick={() => void save()}
+            >
+              {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+              {t('chat.showPage.applyWorkspaceAccess')}
+            </Button>
+          </div>
+        </>
       ) : null}
 
-      {access?.mode === 'organization' && canManage && ['conflict', 'unreachable', 'error'].includes(gate) ? (
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-2">
-          <span className="text-[11px] leading-snug text-destructive-ink">
-            {t(`chat.showPage.workspaceErrors.${gate}`)}
-          </span>
-          <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" onClick={() => void loadManagement()} aria-label={t('common.retry')} title={t('common.retry')}>
+      {gate === 'error' ? (
+        <div className="flex items-start justify-between gap-2 text-[11px] leading-snug text-destructive-ink">
+          <span>{t(`permissions.errors.${errorCode}`, {
+            defaultValue: t('chat.showPage.workspaceLoadError'),
+          })}</span>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-7 shrink-0"
+            onClick={retryLoad}
+            aria-label={t('common.retry')}
+          >
             <RefreshCw className="size-3.5" />
           </Button>
         </div>
       ) : null}
-
-      {access?.mode === 'organization' && !canManage ? (
-        <p className="text-[11px] leading-snug text-muted">
-          {t('chat.showPage.workspaceReadOnly')}
-        </p>
-      ) : null}
-
-      {syncPresentation ? (
-        <div
-          className={clsx(
-            'flex items-center gap-1.5 text-[11px] leading-snug',
-            syncPresentation.tone === 'error' ? 'text-destructive-ink' : 'text-gold-ink',
-          )}
-        >
-          {syncPresentation.tone === 'error' ? (
-            <TriangleAlert className="size-3.5 shrink-0" />
-          ) : (
-            <Loader2 className="size-3.5 shrink-0 animate-spin" />
-          )}
-          {t(syncPresentation.key)}
-        </div>
-      ) : null}
-
-      {access?.mode === 'organization' && canManage && gate === 'ready' ? (
-        <div className="flex justify-end">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-7"
-            disabled={!dirty || !patch || saving}
-            onClick={save}
-          >
-            {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-            {t('chat.showPage.applyWorkspaceAccess')}
-          </Button>
-        </div>
-      ) : null}
-
-      </section>
       <ConfirmDialog
         open={confirmNarrowing}
-        onOpenChange={setNarrowingConfirmationOpen}
-        title={t('organization.resources.narrowTitle')}
-        description={t('organization.resources.narrowBody')}
-        confirmLabel={t('organization.actions.saveChanges')}
+        onOpenChange={setConfirmNarrowing}
+        title={t('chat.showPage.workspaceNarrowTitle')}
+        description={t('chat.showPage.workspaceNarrowBody')}
+        confirmLabel={t('chat.showPage.applyWorkspaceAccess')}
+        confirmDisabled={!editable}
         onConfirm={commit}
         windowOwnerId={ownerWindowId}
       />
-    </>
+    </section>
   );
 }

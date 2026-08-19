@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 
 import { useApi } from '@/context/ApiContext';
 
+import { onPageReactivated } from './pageActivity';
+
 const FALLBACK_POLL_INTERVAL_MS = 5000;
 
 export function shouldPollVaultRequests(eventBridgeConnected: boolean): boolean {
@@ -62,18 +64,12 @@ export function useVaultRequestRefresh(refresh: () => void | Promise<void>): voi
       timer = window.setTimeout(tick, FALLBACK_POLL_INTERVAL_MS);
     };
 
-    const refreshNow = () => {
-      if (document.visibilityState === 'visible') void tick();
-    };
-
     void tick();
-    document.addEventListener('visibilitychange', refreshNow);
-    window.addEventListener('focus', refreshNow);
+    const stopReactivation = onPageReactivated(() => void tick());
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', refreshNow);
-      window.removeEventListener('focus', refreshNow);
+      stopReactivation();
     };
   }, [eventBridgeConnected, refresh]);
 }

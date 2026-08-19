@@ -127,7 +127,7 @@
   },
   "nav": {
     "dashboard": "控制台",
-    "organization": "组织",
+    "permissions": "权限",
     "appLibrary": "应用库",
     "channels": "群组",
     "users": "私聊",
@@ -314,6 +314,7 @@
       "installing": "安装中…",
       "installed": "{{name}} 已就绪。",
       "installFailed": "安装失败。",
+      "memoryRuntimeDisableBeforeRepair": "记忆功能正在运行。请先在「设置 → 记忆」中关闭记忆，再修复运行时。",
       "backendsTitle": "Agent 后端",
       "backendsDetail": "Claude · OpenCode · Codex —— 在 Backends 标签页管理。",
       "manageBackends": "前往 Backends",
@@ -632,10 +633,6 @@
       "subtitle": "按 Agent 查看每个型号现在能否运行、由谁供给；需要时可为单个型号指定路由。",
       "addSource": "添加来源",
       "loadError": "加载失败：{{detail}}",
-      "tabs": {
-        "sources": "来源与网关",
-        "usage": "用量与额度"
-      },
       "sourceKind": {
         "api_key": "API Key",
         "subscription": "订阅"
@@ -658,7 +655,7 @@
         },
         "tab": {
           "hub": "来源与网关",
-          "usage": "用量与额度"
+          "usage": "用量"
         }
       },
       "direct": {
@@ -816,10 +813,6 @@
         "unavailable": "供给已暂停",
         "note": "路由链就是各后端配置的来源顺序。"
       },
-      "usageTab": {
-        "title": "用量与额度",
-        "detail": "网关来源完成请求后，用量会显示在这里。"
-      },
       "status": {
         "allHealthy": "全部正常",
         "needsAction_one": "{{count}} 个模型需要处理",
@@ -947,7 +940,54 @@
         "error": "需要处理"
       },
       "usage": {
-        "monthSpend": "本月 {{amount}}"
+        "title": "用量",
+        "detail": "网关代理的对话所计量的 token，按本地日期汇总。",
+        "window": {
+          "label": "区间",
+          "option": "{{days}} 天"
+        },
+        "range": "{{from}} – {{to}} · 近 {{days}} 天",
+        "empty": "还没有计量数据。网关来源完成请求后，这里就会有内容。",
+        "blank": "—",
+        "tokens": {
+          "label": "Tokens",
+          "detail": "输入 {{input}} · 输出 {{output}}",
+          "none": "这个区间没有请求回报 token"
+        },
+        "requests": {
+          "label": "请求数",
+          "reported": "每次请求都回报了 token",
+          "shortfall_one": "{{count}} 次请求没有回报 token",
+          "shortfall_other": "{{count}} 次请求没有回报 token"
+        },
+        "cached": {
+          "label": "缓存输入",
+          "detail": "输入 {{input}} 中有 {{cached}} 来自缓存",
+          "none": "这个区间没有输入 token"
+        },
+        "bySource": {
+          "title": "按来源",
+          "col": {
+            "source": "来源",
+            "tokens": "Tokens",
+            "requests": "请求",
+            "cached": "缓存",
+            "lastMetered": "最近计量"
+          },
+          "goneSource": "已删除",
+          "goneModel": "型号已不在列表中"
+        },
+        "byDay": {
+          "title": "按日",
+          "chart": "每日计量 token，{{from}} 至 {{to}}",
+          "table": "每日计量 token 与请求数，{{from}} 至 {{to}}",
+          "col": { "day": "日期" },
+          "column": "{{day}} · {{tokens}} tokens · {{requests}} 次请求",
+          "peak": "峰值 {{tokens}}，出现在 {{day}}",
+          "quiet": "这个区间没有任何一天有计量数据",
+          "unreported": "有请求，但没有任何一天回报了 token",
+          "zero": "有回报 token 的日子，回报的都是 0"
+        }
       },
       "supplyTooltip": {
         "label": "供应："
@@ -1016,7 +1056,14 @@
         "section": "这个型号的路由链",
         "removeHop": "移除这一跳",
         "addHop": "添加一跳",
-        "add": { "confirm": "添加", "none": "没有可添加的来源型号" },
+        "add": {
+          "source": "来源",
+          "model": "型号",
+          "search": "搜索来源或型号",
+          "confirm": "添加",
+          "noMatch": "没有匹配的来源型号",
+          "none": "没有可添加的来源型号"
+        },
         "sourceMissing": "来源不存在",
         "invalidAfterRefresh": "这个已编辑的跳在刷新后的来源中不可用。移除它后再保存。",
         "reorder": {
@@ -1664,6 +1711,7 @@
     "memory_runtime_missing": "memory-runtime 依赖尚未安装。",
     "memory_runtime_unsupported": "memory-runtime 依赖在此平台上不受支持。",
     "memory_runtime_install_failed": "memory-runtime 依赖安装失败。",
+    "memory_runtime_install_requires_disabled_memory": "记忆运行时正在使用中。请先在「设置 → 记忆」中关闭记忆，再修复。",
     "memory_reconcile_failed": "Avibe 无法应用记忆设置。请查看运行时日志了解失败步骤。",
     "memory_sidecar_unavailable": "记忆 sidecar 当前不可访问。",
     "memory_provider_timeout": "记忆请求超时。",
@@ -2944,6 +2992,8 @@
   "agents": {
     "title": "Agents",
     "subtitle": "已登记 {{count}} 个 Agent。",
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程模式下此资源为只读。",
     "tabs": {
       "definitions": "定义",
       "running": "运行"
@@ -3228,6 +3278,8 @@
   "skills": {
     "title": "技能",
     "subtitle": "跨各 Agent 后端管理全局与项目级技能 · 基于 askill。",
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程模式下技能为只读。",
     "scopeGlobal": "全局",
     "scopeProject": "项目",
     "searchPlaceholder": "搜索已安装技能…",
@@ -3580,38 +3632,40 @@
         "invalid": "请检查访问模式、链接和邮箱列表。",
         "error": "无法加载链接访问设置。"
       },
-      "workspaceAccess": "登录访问范围",
-      "workspaceAccessDesc": "控制登录后哪些人可以打开此页面。",
-      "workspaceLevels": {
+      "workspaceAccess": "组织内访问",
+      "workspaceAccessDesc": "控制此组织内的已登录访问；与链接访问相互独立。",
+      "loadingWorkspaceAccess": "正在加载组织内访问设置…",
+      "workspacePersonal": "此 Show Page 属于 Personal Avibe。",
+      "workspaceUnmanaged": "此 Avibe 配对后才能使用组织内访问。",
+      "workspacePending": "已知此 Avibe 属于组织，但暂时无法取得精确绑定；访问保持私有。",
+      "workspaceConfigurationUnavailable": "Avibe 配置暂时不可用，无法验证组织内访问；访问保持私有。",
+      "workspaceOwnershipConflict": "此 Show Page 绑定到了其他所有权域；解决冲突前访问保持私有。",
+      "workspaceModes": {
         "private": "私有",
-        "public": "组织",
+        "organization": "组织成员",
         "scope": "指定群组"
       },
       "workspaceHelp": {
-        "private": "此规则下只有页面所有者可以打开。",
-        "public": "组织内所有活跃成员均可打开，同时仍受 Avibe 和项目权限限制。",
-        "scope": "只有指定群组的活跃成员可以打开，同时仍受 Avibe 和项目权限限制。"
+        "private": "只有页面所有者和 Instance Owner 可以使用。",
+        "public": "此组织的已登录成员可以使用。",
+        "scope": "只有所选组织群组的成员可以使用。"
       },
-      "selectedGroups": "指定群组",
-      "archivedGroup": "已归档",
-      "groupRequired": "至少选择一个群组。",
+      "workspaceGroups": "组织群组",
+      "workspaceArchived": "已归档",
+      "workspaceNoGroups": "暂无可选的活跃群组。",
+      "workspaceGroupRequired": "请至少选择一个群组。",
+      "workspaceRevisionConflict": "组织内访问已在其他位置更新；你的草稿已保留到最新版本。",
+      "workspaceOffline": "Permissions 离线时显示上次已知组织策略，暂不可编辑。",
+      "workspaceReadOnly": "此组织策略由 Avibe Cloud 管理，请前往 Avibe Cloud 修改。",
+      "workspaceOwnerOnly": "只有 Instance Owner 可以修改组织内访问。",
+      "workspaceLoadError": "无法加载组织内访问设置。",
+      "workspaceNarrowTitle": "收紧组织内访问权限？",
+      "workspaceNarrowBody": "策略应用后，部分用户可能立即失去访问权限。",
       "applyWorkspaceAccess": "应用",
-      "loadingWorkspaceAccess": "正在加载组织权限…",
-      "workspaceReadOnly": "只有页面所有者或组织管理者可以修改此访问范围。",
-      "organizationSignIn": "登录",
-      "organizationSignInAgain": "重新登录",
-      "organizationSignInDesc": "登录 avibe.bot 后才能修改组织访问范围。",
-      "organizationUnavailable": "当前 Avibe 尚未连接 avibe.bot 的组织管理功能。",
-      "organizationSubjectMismatch": "当前登录的 avibe.bot 账号与此 Avibe 会话不一致。",
-      "workspaceErrors": {
-        "conflict": "访问范围已在其他位置更新，请重新加载最新版本。",
-        "unreachable": "组织权限暂时不可用。",
-        "error": "无法加载组织权限。"
-      },
       "workspaceSync": {
-        "pending": "访问范围变更正在等待应用到当前 Avibe。",
-        "offline": "当前 Avibe 已离线，重新连接后会应用访问范围变更。",
-        "error": "当前 Avibe 无法应用访问范围变更。"
+        "pending": "策略正在等待此 Avibe 应用。",
+        "offline": "此 Avibe 尚未确认最新策略。",
+        "error": "无法应用最新策略。"
       },
       "emailPlaceholder": "name@example.com",
       "addEmail": "添加邮箱",
@@ -3800,6 +3854,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程模式下 Vaults 为只读。",
     "title": "保险库",
     "subtitle": "为你的 AI Agent 提供密钥，永不进入上下文。",
     "add": "添加密钥",
@@ -4163,6 +4219,18 @@
       "title": "处理记录",
       "description": "查看记忆引擎的运行状态、数据更新情况，以及处理中遇到的问题。",
       "refresh": "刷新",
+      "repair": {
+        "action": "修复索引",
+        "running": "正在修复…",
+        "confirmTitle": "修复记忆索引？",
+        "confirmDescription": "修复会重新扫描 Markdown 记忆并排空待处理工作，同时保持记忆 sidecar 可用。此过程可能消耗 Embedding API 配额。",
+        "confirmLabel": "修复索引",
+        "healthResult": "修复后的健康状态",
+        "healthy": "健康",
+        "completed": "记忆索引修复完成。",
+        "completedWithWarnings": "记忆索引修复完成，但健康状态有警告。",
+        "failed": "记忆索引修复失败。"
+      },
       "runtime": {
         "title": "引擎状态",
         "help": "记忆引擎在本机后台运行，负责把你的消息整理成记忆。这里显示它当前的运行情况。",
@@ -4184,18 +4252,6 @@
         "cascade": "处理队列",
         "cascadeHelp": "消息会先进入队列，再由引擎逐条整理成记忆。这里是队列的处理进度和失败统计；可重试的失败会自动重试，永久失败不会。",
         "cascadeHelpLabel": "关于处理队列",
-        "repair": {
-          "action": "修复索引",
-          "running": "正在修复…",
-          "confirmTitle": "修复记忆索引？",
-          "confirmDescription": "修复会重新扫描 Markdown 记忆并排空待处理工作，同时保持记忆 sidecar 可用。此过程可能消耗 Embedding API 配额。",
-          "confirmLabel": "修复索引",
-          "healthResult": "修复后的健康状态",
-          "healthy": "健康",
-          "completed": "记忆索引修复完成。",
-          "completedWithWarnings": "记忆索引修复完成，但健康状态有警告。",
-          "failed": "记忆索引修复失败。"
-        },
         "recorder": "调用记录",
         "recorderHelp": "调用记录正常时会保存模型调用详情，方便排查问题；记录异常或关闭时，新的调用可能不会被记录。",
         "recorderHelpLabel": "关于调用记录",
@@ -4636,340 +4692,148 @@
       "fact": "事实"
     }
   },
-  "organization": {
-    "nav": {
-      "overview": "概览",
-      "instances": "Avibe",
-      "members": "成员",
-      "groups": "群组",
-      "resources": "资源"
+  "permissions": {
+    "title": "权限",
+    "description": "管理谁可以访问当前 Avibe，以及他们可使用的项目。",
+    "currentInstance": "当前 Avibe",
+    "authority": {
+      "instance": "实例管理",
+      "cloud": "由 Avibe Cloud 管理"
     },
     "actions": {
-      "backToControlPanel": "控制面板",
-      "openRemoteAccess": "打开远程访问",
-      "signIn": "登录 Avibe Cloud",
-      "signInAgain": "使用同一账号重新登录",
-      "signOut": "退出",
-      "reload": "查看最新版本",
-      "saving": "保存中...",
-      "saveChanges": "保存更改",
-      "sendInvite": "发送邀请",
-      "inviteMember": "邀请成员",
-      "editMember": "编辑成员",
-      "removeMember": "移除成员",
-      "resendInvite": "重新发送邀请",
-      "exportCsv": "导出 CSV",
-      "newGroup": "新建群组",
-      "editGroup": "编辑群组",
-      "archiveGroup": "归档群组",
-      "restoreGroup": "恢复群组",
-      "manageMembers": "管理成员",
-      "saveMembers": "保存成员",
+      "openCloud": "打开 Avibe Cloud",
       "addAccess": "添加访问权限",
       "editAccess": "编辑访问权限",
       "removeAccess": "移除访问权限",
+      "manage": "管理",
+      "refresh": "刷新状态",
+      "save": "保存更改",
+      "retrySave": "重试保存",
       "addBinding": "添加绑定",
-      "removeBinding": "移除绑定",
-      "manage": "管理"
+      "removeBinding": "移除绑定"
     },
-    "roles": {
-      "owner": "所有者",
-      "admin": "管理员",
-      "member": "成员"
+    "tabs": {
+      "label": "权限视图",
+      "access": "Avibe 访问",
+      "projects": "项目"
     },
-    "status": {
-      "active": "活跃",
-      "invited": "已邀请",
-      "removed": "已移除"
+    "states": {
+      "loadingTitle": "正在加载权限",
+      "deniedTitle": "权限不可用",
+      "deniedBody": "当前 Avibe 会话无权查看此策略。",
+      "unavailableTitle": "无法加载权限",
+      "unavailableBody": "此 Avibe 尚未配对，或当前策略不可用。",
+      "offlineTitle": "正在显示上次已知策略",
+      "offlineBody": "Avibe Cloud 当前不可用。连接恢复前，缓存策略仅供查看。",
+      "cloudTitle": "由 Avibe Cloud 管理",
+      "cloudBody": "此策略由中央管理，在当前 Avibe 中保持只读。",
+      "readOnlyTitle": "只读访问",
+      "readOnlyBody": "当前 Avibe 角色可以查看策略，但不能修改。",
+      "applyingTitle": "策略更改正在应用",
+      "applyingBody": "一个或多个项目策略正在等待当前 Avibe 确认。",
+      "syncErrorTitle": "策略同步失败",
+      "syncErrorBody": "一个或多个策略更改无法分发。请检查项目状态，并在连接恢复后重试。",
+      "syncOfflineTitle": "策略同步已离线",
+      "syncOfflineBody": "当前策略仍可查看，但其分发状态处于离线，可能尚未在所有位置生效。",
+      "conflictTitle": "此策略已在其他位置更改",
+      "conflictBody": "你的草稿已保留，并已加载最新修订。请检查草稿后明确重试。",
+      "conflictRefreshBody": "你的草稿已保留，但无法加载最新修订。请先刷新，再重试更改。",
+      "pairingChangedBody": "你的草稿已保留，但此页面现在属于另一个已配对的 Avibe，无法将草稿保存到新的配对。",
+      "errorTitle": "无法保存权限"
     },
     "sync": {
-      "none": "没有受管策略",
+      "none": "无策略",
       "in_sync": "已同步",
-      "applying": "应用中",
+      "applying": "正在应用",
       "offline": "离线",
       "error": "错误",
       "deleted": "已删除"
     },
-    "sidebar": {
-      "section": "组织",
-      "organizationCount": "{{count}} 个组织",
-      "switchOrganization": "切换组织",
-      "cloudConnected": "Avibe Cloud已连接",
-      "sessionRemaining": "{{minutes}} 分钟",
-      "openMenu": "打开组织菜单"
-    },
-    "states": {
-      "loadingTitle": "正在加载组织",
-      "loadingBody": "正在从 Avibe Cloud 获取最新组织数据。",
-      "notConnectedTitle": "尚未连接 Avibe Cloud",
-      "notConnectedBody": "请先将此 Avibe 连接到 Avibe Cloud，再打开组织管理。",
-      "signInTitle": "需要登录",
-      "signInBody": "登录 Avibe Cloud，以建立短期有效的组织管理会话。",
-      "reauthorizingTitle": "正在重新授权",
-      "reauthorizingBody": "正在使用同一 Cloud 账号恢复组织管理会话。",
-      "mismatchTitle": "Cloud 账号不匹配",
-      "mismatchBody": "当前 Avibe 会话与 Cloud 账号属于不同用户。请使用建立此 Avibe 会话的同一账号重新登录。",
-      "unreachableTitle": "无法连接 Avibe Cloud",
-      "unreachableBody": "暂时无法获取组织数据，本地 Avibe 仍可正常使用。",
-      "revokedTitle": "组织访问权限已撤销",
-      "revokedBody": "此管理会话已失效。请重新登录以确认当前权限。",
-      "emptyTitle": "没有可用组织",
-      "emptyBody": "当前 Cloud 账号不是任何组织的活跃成员。",
-      "unavailableTitle": "无法访问此组织页面",
-      "unavailableBody": "当前组织权限或 Avibe 权限不允许访问此页面。",
-      "errorTitle": "无法完成请求",
-      "conflictTitle": "策略已在其他位置更改",
-      "conflictBody": "你的草稿尚未保存。请先检查草稿，再重新加载最新版本后继续修改。"
-    },
-    "errors": {
-      "generic": "Avibe 无法完成此组织请求。",
-      "forbidden": "当前组织角色不允许执行此操作。",
-      "organization_not_found": "无法访问此组织。",
-      "organization_member_not_found": "此成员已不可用。",
-      "organization_group_not_found": "此群组已不可用。",
-      "organization_group_archived": "不能把已归档群组添加到新策略。",
-      "instance_not_found": "无法访问此 Avibe。",
-      "project_not_found": "无法访问此 Project。",
-      "resource_not_found": "无法访问此资源。",
-      "member_email_taken": "该邮箱已属于此组织。",
-      "group_name_taken": "已存在同名群组。",
-      "organization_member_not_active_in_organization": "所选初始成员已不是该组织的活跃成员，请刷新成员列表后重试。",
-      "invalid_organization_group_name": "群组名称无效，请使用 1-120 个字符。",
-      "invalid_organization_group_color": "群组颜色无效，请选择列表中的颜色。",
-      "invalid_request": "请求参数无效，请检查填写内容后重试。",
-      "too_many_entries": "此策略包含过多条目。",
-      "invalid_project_access_intent": "请选择有效的 Project 访问规则。",
-      "invalid_project_access_principal": "某个 Project 访问主体无效。",
-      "invalid_project_access_role": "某个 Project 访问角色无效。",
-      "invalid_resource_acl_intent": "请选择有效的资源受众。",
-      "invalid_email": "请输入有效的邮箱地址。",
-      "invalid_domain": "请输入有效的邮箱域名。",
-      "duplicate_instance_access_principal": "同一个 Avibe 访问主体只能出现一次。",
-      "duplicate_project_access_principal": "同一个 Project 主体只能出现一次。",
-      "owner_entry_locked": "不能修改 Avibe 所有者的隐式访问权限。",
-      "resource_sync_conflict": "策略已在其他位置更改，请检查最新版本后再保存。",
-      "organization_member_conflict": "成员已在其他位置更改，请检查最新版本后重试。",
-      "organization_group_conflict": "群组已在其他位置更改，请检查最新版本后重试。"
+    "roles": {
+      "owner": "所有者",
+      "editor": "编辑者",
+      "viewer": "查看者"
     },
     "fields": {
-      "name": "名称",
-      "description": "描述",
-      "color": "颜色",
-      "email": "邮箱",
-      "role": "角色",
-      "groups": "群组",
-      "member": "成员",
-      "status": "状态",
       "principalType": "主体类型",
-      "principal": "访问主体"
-    },
-    "colors": {
-      "mint": "薄荷绿",
-      "cyan": "青色",
-      "blue": "蓝色",
-      "violet": "紫罗兰",
-      "rose": "玫红",
-      "gold": "金色"
+      "principal": "主体",
+      "role": "角色"
     },
     "principals": {
       "organization_group": "群组",
       "email": "邮箱",
       "email_domain": "邮箱域名"
     },
-    "breadcrumb": {
-      "overview": "组织 / 概览",
-      "members": "组织 / 成员",
-      "groups": "组织 / 群组",
-      "groupDetail": "组织 / 群组 / {{name}}",
-      "instances": "组织 / Avibe",
-      "resources": "组织 / 资源"
-    },
-    "overview": {
-      "description": "管理此组织的成员、访问权限和策略同步状态。",
-      "memberDescription": "查看你的组织成员身份和可访问的 Avibe。",
-      "memberBreakdown": "{{invited}} 个已邀请 · {{removed}} 个已移除",
-      "groupBreakdown": "{{archived}} 个已归档",
-      "projects": "Project",
-      "projectCountUnavailable": "计数暂不可用",
-      "policySync": "策略同步",
-      "needsAttention": "需要处理",
-      "instanceNeedsAttention": "{{name}} 的策略变更需要处理。",
-      "projectSyncNeedsAttention": "{{name}} 的 Project 策略需要处理。",
-      "resourceSyncNeedsAttention": "{{name}} 的资源策略需要处理。",
-      "noAttention": "所有可见的受管策略状态正常。",
-      "pendingInvites": "待接受邀请",
-      "pendingInvitesBody": "有 {{count}} 个邀请等待接受。",
-      "viewAllInstances": "查看全部 Avibe",
-      "memberSafeTitle": "成员视图",
-      "memberSafeBody": "你可以查看自己的成员身份和可访问的 Avibe。成员目录和资源策略构成仅对组织管理者可见。"
-    },
-    "members": {
-      "description": "邀请成员、分配组织角色并管理群组成员关系。",
-      "memberDescription": "查看你的组织角色和群组成员关系。",
-      "filterLabel": "筛选成员",
-      "filterAll": "全部",
-      "active": "活跃",
-      "invited": "已邀请",
-      "removed": "已移除",
-      "admins": "管理员",
-      "searchPlaceholder": "搜索成员...",
-      "emptyTitle": "没有找到成员",
-      "emptyBody": "当前视图中没有匹配的成员。",
-      "inviteTitle": "邀请成员",
-      "inviteBody": "发送组织邀请，并可选择初始群组。",
-      "editTitle": "编辑成员",
-      "editBody": "角色和完整群组成员关系共用同一 revision。",
-      "emailPlaceholder": "name@example.com",
-      "downgradeTitle": "将此管理员降级？",
-      "downgradeBody": "{{email}} 将失去组织管理权限，其成员身份和群组分配保持不变。",
-      "downgradeConfirm": "降级为成员",
-      "removeTitle": "移除此成员？",
-      "removeBody": "{{email}} 将失去组织成员身份以及由此获得的全部权限。"
-    },
-    "groups": {
-      "description": "创建可复用的组织受众，并检查引用这些群组的全部策略。",
-      "memberDescription": "查看组织群组和你自己的群组成员关系。",
-      "active": "活跃",
-      "archived": "已归档",
-      "filterLabel": "筛选群组",
-      "searchPlaceholder": "搜索群组...",
-      "emptyTitle": "没有找到群组",
-      "emptyBody": "当前视图中没有匹配的群组。",
-      "noDescription": "没有描述",
-      "yourGroup": "我的群组",
-      "createTitle": "创建群组",
-      "createBody": "创建组织群组，并可选择初始成员。",
-      "editTitle": "编辑群组",
-      "editBody": "更新群组的展示信息。",
-      "initialMembers": "初始成员",
-      "manageMembersTitle": "管理群组成员",
-      "manageMembersBody": "替换 {{name}} 的完整成员列表。",
-      "referencedBy": "引用位置",
-      "moreReferences": "另有 {{count}} 项",
-      "archiveTitle": "归档此群组？",
-      "archiveBody": "{{name}} 被 {{count}} 个活跃策略项引用。",
-      "archiveImpactTitle": "归档影响",
-      "archiveImpactBody": "现有引用仍会显示，但不再授予访问权限；已归档群组不能加入新策略。"
-    },
-    "instances": {
-      "description": "你可以看到的组织 Avibe。可管理访问权限和 Project 策略，但不会改变配对或域名。",
-      "searchPlaceholder": "搜索 Avibe...",
-      "emptyTitle": "没有找到 Avibe",
-      "emptyBody": "当前视图中没有可用的组织 Avibe。",
-      "you": "你",
-      "organizationOwner": "Avibe 所有者",
-      "ownerProtected": "所有者身份受保护",
-      "youAreOwner": "你是此 Avibe 的所有者",
-      "paired": "已配对",
-      "notPaired": "未配对",
-      "accessCount": "{{count}} 条访问规则",
-      "accessTab": "访问权限",
-      "projectsTab": "Project",
-      "tabsLabel": "Avibe 管理视图",
-      "columns": {
-        "instance": "Avibe",
-        "owner": "所有者",
-        "address": "公开地址",
-        "status": "状态",
-        "access": "访问规则",
-        "sync": "同步"
-      },
-      "status": {
-        "pending": "等待中",
-        "active": "在线",
-        "disabled": "已停用",
-        "deleted": "已删除"
-      }
+    "errors": {
+      "generic": "Avibe 无法完成此次权限请求。",
+      "permissions_unavailable": "权限服务当前不可用。",
+      "permissions_refresh_failed": "无法加载最新的权威策略。请先重试刷新，再保存更改。",
+      "permissions_pairing_changed": "加载此策略后，已配对的 Avibe 发生了变化。请重新打开权限页面后再修改。",
+      "permission_authority_cloud": "此策略由 Avibe Cloud 管理，无法在此修改。",
+      "instance_access_forbidden": "当前 Avibe 角色无权修改权限。",
+      "cloud_policy_unavailable": "当前 Cloud 策略暂时不可用。",
+      "invalid_request": "请检查表单内容后重试。",
+      "invalid_email": "请输入有效的邮箱地址。",
+      "invalid_domain": "请输入有效的邮箱域名。",
+      "too_many_entries": "此策略包含过多条目。",
+      "duplicate_access_principal": "每个访问主体只能出现一次。",
+      "duplicate_project_access_principal": "每个项目主体只能出现一次。",
+      "organization_group_not_found": "此群组已不可用。",
+      "organization_group_archived": "不能把已归档的群组加入新策略。",
+      "invalid_project_access_intent": "请选择有效的项目访问规则。",
+      "invalid_project_access_principal": "某个项目访问主体无效。",
+      "invalid_project_access_role": "某个项目访问角色无效。",
+      "project_not_found": "此项目已不可用。"
     },
     "access": {
-      "viewer": "查看者",
-      "editor": "编辑者",
-      "ownerTitle": "{{owner}} · Avibe 所有者",
-      "ownerBody": "这是隐式的所有者同等权限，不能作为普通条目编辑或移除。",
-      "emptyTitle": "没有显式访问条目",
-      "emptyBody": "当前只有隐式的 Avibe 所有者可以访问。",
-      "addTitle": "添加 Avibe 访问权限",
-      "editTitle": "编辑 Avibe 访问权限",
-      "dialogBody": "为群组、单个邮箱或邮箱域名授予查看者或编辑者权限。",
-      "emailPlaceholder": "person@example.com",
+      "title": "谁可以访问此 Avibe",
+      "description": "当前 Avibe 的查看者与编辑者分配。",
+      "protectedOwner": "受保护的所有者身份",
+      "ownerBody": "所有者始终保留管理权限。",
+      "emptyTitle": "没有其他访问主体",
+      "emptyBody": "当前策略下只有所有者可以访问此 Avibe。",
+      "publicTitle": "公开实例访问",
+      "publicBody": "任何人都可以访问此 Avibe，且当前没有配置额外的角色分配。",
+      "publicAssignmentsBody": "任何人都可以访问此 Avibe。下方的明确分配可能授予更高角色。",
+      "addTitle": "添加访问权限",
+      "editTitle": "编辑访问权限",
+      "dialogBody": "为此 Avibe 分配查看者或编辑者权限。",
+      "narrowTitle": "确认减少访问权限",
+      "narrowBody": "更改主体或降低其角色会移除现有访问权限。请确认此策略更改后再保存。",
+      "emailPlaceholder": "name@example.com",
       "domainPlaceholder": "example.com",
-      "narrowTitle": "收窄此访问权限？",
-      "narrowBody": "保存后，原访问主体或编辑能力将不再生效。",
       "removeTitle": "移除此访问条目？",
-      "removeBody": "{{principal}} 将失去此条目授予的访问权限。",
-      "columns": {
-        "principal": "访问主体",
-        "type": "类型",
-        "role": "角色"
-      }
+      "removeBody": "此主体将不再通过实例策略获得访问权限。"
     },
     "projects": {
-      "searchPlaceholder": "搜索 Project...",
-      "safeDescriptorNotice": "这里只显示安全描述信息，不会显示或发送本地 Project 路径。Project 权限只能收窄 Avibe 角色。",
-      "emptyTitle": "没有找到 Project",
-      "emptyBody": "此 Avibe 尚未发布活跃的受管 Project 描述信息。",
+      "title": "项目访问",
+      "description": "为当前 Avibe 发布的项目设置更严格的访问规则。",
+      "searchPlaceholder": "搜索项目...",
+      "emptyTitle": "没有可用项目",
+      "emptyBody": "当前 Avibe 尚未发布任何项目。",
+      "dialogTitle": "项目访问 · {{name}}",
+      "dialogBody": "选择谁可以打开和使用此项目。",
       "accessRule": "访问规则",
-      "bindings": "受限绑定",
+      "bindings": "访问绑定",
       "bindingRequired": "受限访问至少需要一个绑定。",
-      "usesAvibeRole": "使用 Avibe 角色",
-      "ownerOnlyAudience": "仅 Avibe 所有者",
       "bindingCount": "{{count}} 个绑定",
-      "dialogTitle": "管理 {{name}} 的访问权限",
-      "dialogBody": "组织管理权限只允许你修改此策略，不会因此获得 Project 使用权限。",
-      "narrowTitle": "收窄此 Project 的访问权限？",
-      "narrowBody": "此更改会移除现有受众、将编辑者降为查看者，或切换到更严格的规则。",
+      "bindingCount_other": "{{count}} 个绑定",
       "modes": {
-        "inherit": "继承",
+        "inherit": "继承 Avibe 权限",
         "restricted": "受限",
         "owner_only": "仅所有者"
       },
       "modeHelp": {
-        "inherit": "使用各访问主体在此 Avibe 上的有效角色。",
-        "restricted": "允许一个或多个明确的群组、邮箱或域名；此规则只能收窄 Avibe 角色。",
-        "owner_only": "只有此 Avibe 的所有者可以使用此 Project。组织管理者可以管理策略，但不会因此获得使用权限。"
+        "inherit": "所有能使用此 Avibe 的用户都能使用该项目。",
+        "restricted": "只有选中的用户、域名和群组可以使用该项目。",
+        "owner_only": "只有 Avibe 所有者可以使用该项目。"
       },
-      "columns": {
-        "project": "Project",
-        "rule": "访问规则",
-        "bindings": "绑定",
-        "sync": "同步"
-      }
-    },
-    "resources": {
-      "description": "管理每项资源可由哪些组织受众使用。可以使用资源不代表可以编辑、删除或再次分享资源。",
-      "tabsLabel": "资源类型",
-      "accessLevel": "受众",
-      "selectGroups": "选择群组",
-      "groupRequired": "请至少选择一个群组。",
-      "dialogTitle": "管理 {{name}} 的受众",
-      "dialogBody": "选择私有、整个组织或指定组织群组。",
-      "narrowTitle": "收窄此资源的受众？",
-      "narrowBody": "部分当前可以使用此资源的成员将在更改后失去访问权限。",
-      "emptyTitle": "没有找到资源",
-      "emptyBody": "没有可用的活跃{{kind}}描述信息。",
-      "everyActiveMember": "每个活跃成员",
-      "ownerOnly": "仅资源所有者",
-      "kinds": {
-        "agent": "Agent",
-        "vault_secret": "Vault 密钥",
-        "skill": "Skill",
-        "show_page": "Show Page"
+      "audience": {
+        "inherit": "使用 Avibe 角色",
+        "owner_only": "仅所有者"
       },
-      "levels": {
-        "private": "私有",
-        "public": "组织",
-        "scope": "指定群组"
-      },
-      "levelHelp": {
-        "private": "通过此组织 ACL，仅资源所有者可以使用。",
-        "public": "此组织的每个活跃成员都可以使用，但仍需满足其他全部权限层。",
-        "scope": "只有指定群组的活跃成员可以使用，并且仍需满足其他全部权限层。"
-      },
-      "columns": {
-        "access": "访问级别",
-        "audience": "受众",
-        "sync": "同步"
-      }
+      "narrowTitle": "收紧项目访问权限？",
+      "narrowBody": "策略应用后，部分用户可能立即失去访问权限。"
     }
   }
 }

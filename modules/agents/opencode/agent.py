@@ -141,6 +141,7 @@ class _SteeringAwareOpenCodeServer:
     ) -> None:
         self._server = server
         self._state = state
+        self.last_list_native_live: bool | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._server, name)
@@ -247,6 +248,32 @@ class _SteeringAwareOpenCodeServer:
             for index, message in enumerate(messages)
         )
 
+    @classmethod
+    def _has_completed_error_after(
+        cls,
+        messages: list[Dict[str, Any]],
+        excluded_message_ids: set[str],
+        *,
+        inserted_user_text: str | None = None,
+    ) -> bool:
+        inserted_user_index = -1
+        if inserted_user_text is not None:
+            inserted_user_index = cls._inserted_user_index(
+                messages,
+                excluded_message_ids,
+                inserted_user_text,
+            )
+            if inserted_user_index < 0:
+                return False
+        return any(
+            index > inserted_user_index
+            and message.get("info", {}).get("role") == "assistant"
+            and message.get("info", {}).get("id") not in excluded_message_ids
+            and message.get("info", {}).get("time", {}).get("completed")
+            and message.get("info", {}).get("error")
+            for index, message in enumerate(messages)
+        )
+
     def _has_pending_question_tool(self, messages: list[Dict[str, Any]]) -> bool:
         return any(
             message.get("info", {}).get("id") not in self._state.baseline_message_ids
@@ -326,6 +353,7 @@ class _SteeringAwareOpenCodeServer:
         while True:
             wait_for_insert = False
             async with self._state.lock:
+                self.last_list_native_live = None
                 if self._state.terminal_status_failure_messages is not None:
                     return self._state.terminal_status_failure_messages
                 messages = await self._server.list_messages(session_id, directory)
@@ -340,6 +368,9 @@ class _SteeringAwareOpenCodeServer:
                 if reconcile_insert or final_snapshot or reconcile_initial_status:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
+                        from modules.agents.opencode.poll_loop import _native_session_is_live
+
+                        self.last_list_native_live = _native_session_is_live(status)
                     except Exception as exc:
                         self._state.status_reconciliation_failures += 1
                         if (
@@ -477,9 +508,15 @@ class _SteeringAwareOpenCodeServer:
                                         inserted_user_text=inserted_user_text,
                                     )
                                 )
-                                if has_final_insert_result:
+                                has_post_boundary_error = self._has_completed_error_after(
+                                    messages,
+                                    awaiting,
+                                    inserted_user_text=inserted_user_text,
+                                )
+                                if has_final_insert_result or has_post_boundary_error:
                                     self._clear_awaiting_reconciliation()
-                                    self._state.closing = True
+                                    if has_final_insert_result:
+                                        self._state.closing = True
                                     return messages
                                 start_deadline = (
                                     self._state.awaiting_start_confirmation_deadline
@@ -562,7 +599,27 @@ class _SteeringAwareOpenCodeServer:
                     {**failure, "info": info},
                 ]
                 return
-            await self._server.prompt_async(*args, **kwargs)
+            kwargs_map = dict(kwargs)
+            prompt_text = str(kwargs_map.get("text") or "")
+            snapshot_ids = kwargs_map.pop("awaiting_after_ids", None)
+            if snapshot_ids is None:
+                session_id = str(kwargs_map.get("session_id") or "")
+                directory = str(kwargs_map.get("directory") or "")
+                if session_id and directory:
+                    try:
+                        current = await self._server.list_messages(session_id, directory)
+                    except Exception:
+                        current = []
+                    snapshot_ids = self._message_ids(current)
+            if snapshot_ids is not None:
+                self._state.awaiting_after_message_ids = set(snapshot_ids)
+                self._state.awaiting_user_text = prompt_text or None
+                self._state.awaiting_start_confirmation_deadline = (
+                    time.monotonic() + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._state.awaiting_active_status_observed = False
+                self._state.awaiting_result_confirmation_deadline = None
+            await self._server.prompt_async(*args, **{k: v for k, v in kwargs.items() if k != "awaiting_after_ids"})
 
     async def abort_session(self, *args, **kwargs) -> bool:
         async with self._state.lock:

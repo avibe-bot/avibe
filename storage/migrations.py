@@ -196,6 +196,17 @@ UNRELEASED_OLD_INITIAL_TABLES = [
     "schema_meta",
     "alembic_version",
 ]
+# The members above that no release could have produced, which is what makes the presence
+# of one evidence of an unreleased build. `scopes` is in INITIAL_TABLES and every stamped
+# database has `alembic_version` -- the check below requires it a few lines earlier -- so
+# testing the full list proved nothing: any database short of INITIAL_TABLES matched, and
+# a released one then had its `scopes` and its stamp dropped out from under it. Derived
+# rather than written out, so a table added to INITIAL_TABLES leaves this correct.
+UNRELEASED_ONLY_INITIAL_TABLES = [
+    table
+    for table in UNRELEASED_OLD_INITIAL_TABLES
+    if table not in INITIAL_TABLES and table != "alembic_version"
+]
 
 
 def alembic_dir() -> Path:
@@ -234,13 +245,9 @@ def _run_migrations_locked(
     cfg = alembic_config(target_db)
     backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
     if backup_revisions is not None:
-        current_revisions, target_revisions = backup_revisions
-        backup_path = create_sqlite_migration_backup(
-            target_db,
-            from_revisions=current_revisions,
-            to_revisions=target_revisions,
-        )
-        logger.info("Created pre-migration SQLite backup at %s", backup_path)
+        _current_revisions, target_revisions = backup_revisions
+        backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        logger.info("Pre-migration SQLite rollback point at %s", backup_path)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
@@ -366,7 +373,7 @@ def _reset_unreleased_initial_schema_drift(db_path: Path) -> None:
         version = conn.execute("select version_num from alembic_version").fetchone()
         if version != (INITIAL_REVISION,):
             return
-        if not any(table in tables for table in UNRELEASED_OLD_INITIAL_TABLES):
+        if not any(table in tables for table in UNRELEASED_ONLY_INITIAL_TABLES):
             return
 
         conn.execute("PRAGMA foreign_keys = OFF")

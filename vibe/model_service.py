@@ -15,6 +15,7 @@ import urllib.request
 
 from config.v2_config import (
     MemoryCloudCapabilities,
+    MemoryCloudLlmSource,
     MemoryConfig,
     V2Config,
     memory_config_to_payload,
@@ -39,6 +40,7 @@ class ModelServiceResolutionError(RuntimeError):
 class ModelServiceStatus:
     scope: str
     capabilities: MemoryCloudCapabilities
+    memory_llm_source: MemoryCloudLlmSource
     embedding_identity: str | None
     quota_enforced: bool
     revision: int
@@ -75,6 +77,7 @@ def _status_from_payload(payload: object) -> ModelServiceStatus:
         raise ModelServiceResolutionError("model_service_invalid_response")
     scope = payload.get("mode")
     capabilities = payload.get("capabilities")
+    memory_llm_source = payload.get("memory_llm_source")
     embedding_identity = payload.get("embedding_identity")
     quota = payload.get("quota")
     revision = payload.get("revision")
@@ -82,7 +85,7 @@ def _status_from_payload(payload: object) -> ModelServiceStatus:
         raise ModelServiceResolutionError("model_service_invalid_response")
     if not isinstance(capabilities, Mapping):
         raise ModelServiceResolutionError("model_service_invalid_response")
-    required_capabilities = {"asr", "chat", "embedding", "multimodal"}
+    required_capabilities = {"asr", "chat", "embedding", "multimodal", "memory_llm"}
     if not required_capabilities.issubset(capabilities) or any(
         not isinstance(capabilities.get(name), bool) for name in required_capabilities
     ):
@@ -90,6 +93,12 @@ def _status_from_payload(payload: object) -> ModelServiceStatus:
     if embedding_identity is not None and (not isinstance(embedding_identity, str) or not embedding_identity.strip()):
         raise ModelServiceResolutionError("model_service_invalid_response")
     if bool(capabilities["embedding"]) != bool(embedding_identity):
+        raise ModelServiceResolutionError("model_service_invalid_response")
+    if memory_llm_source not in {"dedicated", "chat_fallback"}:
+        raise ModelServiceResolutionError("model_service_invalid_response")
+    if memory_llm_source == "dedicated" and not capabilities["memory_llm"]:
+        raise ModelServiceResolutionError("model_service_invalid_response")
+    if memory_llm_source == "chat_fallback" and capabilities["memory_llm"] != capabilities["chat"]:
         raise ModelServiceResolutionError("model_service_invalid_response")
     if not isinstance(quota, Mapping) or not isinstance(quota.get("enforced"), bool):
         raise ModelServiceResolutionError("model_service_invalid_response")
@@ -102,7 +111,9 @@ def _status_from_payload(payload: object) -> ModelServiceStatus:
             chat=capabilities["chat"],
             embedding=capabilities["embedding"],
             multimodal=capabilities["multimodal"],
+            memory_llm=capabilities["memory_llm"],
         ),
+        memory_llm_source=memory_llm_source,
         embedding_identity=embedding_identity.strip() if embedding_identity else None,
         quota_enforced=quota["enforced"],
         revision=revision,
@@ -175,6 +186,7 @@ def _runtime_state_signature(memory: MemoryConfig) -> tuple[object, ...]:
         memory.recovery_intent,
         memory.runtime_source(),
         memory.runtime_processing(),
+        memory.effective_multimodal_available(),
     )
 
 
@@ -233,6 +245,7 @@ def _resolved_memory(
 
     candidate.cloud.scope = status.scope  # type: ignore[assignment]
     candidate.cloud.capabilities = status.capabilities
+    candidate.cloud.memory_llm_source = status.memory_llm_source
     candidate.cloud.embedding_identity = status.embedding_identity
     candidate.cloud.revision = status.revision
     candidate.cloud.quota_enforced = status.quota_enforced
@@ -329,6 +342,7 @@ def _fenced_cloud_memory(current: MemoryConfig) -> MemoryConfig:
 
     candidate = deepcopy(current)
     candidate.cloud.capabilities = MemoryCloudCapabilities()
+    candidate.cloud.memory_llm_source = None
     candidate.cloud.embedding_identity = None
     candidate.cloud.revision = None
     candidate.cloud.quota_enforced = False

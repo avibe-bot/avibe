@@ -52,11 +52,16 @@ def upgrade() -> None:
             ),
             sa.PrimaryKeyConstraint("token", "session_id"),
         )
-        op.create_index(
-            "ix_media_object_references_session",
-            "media_object_references",
-            ["session_id"],
-        )
+    # Outside the table guard on purpose. A run interrupted between the table and
+    # its index leaves the table present, and a guard that covers both would then
+    # skip the index forever -- permanently, once 20260819_0056 replays this
+    # revision and stamps, because a stamped revision never runs again.
+    op.create_index(
+        "ix_media_object_references_session",
+        "media_object_references",
+        ["session_id"],
+        if_not_exists=True,
+    )
 
     bind.exec_driver_sql(
         """

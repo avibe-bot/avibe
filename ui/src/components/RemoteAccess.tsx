@@ -25,6 +25,7 @@ import {
   useApi,
 } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
+import { onPageReactivated } from '../lib/pageActivity';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
@@ -112,13 +113,11 @@ export const RemoteAccess: React.FC = () => {
       if (document.visibilityState === 'visible') refresh(true).catch(() => undefined);
     };
     const interval = window.setInterval(refreshVisible, 30_000);
-    document.addEventListener('visibilitychange', refreshVisible);
-    window.addEventListener('focus', refreshVisible);
+    const stopReactivation = onPageReactivated(refreshVisible);
     return () => {
       disconnect();
       window.clearInterval(interval);
-      document.removeEventListener('visibilitychange', refreshVisible);
-      window.removeEventListener('focus', refreshVisible);
+      stopReactivation();
     };
   }, [api, refresh]);
 

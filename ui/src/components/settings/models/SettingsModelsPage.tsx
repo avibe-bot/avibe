@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, Info, LoaderCircle, Route } from 'lucide-react';
+import { ArrowLeft, Gauge, LoaderCircle, Route } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -30,6 +30,7 @@ import {
   releaseSuspendedRouteAttempt,
 } from './suspendedRouteAttempts';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
+import { UsageTab } from './UsageTab';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
@@ -51,6 +52,7 @@ import {
   foldRegionRead,
   degradedRegion,
   loadingRegion,
+  readRegion,
   readyRegion,
   settleRegionRead,
   unreadRegion,
@@ -60,7 +62,8 @@ import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, st
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { useSourceMutationReport } from './useSourceMutationReport';
 import { backendVisual } from './vendorMeta';
-import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
+import { USAGE_DEFAULT_WINDOW_DAYS, type AgentBackend, type AgentSupply, type ResolutionEvent, type RuntimeDependency, type Source, type UsageSummary } from './types';
+import type { UsageWindowOption } from './usageProjection';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -226,7 +229,7 @@ const HubTabs: React.FC<{ tab: 'sources' | 'usage'; onChange: (tab: 'sources' | 
   return (
     <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
       {(['sources', 'usage'] as const).map((id) => (
-        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[39px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
+        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
           {id === 'sources' ? <Route className="size-3.5" /> : <Gauge className="size-3.5" />}
           {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : 'usage'}`)}
         </button>
@@ -256,7 +259,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
                   <span className="model-hub-direct-backend-copy">
                     <span className="flex min-w-0 items-center gap-1.5">
                       <span className="model-hub-direct-backend-name truncate text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span>
-                      <span className="model-hub-direct-kind-pill shrink-0 rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.direct.pill.direct')}</span>
+                      <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
                     </span>
                     <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>
                   </span>
@@ -292,6 +295,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [eventsRead, setEventsRead] = React.useState<RegionRead<EventFeed>>(loadingRegion);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [tab, setTab] = React.useState<'sources' | 'usage'>('sources');
+  const [usageRead, setUsageRead] = React.useState<RegionRead<UsageSummary>>(loadingRegion);
+  const [usageWindow, setUsageWindow] = React.useState<UsageWindowOption>(USAGE_DEFAULT_WINDOW_DAYS);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [installOpen, setInstallOpen] = React.useState(false);
@@ -516,6 +521,37 @@ export const SettingsModelsPage: React.FC = () => {
         : feedAfterTailRead(emptyFeed, freshEvents, EVENT_PAGE, null));
     });
   }));
+
+  const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageSummary>>((incoming) => {
+    if (!aliveRef.current) return;
+    setUsageRead((previous) => settleRegionRead(previous, incoming));
+  }));
+
+  const refreshUsage = React.useCallback(async (days: UsageWindowOption) => {
+    setUsageRead(beginRegionRead);
+    await usageReadAuthority.run(() => readRegion(() => modelsApi.getUsageSummary(days)));
+  }, [usageReadAuthority]);
+
+  /**
+   * The usage report is read lazily, when the tab is opened.
+   *
+   * It is deliberately NOT a first-paint region (see `firstPaintRegions.ts`,
+   * whose whitelist is a policy list of exactly the three reads the landing
+   * cannot be drawn without): a report nobody is looking at must not delay the
+   * surface that decides routing. Re-reading on every open is the point — the
+   * figure is live, and `beginRegionRead` keeps the previous one on screen while
+   * the new one lands, so returning to the tab never flashes empty. A window
+   * change is the same read with a different span, which is why one effect owns
+   * both.
+   */
+  React.useEffect(() => {
+    if (tab !== 'usage') return;
+    void refreshUsage(usageWindow);
+  }, [tab, usageWindow, refreshUsage]);
+
+  const retryUsage = React.useCallback(async () => {
+    await refreshUsage(usageWindow);
+  }, [refreshUsage, usageWindow]);
 
   const refreshEventHead = React.useCallback(async () => {
     setEventsRead(beginRegionRead);
@@ -1022,10 +1058,19 @@ export const SettingsModelsPage: React.FC = () => {
                 onMutationCommitted={sourceMutationReport.present}
               />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
-          : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
-            : <div className="space-y-[22px]">
+          : <div className="space-y-[22px]">
+                  {/* The tab strip belongs to the Hub, not to the source
+                      inventory. The ledger outlives the Sources it metered — it
+                      retains its window and the report names a deleted Source by
+                      its id — so deleting the last one may not take the only route
+                      to that history with it. Frame 09 is drawn without tabs
+                      because it predates this tab, not because usage stops
+                      existing once the inventory is empty; what the frame decides
+                      is the body of `sources`, which is still Frame 09 there. */}
                   <HubTabs tab={tab} onChange={setTab} />
-                  {tab === 'sources' ? <div className="model-hub-overview">
+                  {tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
+                    : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
+                    : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
                         <Popover
@@ -1121,7 +1166,7 @@ export const SettingsModelsPage: React.FC = () => {
                     </div>
                     <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     <AdvancedRow />
-                  </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
+                  </div>}
                 </div>}
       <SourceMutationReport
         report={sourceMutationReport.report}

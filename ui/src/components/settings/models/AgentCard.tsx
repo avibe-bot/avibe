@@ -62,11 +62,11 @@ const ModelRow: React.FC<{
       data-route-model={modelId}
       onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
-      className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
+      className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-md border border-border px-3 text-left"
     >
       <span className="flex min-w-0 flex-1 items-center justify-between gap-2.5">
-        <span className="flex min-w-0 flex-1 items-center gap-[7px]"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span></span>
-        <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-[10.5px]', supplyState === 'paused' ? 'model-hub-ink-gold' : takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
+        <span className="flex min-w-0 flex-1 items-center gap-[7px]"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-pill model-hub-model-mode-chip border border-border text-muted">{mode}</span></span>
+        <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-right text-[10.5px]', supplyState === 'paused' ? 'model-hub-ink-gold' : takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
       </span>
       <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" aria-hidden="true" />
     </button>
@@ -129,7 +129,7 @@ const AgentModelCard: React.FC<{
         ? 'bg-mint'
         : 'bg-muted';
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-background" data-agent-backend={agent.backend}>
+    <section className="overflow-hidden rounded-lg border border-border bg-background" data-agent-backend={agent.backend}>
       <div
         tabIndex={-1}
         data-agent-group-head={agent.backend}
@@ -139,13 +139,13 @@ const AgentModelCard: React.FC<{
           <div className="flex min-w-0 items-center gap-[9px]">
             <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
             <span className="flex min-w-0 items-center gap-[7px]">
-              <h2 className="truncate text-[14px] font-bold text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</h2>
-              <Badge variant="secondary" className={cn('px-2 py-[3px] text-[10.5px] font-semibold', hasTakeover && 'model-hub-takeover-chip')}>
+              <h2 className="truncate text-[14px] font-bold leading-[17px] text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</h2>
+              <Badge variant="secondary" className={cn('model-hub-pill model-hub-fill-0a', hasTakeover && 'model-hub-takeover-chip')}>
                 {hasTakeover ? t('settings.models.takeover.chip') : t('settings.models.gateway.modelCount', { count: allModels.length })}
               </Badge>
             </span>
           </div>
-          {agent.mode === 'hub' ? <div className="flex shrink-0 flex-wrap gap-2"><Button variant="secondary" size="sm" className="model-hub-agent-head-action rounded-lg px-3 text-[11.5px] font-bold" onClick={() => onOpenOrder(agent)} disabled={pending}>{t('settings.models.gateway.sourceOrder')}</Button><Button variant="outline" size="sm" className="model-hub-agent-head-action rounded-lg px-3 text-[11.5px] font-bold" onClick={() => onSwitchDirect(agent)} disabled={pending}>{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</Button></div> : <Button variant="secondary" size="sm" className="model-hub-agent-head-action shrink-0 self-start rounded-lg px-3 text-[11.5px] font-bold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}>{t('settings.models.gateway.switchToGateway')}</Button>}
+          {agent.mode === 'hub' ? <div className="flex shrink-0 flex-wrap gap-2"><Button variant="secondary" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onOpenOrder(agent)} disabled={pending}>{t('settings.models.gateway.sourceOrder')}</Button><Button variant="outline" size="sm" className="model-hub-agent-head-action rounded-md px-3 text-[11.5px] font-bold" onClick={() => onSwitchDirect(agent)} disabled={pending}>{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</Button></div> : <Button variant="secondary" size="sm" className="model-hub-agent-head-action shrink-0 self-start rounded-md px-3 text-[11.5px] font-bold sm:self-auto" onClick={() => onConnectHub(agent)} disabled={connecting}>{t('settings.models.gateway.switchToGateway')}</Button>}
         </div>
         <span className={cn('model-hub-agent-head-status flex items-center gap-1.5 text-[11px] font-semibold sm:ml-[42px]', statusClass)}>
           <span className={cn('size-[5px] shrink-0 rounded-full', statusDot)} />
@@ -171,4 +171,4 @@ export const AgentCard: React.FC<{
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   connectingBackend: string | null;
-}> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => <div className="flex flex-col gap-4">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
+}> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => <div className="flex flex-col gap-2.5">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;

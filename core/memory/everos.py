@@ -64,7 +64,7 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
     + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
-_PREFLIGHT_TIMEOUT_SECONDS = 5.0
+_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
 _CHAT_PROBE_MAX_TOKENS = 8
 _CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
@@ -1601,9 +1601,8 @@ def _chat_probe_response_issue(value: Any) -> str | None:
     message = choices[0].get("message")
     if not isinstance(message, dict):
         return "provider_response_missing_message"
-    if "content" not in message:
-        return "provider_response_missing_content"
-    content = message["content"]
+    # Reasoning-model probes may omit content; treat absence like content: null.
+    content = message.get("content")
     if content is not None and not isinstance(content, str):
         return "provider_response_invalid_content"
     if content is None or not content.strip():

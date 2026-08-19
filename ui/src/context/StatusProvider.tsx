@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../lib/apiFetch';
+import { onPageReactivated } from '../lib/pageActivity';
 import { StatusContext, type RuntimeStatus } from './StatusContext';
 
 // Polling cadence for GET /status. The probe is cheap server-side (it reads a
@@ -158,22 +159,15 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     void tick();
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') refreshNow();
-    };
-    // Wrap so the DOM event object is not forwarded as `enterRestartWindow`: a
-    // truthy Event would otherwise wrongly open the fast restart window.
-    const handleFocus = () => refreshNow();
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleFocus);
+    // Wrap so the reactivation callback's arguments are not forwarded as
+    // `enterRestartWindow`, which would wrongly open the fast restart window.
+    const stopReactivation = onPageReactivated(() => refreshNow());
 
     return () => {
       cancelled = true;
       wakePollRef.current = null;
       window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleFocus);
+      stopReactivation();
     };
   }, [refreshStatus]);
 

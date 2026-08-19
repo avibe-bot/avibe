@@ -579,8 +579,6 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 def _is_mutation_guard_exempt() -> bool:
     if request.path in {
         "/auth/callback",
-        "/auth/organization/callback",
-        "/auth/organization/start",
         "/auth/show-identity/callback",
     }:
         return True
@@ -1577,8 +1575,6 @@ def _remote_auth_exempt_path() -> bool:
         path == "/health"
         or path == "/auth/login"
         or path == "/auth/callback"
-        or path == "/auth/organization/callback"
-        or path == "/auth/organization/start"
         or path == "/auth/show-identity/callback"
         or path == "/auth/logout"
         or path == "/api/session"
@@ -1602,8 +1598,6 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         request.path
         in {
             "/auth/callback",
-            "/auth/organization/callback",
-            "/auth/organization/start",
             "/auth/logout",
             "/api/session",
             "/api/csrf-token",
@@ -2157,7 +2151,7 @@ _oauth_diag_log_lock = threading.Lock()
 _oauth_diag_log_state: dict[str, list[float]] = {}
 
 
-def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
+def _log_oauth_diag(key: str, message: str, *args: Any, exc_info: BaseException | None = None) -> None:
     """Emit an unauthenticated-reachable OAuth diagnostic at WARNING, rate-limited
     per ``key`` (~once / ``_OAUTH_DIAG_LOG_INTERVAL_SECONDS``).
 
@@ -2173,7 +2167,34 @@ def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
             return
         _oauth_diag_log_state[key] = [now, 0]
     extra = f" [+{int(suppressed)} suppressed in {int(_OAUTH_DIAG_LOG_INTERVAL_SECONDS)}s]" if suppressed else ""
-    logger.warning(message + extra, *args)
+    logger.warning(message + extra, *args, exc_info=exc_info)
+
+
+def _log_oauth_callback_failure(stage: str, exc: BaseException) -> None:
+    """Log one failed OAuth callback stage so the cause stays attributable.
+
+    ``OAuthCodeExchangeError`` is the expected shape: it carries its own reason
+    and detail, and any unauthenticated caller can produce one at will. Anything
+    else is a bug or an environment fault (a locked, full, or read-only database
+    all arrive as a bare ``OperationalError``) whose only remaining description
+    is the traceback. Those get one — in the service log, never in the response,
+    which still exposes just the exception class name — plus a rate-limit budget
+    of their own, so a flood of bad codes cannot suppress the line that matters.
+    """
+
+    from vibe import remote_access
+
+    expected = isinstance(exc, remote_access.OAuthCodeExchangeError)
+    reason = exc.reason if expected else exc.__class__.__name__
+    _log_oauth_diag(
+        f"{stage}_{'rejected' if expected else 'error'}",
+        "vibe cloud oauth %s failed: reason=%s",
+        stage,
+        reason,
+        # The exception object, not ``True``: ``True`` reads ambient
+        # ``sys.exc_info()`` and silently logs nothing outside a live handler.
+        exc_info=None if expected else exc,
+    )
 
 
 def _oauth_callback_error_response(
@@ -2626,14 +2647,6 @@ def enforce_instance_role_capabilities():
     except (LookupError, RuntimeError):
         # This helper is also exercised by pure policy tests outside a request.
         context = None
-    # Cloud-management routes re-establish identity themselves (OAuth handshake,
-    # silent reauthorization). They must admit an authenticated remote principal
-    # who is not yet an active Organization member, so they bypass the
-    # Organization-admitted-identity role gate; each handler re-validates cloud
-    # identity before acting.
-    is_identity_bootstrap_path = request.path.startswith("/api/cloud-management/")
-    if is_identity_bootstrap_path:
-        return None
     try:
         if context is None:
             raise InstanceAuthorizationError(minimum_role)
@@ -2647,6 +2660,231 @@ def enforce_instance_role_capabilities():
             }
         ), 403
     return None
+
+
+def _permissions_error_response(error: Exception):
+    from vibe import permissions
+
+    if isinstance(error, permissions.PermissionsNotPairedError):
+        return jsonify({"ok": False, "error": "permissions_not_paired"}), 409
+    if isinstance(error, permissions.PermissionsPairingChangedError):
+        return jsonify({"ok": False, "error": "permissions_pairing_changed"}), 409
+    if isinstance(error, permissions.PermissionsUnavailableError):
+        return jsonify(
+            {"ok": False, "error": "permissions_unavailable", "offline": True}
+        ), 503
+    if isinstance(error, permissions.PermissionsBackendError):
+        return jsonify({"ok": False, **error.payload}), error.status
+    if isinstance(error, permissions.PermissionsInvalidResponseError):
+        return jsonify({"ok": False, "error": str(error)}), 502
+    logger.warning("Permissions request failed: %s", error.__class__.__name__)
+    return jsonify({"ok": False, "error": "permissions_unavailable"}), 503
+
+
+def _permissions_mutation_payload(
+    payload: Any,
+    allowed_keys: set[str],
+    item_shapes: dict[str, frozenset[str]],
+):
+    if not isinstance(payload, dict) or set(payload) != allowed_keys:
+        return None
+    expected_instance_id = payload.get("if_match_instance_id")
+    if not isinstance(expected_instance_id, str) or not expected_instance_id:
+        return None
+    for field, allowed_item_keys in item_shapes.items():
+        items = payload.get(field)
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict) or set(item) != allowed_item_keys
+            for item in items
+        ):
+            return None
+    return payload
+
+
+def _resource_access_mutation_payload(payload: Any):
+    if not isinstance(payload, dict) or set(payload) != {
+        "access_level",
+        "group_ids",
+        "if_match_revision",
+        "if_match_instance_id",
+    }:
+        return None
+    access_level = payload.get("access_level")
+    group_ids = payload.get("group_ids")
+    revision = payload.get("if_match_revision")
+    instance_id = payload.get("if_match_instance_id")
+    if (
+        access_level not in {"private", "public", "scope"}
+        or not isinstance(group_ids, list)
+        or any(not isinstance(group_id, str) or not group_id.strip() for group_id in group_ids)
+        or len(group_ids) != len(set(group_ids))
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(instance_id, str)
+        or not instance_id
+    ):
+        return None
+    if (access_level == "scope") != bool(group_ids):
+        return None
+    return payload
+
+
+@app.get("/api/permissions", include_in_schema=False)
+async def current_instance_permissions_get(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_read_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            result = await asyncio.to_thread(permissions.get_current_permissions)
+            response = jsonify(permissions.response_payload(result))
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/permissions/authorized-users", include_in_schema=False)
+async def current_instance_permissions_authorized_users_put(
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _permissions_mutation_payload(
+            raw_payload,
+            {"entries", "if_match_revision", "if_match_instance_id"},
+            {"entries": frozenset({"kind", "value", "role"})},
+        )
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(permissions.replace_authorized_users, payload)
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/permissions/projects/{project_id}/access", include_in_schema=False)
+async def current_instance_permissions_project_access_put(
+    project_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _permissions_mutation_payload(
+            raw_payload,
+            {"mode", "bindings", "if_match_revision", "if_match_instance_id"},
+            {
+                "bindings": frozenset(
+                    {"principal_kind", "principal_value", "access_role"}
+                )
+            },
+        )
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(
+                permissions.update_project_access,
+                project_id,
+                payload,
+            )
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get(
+    "/api/permissions/resources/{resource_kind}/{resource_id}/access",
+    include_in_schema=False,
+)
+async def current_instance_permissions_resource_access_get(
+    resource_kind: str,
+    resource_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_read_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            result = await asyncio.to_thread(
+                permissions.get_resource_access,
+                resource_kind,
+                resource_id,
+            )
+            response = jsonify(result)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put(
+    "/api/permissions/resources/{resource_kind}/{resource_id}/access",
+    include_in_schema=False,
+)
+async def current_instance_permissions_resource_access_put(
+    resource_kind: str,
+    resource_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _resource_access_mutation_payload(raw_payload)
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(
+                permissions.update_resource_access,
+                resource_kind,
+                resource_id,
+                payload,
+            )
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 _PROJECT_RESOURCE_PATHS = (
@@ -4463,6 +4701,30 @@ def model_hub_events_get():
         return _model_hub_success(events=events)
     except ModelHubError as exc:
         return _model_hub_error(exc)
+
+
+@app.get("/api/models/usage", include_in_schema=False)
+async def model_hub_usage_get(starlette_request: FastAPIRequest):
+    # Native rather than on the compat surface, and awaited rather than called:
+    # this read blocks on the lock the usage ledger's writers hold across an
+    # fsync, so reaching it from a threadpool worker would occupy that worker for
+    # as long as the disk takes. The controller side of the same rule is in
+    # `rpc.py`, which keeps the read off the event loop there.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
+
+        try:
+            days = int(starlette_request.query_params.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
+        except (TypeError, ValueError):
+            days = USAGE_DEFAULT_WINDOW_DAYS
+        try:
+            usage = await _model_hub_service().usage_summary(days=days)
+            return _model_hub_success(usage=usage)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/models/agents/<backend>/chain", methods=["GET"])
@@ -6483,477 +6745,6 @@ def remote_access_optimize_route():
     return jsonify(result), 202 if result.get("ok") else 409
 
 
-def _cloud_management_subject(config: V2Config | None) -> str | None:
-    payload = getattr(g, "remote_session_payload", None)
-    if payload is None and config is not None and _is_remote_access_request(config):
-        payload = _resolved_remote_session_payload(config)
-    subject = payload.get("sub") if isinstance(payload, Mapping) else None
-    return subject if isinstance(subject, str) and subject else None
-
-
-def _cloud_management_callback_origin(config: V2Config) -> str | None:
-    if _is_remote_access_request(config):
-        origin = _remote_access_request_origin(config)
-    else:
-        origin = _remote_access_public_origin(config)
-    return origin if origin and urlsplit(origin).scheme == "https" else None
-
-
-def _cloud_management_json(payload: dict[str, Any], status: int = 200) -> Response:
-    response = jsonify(payload)
-    response.status_code = status
-    response.headers["Cache-Control"] = "no-store, private"
-    return response
-
-
-def _cloud_management_cookie_secure() -> bool:
-    return urlsplit(_current_origin()).scheme.lower() == "https"
-
-
-def _set_cloud_management_cookie(
-    response: Response,
-    name: str,
-    value: str,
-    *,
-    max_age: int,
-) -> None:
-    response.set_cookie(
-        name,
-        value,
-        max_age=max_age,
-        httponly=True,
-        secure=_cloud_management_cookie_secure(),
-        samesite="Lax",
-        path="/",
-    )
-
-
-def _delete_cloud_management_cookie(response: Response, name: str) -> None:
-    response.delete_cookie(
-        name,
-        path="/",
-        secure=_cloud_management_cookie_secure(),
-        samesite="Lax",
-    )
-
-
-def _mark_cloud_management_manual(response: Response) -> None:
-    from vibe import cloud_management
-
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.MANUAL_COOKIE_NAME,
-        secrets.token_urlsafe(16),
-        max_age=180 * 24 * 60 * 60,
-    )
-
-
-def _cloud_management_error_response(error: Exception) -> Response:
-    from vibe import cloud_management
-
-    if isinstance(error, cloud_management.CloudManagementError):
-        return _cloud_management_json(
-            {"error": error.code, "retryable": error.retryable},
-            error.status,
-        )
-    logger.warning("Cloud management request failed: %s", error.__class__.__name__)
-    return _cloud_management_json(
-        {"error": "cloud_management_unavailable", "retryable": True},
-        503,
-    )
-
-
-def _cloud_management_redirect(next_path: str, error: str | None = None) -> Response:
-    target = urlsplit(next_path)
-    params = list(parse_qsl(target.query, keep_blank_values=True))
-    if error:
-        params.append(("cloud_management_error", error))
-    location = urlunsplit(("", "", target.path, urlencode(params), ""))
-    response = redirect(location)
-    response.headers["Cache-Control"] = "no-store, private"
-    return response
-
-
-@app.route("/api/cloud-management/session", methods=["GET"])
-def cloud_management_session_get():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if not cloud_management.cloud_is_configured(config):
-        return _cloud_management_json(
-            {"connected": False, "state": "cloud_not_connected"}
-        )
-    handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
-    remote_subject = _cloud_management_subject(config)
-    grant, error = cloud_management.resolve_grant(
-        handle,
-        browser_id,
-        remote_subject,
-    )
-    if error:
-        response = _cloud_management_json(
-            {"connected": False, "state": "subject_mismatch", "error": error},
-            409,
-        )
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    if grant is None:
-        manual = bool(request.cookies.get(cloud_management.MANUAL_COOKIE_NAME))
-        return _cloud_management_json(
-            {
-                "connected": False,
-                "state": "authorization_required",
-                "can_silent_reauthorize": (
-                    not manual
-                    and cloud_management.can_silent_reauthorize(
-                        browser_id,
-                        remote_subject,
-                    )
-                ),
-            }
-        )
-    return _cloud_management_json(
-        {
-            "connected": True,
-            "state": "connected",
-            "user": {"subject": grant.subject, "email": grant.email},
-            "expires_in": max(0, int(grant.expires_at - time.time())),
-        }
-    )
-
-
-@app.route("/api/cloud-management/session/start", methods=["POST"])
-def cloud_management_session_start():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if config is None:
-        return _cloud_management_json(
-            {"error": "cloud_management_not_connected", "retryable": False},
-            409,
-        )
-    payload = request.json if isinstance(request.json, dict) else {}
-    silent = payload.get("mode") == "silent"
-    if silent and request.cookies.get(cloud_management.MANUAL_COOKIE_NAME):
-        return _cloud_management_json(
-            {"error": "cloud_management_authorization_required", "retryable": False},
-            401,
-        )
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
-    remote_subject = _cloud_management_subject(config)
-    if silent and not cloud_management.can_silent_reauthorize(
-        browser_id,
-        remote_subject,
-    ):
-        return _cloud_management_json(
-            {"error": "cloud_management_authorization_required", "retryable": False},
-            401,
-        )
-    if not browser_id:
-        browser_id = cloud_management.new_browser_id()
-    callback_origin = _cloud_management_callback_origin(config)
-    if callback_origin is None:
-        return _cloud_management_json(
-            {"error": "cloud_management_not_connected", "retryable": False},
-            409,
-        )
-    try:
-        authorize_url, state = cloud_management.begin_authorization(
-            config,
-            browser_id=browser_id,
-            remote_subject=remote_subject,
-            callback_origin=callback_origin,
-            next_path=cloud_management.validate_next_path(payload.get("next")),
-            silent=silent,
-        )
-    except Exception as exc:
-        return _cloud_management_error_response(exc)
-    current_origin = _current_origin()
-    if not _same_origin(callback_origin, current_origin):
-        authorize_url = (
-            f"{callback_origin}/auth/organization/start?"
-            f"{urlencode({'state': state})}"
-        )
-    response = _cloud_management_json(
-        {"ok": True, "authorize_url": authorize_url, "mode": "silent" if silent else "interactive"},
-        202,
-    )
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.BROWSER_COOKIE_NAME,
-        browser_id,
-        max_age=180 * 24 * 60 * 60,
-    )
-    if not silent:
-        _delete_cloud_management_cookie(response, cloud_management.MANUAL_COOKIE_NAME)
-    return response
-
-
-@app.route("/auth/organization/start", methods=["GET"])
-def cloud_management_authorization_handoff():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if config is None or not _is_remote_access_request(config):
-        return _cloud_management_json({"error": "cloud_management_invalid_callback"}, 400)
-    if _auth_rate_limited():
-        return _auth_rate_limit_response()
-    state = str(request.args.get("state") or "")
-    try:
-        result = cloud_management.authorization_url_for_handoff(config, state, None)
-    except Exception as exc:
-        return _cloud_management_error_response(exc)
-    if result is None:
-        response = _cloud_management_redirect(
-            "/admin/organization/overview",
-            "invalid_cloud_management_state",
-        )
-        _mark_cloud_management_manual(response)
-        return response
-    authorize_url, browser_id = result
-    response = redirect(authorize_url)
-    response.headers["Cache-Control"] = "no-store, private"
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.BROWSER_COOKIE_NAME,
-        browser_id,
-        max_age=180 * 24 * 60 * 60,
-    )
-    return response
-
-
-@app.route("/auth/organization/callback", methods=["GET"])
-def cloud_management_auth_callback():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if config is None or not _is_remote_access_request(config):
-        return _cloud_management_json({"error": "cloud_management_invalid_callback"}, 400)
-    if _auth_rate_limited():
-        return _auth_rate_limit_response()
-    state = str(request.args.get("state") or "")
-    upstream_error = str(request.args.get("error") or "")
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
-    # This route is unauthenticated and CSRF-exempt, so a cross-site top-level
-    # link reaches it with the `SameSite=Lax` management cookies attached. Only
-    # a callback that resolves to this browser's own live handshake may tear
-    # down its existing grant; an unrelated or forged one leaves the current
-    # session exactly as it was instead of forcing a logout.
-    owns_flow = cloud_management.callback_owns_flow(state, browser_id)
-    if upstream_error:
-        if not owns_flow:
-            return _cloud_management_redirect("/admin/organization/overview", upstream_error)
-        next_path = cloud_management.fail_handshake(state)
-        response = _cloud_management_redirect(next_path, upstream_error)
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
-    failure_next_path = (
-        cloud_management.handshake_next_path(state, browser_id)
-        or "/admin/organization/overview"
-    )
-    try:
-        grant, next_path = cloud_management.complete_authorization(
-            config,
-            state=state,
-            code=str(request.args.get("code") or ""),
-            browser_id=browser_id,
-            remote_subject=_cloud_management_subject(config),
-        )
-    except Exception as exc:
-        code = (
-            exc.code
-            if isinstance(exc, cloud_management.CloudManagementError)
-            else "cloud_management_unavailable"
-        )
-        response = _cloud_management_redirect(
-            failure_next_path,
-            code,
-        )
-        if not owns_flow:
-            return response
-        cloud_management.invalidate_grant(
-            request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
-        )
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    response = _cloud_management_redirect(next_path)
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.HANDLE_COOKIE_NAME,
-        grant.handle,
-        max_age=cloud_management.MANAGEMENT_TOKEN_MAX_TTL_SECONDS,
-    )
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.BROWSER_COOKIE_NAME,
-        grant.browser_id,
-        max_age=180 * 24 * 60 * 60,
-    )
-    _delete_cloud_management_cookie(response, cloud_management.MANUAL_COOKIE_NAME)
-    return response
-
-
-@app.route("/api/cloud-management/session", methods=["DELETE"])
-def cloud_management_session_delete():
-    from vibe import cloud_management
-
-    cloud_management.invalidate_grant(
-        request.cookies.get(cloud_management.HANDLE_COOKIE_NAME),
-        browser_id=request.cookies.get(cloud_management.BROWSER_COOKIE_NAME),
-        clear_subject=True,
-    )
-    response = _cloud_management_json({"ok": True, "connected": False})
-    _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-    _mark_cloud_management_manual(response)
-    return response
-
-
-async def _read_cloud_management_json_body(starlette_request: FastAPIRequest) -> Any:
-    from vibe import cloud_management
-
-    body = bytearray()
-    async for chunk in starlette_request.stream():
-        if len(body) + len(chunk) > cloud_management.MAX_REQUEST_BYTES:
-            raise cloud_management.CloudManagementError(
-                "cloud_management_request_too_large",
-                status=413,
-                retryable=False,
-            )
-        body.extend(chunk)
-    if not body:
-        return {}
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise StarletteHTTPException(status_code=400, detail="Malformed JSON") from exc
-    return {} if payload is None else payload
-
-
-async def _cloud_management_proxy(
-    starlette_request: FastAPIRequest,
-    upstream_path: str,
-) -> Response:
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if not cloud_management.cloud_is_configured(config):
-        return _cloud_management_json(
-            {"error": "cloud_management_not_connected", "retryable": False},
-            409,
-        )
-    handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
-    remote_subject = _cloud_management_subject(config)
-    grant, error = cloud_management.resolve_grant(
-        handle,
-        browser_id,
-        remote_subject,
-    )
-    if error:
-        response = _cloud_management_json({"error": error, "retryable": False}, 409)
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    if grant is None:
-        return _cloud_management_json(
-            {
-                "error": "cloud_management_authorization_required",
-                "retryable": False,
-                "can_silent_reauthorize": (
-                    not bool(request.cookies.get(cloud_management.MANUAL_COOKIE_NAME))
-                    and cloud_management.can_silent_reauthorize(
-                        browser_id,
-                        remote_subject,
-                    )
-                ),
-            },
-            401,
-        )
-    try:
-        content_length = int(request.headers.get("Content-Length") or "0")
-    except ValueError:
-        content_length = cloud_management.MAX_REQUEST_BYTES + 1
-    if content_length > cloud_management.MAX_REQUEST_BYTES:
-        return _cloud_management_json(
-            {"error": "cloud_management_request_too_large", "retryable": False},
-            413,
-        )
-    try:
-        body = (
-            await _read_cloud_management_json_body(starlette_request)
-            if request.method in MUTATING_METHODS
-            else None
-        )
-    except cloud_management.CloudManagementError as exc:
-        return _cloud_management_error_response(exc)
-    try:
-        status, payload = await asyncio.to_thread(
-            cloud_management.proxy_request,
-            config,
-            grant=grant,
-            method=request.method,
-            upstream_path=upstream_path,
-            query=list(request.args.multi_items()),
-            json_body=body,
-        )
-    except Exception as exc:
-        return _cloud_management_error_response(exc)
-    response = _cloud_management_json(payload, status)
-    if status == 401:
-        cloud_management.invalidate_grant(handle)
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-    return response
-
-
-async def _dispatch_cloud_management_proxy(
-    starlette_request: FastAPIRequest,
-    upstream_path: str,
-) -> Response:
-    async def handler() -> Response:
-        return await _cloud_management_proxy(starlette_request, upstream_path)
-
-    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
-
-
-@app.get("/api/cloud-management/organizations", include_in_schema=False)
-async def cloud_management_organizations_root_proxy(starlette_request: FastAPIRequest):
-    return await _dispatch_cloud_management_proxy(starlette_request, "/api/organizations")
-
-
-@app.api_route(
-    "/api/cloud-management/organizations/{management_path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    include_in_schema=False,
-)
-async def cloud_management_organizations_proxy(
-    starlette_request: FastAPIRequest,
-    management_path: str,
-):
-    return await _dispatch_cloud_management_proxy(
-        starlette_request,
-        f"/api/organizations/{management_path}",
-    )
-
-
-@app.api_route(
-    "/api/cloud-management/instances/{management_path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    include_in_schema=False,
-)
-async def cloud_management_instances_proxy(
-    starlette_request: FastAPIRequest,
-    management_path: str,
-):
-    return await _dispatch_cloud_management_proxy(
-        starlette_request,
-        f"/api/instances/{management_path}",
-    )
 @app.route("/api/remote-access/network-interfaces", methods=["GET"])
 def remote_access_network_interfaces():
     from vibe import remote_access
@@ -7112,8 +6903,7 @@ def remote_access_auth_callback():
             next_target = _strip_show_page_reauth_param(next_target)
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
-        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
-        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: reason=%s", reason)
+        _log_oauth_callback_failure("code_exchange", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
@@ -7126,8 +6916,7 @@ def remote_access_auth_callback():
             session_claims=session_claims,
         )
     except Exception as exc:
-        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
-        _log_oauth_diag("exchange_failed", "vibe cloud session cookie creation failed: reason=%s", reason)
+        _log_oauth_callback_failure("session_cookie", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     response = Response(status=302)
@@ -7243,233 +7032,6 @@ def _remote_resource_access_context():
         payload,
         is_remote=True,
     )
-
-
-def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, connection: Any) -> dict[str, Any]:
-    from storage import resource_access_service
-
-    can_manage = resource_access_service.can_manage_resource_acl(
-        user_context,
-        policy["resource_kind"],
-        policy["resource_id"],
-        connection=connection,
-    )
-    group_ids = policy.get("group_ids") or []
-    if not can_manage:
-        group_ids = sorted(set(group_ids).intersection(user_context.group_ids or set()))
-    return {
-        "resource_kind": policy["resource_kind"],
-        "resource_id": policy["resource_id"],
-        "access_level": policy["access_level"],
-        "owner_user_id": policy.get("owner_user_id"),
-        "organization_id": policy.get("organization_id"),
-        "group_ids": group_ids,
-        "policy_revision": policy.get("policy_revision"),
-        "last_applied_control_plane_revision": policy.get("last_applied_control_plane_revision"),
-        "can_use": resource_access_service.can_use_resource(
-            user_context,
-            policy["resource_kind"],
-            policy["resource_id"],
-            connection=connection,
-        ),
-        "can_manage": can_manage,
-    }
-
-
-@app.route("/api/org/context", methods=["GET"])
-def organization_context_get():
-    _config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    organization = None
-    if user_context.is_active_organization_member:
-        organization = {
-            "id": user_context.organization_id,
-            "member_id": user_context.organization_member_id,
-            "role": user_context.organization_role,
-            "group_ids": sorted(user_context.group_ids or []),
-            "membership_version": user_context.membership_version,
-        }
-    response = jsonify(
-        {
-            "user": {"sub": user_context.subject, "email": user_context.email},
-            "instance_id": _payload.get("vibe_instance_id", _payload.get("instance_id")),
-            "organization": organization,
-            "instance_role": user_context.instance_role,
-            "instance_access_source": user_context.instance_access_source,
-        }
-    )
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["Vary"] = "Cookie"
-    return response
-
-
-@app.route("/api/org/groups", methods=["GET"])
-def organization_groups_get():
-    _config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    if not user_context.is_active_organization_member:
-        return jsonify({"error": "organization_context_required"}), 403
-    # The frozen device protocol carries group IDs but no mutable group metadata.
-    # These are signed current-member groups, not an authorization cache; a later
-    # metadata endpoint can enrich names and archived state without affecting ACL
-    # evaluation.
-    response = jsonify(
-        {
-            "groups": [
-                {"id": group_id, "name": None, "archived_at": None}
-                for group_id in sorted(user_context.group_ids or [])
-            ]
-        }
-    )
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["Vary"] = "Cookie"
-    return response
-
-
-@app.route("/api/resource-policies", methods=["GET"])
-def resource_policies_get():
-    from storage import resource_access_service
-
-    _config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    resource_kind = request.args.get("kind")
-    if resource_kind and resource_kind not in resource_access_service.RESOURCE_KINDS:
-        return jsonify({"error": "invalid_resource_kind"}), 422
-    engine = _projects_engine()
-    try:
-        with engine.connect() as connection:
-            if user_context.is_active_organization_member:
-                policies = resource_access_service.list_resource_policies(
-                    resource_kind=resource_kind,
-                    organization_id=user_context.organization_id,
-                    connection=connection,
-                )
-            elif user_context.subject:
-                policies = resource_access_service.list_resource_policies(
-                    resource_kind=resource_kind,
-                    owner_user_id=user_context.subject,
-                    connection=connection,
-                )
-            else:
-                policies = []
-            serialized = [
-                _resource_policy_api_payload(policy, user_context, connection)
-                for policy in policies
-                if resource_access_service.can_use_resource(
-                    user_context,
-                    policy["resource_kind"],
-                    policy["resource_id"],
-                    connection=connection,
-                )
-                or resource_access_service.can_manage_resource_acl(
-                    user_context,
-                    policy["resource_kind"],
-                    policy["resource_id"],
-                    connection=connection,
-                )
-            ]
-    finally:
-        engine.dispose()
-    response = jsonify({"policies": serialized})
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["Vary"] = "Cookie"
-    return response
-
-
-@app.route("/api/resource-policies/<resource_kind>/<resource_id>", methods=["PUT"])
-def resource_policy_put(resource_kind: str, resource_id: str):
-    from storage import resource_access_service
-    from vibe import remote_access
-
-    config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    if resource_kind not in resource_access_service.RESOURCE_KINDS:
-        return jsonify({"error": "invalid_resource_kind"}), 422
-    body = request.json or {}
-    if not isinstance(body, dict):
-        return jsonify({"error": "invalid_request"}), 422
-
-    engine = _projects_engine()
-    try:
-        with engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                resource_kind,
-                resource_id,
-                connection=connection,
-            )
-            if policy is None:
-                return jsonify({"error": "resource_not_found"}), 404
-            if policy.get("organization_id"):
-                # Resource existence is hidden from non-member callers and from
-                # callers whose Organization membership does not match the
-                # resource's owning Organization; surface not_found in either
-                # case so the existence of an unrelated Organization's policy
-                # is not leaked.
-                if (
-                    not user_context.is_active_organization_member
-                    or user_context.organization_id != policy.get("organization_id")
-                ):
-                    return jsonify({"error": "resource_not_found"}), 404
-            if not resource_access_service.can_manage_resource_acl(
-                user_context,
-                resource_kind,
-                resource_id,
-                connection=connection,
-            ):
-                return jsonify({"error": "resource_acl_forbidden"}), 403
-
-        try:
-            access_level, group_ids = resource_access_service.normalize_policy_request(
-                body.get("access_level"),
-                body.get("group_ids", []),
-                policy.get("organization_id"),
-            )
-        except resource_access_service.ResourceAccessError as exc:
-            return jsonify({"error": exc.code}), 422
-
-        if policy.get("organization_id"):
-            # Desired organization ACLs are written by the hosted resource API.
-            # This local route only reconciles an intent before returning state;
-            # it never invents a local revision that could overwrite a newer one.
-            sync = remote_access.sync_resource_acl_once(config, organization_id=str(policy["organization_id"]))
-            if not sync.get("ok"):
-                return jsonify({"error": sync.get("error") or "resource_acl_sync_failed", "sync": sync}), 503
-            with engine.connect() as connection:
-                refreshed = resource_access_service.get_resource_policy(
-                    resource_kind,
-                    resource_id,
-                    connection=connection,
-                )
-                if refreshed is None:
-                    return jsonify({"error": "resource_not_found"}), 404
-                serialized = _resource_policy_api_payload(refreshed, user_context, connection)
-            if refreshed["access_level"] == access_level and sorted(refreshed.get("group_ids") or []) == sorted(group_ids):
-                return jsonify({"policy": serialized, "sync": sync})
-            return jsonify(
-                {
-                    "error": "resource_acl_control_plane_required",
-                    "policy": serialized,
-                    "sync": sync,
-                }
-            ), 409
-
-        with engine.begin() as connection:
-            updated = resource_access_service.update_local_non_organization_policy(
-                connection,
-                resource_kind=resource_kind,
-                resource_id=resource_id,
-                access_level=access_level,
-                group_ids=group_ids,
-                updated_by_user_id=user_context.subject,
-            )
-            serialized = _resource_policy_api_payload(updated, user_context, connection)
-        return jsonify({"policy": serialized})
-    finally:
-        engine.dispose()
 
 
 @app.route("/api/cloud/token", methods=["GET"])
@@ -12969,8 +12531,133 @@ def _show_page_offline_response():
     return Response(html, status=401, mimetype="text/html; charset=utf-8")
 
 
+def _show_page_accept_quality(accept: str, target: str) -> float:
+    """Return the preferred quality for a response media type."""
+    target_type, target_subtype = target.split("/", 1)
+    best_specificity = -1
+    best_quality = 0.0
+    for item in accept.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        media_range = parts[0].lower()
+        if "/" not in media_range:
+            continue
+        range_type, range_subtype = media_range.split("/", 1)
+        if range_type not in {target_type, "*"} or range_subtype not in {target_subtype, "*"}:
+            continue
+        specificity = (range_type != "*") + (range_subtype != "*")
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition("=")
+            if name.strip().lower() != "q" or not separator:
+                continue
+            try:
+                quality = float(value.strip().strip('"'))
+            except ValueError:
+                quality = 0.0
+            break
+        if not 0.0 <= quality <= 1.0:
+            quality = 0.0
+        if specificity > best_specificity:
+            best_specificity = specificity
+            best_quality = quality
+    return best_quality
+
+
+def _show_page_accepts_html() -> bool:
+    """Choose HTML only when it is preferred and explicitly acceptable."""
+    accept = request.headers.get("Accept", "").strip()
+    if not accept:
+        return False
+    html_quality = _show_page_accept_quality(accept, "text/html")
+    json_quality = _show_page_accept_quality(accept, "application/json")
+    return html_quality > 0.0 and html_quality > json_quality
+
+
+def _show_page_not_found_html_response():
+    language = _request_ui_language()
+    title = html.escape(t("show.pageUnavailable.title", language), quote=True)
+    heading = html.escape(t("show.pageUnavailable.heading", language))
+    message = html.escape(t("show.pageUnavailable.message", language))
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
+    </main>
+  </body>
+</html>
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message)
+    response = Response(html_body, status=404, mimetype="text/html; charset=utf-8")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _show_page_not_found_response():
+    if (
+        request.method in {"GET", "HEAD"}
+        and _show_page_accepts_html()
+    ):
+        return _show_page_not_found_html_response()
     return jsonify({"error": "not_found"}), 404
+
+
+def _show_page_access_denied_html_response(*, include_back_link: bool = True):
+    language = _request_ui_language()
+    title = html.escape(t("show.pageAccessDenied.title", language), quote=True)
+    heading = html.escape(t("show.pageAccessDenied.heading", language))
+    message = html.escape(t("show.pageAccessDenied.message", language))
+    back = html.escape(t("show.pageAccessDenied.back", language))
+    back_link = f'<a href="/">{back}</a>' if include_back_link else ""
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+      a { display: inline-block; margin-top: 22px; color: #3157d5; font-weight: 600; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
+      __BACK_LINK__
+    </main>
+  </body>
+</html>
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message).replace("__BACK_LINK__", back_link)
+    response = Response(html_body, status=403, mimetype="text/html; charset=utf-8")
+    return _with_limited_show_policy(response)
+
+
+def _show_page_access_denied_response(*, include_back_link: bool = True):
+    if (
+        request.method in {"GET", "HEAD"}
+        and _show_page_accepts_html()
+    ):
+        return _show_page_access_denied_html_response(include_back_link=include_back_link)
+    response = jsonify({"error": "show_access_forbidden"})
+    response.status_code = 403
+    return _with_limited_show_policy(response)
 
 
 def _show_page_file_not_found_response():
@@ -13309,6 +12996,35 @@ def _show_public_editor_context():
     if not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
         return None
     return instance_owner_context()
+
+
+def _show_public_authenticated_context(config: V2Config | None):
+    from vibe.authorization import context_from_session_payload
+
+    session = _resolved_remote_session_payload(config) if config is not None else None
+    return context_from_session_payload(session) if session is not None else None
+
+
+def _show_limited_viewer_is_allowed(
+    context: Any,
+    access: Any,
+    page_id: str,
+    *,
+    allow_page_scoped: bool = True,
+) -> bool:
+    from core.show_pages import normalize_show_access_email
+
+    allowlisted = False
+    if context.email:
+        try:
+            allowlisted = (
+                access is not None
+                and normalize_show_access_email(context.email)
+                in access.normalized_emails
+            )
+        except (TypeError, ValueError):
+            allowlisted = False
+    return allowlisted or (allow_page_scoped and context.can_use_show_page(page_id))
 
 
 async def _show_public_request_author() -> dict[str, str] | None:
@@ -14989,6 +14705,17 @@ def _show_identity_error_response(error: str, status: int):
     return response
 
 
+def _show_identity_not_found_response():
+    """Hide whether a share exists when identity admission is denied."""
+    if _show_page_accepts_html():
+        return _show_page_not_found_html_response()
+    response = jsonify({"error": "not_found"})
+    response.status_code = 404
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _show_identity_error_status(error: str, *, default: int = 400) -> int:
     if error == "identity_unavailable":
         return 503
@@ -15073,6 +14800,14 @@ def _with_limited_show_policy(response: Response) -> Response:
     return response
 
 
+def _show_limited_not_found_response():
+    result = _show_page_not_found_response()
+    if isinstance(result, tuple):
+        response, status = result
+        return _with_limited_show_policy(response), status
+    return _with_limited_show_policy(result)
+
+
 @app.route("/auth/show-identity/callback", methods=["POST"])
 async def complete_show_identity_login():
     from core.show_pages import ShowPageStore
@@ -15093,6 +14828,8 @@ async def complete_show_identity_login():
         if "error" in fields:
             if fields["error"] not in {"identity_not_verified", "identity_unavailable"}:
                 raise show_identity.ShowIdentityError("invalid_callback")
+            if fields["error"] == "identity_not_verified":
+                return _show_identity_not_found_response()
             return _show_identity_error_response(
                 fields["error"],
                 _show_identity_error_status(fields["error"]),
@@ -15116,13 +14853,15 @@ async def complete_show_identity_login():
     try:
         page = store.get_by_share_id(state.share_id)
         if page is None:
-            return _show_identity_error_response("not_found", 404)
+            return _show_identity_not_found_response()
         if page.visibility == "offline":
-            return _show_identity_error_response("show_access_forbidden", 403)
+            return _show_identity_not_found_response()
         access = store.get_access(page.session_id)
         if access is None:
-            return _show_identity_error_response("not_found", 404)
+            return _show_identity_not_found_response()
         if access.access_mode == "public":
+            if page.visibility != "public":
+                return _show_identity_not_found_response()
             try:
                 show_identity.consume_verified_show_identity(identity)
             except show_identity.ShowIdentityError as exc:
@@ -15133,10 +14872,11 @@ async def complete_show_identity_login():
             return redirect(state.return_target, code=303)
         if (
             access.access_mode != "limited"
+            or page.visibility != "limited"
             or access.share_id != state.share_id
             or identity.normalized_email not in access.normalized_emails
         ):
-            return _show_identity_error_response("show_access_forbidden", 403)
+            return _show_identity_not_found_response()
 
         try:
             show_identity.consume_verified_show_identity(identity)
@@ -15203,7 +14943,12 @@ def redirect_public_show_page_to_canonical_path(share_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_public_show_page(share_id, asset_path):
-    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
+    from core.show_pages import (
+        ShowPageError,
+        ShowPageStore,
+        ensure_show_page_dir,
+        normalize_show_access_email,
+    )
     from vibe import show_identity
 
     config = _load_remote_access_config()
@@ -15213,6 +14958,10 @@ async def serve_public_show_page(share_id, asset_path):
         page = store.get_by_share_id(share_id)
         if page is None and lease is not None:
             page = store.get(lease.page_id)
+            if page is not None:
+                access = store.get_access(page.session_id)
+                if access is None or access.share_id != share_id:
+                    return _show_limited_not_found_response()
         if page is None:
             return _show_page_not_found_response()
         limited_guest = (
@@ -15244,10 +14993,75 @@ async def serve_public_show_page(share_id, asset_path):
                     if query:
                         private_target = f"{private_target}?{query}"
                     return redirect(private_target)
+        if limited_guest:
+            # A guest lease does not grant a grace period after access changes.
+            # Already-rendered pages are not proactively closed, but every
+            # subsequent request must match the current local access record.
+            access = store.get_access(page.session_id)
+            lease_is_current = (
+                access is not None
+                and page.visibility == "limited"
+                and access.access_mode == "limited"
+                and access.share_id == share_id
+                and lease.normalized_email in access.normalized_emails
+            )
+            if not lease_is_current:
+                current_limited_binding = (
+                    access is not None
+                    and page.visibility == "limited"
+                    and access.access_mode == "limited"
+                    and access.share_id == share_id
+                )
+                if current_limited_binding:
+                    authenticated_context = await asyncio.to_thread(
+                        _show_public_authenticated_context,
+                        config,
+                    )
+                    if (
+                        authenticated_context is not None
+                        and request.method == "GET"
+                        and is_spa_navigation
+                        and _show_page_accepts_html()
+                    ):
+                        if not _show_limited_viewer_is_allowed(
+                            authenticated_context,
+                            access,
+                            page.session_id,
+                            allow_page_scoped=False,
+                        ):
+                            return _show_page_access_denied_response(
+                                include_back_link=(
+                                    authenticated_context.instance_access_source
+                                    != "show_page_email"
+                                )
+                            )
+                        # The current identity may be allowed again, but the
+                        # old lease must not be treated as valid guest access.
+                        limited_guest = False
+                    else:
+                        return _show_limited_not_found_response()
+                else:
+                    return _show_limited_not_found_response()
         if page.visibility == "limited":
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
                     return _show_page_not_found_response()
+                authenticated_context = await asyncio.to_thread(
+                    _show_public_authenticated_context,
+                    config,
+                )
+                if authenticated_context is not None:
+                    access = store.get_access(page.session_id)
+                    if not _show_limited_viewer_is_allowed(
+                        authenticated_context,
+                        access,
+                        page.session_id,
+                    ):
+                        return _show_page_access_denied_response(
+                            include_back_link=(
+                                authenticated_context.instance_access_source != "show_page_email"
+                            )
+                        )
                 if config is None:
                     return _show_identity_error_response("identity_unavailable", 503)
                 return_target = request.full_path if request.query_string else request.path

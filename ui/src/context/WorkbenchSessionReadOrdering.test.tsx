@@ -106,14 +106,33 @@ function settle() {
   });
 }
 
+// The inbox reconciles when the page comes back, which is an edge rather than a
+// level: the shared page-activity sampler ignores a `focus` event on a page that
+// never left. Simulate a real gap by hiding the document and revealing it again.
+function simulatePageResume() {
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  setVisibility('hidden');
+  setVisibility('visible');
+  // Drop the shadowing property so the rest of the suite reads jsdom's own getter.
+  Reflect.deleteProperty(document, 'visibilityState');
+}
+
 describe('Workbench session read ownership', () => {
   beforeEach(() => {
     apiRef.current = null;
+    // jsdom never reports window focus, so no reading would ever count as "the
+    // page is presented". Model a focused window and let visibility carry the
+    // transitions `simulatePageResume` needs.
+    document.hasFocus = () => true;
   });
 
   afterEach(() => {
     cleanup();
     apiRef.current = null;
+    Reflect.deleteProperty(document, 'hasFocus');
   });
 
   it('does not let a bootstrap issued before hide repopulate the projects tree', async () => {
@@ -1255,7 +1274,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     act(() => {
@@ -1321,7 +1340,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     act(() => {
@@ -1411,7 +1430,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     act(() => {
@@ -1507,7 +1526,7 @@ describe('Workbench session read ownership', () => {
     await settle();
     act(() => {
       void inbox?.loadMore();
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     expect(listInbox).toHaveBeenCalledTimes(2);
@@ -1575,8 +1594,8 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
+      simulatePageResume();
     });
     await settle();
     expect(listInbox).toHaveBeenCalledTimes(2);

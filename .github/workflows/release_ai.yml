@@ -157,7 +157,7 @@ jobs:
           npm run build
 
       - name: Download Show Runtime bundles
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: show-runtime-*
           path: runtime-artifacts
@@ -173,7 +173,7 @@ jobs:
             --output vibe/show_runtime_manifest.json
 
       - name: Download Memory Runtime bundles
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: memory-runtime-*
           path: runtime-artifacts
@@ -594,7 +594,7 @@ jobs:
           fi
 
       - name: Download release artifacts
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: release-dist
           path: dist/

@@ -73,7 +73,7 @@ from .events import (
     contains_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import STANDARD_OPENCODE_VENDOR_IDS
+from .identifiers import STANDARD_OPENCODE_VENDOR_IDS, canonical_model_id
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -110,10 +110,11 @@ from .resolver import (
     source_runnable,
 )
 from .revocations import CredentialRevocationJournal
+from .usage import USAGE_DEFAULT_WINDOW_DAYS, BoundedUsageLedger, SourceIdentity, UsageWriter
 
-CONTRACT_VERSION = 5
-AGENT_CHAIN_CONTRACT_VERSION = 5
-PROBE_RESULT_CONTRACT_VERSION = 5
+CONTRACT_VERSION = 6
+AGENT_CHAIN_CONTRACT_VERSION = 6
+PROBE_RESULT_CONTRACT_VERSION = 6
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
 # runtime mints is therefore strictly greater than this pre-attempt value, and
@@ -539,7 +540,7 @@ def _runtime_payload(status: EngineStatus) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 5,
+        "contract_version": 6,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
         "status": {
@@ -569,6 +570,7 @@ class ModelHubService:
         adapter: EngineAdapter,
         events: BoundedEventLog,
         provenance: Optional[BoundedProvenanceStore] = None,
+        usage: Optional[BoundedUsageLedger] = None,
         native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
@@ -589,6 +591,13 @@ class ModelHubService:
         self.provenance = provenance or BoundedProvenanceStore(
             paths.get_state_dir() / "model_hub_turn_provenance.json"
         )
+        self.usage = usage or BoundedUsageLedger(
+            paths.get_state_dir() / "model_hub_usage.json",
+            now=now,
+        )
+        # One writer per ledger, shared with the gateway: both metering populations
+        # then have the same owner for the lifetime of what they write.
+        self.usage_writer = UsageWriter(self.usage)
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(
             paths.get_state_dir() / "model_hub_oauth_flows.json",
@@ -1401,13 +1410,21 @@ class ModelHubService:
         *,
         allow_empty: bool = False,
     ) -> None:
-        if (not allow_empty and not discovered and not manual_models) or any(
-            not isinstance(model_id, str)
-            or not model_id
-            or contains_credential_material(model_id)
-            for model_id in discovered
-        ) or len(set(discovered)) != len(discovered):
+        # Admit the canonical form, not the text upstream happened to send: what
+        # is stored here is what resolution compares and what usage meters, and a
+        # listing that names one model twice under two spellings is a failed
+        # discovery, not two models.
+        canonical = [canonical_model_id(model_id) for model_id in discovered]
+        if (
+            (not allow_empty and not discovered and not manual_models)
+            or any(
+                model_id is None or contains_credential_material(model_id)
+                for model_id in canonical
+            )
+            or len(set(canonical)) != len(canonical)
+        ):
             raise ModelHubError("discovery_failed", status=502)
+        discovered = [model_id for model_id in canonical if model_id is not None]
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
         existing_by_id = {model.id: model for model in source.models}
@@ -2337,6 +2354,12 @@ class ModelHubService:
             manual_models = [ModelHubModelConfig.from_payload(model) for model in models_payload]
             if any(
                 model.provenance != "manual"
+                # The same admission rule the manual-add surface applies. A source
+                # may be created with its models inline, so this is the other way a
+                # client-declared identifier enters config — and a client can still
+                # be told no, which is the one moment an unbounded identifier is
+                # refusable rather than something every later surface must carry.
+                or canonical_model_id(model.id) is None
                 or contains_credential_material(model.id)
                 or contains_credential_material(model.display_name or "")
                 for model in manual_models
@@ -3469,14 +3492,10 @@ class ModelHubService:
     async def add_custom_model(self, source_id: object, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("source_not_found", status=404)
-        model_id = payload.get("model_id")
+        model_id = canonical_model_id(payload.get("model_id"))
         display_name = payload.get("display_name")
         reasoning_efforts = payload.get("reasoning_efforts")
-        if (
-            not isinstance(model_id, str)
-            or not model_id
-            or contains_credential_material(model_id)
-        ):
+        if model_id is None or contains_credential_material(model_id):
             raise ModelHubError("mapping_target_unavailable")
         if display_name is not None and (
             not isinstance(display_name, str) or contains_credential_material(display_name)
@@ -3600,6 +3619,36 @@ class ModelHubService:
                 "removed_hops": removed_hops,
                 "interrupted": would_interrupt,
             }
+
+    def usage_summary(self, *, days: int = USAGE_DEFAULT_WINDOW_DAYS) -> dict:
+        """Report metered token usage, labelled from current Source config.
+
+        Config is what this method owns: which identities exist right now and what
+        they are called. The join itself belongs to the ledger, because only the
+        ledger knows how a row is keyed — the version of this method that looked a
+        label up by `row["source_id"]` is what that rule looks like once it has
+        leaked to a caller, and it silently dropped the label of every identity the
+        key fold exists for.
+
+        What it hands over is therefore the shape config actually has — Sources, each
+        carrying the models listed under it — and not a flat map per key level. A
+        metered model's identity is the pair, so a flat model map cannot say which
+        Source an ID came from, and answers for one Source with another's models.
+        """
+
+        config = self.store.load()
+        return self.usage.summary(
+            days=days,
+            now=self.now(),
+            identities=[
+                SourceIdentity(
+                    source_id=source.id,
+                    label=source.display_name,
+                    model_ids=[model.id for model in source.models],
+                )
+                for source in config.sources
+            ],
+        )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:
         events = self.events.list(limit=limit, before=before)
@@ -4882,8 +4931,55 @@ class ModelHubService:
             self.adapter.invoke(source.id, model_id, request, stream, backend)
         )
         if handle.stream is not None:
+            # The body is the gateway's to forward, so the tokens in it are the
+            # gateway's to meter.
             return handle, None
-        return handle, await self._engine_call(handle.outcome())
+        outcome = await self._engine_call(handle.outcome())
+        await self._meter_call(source_id=source.id, model_id=model_id, outcome=outcome)
+        return handle, outcome
+
+    async def _meter_call(
+        self,
+        *,
+        source_id: str,
+        model_id: str,
+        outcome: RawCallOutcome,
+    ) -> None:
+        """Fold one bodyless upstream call into the usage ledger, best-effort.
+
+        This is the resolver's half of metering. A call that ends here has no body
+        to hand onward — a terminal error, or a buffered response the resolver
+        itself consumed — so the gateway will never see its token report, and for
+        an error the resolver may not even name this Source in what it raises. A
+        vendor that reported tokens billed for them whether or not the call ended
+        well, and every hop of a failover chain that reported tokens billed the
+        Source it was made against, not the one that finally served the turn.
+
+        The population split with the gateway is ``handle.stream is not None``
+        one frame above: a call either hands its body onward or it does not, so
+        each call is metered exactly once and none is missed.
+
+        The ledger read-modify-write is file I/O, so it runs off the event loop;
+        metering is a report, never a control input, and a ledger failure must not
+        change the outcome the caller sees.
+
+        Which is also why the write is the writer's and not this call's: a resolve
+        cancelled downstream while its row sat queued would otherwise discard usage
+        the vendor had already billed. The writer's own bounded wait keeps the
+        ordinary path leaving the row on disk before the caller sees its outcome,
+        without putting an unresponsive disk in front of the next failover hop.
+        """
+
+        if outcome.usage is None:
+            return
+        await self.usage_writer.wait_recorded(
+            self.usage_writer.record(
+                source_id=source_id,
+                model_id=model_id,
+                usage=outcome.usage,
+                at=self.now(),
+            )
+        )
 
     async def _classify_source_outcome(
         self,
@@ -5297,6 +5393,7 @@ def create_default_service(
         store=V2ModelHubConfigStore(),
         adapter=adapter,
         events=BoundedEventLog(paths.get_state_dir() / "model_hub_resolution_events.json"),
+        usage=BoundedUsageLedger(paths.get_state_dir() / "model_hub_usage.json"),
         native_oauth_adapter=native_oauth_adapter,
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),

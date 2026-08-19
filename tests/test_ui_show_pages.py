@@ -588,6 +588,101 @@ def test_limited_show_page_uses_editor_route_and_redirects_guest_to_identity(
     assert asset.status_code == 404
 
 
+def test_limited_show_page_shows_access_denied_to_authenticated_viewer(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "other@example.com",
+            "viewer-1",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    def fail_oauth(*_args, **_kwargs):
+        pytest.fail("an authenticated viewer must not be sent through OAuth")
+
+    with monkeypatch.context() as denied_patch:
+        denied_patch.setattr(show_identity, "begin_show_identity_authorization", fail_oauth)
+        html_response = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        json_response = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "application/json"},
+            follow_redirects=False,
+        )
+
+    assert html_response.status_code == 403
+    assert "Location" not in html_response.headers
+    assert "You do not have access to this page" in html_response.text
+    assert "Please contact the page owner" in html_response.text
+    assert html_response.headers["Cache-Control"] == "private, no-store"
+    assert "Cookie" in html_response.headers["Vary"]
+    assert json_response.status_code == 403
+    assert json_response.get_json() == {"error": "show_access_forbidden"}
+
+    allowlisted_client = app.test_client()
+    allowlisted_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "viewer-1",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+    allowlisted = allowlisted_client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert allowlisted.status_code == 302
+    assert (
+        urllib.parse.urlsplit(allowlisted.headers["Location"]).path
+        == "/api/v1/instances/inst_123/show-identity/authorize"
+    )
+
+    page_scoped_client = app.test_client()
+    page_scoped_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _show_page_email_cookie(
+            config,
+            session_id="other-page",
+            email="other@example.com",
+            subject="other-viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+    page_scoped = page_scoped_client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert page_scoped.status_code == 403
+    assert 'href="/"' not in page_scoped.text
+
+
 def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
     monkeypatch,
     tmp_path,
@@ -616,6 +711,25 @@ def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
     )
     assert unavailable.status_code == 503
     assert unavailable.get_json()["error"] == "identity_unavailable"
+
+    not_verified_login = client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    not_verified_state = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(not_verified_login.headers["Location"]).query
+    )["state"][0]
+    not_verified = client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": not_verified_state, "error": "identity_not_verified"},
+    )
+    assert not_verified.status_code == 404
+    assert not_verified.get_json() == {"error": "not_found"}
 
     verifier_login = client.get(
         f"/p/{share_id}/",
@@ -683,8 +797,8 @@ def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
         environ_base=_remote_peer(),
         data={"state": next_state, "assertion": "signed-assertion"},
     )
-    assert rotated.status_code == 403
-    assert rotated.get_json()["error"] == "show_access_forbidden"
+    assert rotated.status_code == 404
+    assert rotated.get_json() == {"error": "not_found"}
     assert "Set-Cookie" not in rotated.headers
 
 
@@ -730,8 +844,8 @@ def test_limited_show_callback_rejects_offline_page_and_rate_limits_verification
         environ_base=_remote_peer(),
         data={"state": state, "assertion": "signed-assertion"},
     )
-    assert offline.status_code == 403
-    assert offline.get_json()["error"] == "show_access_forbidden"
+    assert offline.status_code == 404
+    assert offline.get_json() == {"error": "not_found"}
     assert "Set-Cookie" not in offline.headers
 
     monkeypatch.setattr(ui_server, "_auth_rate_limited", lambda: True)
@@ -855,9 +969,46 @@ def test_show_identity_callback_does_not_charge_denied_identity_to_replay_ledger
         data={"state": state, "assertion": "signed-assertion"},
     )
 
-    assert denied.status_code == 403
-    assert denied.get_json()["error"] == "show_access_forbidden"
+    assert denied.status_code == 404
+    assert denied.get_json() == {"error": "not_found"}
     assert "Set-Cookie" not in denied.headers
+
+
+def test_show_identity_not_found_is_a_generic_html_page_for_browsers():
+    with app.test_request_context(
+        show_identity.CALLBACK_PATH,
+        method="POST",
+        headers={"Accept": "text/html", "Accept-Language": "zh-CN,zh;q=0.9"},
+    ):
+        response = ui_server._show_identity_not_found_response()
+
+    assert response.status_code == 404
+    assert response.headers["Content-Type"].startswith("text/html")
+    body = response.body.decode("utf-8")
+    assert 'lang="zh"' in body
+    assert "此页面暂时不可用" in body
+    assert "页面不存在，或已不再提供访问。" in body
+    assert b"show_access_forbidden" not in response.body
+
+
+@pytest.mark.parametrize(
+    "accept",
+    [
+        "application/json, text/html;q=0",
+        "application/json, text/html;q=0.5",
+        "*/*",
+    ],
+)
+def test_show_identity_not_found_prefers_json_when_html_is_not_preferred(accept):
+    with app.test_request_context(
+        show_identity.CALLBACK_PATH,
+        method="POST",
+        headers={"Accept": accept},
+    ):
+        response = ui_server._show_identity_not_found_response()
+
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "not_found"}
 
 
 def test_show_identity_callback_body_stops_at_the_streaming_limit():
@@ -919,7 +1070,57 @@ def test_public_show_ignores_an_existing_limited_guest_lease(monkeypatch, tmp_pa
     assert "Cookie" not in response.headers.get("Vary", "")
 
 
-def test_limited_guest_lease_survives_rotation_only_for_that_browser(
+def test_rotated_public_share_rejects_an_old_guest_lease(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    old_share_id = _create_show_page("ses123", "limited")
+    lease = show_identity.make_show_guest_lease(
+        config,
+        page_id="ses123",
+        share_id=old_share_id,
+        normalized_email="viewer@example.com",
+    )
+    client = app.test_client()
+    client.set_cookie(
+        show_identity.show_guest_cookie_name(old_share_id),
+        lease,
+        domain="alex.avibe.bot",
+        path=show_identity.show_guest_cookie_path(old_share_id),
+    )
+
+    store = ShowPageStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        result = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="public",
+            target_share_id="rotated-public-share",
+            target_emails=[],
+        )
+        assert result.status == "applied"
+    finally:
+        store.close()
+
+    old_response = client.get(
+        f"/p/{old_share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    new_response = app.test_client().get(
+        "/p/rotated-public-share/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert old_response.status_code == 404
+    assert old_response.headers["Cache-Control"] == "private, no-store"
+    assert "Cookie" in old_response.headers["Vary"]
+    assert new_response.status_code == 200
+
+
+def test_limited_guest_lease_is_rejected_after_rotation(
     monkeypatch,
     tmp_path,
 ):
@@ -960,7 +1161,19 @@ def test_limited_guest_lease_survives_rotation_only_for_that_browser(
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert continuing.status_code == 200
+    rotated_navigation = admitted.get(
+        f"/p/{old_share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={
+            "Accept": "text/html",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        },
+        follow_redirects=False,
+    )
+    assert rotated_navigation.status_code == 404
+    assert continuing.status_code == 404
     fresh_old_link = app.test_client().get(
         f"/p/{old_share_id}/",
         base_url="https://alex.avibe.bot",
@@ -970,7 +1183,7 @@ def test_limited_guest_lease_survives_rotation_only_for_that_browser(
     assert fresh_old_link.status_code == 404
 
 
-def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
+def test_limited_show_guest_is_rechecked_after_access_changes(
     monkeypatch,
     tmp_path,
 ):
@@ -1119,7 +1332,58 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             base_url="https://alex.avibe.bot",
             environ_base=_remote_peer(),
         )
-        assert existing_asset.status_code == 200
+        assert existing_asset.status_code == 404
+        assert existing_asset.headers["Cache-Control"] == "private, no-store"
+        assert "Cookie" in existing_asset.headers["Vary"]
+        html_subresource = client.get(
+            f"/p/{share_id}/index.html",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+        )
+        assert html_subresource.status_code == 404
+
+        stale_limited_navigation = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert stale_limited_navigation.status_code == 404
+
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(
+                config,
+                "viewer@example.com",
+                "viewer-1",
+                role="viewer",
+            ),
+            domain="alex.avibe.bot",
+        )
+        authenticated_revoked_navigation = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert authenticated_revoked_navigation.status_code == 403
+        assert "You do not have access to this page" in authenticated_revoked_navigation.text
+        assert "Please contact the page owner" in authenticated_revoked_navigation.text
+        assert "Location" not in authenticated_revoked_navigation.headers
+
+        for entry_path in (f"/p/{share_id}/", f"/p/{share_id}/index.html"):
+            non_html_entry = client.get(
+                entry_path,
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+                headers={"Accept": "application/json"},
+                follow_redirects=False,
+            )
+            assert non_html_entry.status_code == 404
+            assert non_html_entry.get_json() == {"error": "not_found"}
 
         fresh_client = app.test_client()
         fresh_login = fresh_client.get(
@@ -1141,7 +1405,8 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
                 "assertion": "signed-assertion",
             },
         )
-        assert denied.status_code == 403
+        assert denied.status_code == 404
+        assert denied.get_json() == {"error": "not_found"}
 
         store = ShowPageStore()
         try:
@@ -1163,7 +1428,15 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             base_url="https://alex.avibe.bot",
             environ_base=_remote_peer(),
         )
-        assert still_open.status_code == 200
+        assert still_open.status_code == 404
+        stale_private_navigation = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert stale_private_navigation.status_code == 404
         new_visit = app.test_client().get(
             f"/p/{share_id}/",
             base_url="https://alex.avibe.bot",
@@ -1171,6 +1444,8 @@ def test_limited_show_guest_is_admitted_once_and_not_live_revoked(
             headers={"Accept": "text/html"},
         )
         assert new_visit.status_code == 404
+        assert b"This page is unavailable" in new_visit.content
+        assert b"does not exist or is no longer available" in new_visit.content
 
         store = ShowPageStore()
         try:
@@ -7679,6 +7954,30 @@ def test_public_and_private_paths_are_canonical_by_visibility(monkeypatch, tmp_p
     # private page is never reachable there.
     public_response = app.test_client().get(f"/p/{share_id}/", base_url="http://127.0.0.1:5123")
     assert public_response.status_code == 404
+
+
+def test_public_show_not_found_is_a_generic_html_page_for_browsers():
+    response = app.test_client().get(
+        "/p/unknown-share/",
+        base_url="http://127.0.0.1:5123",
+        headers={"Accept": "text/html"},
+    )
+
+    assert response.status_code == 404
+    assert response.headers["Content-Type"].startswith("text/html")
+    assert b"This page is unavailable" in response.content
+    assert b"not_found" not in response.content
+
+
+def test_public_show_not_found_respects_html_quality():
+    response = app.test_client().get(
+        "/p/unknown-share/",
+        base_url="http://127.0.0.1:5123",
+        headers={"Accept": "application/json, text/html;q=0"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "not_found"}
 
 
 def test_rotated_public_share_url_stops_working(monkeypatch, tmp_path):

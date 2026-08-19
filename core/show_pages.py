@@ -18,7 +18,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from config.v2_config import V2Config
+from config.v2_config import V2Config, config_file_lock
 from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
 from core.show_git import format_agent_contract
 from storage.db import create_sqlite_engine
@@ -609,7 +609,7 @@ class ShowPageStore:
 
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             row = (
                 conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
                 .mappings()
@@ -625,7 +625,7 @@ class ShowPageStore:
 
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             row = (
                 conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
                 .mappings()
@@ -682,7 +682,7 @@ class ShowPageStore:
                 clauses.append(show_pages.c.offline_at.is_not(None))
             statement = statement.where(or_(*clauses))
         statement = statement.order_by(show_pages.c.updated_at.desc(), show_pages.c.session_id.asc())
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             rows = conn.execute(statement).mappings().all()
             rows = resource_access_service.filter_accessible_resources(
                 context,
@@ -759,26 +759,84 @@ class ShowPageStore:
             raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
     @staticmethod
-    def _register_created_resource_policy(connection, session_id: str, user_context: Any) -> None:
+    def _resolve_instance_ownership() -> dict[str, Any]:
+        from vibe import permissions
+
+        return permissions.resolve_current_instance_ownership()
+
+    @classmethod
+    def _reconcile_resource_policy(
+        cls,
+        connection,
+        session_id: str,
+        user_context: Any,
+        ownership: dict[str, Any],
+    ) -> dict[str, Any]:
         from storage import resource_access_service
 
-        if not (user_context.subject and user_context.has_role("editor")):
-            return
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id=session_id,
-            organization_id=user_context.organization_id,
-            owner_user_id=user_context.subject,
-            owner_email=user_context.email,
-            access_level="private",
-            created_by_user_id=user_context.subject,
-            updated_by_user_id=user_context.subject,
+        current_policy = resource_access_service.get_resource_policy(
+            "show_page",
+            session_id,
+            connection=connection,
         )
+        if current_policy is None:
+            try:
+                cls._require_project_edit_access(connection, session_id, user_context)
+            except ShowPageError:
+                if not user_context.can_use_show_page(session_id):
+                    raise
+                return {
+                    "status": "unchanged",
+                    "ownership": ownership,
+                    "policy": None,
+                }
+        owner_user_id = (
+            user_context.subject
+            if user_context.subject and user_context.has_role("editor")
+            else None
+        )
+        return resource_access_service.reconcile_show_page_resource_policy(
+            connection,
+            resource_id=session_id,
+            ownership=ownership,
+            owner_user_id=owner_user_id,
+            owner_email=user_context.email,
+        )
+
+    def reconcile_resource_policy(
+        self,
+        session_id: str,
+        *,
+        user_context: Any = None,
+    ) -> dict[str, Any]:
+        """Resolve ownership outside SQLite, then reconcile one existing page."""
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
+        with config_file_lock():
+            with self.engine.begin() as connection:
+                exists = connection.execute(
+                    select(show_pages.c.session_id)
+                    .where(show_pages.c.session_id == session_id)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if exists is None:
+                    raise ShowPageError(
+                        "This session has no Show Page.",
+                        code="show_page_not_found",
+                    )
+                return self._reconcile_resource_policy(
+                    connection,
+                    session_id,
+                    context,
+                    ownership,
+                )
 
     def ensure(self, session_id: str, *, user_context: Any = None) -> ShowPage:
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
         now = _utc_now_iso()
         page = ShowPage(
             session_id=session_id,
@@ -789,30 +847,32 @@ class ShowPageStore:
             created_at=now,
             updated_at=now,
         )
-        with self.engine.begin() as conn:
-            existing = (
-                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                .mappings()
-                .first()
-            )
-            if existing is not None:
-                self._require_project_edit_access(conn, session_id, context)
-                self._require_resource_access(conn, session_id, context)
-                return _page_from_row(existing)
-            self._require_project_edit_access(conn, session_id, context)
-            self._require_create_access(context)
-            conn.execute(
-                insert(show_pages).values(
-                    session_id=page.session_id,
-                    access_mode=page.access_mode,
-                    access_revision=page.access_revision,
-                    share_id=page.share_id,
-                    offline_at=page.offline_at,
-                    created_at=page.created_at,
-                    updated_at=page.updated_at,
+        with config_file_lock():
+            with self.engine.begin() as conn:
+                existing = (
+                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                    .mappings()
+                    .first()
                 )
-            )
-            self._register_created_resource_policy(conn, session_id, context)
+                if existing is not None:
+                    self._reconcile_resource_policy(conn, session_id, context, ownership)
+                    self._require_project_edit_access(conn, session_id, context)
+                    self._require_resource_access(conn, session_id, context)
+                    return _page_from_row(existing)
+                self._require_project_edit_access(conn, session_id, context)
+                self._require_create_access(context)
+                conn.execute(
+                    insert(show_pages).values(
+                        session_id=page.session_id,
+                        access_mode=page.access_mode,
+                        access_revision=page.access_revision,
+                        share_id=page.share_id,
+                        offline_at=page.offline_at,
+                        created_at=page.created_at,
+                        updated_at=page.updated_at,
+                    )
+                )
+                self._reconcile_resource_policy(conn, session_id, context, ownership)
         return page
 
     def ensure_active(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, bool]:
@@ -827,71 +887,79 @@ class ShowPageStore:
         """
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
         now = _utc_now_iso()
-        with self.engine.begin() as conn:
-            existing = (
-                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                .mappings()
-                .first()
-            )
-            if existing is not None:
-                self._require_project_edit_access(conn, session_id, context)
-                self._require_resource_access(conn, session_id, context)
-                return _page_from_row(existing), False
-            self._require_project_edit_access(conn, session_id, context)
-            self._require_create_access(context)
-            status = conn.execute(
-                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-            ).scalar_one_or_none()
-            if status is None:
-                # Unknown session — don't create an orphan page row not tied to any
-                # session lifecycle/archive cleanup (other session-scoped APIs also
-                # treat a missing session as absent).
-                raise ShowPageError(
-                    "Cannot create a Show Page for an unknown session.",
-                    code="session_not_found",
-                )
-            if status == "archived":
-                raise ShowPageError(
-                    "Cannot create a Show Page for an archived session.",
-                    code="session_archived",
-                )
-            created = False
-            row = None
-            for _ in range(20):
-                result = conn.execute(
-                    insert(show_pages)
-                    .prefix_with("OR IGNORE")
-                    .values(
-                        session_id=session_id,
-                        access_mode=ACCESS_MODE_PRIVATE,
-                        access_revision=0,
-                        share_id=_new_share_id(),
-                        offline_at=None,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-                created = bool(result.rowcount and result.rowcount > 0)
-                row = (
-                    conn.execute(
-                        select(show_pages)
-                        .where(show_pages.c.session_id == session_id)
-                        .limit(1)
-                    )
+        with config_file_lock():
+            with self.engine.begin() as conn:
+                existing = (
+                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
                     .mappings()
                     .first()
                 )
-                if row is not None:
-                    break
-            if row is None:
-                raise ShowPageError(
-                    "Could not allocate a unique share ID.",
-                    code="share_id_allocation_failed",
+                if existing is not None:
+                    self._reconcile_resource_policy(conn, session_id, context, ownership)
+                    self._require_project_edit_access(conn, session_id, context)
+                    self._require_resource_access(conn, session_id, context)
+                    return _page_from_row(existing), False
+                self._require_project_edit_access(conn, session_id, context)
+                self._require_create_access(context)
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+                ).scalar_one_or_none()
+                if status is None:
+                    # Unknown session — don't create an orphan page row not tied to any
+                    # session lifecycle/archive cleanup (other session-scoped APIs also
+                    # treat a missing session as absent).
+                    raise ShowPageError(
+                        "Cannot create a Show Page for an unknown session.",
+                        code="session_not_found",
+                    )
+                if status == "archived":
+                    raise ShowPageError(
+                        "Cannot create a Show Page for an archived session.",
+                        code="session_archived",
+                    )
+                created = False
+                row = None
+                for _ in range(20):
+                    result = conn.execute(
+                        insert(show_pages)
+                        .prefix_with("OR IGNORE")
+                        .values(
+                            session_id=session_id,
+                            access_mode=ACCESS_MODE_PRIVATE,
+                            access_revision=0,
+                            share_id=_new_share_id(),
+                            offline_at=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    created = bool(result.rowcount and result.rowcount > 0)
+                    row = (
+                        conn.execute(
+                            select(show_pages)
+                            .where(show_pages.c.session_id == session_id)
+                            .limit(1)
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    if row is not None:
+                        break
+                if row is None:
+                    raise ShowPageError(
+                        "Could not allocate a unique share ID.",
+                        code="share_id_allocation_failed",
+                    )
+                reconciliation = self._reconcile_resource_policy(
+                    conn,
+                    session_id,
+                    context,
+                    ownership,
                 )
-            if created:
-                self._register_created_resource_policy(conn, session_id, context)
-            self._require_resource_access(conn, session_id, context)
+                if not (created and reconciliation["status"] == "pending"):
+                    self._require_resource_access(conn, session_id, context)
         return _page_from_row(row), created
 
     def is_archived(self, session_id: str) -> bool:

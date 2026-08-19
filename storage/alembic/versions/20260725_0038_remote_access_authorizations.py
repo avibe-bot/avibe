@@ -26,22 +26,26 @@ def _tables(bind) -> set[str]:
 
 
 def upgrade() -> None:
-    if "remote_access_authorizations" in _tables(op.get_bind()):
-        return
-    op.create_table(
-        "remote_access_authorizations",
-        sa.Column("id", sa.String(), nullable=False),
-        sa.Column("instance_id", sa.String(), nullable=False),
-        sa.Column("subject", sa.String(), nullable=False),
-        sa.Column("claims_json", sa.Text(), nullable=False),
-        sa.Column("expires_at", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.Integer(), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
+    if "remote_access_authorizations" not in _tables(op.get_bind()):
+        op.create_table(
+            "remote_access_authorizations",
+            sa.Column("id", sa.String(), nullable=False),
+            sa.Column("instance_id", sa.String(), nullable=False),
+            sa.Column("subject", sa.String(), nullable=False),
+            sa.Column("claims_json", sa.Text(), nullable=False),
+            sa.Column("expires_at", sa.Integer(), nullable=False),
+            sa.Column("created_at", sa.Integer(), nullable=False),
+            sa.PrimaryKeyConstraint("id"),
+        )
+    # Outside the table guard on purpose -- this revision used to return early on
+    # the table alone, which made the index unreachable in exactly the state that
+    # needs it. A run interrupted between the two leaves the table present and the
+    # index missing, and 20260819_0056 would then stamp over it permanently.
     op.create_index(
         "ix_remote_access_authorizations_expires",
         "remote_access_authorizations",
         ["expires_at"],
+        if_not_exists=True,
     )
 
 

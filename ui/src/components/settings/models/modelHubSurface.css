@@ -139,6 +139,25 @@
 .model-hub-accent-pill--violet { border-color: var(--model-hub-violet-4d); background: var(--model-hub-violet-1a); color: var(--violet-ink); }
 .model-hub-accent-pill--neutral { border-color: var(--model-hub-wash-14); background: var(--model-hub-wash-0a); color: var(--muted); }
 
+/* One owner for the surface's 10.5px status pill. Every frame draws it as a 23px
+   box: a 1px border plus 3px insets over a 15px line box. The line-height is the
+   part that has to be pinned — inherited leading grows the same padding into a
+   25px box, which is what every pill on the page was doing. Colour stays at the
+   call site (`.model-hub-accent-pill--*`, `.model-hub-upstream-count`,
+   `.model-hub-takeover-chip`, Badge variants); this owns only the shape. */
+.model-hub-pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
 .model-hub-ink-mint { color: var(--mint-ink); }
 .model-hub-ink-gold { color: var(--gold-ink); }
 .model-hub-ink-violet { color: var(--violet-ink); }
@@ -180,9 +199,12 @@
   line-height: normal;
 }
 
+/* The glyph is the control: the frame draws a bare 13px hint icon beside the
+   page title, exactly like the one in the sources panel head, with no 26px box
+   around it pushing the title's baseline off-centre. */
 .model-hub-shell-info {
-  width: 26px;
-  height: 26px;
+  width: 13px;
+  height: 13px;
   color: var(--model-hub-ink-40);
 }
 
@@ -270,7 +292,7 @@
   --model-hub-wire-active-width: 1.75px;
   --model-hub-wire-muted-width: 1px;
   --model-hub-wire-node: 7px;
-  --model-hub-footer-action-height: 31px;
+  --model-hub-footer-action-height: 30px;
   --model-hub-footer-action-radius: 7px;
   --model-hub-footer-action-font-size: 11.5px;
   --model-hub-upstream-info-ink: var(--model-hub-ink-40);
@@ -281,7 +303,7 @@
   --model-hub-model-current-ink: var(--model-hub-muted-cc);
   --model-hub-model-collapse-ink: var(--model-hub-ink-59);
   --model-hub-takeover-current-ink: var(--model-hub-violet-ink);
-  --model-hub-agent-head-action-height: 35px;
+  --model-hub-agent-head-action-height: 36px;
   --model-hub-agent-head-action-leading: 17px;
   --model-hub-agent-head-status-height: 16px;
   display: flex;
@@ -291,12 +313,12 @@
 
 .model-hub-overview-chevron,
 .model-hub-overview-info { color: var(--model-hub-ink-40); }
-/* The agent group head is a fixed 66px band holding a 35px action row and a
-   16px status row with a 7px gap: 58px of content leaves a symmetric 4px inset.
-   Both rows have to be pinned, because inherited line-height alone grows them to
-   37px/17px and eats the top inset. */
+/* The agent group head is a fixed 66px band holding a 36px action row and a
+   16px status row with a 7px gap; the frame's 59px of content is centred in it,
+   so the inset is the half-pixel 3.5 rather than a round number. Both rows have
+   to be pinned, because inherited line-height alone grows them past that. */
 .model-hub-agent-head-action {
-  height: var(--model-hub-agent-head-action-height, 35px);
+  height: var(--model-hub-agent-head-action-height, 36px);
   padding-block: 0;
   line-height: var(--model-hub-agent-head-action-leading, 17px);
 }
@@ -348,7 +370,13 @@
   padding-inline: 12px;
   border-radius: var(--model-hub-footer-action-radius);
   font-size: var(--model-hub-footer-action-font-size);
+  font-weight: 600;
 }
+/* Both footer buttons sit on one 30px band. The frame strokes the outlined one
+   *outside* that band, so its border-box is the 2px taller of the two — which is
+   why the design reads 88x30 next to 113x32 rather than two equal heights. */
+.model-hub-footer-action--filled { border-width: 0; }
+.model-hub-footer-action--outlined { height: calc(var(--model-hub-footer-action-height) + 2px); }
 
 .model-hub-subscription-menu-row--active,
 .model-hub-subscription-menu-row:hover,
@@ -715,31 +743,71 @@
 .model-hub-route-grip[aria-grabbed="true"] { color: var(--mint-ink); }
 .model-hub-route-invalid,
 .model-hub-route-invalid-summary { color: var(--destructive-ink); font-size: 10px; line-height: 14px; }
-.model-hub-route-selector-label { color: var(--model-hub-ink-73); font-size: 10.5px; font-weight: 700; }
 /* The picker opens from a button that sits near the bottom of an anchored
    dialog, so it has to bound itself against the space Radix reports instead of
    letting a long model list run past the dialog and off the screen. Its metrics
    live here rather than on `.model-hub-route-dialog` because the popover is
-   portalled out of the dialog and inherits nothing from it. */
+   portalled out of the dialog and inherits nothing from it — including the
+   dialog-action tokens the confirmation shares with the dialog's Cancel/Save.
+
+   Bounding the panel is only half of it: the bound has to land on the list, so
+   every fixed band (search, column head, confirm foot) stays out of the way and
+   the remaining space is what scrolls. `min-height: 0` on each link of that
+   chain is what lets a flex item shrink below its content and hand the overflow
+   to the one element that owns `overflow-y: auto`. */
 .model-hub-route-selector {
   --model-hub-route-selector-max: 300px;
   --model-hub-route-selector-confirm-height: 33px;
   --model-hub-route-selector-confirm-size: 12px;
+  --model-hub-dialog-action-radius: 7px;
   max-height: min(
     var(--model-hub-route-selector-max),
     var(--radix-popover-content-available-height, var(--model-hub-route-selector-max))
   );
 }
-.model-hub-route-selector-list { min-height: 0; overflow-y: auto; }
-.model-hub-route-candidate { min-height: 28px; }
+.model-hub-route-selector-command { min-height: 0; flex: 1 1 auto; }
+.model-hub-route-selector [cmdk-input-wrapper] {
+  flex-shrink: 0;
+  padding-inline: 10px;
+  border-color: var(--model-hub-wash-14);
+}
+.model-hub-route-selector [cmdk-input] {
+  height: 34px;
+  padding-block: 0;
+  font-size: 12px;
+  line-height: 17px;
+}
+.model-hub-route-selector-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+.model-hub-route-selector-head {
+  flex-shrink: 0;
+  padding: 8px 12px 4px;
+  color: var(--model-hub-ink-73);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 14px;
+}
+.model-hub-route-selector-list { min-height: 0; max-height: none; flex: 1 1 auto; overflow-y: auto; }
+.model-hub-route-selector-group { padding: 0 6px 6px; }
+.model-hub-route-candidate { min-height: 28px; font-size: 11.5px; line-height: 16px; }
+.model-hub-route-candidate-model { color: var(--model-hub-ink-73); }
 .model-hub-route-candidate:hover { background: var(--model-hub-wash-0a); }
-.model-hub-route-candidate[aria-pressed="true"] {
+.model-hub-route-candidate[data-selected="true"] {
   background: var(--model-hub-mint-1a);
   color: var(--mint-ink);
 }
-.model-hub-route-candidate[aria-pressed="true"] .model-hub-route-candidate-model { color: inherit; }
+.model-hub-route-candidate[data-selected="true"] .model-hub-route-candidate-model { color: inherit; }
+.model-hub-route-selector-foot {
+  padding: 8px 10px;
+  border-color: var(--model-hub-wash-14);
+}
 .model-hub-route-selector-confirm {
   height: var(--model-hub-route-selector-confirm-height);
+  border-radius: var(--model-hub-dialog-action-radius);
   font-size: var(--model-hub-route-selector-confirm-size);
 }
 .model-hub-route-remove { width: 26px; height: 26px; border-radius: 6px; color: var(--foreground); }
@@ -765,8 +833,9 @@
   --model-hub-source-action-width: 95px;
   --model-hub-source-action-height: 33px;
   --model-hub-source-action-radius: 7px;
+  --model-hub-source-action-size: 12px;
   --model-hub-source-table-head-height: 36px;
-  --model-hub-source-table-row-height: 54px;
+  --model-hub-source-table-row-height: 55px;
   --model-hub-source-table-draft-height: 55px;
   --model-hub-source-table-add-height: 41px;
   --model-hub-source-table-columns: 250px 84px minmax(220px, 470px) 1fr;
@@ -827,6 +896,16 @@
   width: var(--model-hub-source-action-width);
   height: var(--model-hub-source-action-height);
   border-radius: var(--model-hub-source-action-radius);
+  font-size: var(--model-hub-source-action-size);
+  font-weight: 600;
+}
+/* The bar's `···` is not a square: the frame gives it the action row's radius and
+   a slightly wide, slightly short box so it reads as part of that row rather than
+   as an icon button dropped beside it. */
+.model-hub-source-more {
+  width: 33px;
+  height: 30px;
+  border-radius: var(--model-hub-source-action-radius);
 }
 .model-hub-source-table { border-radius: var(--model-hub-source-radius); }
 .model-hub-source-table-head,
@@ -846,7 +925,7 @@
   background: var(--model-hub-source-table-head-fill);
   color: var(--model-hub-source-label-ink);
   font-size: var(--model-hub-source-label-size);
-  line-height: 16px;
+  line-height: 15px;
 }
 .model-hub-source-table-row {
   min-height: var(--model-hub-source-table-row-height);
@@ -864,9 +943,9 @@
   color: var(--model-hub-source-summary-ink);
   font-size: var(--model-hub-source-tier-size);
 }
-.model-hub-source-model { font-size: var(--model-hub-source-model-size); }
+.model-hub-source-model { font-size: var(--model-hub-source-model-size); line-height: 16px; }
 .model-hub-source-manual-id { border-radius: var(--model-hub-source-manual-input-radius); }
-.model-hub-source-pill { font-size: var(--model-hub-source-pill-size); }
+.model-hub-source-pill { font-size: var(--model-hub-source-pill-size); line-height: 14px; }
 .model-hub-source-tier { font-size: var(--model-hub-source-tier-size); }
 .model-hub-source-tier-chip {
   background: var(--model-hub-source-chip-fill);
@@ -896,9 +975,10 @@
   color: var(--foreground);
 }
 .model-hub-source-footnote {
-  min-height: 17px;
+  min-height: 16px;
   color: var(--model-hub-source-footnote-ink);
   font-size: var(--model-hub-source-footnote-size);
+  line-height: 16px;
 }
 
 .model-hub-guard-overlay { background: var(--model-hub-scrim); }
@@ -1375,6 +1455,150 @@
   font-weight: 600;
 }
 
+/* 用量 tab.
+ *
+ * design.pen has no frame for this tab on the local surface, so the geometry is
+ * borrowed from the source table above rather than invented: the same 18px
+ * gutter, 36px head, 11px column label, and wash-05 head fill. Importing a
+ * second panel's spacing into the middle of this one would read as two
+ * surfaces stitched together.
+ *
+ * Every ink here resolves through a step the light blocks already re-anchor
+ * (ink-73 / ink-8c / muted-b3), so this block needs no light branch of its own.
+ * The one genuinely new unit is the day chart, and its two colors are a wash and
+ * an accent fill — both of which flip correctly on their own.
+ */
+.model-hub-usage {
+  --model-hub-usage-gap: 16px;
+  --model-hub-usage-bar-padding-y: 13px;
+  --model-hub-usage-bar-padding-x: 18px;
+  --model-hub-usage-padding-x: 18px;
+  --model-hub-usage-head-height: 36px;
+  --model-hub-usage-row-min-height: 46px;
+  --model-hub-usage-row-padding-y: 9px;
+  --model-hub-usage-columns: minmax(0, 1fr) 104px 84px 84px 116px;
+  --model-hub-usage-gutter: 16px;
+  --model-hub-usage-title-size: 13px;
+  --model-hub-usage-section-size: 12px;
+  --model-hub-usage-label-size: 11px;
+  --model-hub-usage-value-size: 20px;
+  --model-hub-usage-cell-size: 12px;
+  --model-hub-usage-note-size: 10.5px;
+  --model-hub-usage-model-indent: 14px;
+  --model-hub-usage-chart-height: 132px;
+  --model-hub-usage-chart-gap: 3px;
+  --model-hub-usage-column-radius: 2px;
+  --model-hub-usage-head-fill: var(--model-hub-wash-05);
+  --model-hub-usage-label-ink: var(--model-hub-ink-73);
+  --model-hub-usage-note-ink: var(--model-hub-muted-b3);
+  --model-hub-usage-model-ink: var(--model-hub-ink-8c);
+  --model-hub-usage-track-fill: var(--model-hub-wash-08);
+  --model-hub-usage-column-fill: color-mix(in srgb, var(--mint) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-usage-gap);
+}
+.model-hub-usage-bar {
+  padding: var(--model-hub-usage-bar-padding-y) var(--model-hub-usage-bar-padding-x);
+}
+.model-hub-usage-title { font-size: var(--model-hub-usage-title-size); }
+.model-hub-usage-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-failure {
+  padding: 11px var(--model-hub-usage-padding-x);
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-usage-pending { font-size: var(--model-hub-usage-title-size); }
+.model-hub-usage-empty {
+  padding: 26px var(--model-hub-usage-padding-x);
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-usage-stat {
+  padding: 13px var(--model-hub-usage-padding-x) 14px;
+  gap: 5px;
+}
+.model-hub-usage-stat-label {
+  color: var(--model-hub-usage-label-ink);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-usage-stat-value {
+  font-size: var(--model-hub-usage-value-size);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.model-hub-usage-stat-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-card-head {
+  padding: 11px var(--model-hub-usage-padding-x);
+}
+.model-hub-usage-section-title { font-size: var(--model-hub-usage-section-size); }
+/* Grid items stretch by default, which would leave a plain text cell drawing its
+ * glyphs against the top of the box while a flex cell beside it centres them. */
+.model-hub-usage-head {
+  min-height: var(--model-hub-usage-head-height);
+  padding: 0 var(--model-hub-usage-padding-x);
+  grid-template-columns: var(--model-hub-usage-columns);
+  gap: var(--model-hub-usage-gutter);
+  align-items: center;
+  background: var(--model-hub-usage-head-fill);
+  color: var(--model-hub-usage-label-ink);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-usage-row {
+  min-height: var(--model-hub-usage-row-min-height);
+  padding: var(--model-hub-usage-row-padding-y) var(--model-hub-usage-padding-x);
+  grid-template-columns: var(--model-hub-usage-columns);
+  gap: var(--model-hub-usage-gutter);
+  font-size: var(--model-hub-usage-cell-size);
+}
+.model-hub-usage-row--model {
+  padding-left: calc(var(--model-hub-usage-padding-x) + var(--model-hub-usage-model-indent));
+  color: var(--model-hub-usage-model-ink);
+}
+.model-hub-usage-source,
+.model-hub-usage-model,
+.model-hub-usage-cell { min-width: 0; }
+.model-hub-usage-cell { font-variant-numeric: tabular-nums; }
+.model-hub-usage-cell-label {
+  color: var(--model-hub-usage-label-ink);
+  font-size: var(--model-hub-usage-note-size);
+  font-variant-numeric: normal;
+}
+.model-hub-usage-gone {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-plot {
+  padding: 16px var(--model-hub-usage-padding-x) 12px;
+  gap: 9px;
+}
+.model-hub-usage-chart {
+  height: var(--model-hub-usage-chart-height);
+  gap: var(--model-hub-usage-chart-gap);
+}
+/* The track is drawn even where the column is not: a bar of zero height in an
+ * empty row cannot be told apart from a day the report never covered, and that
+ * distinction is the reason the series is plotted day by day at all. */
+.model-hub-usage-track {
+  min-width: 0;
+  height: 100%;
+  border-radius: var(--model-hub-usage-column-radius);
+  background: var(--model-hub-usage-track-fill);
+}
+.model-hub-usage-column {
+  border-radius: var(--model-hub-usage-column-radius);
+  background: var(--model-hub-usage-column-fill);
+}
+.model-hub-usage-axis {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-usage-peak { color: var(--model-hub-usage-label-ink); }
+
 @media (min-width: 1024px) {
   .model-hub-direct-grid {
     grid-template-columns: minmax(0, 1fr) var(--model-hub-direct-benefits-width);
@@ -1388,6 +1612,9 @@
   .model-hub-source-bar { align-items: stretch; }
   .model-hub-source-action { width: auto; flex: 1 1 0; }
   .model-hub-direct-card { min-height: 0; }
+  /* Stacked, each cell carries its own label, so the column gutter becomes a
+   * line gap and 16px of it would read as four separate rows. */
+  .model-hub-usage-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
 }
 
 @media (min-width: 1024px) {

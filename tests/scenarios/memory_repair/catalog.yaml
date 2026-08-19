@@ -62,9 +62,6 @@ scenarios:
     expected_outputs:
       - A completed-with-warnings response containing the frozen unhealthy projection
       - A follow-up public status read that remains available and reports degraded cascade health
-    ui_contract:
-      test: ui/src/components/settings/SettingsMemoryPage.test.tsx
-      case: renders an unhealthy Repair completion as warnings
     related_tests:
       - tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
@@ -86,9 +83,6 @@ scenarios:
       - Exactly one internal Repair invocation across both public Repair requests
       - A 409 memory_operation_in_progress response without invoking internal Clear
       - A completed joined response and available follow-up status
-    ui_contract:
-      test: ui/src/components/settings/SettingsMemoryPage.test.tsx
-      case: prevents a second Repair request while the first is pending
     related_tests:
       - tests/test_memory_repair.py::test_repair_is_retained_joined_and_holds_lease_after_caller_cancel
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
@@ -138,9 +132,6 @@ scenarios:
       - repair_available remains exactly false before and after the attempted mutation
       - A 409 memory_runtime_unsupported failure from the public Repair route
       - An available follow-up Memory status result
-    ui_contract:
-      test: ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
-      case: only exposes Repair index when the backend capability is explicitly available
     related_tests:
       - tests/test_ui_memory_routes.py::test_memory_settings_are_direct_loopback_only_and_write_only
       - tests/test_ui_memory_routes.py::test_memory_settings_projects_only_admitted_repair_capability

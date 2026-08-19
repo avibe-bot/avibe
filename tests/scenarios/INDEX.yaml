@@ -117,7 +117,12 @@ capabilities:
       - tests/test_model_hub_resolution.py
       - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
+      - tests/test_model_hub_l3.py
+      - tests/test_model_hub_usage.py
       - tests/test_opencode_server.py
+      - ui/src/components/settings/models/UsageTab.test.tsx
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+      - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active
@@ -158,7 +163,19 @@ capabilities:
       - tests/test_claude_agent_sessions.py
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py
-      - tests/test_cloud_management.py
+  - id: current_instance_permissions
+    name: Current-instance Permissions policy and authority
+    status: active
+    catalog: tests/scenarios/permissions/catalog.yaml
+    observations: tests/scenarios/permissions/observations.yaml
+    scenario_tests:
+      - tests/scenarios/permissions/test_permissions_scenarios.py
+    harness:
+      - tests/scenario_harness/permissions.py
+    unit_or_contract_tests:
+      - tests/test_permissions.py
+      - ui/src/features/permissions/PermissionsPage.test.tsx
+      - ui/src/components/workbench/ShowPageSharingSettings.test.tsx
   - id: message_delivery
     name: scheduled result delivery
     status: active

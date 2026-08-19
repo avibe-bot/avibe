@@ -163,12 +163,12 @@ describe('AppShell workbench sidebar', () => {
   });
 });
 
-describe('AppShell Organization navigation', () => {
+describe('AppShell Permissions navigation', () => {
   it.each([
-    ['personal', 0],
-    [null, 0],
+    ['personal', 2],
+    [null, 2],
     ['organization', 2],
-  ] as const)('shows Organization only for %s instances', async (instanceKind, expectedCount) => {
+  ] as const)('shows current-instance Permissions for %s instances', async (instanceKind, expectedCount) => {
     instanceAuth.instanceKind = instanceKind;
 
     render(
@@ -182,8 +182,16 @@ describe('AppShell Organization navigation', () => {
     );
 
     expect(await screen.findByTestId('dashboard')).toBeTruthy();
-    const organizationEntries = screen.queryAllByText('nav.organization');
-    expect(organizationEntries).toHaveLength(expectedCount);
+    const permissionEntries = screen.queryAllByText('nav.permissions');
+    expect(permissionEntries).toHaveLength(expectedCount);
+    const advancedEntries = screen.queryAllByText('nav.advancedSettings');
+    expect(advancedEntries).toHaveLength(expectedCount);
+    permissionEntries.forEach((permission, index) => {
+      expect(
+        permission.compareDocumentPosition(advancedEntries[index]!)
+          & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
   });
 });
 

@@ -6,6 +6,7 @@ import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import { onPageReactivated } from '../lib/pageActivity';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
@@ -3024,14 +3025,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       wakeWorkbenchEventsRef.current();
       syncSessionDraftsRef.current();
     };
-    document.addEventListener('visibilitychange', wakeIfVisible);
+    // Regaining the network is its own gap, independent of the page coming back.
+    const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeIfVisible);
-    window.addEventListener('focus', wakeIfVisible);
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
-      document.removeEventListener('visibilitychange', wakeIfVisible);
+      stopReactivation();
       window.removeEventListener('online', wakeIfVisible);
-      window.removeEventListener('focus', wakeIfVisible);
       stopWorkbenchEventsRef.current();
     };
   }, []);

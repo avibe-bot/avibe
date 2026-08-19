@@ -13,9 +13,12 @@ import pytest
 
 from core.memory import artifact as memory_artifact
 from core.memory.everos import (
+    PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS,
     _AGENTIC_ROUND_HEADER,
     _AGENTIC_TIMEOUT_HEADER,
     _ATTACHMENT_ADD_REJECTION_CODES_VALIDATED_EVEROS_VERSION,
+    _PREFLIGHT_TIMEOUT_SECONDS,
+    _chat_probe_response_issue,
     AddAck,
     AddRejected,
     AgenticRecallTelemetry,
@@ -78,6 +81,17 @@ class _FailingResponseStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         raise self._failure_type("response body lost", request=self._request)
         yield b""  # pragma: no cover - keeps this an async generator
+
+
+def _thinking_chat_completion(*, role: str = "assistant", finish_reason: str | None = "length") -> dict:
+    message = {"role": role}
+    choice: dict = {"finish_reason": finish_reason, "index": 0, "message": message}
+    if finish_reason is None:
+        del choice["finish_reason"]
+    return {
+        "choices": [choice],
+        "usage": {"completion_tokens": 0, "prompt_tokens": 1, "total_tokens": 1},
+    }
 
 
 def _health_envelope(recorder) -> dict:
@@ -1489,6 +1503,136 @@ def test_processing_preflight_accepts_truncated_chat_completion_from_resolved_sl
     request_payload = json.loads(requests[0].content)
     assert request_payload["model"] == "client-alias"
     assert request_payload["max_tokens"] == 8
+
+
+def test_preflight_timeout_budget_stays_above_health_probe_budget() -> None:
+    assert _PREFLIGHT_TIMEOUT_SECONDS == 30.0
+    assert PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS == 8.0
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (_thinking_chat_completion(), None),
+        ({"choices": [{"message": {"content": "OK"}}]}, None),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "OK"},
+                    }
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": None},
+                    }
+                ]
+            },
+            None,
+        ),
+        (
+            _thinking_chat_completion(finish_reason=None),
+            "provider_response_missing_finish_reason",
+        ),
+        (
+            _thinking_chat_completion(role="user"),
+            "provider_response_invalid_role",
+        ),
+        (
+            {"choices": [{"finish_reason": "length", "message": {}}]},
+            "provider_response_invalid_role",
+        ),
+        ({"choices": [{}]}, "provider_response_missing_message"),
+    ],
+)
+def test_chat_probe_validator_accepts_thinking_model_and_openai_shapes(
+    payload: dict, expected: str | None
+) -> None:
+    assert _chat_probe_response_issue(payload) == expected
+
+
+def test_processing_preflight_accepts_thinking_model_chat_completions() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(200, json=_thinking_chat_completion())
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests] == [
+        "/v1/chat/completions",
+        "/v1/embeddings",
+        "/v1/chat/completions",
+    ]
+
+
+def test_processing_health_accepts_thinking_model_chat_completions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+        return httpx.Response(200, json=_thinking_chat_completion())
+
+    async def run() -> bool:
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat-model",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embedding-model",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+        ).processing_healthy()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        assert asyncio.run(run()) is True
 
 
 def test_processing_preflight_reports_the_rejected_2xx_shape() -> None:
