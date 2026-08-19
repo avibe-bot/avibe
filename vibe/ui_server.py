@@ -11027,6 +11027,11 @@ async def sessions_messages_create(session_id: str):
     in Step 6 — the session-scoped stream replaced it.
     """
 
+    from core.memory.admission import (
+        MEMORY_CLI_ADMITTED_METADATA,
+        MEMORY_ORDINARY_TEXT_METADATA,
+        MEMORY_USER_ID_METADATA,
+    )
     from core.services import sessions as workbench_sessions_service
     from core.web_push_notifications import (
         WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
@@ -11127,9 +11132,9 @@ async def sessions_messages_create(session_id: str):
                 {
                     **(payload.get("metadata") or {}),
                     "_web_push_user_key": web_push_user_key,
-                    "_memory_user_id": memory_user_id,
-                    "_memory_cli_admitted": memory_cli_admitted,
-                    "_memory_ordinary_text": memory_ordinary_text,
+                    MEMORY_USER_ID_METADATA: memory_user_id,
+                    MEMORY_CLI_ADMITTED_METADATA: memory_cli_admitted,
+                    MEMORY_ORDINARY_TEXT_METADATA: memory_ordinary_text,
                 },
                 getattr(g, "authorization_context", None),
             )
