@@ -617,6 +617,7 @@ class OpenCodePollLoop:
                     emitted_assistant_messages.add(message_id)
 
             if messages:
+                remaining = deadline - time.monotonic()
                 last_message = _settlement_assistant_message(
                     messages,
                     baseline_message_ids,
@@ -932,6 +933,7 @@ class OpenCodePollLoop:
                             await self._agent.controller.emit_agent_message(context, "tool_call", tool_summary)
 
                 if messages:
+                    remaining = deadline - time.monotonic()
                     last_message = _settlement_assistant_message(
                         messages,
                         baseline_message_ids,
