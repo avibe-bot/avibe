@@ -7997,6 +7997,27 @@ class SessionTurnManager:
                     session_id
                 ),
             }
+        memory_dead = turn is None or turn.task.done()
+        if owner is not None and memory_dead and not agent_run_id:
+            terminal = self._terminalize_durable_turn(
+                str(owner["id"]),
+                "canceled",
+                settled_by=SETTLED_BY_STOPPED,
+                evidence_kind="runtime_gone",
+                evidence={"reason": "stop_with_no_live_runtime"},
+            )
+            if terminal.get("changed"):
+                logger.info(
+                    "Released durable Turn=%s for Session=%s after Stop found no live runtime",
+                    owner["id"],
+                    session_id,
+                )
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "stale_released",
+                    "reason": "runtime_gone",
+                }
         result = await self.deliver(
             DeliveryRequest(
                 session_id=session_id,

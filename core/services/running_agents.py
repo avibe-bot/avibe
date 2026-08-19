@@ -733,11 +733,12 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
 
 
 async def _settle_workbench_turn(controller: "Controller", session_id: Optional[str]) -> Optional[dict[str, Any]]:
-    """If a Workbench/chat turn is in flight for ``session_id``, stop it through
+    """If a Workbench/chat turn still owns ``session_id``, stop it through
     ``SessionTurnManager.cancel`` so the turn FSM settles: it interrupts the
     backend, emits the terminal result, AND cancels the ``dispatch_turn`` task the
-    Chat page is awaiting. Skipping this (and only doing the backend teardown
-    below) would leave the chat session stuck "running" with sends queued.
+    Chat page is awaiting. Ownership is either the in-memory task or a leftover
+    durable Turn after that task is gone. Skipping this (and only doing the
+    backend teardown below) would leave the chat session stuck "running".
 
     Returns a success/failure result when the Workbench manager owned the turn;
     returns ``None`` for IM/agent-run turns and when there is no turn owner.
@@ -745,10 +746,13 @@ async def _settle_workbench_turn(controller: "Controller", session_id: Optional[
     if not session_id:
         return None
     manager = getattr(controller, "session_turns", None)
-    if manager is None or not getattr(manager, "is_in_flight", None):
+    if manager is None or not getattr(manager, "cancel", None):
         return None
     try:
-        if not manager.is_in_flight(session_id):
+        in_flight = getattr(manager, "is_in_flight", None)
+        if not (callable(in_flight) and in_flight(session_id)) and not _session_has_durable_owner(
+            manager, session_id
+        ):
             return None
         result = await manager.cancel(session_id)
         if isinstance(result, dict) and result.get("ok"):
@@ -1061,6 +1065,76 @@ def _inflight_turn_matches_row(
     return backend_match or anchor_match
 
 
+def _load_durable_owner(manager: Any, session_id: str) -> Optional[dict[str, Any]]:
+    """Return the SQLite Turn owner for ``session_id``, if one is still active."""
+
+    reader = getattr(manager, "_durable_schema_available", None)
+    if not callable(reader) or not reader():
+        return None
+    engine = getattr(manager, "_sqlite_engine", None)
+    if not callable(engine):
+        return None
+    try:
+        from sqlalchemy import select
+
+        from storage import message_deliveries as delivery_store
+        from storage.models import agent_sessions
+
+        with engine().connect() as conn:
+            owner = delivery_store.active_turn(conn, session_id)
+            if owner is None:
+                return None
+            session_row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == session_id)
+            ).mappings().first()
+    except Exception:  # noqa: BLE001
+        logger.debug("end: durable-owner check failed for %s", session_id, exc_info=True)
+        return None
+    payload = dict(owner)
+    payload["session_anchor"] = str((session_row or {}).get("session_anchor") or "")
+    return payload
+
+
+def _session_has_durable_owner(manager: Any, session_id: str) -> bool:
+    """True when SQLite still owns an active Turn for ``session_id``.
+
+    A Workbench Stop can leave this row after the in-memory poll/task is gone.
+    End/Stop must still see it as live, or they take the idle teardown and
+    leave the chat stuck on ``running``.
+    """
+
+    return _load_durable_owner(manager, session_id) is not None
+
+
+def _durable_owner_matches_row(
+    manager: Any,
+    session_id: str,
+    *,
+    backend: Optional[str],
+    base_session_id: Optional[str],
+) -> bool:
+    """True when the durable owner is THIS End/Stop row's runtime.
+
+    Same last-only identity as ``_inflight_turn_matches_row``: a backend or
+    session-anchor conflict is a different turn under the same chat.
+    """
+
+    owner = _load_durable_owner(manager, session_id)
+    if owner is None:
+        return False
+    turn_backend = str(owner.get("backend") or "").strip()
+    turn_anchor = str(owner.get("session_anchor") or "").strip()
+    row_backend = str(backend or "").strip()
+    row_base = str(base_session_id or "").strip()
+    backend_conflict = bool(turn_backend and row_backend and turn_backend != row_backend)
+    anchor_conflict = bool(turn_anchor and row_base and turn_anchor != row_base)
+    if backend_conflict or anchor_conflict:
+        return False
+    backend_match = bool(turn_backend and turn_backend == row_backend)
+    anchor_match = bool(turn_anchor and turn_anchor == row_base)
+    return backend_match or anchor_match
+
+
 def _resolve_live_state(
     controller: "Controller",
     *,
@@ -1091,6 +1165,11 @@ def _resolve_live_state(
     # fall through to the backend-specific live checks below.
     if session_id and _inflight_turn_matches_row(
         controller, session_id=session_id, backend=backend, base_session_id=base_session_id
+    ):
+        return "active"
+    manager = getattr(controller, "session_turns", None)
+    if session_id and manager is not None and _durable_owner_matches_row(
+        manager, session_id, backend=backend, base_session_id=base_session_id
     ):
         return "active"
 

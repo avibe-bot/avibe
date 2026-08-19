@@ -880,6 +880,64 @@ def test_end_opencode_cancels_active_task():
     assert task.cancelled
 
 
+def test_end_opencode_settles_durable_owner_after_poll_is_gone(monkeypatch):
+    """A durable Workbench owner with no live poll is still an active turn.
+
+    Live hang: OpenCode abort succeeded, ``_active_requests`` was empty, End
+    took the idle teardown and left ``session_turns`` active / the chat
+    spinning. Stop/End must cancel through the turn manager instead.
+    """
+
+    class _Cancel:
+        def __init__(self):
+            self.called = False
+
+        async def __call__(self, session_id):
+            self.called = True
+            assert session_id == "ses-zombie"
+            return {"ok": True, "status": "stale_released", "reason": "runtime_gone"}
+
+    cancel = _Cancel()
+    manager = types.SimpleNamespace(
+        is_in_flight=lambda sid: False,
+        cancel=cancel,
+    )
+    oc = types.SimpleNamespace(
+        _active_requests={},
+        _session_manager=types.SimpleNamespace(get_request_session=lambda b: None),
+    )
+    controller = _make_controller(opencode=oc)
+    controller.session_turns = manager
+    monkeypatch.setattr(
+        running_agents,
+        "_load_durable_owner",
+        lambda _manager, session_id: (
+            {
+                "id": "trn_zombie",
+                "state": "active",
+                "backend": "opencode",
+                "session_anchor": "ses-zombie",
+            }
+            if session_id == "ses-zombie"
+            else None
+        ),
+    )
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="opencode",
+            state="idle",
+            session_id="ses-zombie",
+            base_session_id="ses-zombie",
+        )
+    )
+
+    assert res["ok"] is True
+    assert cancel.called
+    assert res.get("turn_settled") is True
+
+
 def test_end_active_workbench_turn_settles_via_manager(monkeypatch):
     # An active turn owned by the Workbench FSM must be stopped through
     # SessionTurnManager.cancel. The real Claude stop path pops the SDK client
@@ -1324,6 +1382,32 @@ def test_inflight_no_match_when_target_missing_or_task_done():
     ) is False
 
 
+def test_durable_owner_match_follows_last_only_identity(monkeypatch):
+    manager = object()
+    monkeypatch.setattr(
+        running_agents,
+        "_load_durable_owner",
+        lambda _manager, session_id: (
+            {
+                "id": "trn_owner",
+                "backend": "opencode",
+                "session_anchor": "base-1",
+            }
+            if session_id == "s1"
+            else None
+        ),
+    )
+    assert running_agents._durable_owner_matches_row(
+        manager, "s1", backend="opencode", base_session_id="base-1"
+    ) is True
+    assert running_agents._durable_owner_matches_row(
+        manager, "s1", backend="codex", base_session_id="codex-base"
+    ) is False
+    assert running_agents._durable_owner_matches_row(
+        manager, "s2", backend="opencode", base_session_id="base-1"
+    ) is False
+
+
 def test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend():
     # Stale idle Codex row, but the SAME chat has since started a new Claude turn
     # (in flight under the same session_id). Ending the codex row must NOT cancel
@@ -1369,6 +1453,63 @@ def test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend():
     assert res["ok"] is True
     assert cancel_called["v"] is False  # the unrelated in-flight Claude turn was NOT canceled
     assert cleared.get("clr") == "codex-base" and cleared.get("treg") == "codex-base"  # idle codex teardown ran
+
+
+def test_end_does_not_promote_unrelated_durable_owner_of_other_backend(monkeypatch):
+    """A leftover durable owner still follows the last-only End identity.
+
+    Same chat can keep an idle Codex row after a later Claude turn became the
+    durable owner. Ending the Codex row must not cancel that owner.
+    """
+
+    cancel_called = {"v": False}
+
+    async def _cancel(_sid):
+        cancel_called["v"] = True
+        return {"ok": True, "status": "stale_released", "reason": "runtime_gone"}
+
+    manager = types.SimpleNamespace(
+        is_in_flight=lambda sid: False,
+        cancel=_cancel,
+    )
+    cleared = {}
+    transport = types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = _FakeTurnRegistry({}, pending=set())
+    treg.clear_session = lambda b: cleared.__setitem__("treg", b)
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = manager
+    monkeypatch.setattr(
+        running_agents,
+        "_load_durable_owner",
+        lambda _manager, session_id: (
+            {
+                "id": "trn_claude",
+                "state": "active",
+                "backend": "claude",
+                "session_anchor": "claude-base",
+            }
+            if session_id == "chat-1"
+            else None
+        ),
+    )
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="chat-1", base_session_id="codex-base"
+        )
+    )
+    assert res["ok"] is True
+    assert cancel_called["v"] is False
+    assert cleared.get("clr") == "codex-base" and cleared.get("treg") == "codex-base"
 
 
 def test_end_rechecks_live_state_idle_to_active(monkeypatch):
