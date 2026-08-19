@@ -160,6 +160,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/sessions/session-1/messages"),
         ("POST", "/api/sessions/session-1/attachments"),
         ("POST", "/api/sessions/session-1/cancel"),
+        ("GET", "/api/show-pages/session-1"),
         ("POST", "/api/show-pages/session-1/ensure"),
         ("POST", "/api/show-pages/session-1/availability"),
         ("POST", "/api/show-pages/session-1/access-settings/read"),

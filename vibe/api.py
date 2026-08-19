@@ -1676,6 +1676,29 @@ def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
+def get_show_page(session_id: str, *, user_context: Any = None) -> dict:
+    """Read one session's Show Page without creating it.
+
+    The read-only counterpart of ``ensure_show_page``: same payload and the same
+    access enforcement for a page that exists, and ``show_page_not_found`` where
+    ensure would have created one. A caller that only needs to DISPLAY the page
+    uses this, so ``ensure_show_page``'s one-shot ``existed`` edge stays with the
+    single caller that owns the "visualize this session" prompt. The response
+    deliberately carries no ``existed`` key: there is no creation fact to report,
+    and none to accidentally consume.
+    """
+    from core.show_pages import ShowPageStore, show_page_payload
+
+    config = V2Config.load()
+    store = ShowPageStore()
+    try:
+        page = store.get_for_use(session_id, user_context=user_context)
+        payload = show_page_payload(page, config=config)
+    finally:
+        store.close()
+    return {"ok": True, **_apply_session_meta([payload])[0]}
+
+
 def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
     """Return the applied authenticated audience and sharing authority."""
 

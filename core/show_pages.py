@@ -803,6 +803,64 @@ class ShowPageStore:
             owner_email=user_context.email,
         )
 
+    @classmethod
+    def _existing_page_for_use(
+        cls,
+        connection,
+        session_id: str,
+        user_context: Any,
+        ownership: dict[str, Any],
+    ) -> ShowPage | None:
+        """Reconcile and authorize an ALREADY-EXISTING page; None when there is none.
+
+        The single owner of "may this caller use this existing page". ``ensure`` /
+        ``ensure_active`` take this branch before they consider creating anything,
+        and ``get_for_use`` is only this branch — so a read can never drift from
+        what the create path would have enforced for the same page.
+        """
+        existing = (
+            connection.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+            .mappings()
+            .first()
+        )
+        if existing is None:
+            return None
+        cls._reconcile_resource_policy(connection, session_id, user_context, ownership)
+        cls._require_project_edit_access(connection, session_id, user_context)
+        cls._require_resource_access(connection, session_id, user_context)
+        return _page_from_row(existing)
+
+    def get_for_use(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Read a page the caller may use, WITHOUT creating one.
+
+        The read-only half of ``ensure_active``: identical reconcile-and-authorize
+        enforcement for a page that exists, and ``show_page_not_found`` where
+        ``ensure_active`` would have created one. Reading no longer requires taking
+        the creation path, which is what keeps the one-shot ``created`` edge — and
+        the "visualize this session" prompt it triggers — owned by the single
+        caller that honors it.
+        """
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
+        with config_file_lock():
+            with self.engine.begin() as conn:
+                page = self._existing_page_for_use(conn, session_id, context, ownership)
+                if page is None:
+                    # Absence is only reported to a caller allowed to work on the
+                    # project, exactly as ``ensure`` checks before it creates. The
+                    # route policy screens the Instance role alone, so skipping this
+                    # would let an Editor without project access tell a session that
+                    # HAS a page (forbidden) from one that does not (not found) —
+                    # turning a read into a page-existence oracle over arbitrary
+                    # session ids.
+                    self._require_project_edit_access(conn, session_id, context)
+                    raise ShowPageError(
+                        "This session has no Show Page.",
+                        code="show_page_not_found",
+                    )
+                return page
+
     def reconcile_resource_policy(
         self,
         session_id: str,
@@ -849,16 +907,9 @@ class ShowPageStore:
         )
         with config_file_lock():
             with self.engine.begin() as conn:
-                existing = (
-                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                    .mappings()
-                    .first()
-                )
+                existing = self._existing_page_for_use(conn, session_id, context, ownership)
                 if existing is not None:
-                    self._reconcile_resource_policy(conn, session_id, context, ownership)
-                    self._require_project_edit_access(conn, session_id, context)
-                    self._require_resource_access(conn, session_id, context)
-                    return _page_from_row(existing)
+                    return existing
                 self._require_project_edit_access(conn, session_id, context)
                 self._require_create_access(context)
                 conn.execute(
@@ -891,16 +942,9 @@ class ShowPageStore:
         now = _utc_now_iso()
         with config_file_lock():
             with self.engine.begin() as conn:
-                existing = (
-                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                    .mappings()
-                    .first()
-                )
+                existing = self._existing_page_for_use(conn, session_id, context, ownership)
                 if existing is not None:
-                    self._reconcile_resource_policy(conn, session_id, context, ownership)
-                    self._require_project_edit_access(conn, session_id, context)
-                    self._require_resource_access(conn, session_id, context)
-                    return _page_from_row(existing), False
+                    return existing, False
                 self._require_project_edit_access(conn, session_id, context)
                 self._require_create_access(context)
                 status = conn.execute(

@@ -7,6 +7,7 @@ import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated } from '../lib/pageActivity';
+import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
@@ -527,7 +528,15 @@ export type ApiContextType = {
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
-  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
+  /** Read the session's Show Page without creating it; rejects with
+   *  `show_page_not_found` — silently, as an expected answer — when there is none.
+   *  Everything that only DISPLAYS the page uses this — `ensureShowPage` is reserved
+   *  for the one caller that owns the first-creation prompt. */
+  getShowPage: (sessionId: string) => Promise<ShowPagePayload>;
+  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. Callers
+   *  MUST honor `existed === false` by sending the visualize prompt: that edge is
+   *  reported once, so a caller that ignores it silently consumes it. To only read the
+   *  page, use `getShowPage`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
   /** Upload an image as the page's workspace-root favicon (multipart); resolves to the
    *  refreshed page payload carrying the fresh `icon_version` (§7.1j). */
@@ -2621,10 +2630,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const handleApiError = async (res: Response, path: string) => {
+  const handleApiError = async (
+    res: Response,
+    path: string,
+    { expectedCodes }: { expectedCodes?: readonly string[] } = {},
+  ) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
     let errorCode: string | null = null;
-    
+
     try {
       const data = await res.json();
       const parsed = selectApiErrorFields(data, errorMessage);
@@ -2641,15 +2654,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       errorMessage = `${path}: ${res.statusText || 'Unknown error'} (${res.status})`;
     }
 
-    // Log error details to console
-    console.error(`[API Error] ${path}`, {
-      status: res.status,
-      statusText: res.statusText,
-      error: errorMessage,
-    });
+    // A code the caller declared EXPECTED is an answer, not a failure: it still
+    // rejects, so no caller can mistake an error body for data, but it is neither
+    // announced to the user nor logged as an error. Declared per call site, applied
+    // here, so "expected" cannot mean two different things in two helpers.
+    if (!(errorCode !== null && expectedCodes?.includes(errorCode))) {
+      // Log error details to console
+      console.error(`[API Error] ${path}`, {
+        status: res.status,
+        statusText: res.statusText,
+        error: errorMessage,
+      });
 
-    // Show toast to user
-    showToast(errorMessage, 'error');
+      // Show toast to user
+      showToast(errorMessage, 'error');
+    }
 
     // Archive is TERMINAL, so this particular refusal is not a failure to retry
     // but a state change the client missed (a backgrounded/offline tab can drop
@@ -2672,13 +2691,27 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
+  const getJson = async (
+    path: string,
+    { handleError = true, expectedCodes }: { handleError?: boolean; expectedCodes?: readonly string[] } = {},
+  ) => {
     const res = await apiFetch(path);
     if (!res.ok && handleError) {
-      await handleApiError(res, path);
+      await handleApiError(res, path, { expectedCodes });
     }
     return res.json();
   };
+
+  // Absence is data for a GET of ONE session's Show Page, never an incident: the share
+  // panel opens on sessions that have no page yet and renders that as an empty link.
+  // The property is owned here instead of declared per call site because the panel fires
+  // several of these reads at once — one of them forgetting is a toast the user sees for
+  // the normal case, and the reader cannot tell which of the parallel reads produced it.
+  // Mutations stay off this path deliberately: pinning or re-skinning a page that does
+  // not exist IS a fault worth announcing. So is the POST-shaped access-settings read,
+  // which only mounts once an access read has already proven the page exists, so an
+  // absent page there means it vanished mid-session rather than never existed.
+  const readShowPageJson = (path: string) => getJson(path, { expectedCodes: ['show_page_not_found'] });
 
   const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
     // Best-effort callers (handleError: false) bypass the shared read cache so a
@@ -3280,7 +3313,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removeUser: (userId, platform) =>
       deleteJson(platform ? `/api/users/${encodeURIComponent(userId)}?platform=${encodeURIComponent(platform)}` : `/api/users/${encodeURIComponent(userId)}`),
     getShowPages: () => getJson('/api/show-pages'),
-    getShowPageAccess: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
+    getShowPageAccess: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
     probeShowPageAccess: async (sessionId) => {
       try {
         const response = await apiFetch(`/api/show-pages/${encodeURIComponent(sessionId)}/access`);
@@ -3319,6 +3352,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
       { offline },
     ),
+    getShowPage: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}`),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes
