@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Gate: every scenario-catalog row evidenced by a UI case resolves to exactly one
- * case vitest collects, in the file the row cites.
+ * Gate: every UI citation a scenario catalog makes names exactly one case vitest
+ * collects, in the file the citation points at.
  *
  * This runs from `npm test`, which is the UI suite's own CI step, because that is
  * where the collector lives. The Python catalog checker owns everything it can
@@ -53,7 +53,7 @@ const main = () => {
   });
   const rows = catalogs.flatMap((catalog) => catalog.rows);
   if (rows.length === 0) {
-    console.log('scenario catalogs: no rows are evidenced by a UI case');
+    console.log('scenario catalogs: no row cites a UI case');
     return;
   }
 
@@ -63,13 +63,16 @@ const main = () => {
   const collected = collectCases({ files });
   const problems = catalogs.flatMap((catalog) => resolveUiEvidence(catalog.rows, collected, catalog.ids));
   if (problems.length > 0) {
-    console.error(`\nUI-evidenced scenario rows that do not resolve to a collected vitest case:\n`);
+    console.error(`\nScenario-catalog UI citations that do not name a collected vitest case:\n`);
     for (const problem of problems) console.error(`  - ${problem}`);
     console.error('');
     process.exitCode = 1;
     return;
   }
-  console.log(`scenario catalogs: ${rows.length} UI-evidenced rows resolve to a collected vitest case`);
+  console.log(
+    `scenario catalogs: ${rows.length} UI citations across `
+      + `${new Set(rows.map((row) => row.id)).size} rows each name one collected vitest case`,
+  );
 };
 
 main();

@@ -1241,7 +1241,7 @@ have in common — a rule per catalog would be a policy each new catalog could c
 | --- | --- | --- |
 | Catalog ID | `path::MH-USAGE-024` | the case's own name |
 | Readable full name | `path::taskCommandPreview quotes an argv part …` | the full name with `' > '` flattened to `' '` |
-| File only | `path` | the file being collected at all |
+| File only | `path` | the file being collected at all — *deleted in round 5, below* |
 
 Two shapes that resolve to a running case and still prove nothing are rejected explicitly: a
 row citing a **sibling row's ID** (checked against the whole catalog's ID set, including
@@ -1282,3 +1282,62 @@ early and shifts the ones before it), and — where the headers can leave the ac
 tree — labels every figure with the header at its own position. Four mutations were run
 against it and all four fail: dropping `role="table"`, removing the model row's placeholder
 cell, removing the stacked labels, and reordering `SOURCE_COLUMNS`.
+
+### Stage 2, round 5 (head `28baeb512`) — class A, fifth appearance
+
+One P2 finding, and it is class A again: **a row can read `covered` while nothing executable
+is tied to *that row*.** Heads 1, 3, 4, 5. Each round's fix was correct about the level it
+was shown and defined the property by what the existing rows happened to say — which is what
+produced the next level.
+
+| Head | What the gate accepted | The question it was actually answering |
+| --- | --- | --- |
+| 1 | a commented-out declaration | does the cited case run |
+| 3 | a regex literal read as division | the same, one layer deeper |
+| 4 | rows selected through `status_legend` | which rows get asked |
+| 5 | a file-only citation | what counts as an answer |
+
+Round 4 accepted the file-only shape **because three legacy rows used it**. The reviewer
+showed why that cannot hold: `MEMORY-LIST-006` and `MEMORY-LIST-007` both cited
+`MemorySearchPanel.test.tsx` and nothing else, so deleting either row's case leaves the other
+row keeping the file collected and *both* rows green. A file runs for reasons that have
+nothing to do with the citing row.
+
+**Terminal rule, with no free parameter left for an adversary to probe:** a citation must
+name a case, and that name must resolve to **exactly one** case the collector observes in the
+cited file — for **every** citation a row makes, not for one key. The shape is deleted rather
+than weakened; there is no ID heuristic bolted onto a bare file.
+
+**The member the reviewer had not reached, which is where the rot was.** `memory_repair`
+states its UI half as `ui_contract: {test, case, inputs}`, so reading `row.test` alone left
+all five of its fully-written citations unasked — the round-4 legend hole again, in a
+different key. Four of the five were dead. `git log -S` traces three to `d6ea9ee0f`
+(#1401, merged 2026-08-14), which deleted 623 lines from `SettingsMemoryPage.test.tsx` and
+368 from `MemoryStatusPanel.test.tsx`; nothing read `ui_contract`, so the false claims sat
+there for five days. Those three `ui_contract` blocks are deleted — `status`,
+`expected_outputs`, and `related_tests` untouched, since only the case-level claim was
+provably false and asserting anything more about another capability's semantics is not mine
+to assert.
+
+`related_tests` and `canonical_tests` stay unread, and that is **the same rule rather than an
+exception to it**: they name a file and no case, so they cannot evidence a row — and they do
+not claim to. "Related" is a pointer.
+
+Two mechanics follow from measurement rather than from taste:
+
+- **Containment, not prefix.** `[MEMORY-LIST-004][MEMORY-LIST-006] browses …` is one case
+  answering two scenarios, each citing it by its own ID, so an ID is not always first. The
+  looseness is bounded by the pre-existing uniqueness count — a name reaching two cases fails
+  for the same reason as one reaching none.
+- **Parameterized cases without emulating printf.** `vitest list` *does* expand `it.each`, so
+  a citation's terms are the template's literal head plus each `inputs` entry, all contained
+  in one collected name. The literal tail is dropped rather than parsed because the count is
+  what decides: for `accepts the declared failure %s with result %s` with
+  `[memory_repair_failed, timed_out]`, one collected case carries all three terms and the
+  other seven carry two.
+
+The three bare-file rows were fixable as citations alone — their cases already carry their
+IDs, which §4 of the scenario-testing standard has required all along, so a bare-file row was
+the standard not being followed rather than a second legitimate convention. Zero test renames.
+Coverage went 20 rows / 1 legend-selected catalog → **22 citations across 22 rows**, and the
+standard now states the property so the next catalog writes citations that pass.

@@ -87,6 +87,7 @@ describe('UI evidence resolution', () => {
       { name: 'suite > MH-ROW-C: runs', file: `/checkout/${FIXTURE_FILE}` },
       { name: 'suite > MH-ROW-C: runs again', file: `/checkout/${FIXTURE_FILE}` },
       { name: 'TaskDetail > command task > states the timeout', file: `/checkout/${FIXTURE_FILE}` },
+      { name: 'suite > [MH-ROW-X][MH-ROW-F] one case answering two rows', file: `/checkout/${FIXTURE_FILE}` },
     ];
     const row = (id, extra = {}) => ({ id, cited: id, file: FIXTURE_FILE, ...extra });
 
@@ -103,29 +104,73 @@ describe('UI evidence resolution', () => {
     // The other convention in the checkout: the case's readable full name, which
     // the catalogs write with vitest's separator flattened to a space.
     expect(resolveUiEvidence([row('SCT-018', { cited: 'TaskDetail command task states the timeout' })], collected)).toEqual([]);
-    // A row that names a file and no case in it claims only that the file runs.
-    expect(resolveUiEvidence([row('MH-ROW-E', { cited: null })], collected)).toEqual([]);
-    expect(resolveUiEvidence([row('MH-ROW-E', { cited: null, file: 'absent.test.tsx' })], collected)).toHaveLength(1);
+    // An ID the case name carries without leading with it, which is why the rule
+    // is containment: one case can answer two scenarios, and each of them cites
+    // it by its own ID.
+    expect(resolveUiEvidence([row('MH-ROW-F', { cited: '[MH-ROW-F]' })], collected)).toEqual([]);
+    // A citation naming a file and no case in it is evidence for no row in
+    // particular — whatever else cites the file keeps it collected, so the row
+    // would read `covered` with nothing tied to itself. Reported, not resolved.
+    expect(resolveUiEvidence([row('MH-ROW-E', { cited: null })], collected)).toHaveLength(1);
   });
 
-  it('asks about every row that cites a UI file, whatever its legend looks like', () => {
-    // The legend shape is the hole this closes: `status_legend` is a description
-    // string in every catalog but one, so selecting rows by `test_required` asked
-    // about one catalog and passed the rest without saying so. A citation is the
-    // row's own claim and reads the same in both shapes.
+  it('resolves a parameterized case through the inputs the citation names', () => {
+    // A case named at run time has no name to cite, so the catalog writes the
+    // template and its substitutions in separate keys. Both are terms of one
+    // citation, and the count is still what decides.
+    const collected = [
+      { name: 'parse > accepts the declared failure memory_repair_failed with result failed', file: '/checkout/parse.test.ts' },
+      { name: 'parse > accepts the declared failure memory_repair_failed with result timed_out', file: '/checkout/parse.test.ts' },
+    ];
+    const cited = (inputs) => [{
+      id: 'MEMORY-REPAIR-004',
+      file: 'parse.test.ts',
+      cited: 'accepts the declared failure %s with result %s',
+      inputs,
+    }];
+
+    expect(resolveUiEvidence(cited(['memory_repair_failed', 'timed_out']), collected)).toEqual([]);
+    // The template alone reaches every row of the table, which identifies none of
+    // them — the same failure as reaching no case at all.
+    expect(resolveUiEvidence(cited([]), collected)).toHaveLength(1);
+  });
+
+  it('asks about every UI citation a row makes, whatever key it sits in and whatever its legend looks like', () => {
+    // Two holes of one shape, each found a round apart. The legend: `status_legend`
+    // is a description string in every catalog but one, so selecting rows by
+    // `test_required` asked about that catalog and passed the rest without saying
+    // so. The key: reading `test` alone left every `ui_contract` unasked, and four
+    // of the five in the checkout named a case that no longer existed. A citation
+    // is the row's own claim, so the answer to both is to read them all.
     const scenarios = [
       { id: 'MH-UI', status: 'covered', test: 'ui/src/a.test.tsx::MH-UI' },
       { id: 'MH-SCRIPT', status: 'covered', test: 'ui/scripts/a.test.mjs::MH-SCRIPT' },
       { id: 'MH-FILE', status: 'covered', test: 'ui/src/b.test.tsx' },
       { id: 'MH-PY', status: 'covered', test: 'tests/test_a.py::test_a' },
+      {
+        id: 'MH-CONTRACT',
+        status: 'covered',
+        test: 'tests/test_b.py::test_b',
+        ui_contract: { test: 'ui/src/c.test.tsx', case: 'holds the frozen contract' },
+      },
+      // A pointer, not a claim: it names a file and no case, so it evidences no
+      // row and does not say it does. Unread for the same reason a file-only
+      // citation is rejected, rather than as an exception to it.
+      { id: 'MH-RELATED', status: 'covered', test: 'tests/test_c.py::test_c', related_tests: ['ui/src/d.test.tsx'] },
       { id: 'MH-GAP', status: 'gap', test: null },
     ];
-    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE'];
+    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT'];
+    const rowsOf = (catalog) => uiEvidenceRows({ ...catalog, scenarios });
 
-    expect(uiEvidenceRows({ status_legend: { covered: { test_required: true } }, scenarios }).map((row) => row.id)).toEqual(asked);
-    expect(uiEvidenceRows({ status_legend: { covered: 'executable evidence exists' }, scenarios }).map((row) => row.id)).toEqual(asked);
-    expect(uiEvidenceRows({ scenarios }).map((row) => row.id)).toEqual(asked);
-    expect(uiEvidenceRows({ scenarios }).find((row) => row.id === 'MH-FILE').cited).toBe(null);
+    expect(rowsOf({ status_legend: { covered: { test_required: true } } }).map((row) => row.id)).toEqual(asked);
+    expect(rowsOf({ status_legend: { covered: 'executable evidence exists' } }).map((row) => row.id)).toEqual(asked);
+    expect(rowsOf({}).map((row) => row.id)).toEqual(asked);
+    // The shape the resolver then rejects, and the one it reads a case out of.
+    expect(rowsOf({}).find((row) => row.id === 'MH-FILE').cited).toBe(null);
+    expect(rowsOf({}).find((row) => row.id === 'MH-CONTRACT')).toMatchObject({
+      file: 'ui/src/c.test.tsx',
+      cited: 'holds the frozen contract',
+    });
     expect(isUiEvidence('tests/test_a.py::test_a')).toBe(false);
   });
 });

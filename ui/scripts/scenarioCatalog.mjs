@@ -35,24 +35,52 @@ const citedPath = (testRef) => testRef.split('::')[0];
 export const isUiEvidence = (testRef) => UI_SUFFIXES.has(path.extname(citedPath(testRef)));
 
 /**
- * Every catalog row whose evidence is a UI case, whatever its legend looks like.
+ * Every UI citation the catalog's rows make, whatever key it sits in.
  *
- * The row set is the rows that *cite* a UI file, never the rows a legend marks as
- * needing a test. `status_legend` maps a status to a description string in every
- * catalog here but one, so reading `test_required` off it selected the rows of
- * that single catalog and passed the other three in silence — the same failure
- * this gate exists to prevent, one level up. A citation is the row's own claim,
- * exists in every catalog, and no legend shape can switch it off.
+ * Two questions this has been asked wrong twice, and the answer to both is that
+ * the row's own claim decides, never a schema position:
  *
- * `cited` is null for a row that names a file and no case in it.
+ * *Which rows?* The ones that **cite** a UI file — never the ones a legend marks
+ * as needing a test. `status_legend` maps a status to a description string in
+ * every catalog here but one, so reading `test_required` off it selected that
+ * single catalog's rows and passed the other three in silence.
+ *
+ * *Which citations?* Every one, not `test` alone. A row states UI evidence in
+ * two places — `test` names the case that owns the row, and `ui_contract` names
+ * the UI half of a row owned by a pytest scenario — and reading only the first
+ * left five fully-written citations unasked, which is the legend hole again in
+ * another key. It cost four of those five: three named cases #1401 deleted on
+ * 2026-08-14, unnoticed because nothing read them.
+ *
+ * `related_tests` and `canonical_tests` stay unread, and that is the same rule
+ * rather than an exception to it: they name a file and no case, so they cannot
+ * evidence a row, and they do not claim to — "related" is a pointer, not a
+ * coverage claim.
+ *
+ * `cited` is null for a citation that names a file and no case in it, which
+ * `resolveUiEvidence` reports rather than resolves.
  */
 export const uiEvidenceRows = (catalog) =>
-  (catalog.scenarios ?? [])
-    .filter((row) => typeof row.test === 'string' && isUiEvidence(row.test))
-    .map((row) => {
+  (catalog.scenarios ?? []).flatMap((row) => {
+    const citations = [];
+    if (typeof row.test === 'string' && isUiEvidence(row.test)) {
       const [file, cited = null] = row.test.split('::');
-      return { id: row.id, file, cited };
-    });
+      citations.push({ id: row.id, file, cited });
+    }
+    const contract = row.ui_contract;
+    if (contract && typeof contract.test === 'string' && isUiEvidence(contract.test)) {
+      citations.push({
+        id: row.id,
+        file: contract.test,
+        cited: typeof contract.case === 'string' ? contract.case : null,
+        // A parameterized case is named at run time, so the catalog writes the
+        // template and the substitutions it means separately. Both are terms of
+        // one citation; see `citedTerms`.
+        inputs: (contract.inputs ?? []).map(String),
+      });
+    }
+    return citations;
+  });
 
 /** A collected case's own name, without the `describe` path vitest prefixes to it. */
 const caseName = (fullName) => fullName.split(' > ').at(-1);
@@ -61,12 +89,31 @@ const caseName = (fullName) => fullName.split(' > ').at(-1);
  * The names a citation may be written against: the case's own, and its full path
  * with vitest's separator flattened to the space the catalogs write instead.
  *
- * Two conventions are in use — a catalog ID that the case name begins with, and
- * the case's readable full name — and both are a prefix of one of these. One
- * matching rule covers them because that is what they have in common, rather
- * than a rule per catalog, which is a policy each new catalog could contradict.
+ * Two conventions are in use — a catalog ID the case name carries, and the
+ * case's readable full name — and one containment rule covers both, rather than
+ * a rule per catalog, which is a policy each new catalog could contradict.
+ * Containment and not a prefix because an ID is not always first: one case can
+ * carry two scenarios (`[MEMORY-LIST-004][MEMORY-LIST-006] browses …`), and each
+ * of them cites it by its own ID. What bounds the looseness is the count below —
+ * exactly one collected case may match — so a citation loose enough to reach two
+ * cases fails for the same reason as one that reaches none.
  */
 const citableNames = (entry) => [caseName(entry.name), entry.name.replaceAll(' > ', ' ')];
+
+/**
+ * The terms one citation names, all of which the collected name must contain.
+ *
+ * A parameterized case has no name until vitest substitutes its row, so the
+ * catalog writes the template and its `inputs` in separate keys. Taking the
+ * template's literal head plus each input keeps this out of the business of
+ * emulating a format string: `%` opens a substitution, everything before the
+ * first one is literal, and the inputs are what the substitutions were. The
+ * literal tail is dropped rather than parsed, which costs nothing because the
+ * count is what decides — for `accepts the declared failure %s with result %s`
+ * with `[memory_repair_failed, timed_out]`, one collected case carries all
+ * three terms and the other seven carry two.
+ */
+const citedTerms = (row) => [row.cited.split('%')[0], ...(row.inputs ?? [])];
 
 const sameFile = (collectedFile, file) => {
   const normalized = collectedFile.replaceAll('\\', '/');
@@ -74,12 +121,21 @@ const sameFile = (collectedFile, file) => {
 };
 
 /**
- * What is wrong with these rows, given everything vitest collected — nothing if
- * every citation resolves to a case the suite would execute.
+ * What is wrong with these citations, given everything vitest collected — nothing
+ * if each names exactly one case the suite would execute.
  *
- * Zero is the interesting count: a case that is commented out, skipped, named at
- * run time by `it.each`, sitting in an unreachable branch, or merely quoted in a
- * string is absent from a collection, so it cannot stand as a row's evidence.
+ * Zero is the interesting count: a case that is commented out, skipped, sitting
+ * in an unreachable branch, or merely quoted in a string is absent from a
+ * collection, so it cannot stand as a row's evidence.
+ *
+ * A citation must **name a case**, which is the whole rule and the reason there
+ * is no file-only shape left. Accepting a bare file made the gate ask whether the
+ * file runs, and a file runs for reasons that have nothing to do with the citing
+ * row: `MEMORY-LIST-006` and `MEMORY-LIST-007` both named `MemorySearchPanel`
+ * and nothing else, so deleting either one's case left the other keeping the
+ * file collected and both rows green. That is this gate's own failure — a row
+ * reading `covered` with nothing executable tied to *it* — so the file is
+ * reported rather than resolved, and the row states which case carries it.
  *
  * `ids` is the whole catalog's ID set, which is what makes a borrowed citation
  * legible: a row naming a *sibling row's* ID resolves to a real running case and
@@ -89,14 +145,11 @@ export const resolveUiEvidence = (rows, collected, ids = new Set(rows.map((row) 
   const problems = [];
   for (const row of rows) {
     const where = row.catalog ? `${row.catalog} ${row.id}` : row.id;
-    const inFile = collected.filter((entry) => sameFile(entry.file, row.file));
     if (row.cited === null) {
-      // The row cites a file and names no case inside it, so the only claim there
-      // is to check is the one it makes: that vitest executes that file. Which
-      // case carries the row is the catalog's to say, and this one does not say.
-      if (inFile.length === 0) {
-        problems.push(`${where}: vitest collects no case from ${row.file}, so the file it cites is not executable evidence`);
-      }
+      problems.push(
+        `${where} cites ${row.file} and no case in it; a file is evidence for no row in particular — `
+          + 'name the case that carries this one, since any other row citing the same file keeps it collected',
+      );
       continue;
     }
     if (row.cited !== row.id && ids.has(row.cited)) {
@@ -105,11 +158,15 @@ export const resolveUiEvidence = (rows, collected, ids = new Set(rows.map((row) 
       );
       continue;
     }
-    const matches = inFile.filter((entry) => citableNames(entry).some((name) => name.startsWith(row.cited)));
+    const terms = citedTerms(row);
+    const matches = collected
+      .filter((entry) => sameFile(entry.file, row.file))
+      .filter((entry) => citableNames(entry).some((name) => terms.every((term) => name.includes(term))));
     if (matches.length !== 1) {
       problems.push(
-        `${where}: vitest collects ${matches.length} cases named \`${row.cited}…\` in ${row.file}, expected exactly one — `
-          + 'a commented-out, skipped, parameterized, unreachable or merely quoted case is not executable evidence',
+        `${where}: vitest collects ${matches.length} cases named \`${terms.join('` + `')}\` in ${row.file}, expected exactly one — `
+          + 'a commented-out, skipped, unreachable or merely quoted case is not executable evidence, and a name '
+          + 'reaching several cases identifies none of them',
       );
     }
   }
