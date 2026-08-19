@@ -16,6 +16,11 @@ from storage.delivery_states import (
     RUN_CANCEL_RETIRE_STATES,
     policy_for,
 )
+from core.memory.admission import (
+    MEMORY_CLI_ADMITTED_METADATA,
+    MEMORY_ORDINARY_TEXT_METADATA,
+    MEMORY_USER_ID_METADATA,
+)
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -30,9 +35,6 @@ TURN_OWNER_STATES = ("starting", "active")
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
-MEMORY_USER_ID_METADATA = "_memory_user_id"
-MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
-MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
 
 
 def utc_now_iso() -> str:
