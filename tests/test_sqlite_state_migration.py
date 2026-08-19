@@ -6376,7 +6376,21 @@ def _write_discovered_chats(path: Path) -> None:
     )
 
 
-def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_path: Path) -> None:
+def test_media_reference_migration_derives_no_rows_from_existing_data(tmp_path: Path) -> None:
+    """The revision creates the table. Nothing in the graph reads history to fill it.
+
+    Seeded with one row of every shape the removed backfill consumed -- a media object
+    carrying its own minting session, and an agent message in a *second* session linking
+    that token -- and asserting the table comes out empty, rather than asserting two
+    named rows are absent. A shape the scan would have matched cannot pass by going
+    unlisted.
+
+    Nothing replaced it, because the read path already covers what it wrote:
+    media_service.register() records the reference when a token is minted or reused, and
+    vibe/ui_server.py falls back to the media row's own session and scope when the
+    reference set is empty, so a legacy attachment stays readable by the session that
+    minted it either way.
+    """
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260725_0035")
     now = "2026-07-25T00:00:00Z"
@@ -6442,10 +6456,7 @@ def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_pat
         )
         version = conn.execute("select version_num from alembic_version").fetchone()
 
-    assert references == {
-        ("legacy-shared-token", "ses_media_original"),
-        ("legacy-shared-token", "ses_media_reuse"),
-    }
+    assert references == set()
     assert version == (HEAD_REVISION,)
 
 

@@ -425,10 +425,71 @@ def test_support_files_are_not_held_to_the_release(monkeypatch):
     assert guard.rechained_revisions("v0.0.0") == []
 
 
+def _declare(monkeypatch, *entries: guard.DeclaredBodyEdit) -> None:
+    monkeypatch.setattr(guard, "DECLARED_BODY_EDITS", entries)
+
+
+DECLARED_EDIT = SHIPPED_GRAPH["20260102_0002_linear.py"] + "\n# a declared edit\n"
+
+
+@pytest.mark.parametrize(
+    ("pinned", "reported"),
+    [
+        (guard.body_fingerprint(DECLARED_EDIT), False),
+        (guard.body_fingerprint(DECLARED_EDIT + "# and one more\n"), True),
+    ],
+    ids=["pins-the-body-present", "pins-a-different-body"],
+)
+def test_a_declaration_accepts_exactly_the_body_it_pins(monkeypatch, pinned, reported):
+    """What separates a declaration from an exemption, stated from both sides.
+
+    An entry naming only the revision would hand that file a standing permission: the
+    edit it was written for and every later one look alike to a check that stops at the
+    name. Pinning the replacement means the second edit arrives as an undeclared edit
+    again, which is the whole difference between recording a decision and suspending the
+    property.
+    """
+    current = dict(SHIPPED_GRAPH) | {"20260102_0002_linear.py": DECLARED_EDIT}
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+    _declare(monkeypatch, guard.DeclaredBodyEdit(revision="20260102_0002", body=pinned, reason="recorded"))
+
+    assert bool(guard.edited_released_bodies("v0.0.0")) is reported
+
+
+def test_a_declaration_that_describes_no_edit_is_reported_as_spent(monkeypatch):
+    """The property that keeps the list from becoming the allowlist this module refuses.
+
+    A declaration is spent the moment a release ships the body it pinned, and a spent one
+    is indistinguishable from a live one by inspection. Failing on it is what bounds the
+    list to edits made since the last release, and it also catches the entry written for
+    an edit that was reverted before shipping -- which would otherwise sit ready to
+    excuse an edit nobody reviewed.
+    """
+    _graphs(monkeypatch, SHIPPED_GRAPH, dict(SHIPPED_GRAPH))
+    _declare(monkeypatch, guard.DeclaredBodyEdit(revision="20260102_0002", body="0" * 64, reason="recorded"))
+
+    assert len(guard.spent_body_edit_declarations("v0.0.0")) == 1
+    assert guard.edited_released_bodies("v0.0.0") == []
+
+
+def test_every_declaration_pins_a_fingerprint_and_records_a_reason():
+    """A mistyped fingerprint would otherwise surface as an unexplained mismatch."""
+    for declared in guard.DECLARED_BODY_EDITS:
+        assert declared.revision.strip()
+        assert declared.reason.strip()
+        assert len(declared.body) == 64 and set(declared.body) <= set("0123456789abcdef")
+
+
 @requires_release_history
-def test_no_released_migration_body_has_been_edited():
-    """The claim measured against the graph that actually ships, not a synthetic one."""
+def test_the_real_graph_has_no_undeclared_edit_and_no_spent_declaration():
+    """The pair measured against the graph that actually ships, not a synthetic one.
+
+    Both halves, because they fail in opposite directions: an undeclared edit is a
+    divergence nobody wrote down, and a spent declaration is a written permission that
+    outlived the edit it was written for.
+    """
     assert guard.edited_released_bodies() == []
+    assert guard.spent_body_edit_declarations() == []
 
 
 def test_an_unreadable_graph_has_its_head_refused_rather_than_guessed():
