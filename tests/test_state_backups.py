@@ -279,86 +279,66 @@ def test_repeated_migration_failures_keep_the_rollback_window_bounded(monkeypatc
             assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
 
 
-def test_retrying_a_failed_migration_does_not_take_another_copy(monkeypatch, tmp_path: Path) -> None:
-    # The retries are all attempts to leave the same revision, so they all want
-    # the same rollback point -- and it already exists after the first one. Not
-    # making the copies is what keeps the clean snapshot: nothing is produced
-    # that could displace it, however long the migration keeps failing.
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    db_path = state_dir / "vibe.sqlite"
-    run_migrations(db_path, revision="20260627_0025")
-    monkeypatch.setattr(
-        "storage.migrations.command.upgrade",
-        _fails_after_committing(db_path, "create table if not exists half_migrated (value text)"),
-    )
-
-    for _ in range(SQLITE_BACKUP_RETENTION + 4):
-        with pytest.raises(RuntimeError, match="upgrade failed after committing"):
-            run_migrations(db_path)
-
-    surviving = _sqlite_backup_roots(state_dir / "backups")
-    assert len(surviving) == 1
-    assert not _table_exists(state_dir / "backups" / surviving[0] / "vibe.sqlite", "half_migrated")
+def _db_contents(path: Path) -> list[tuple[str, list[tuple]]]:
+    with sqlite3.connect(path) as conn:
+        tables = [
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table' order by name")
+        ]
+        return [(table, conn.execute(f'select * from "{table}"').fetchall()) for table in tables]
 
 
-def test_a_migration_that_only_commits_rows_still_leaves_a_clean_snapshot(
-    monkeypatch, tmp_path: Path
-) -> None:
-    # Not every partial upgrade is visible in the schema. One that commits row
-    # changes and then fails a validation leaves a database whose tables,
-    # indexes and revision stamp are all exactly what they were, so no
-    # fingerprint taken from a copy can tell the damaged database from the clean
-    # one. Any rule that decides which copies to keep by inspecting them is
-    # blind here; not taking the copies is not.
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    db_path = state_dir / "vibe.sqlite"
-    run_migrations(db_path, revision="20260627_0025")
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("create table payload (value text)")
-        conn.execute("insert into payload (value) values ('original')")
-    monkeypatch.setattr(
-        "storage.migrations.command.upgrade",
-        _fails_after_committing(db_path, "update payload set value = 'rewritten'"),
-    )
-
-    for _ in range(SQLITE_BACKUP_RETENTION + 4):
-        with pytest.raises(RuntimeError, match="upgrade failed after committing"):
-            run_migrations(db_path)
-
-    surviving = _sqlite_backup_roots(state_dir / "backups")
-    assert len(surviving) == 1
-    with sqlite3.connect(state_dir / "backups" / surviving[0] / "vibe.sqlite") as backup:
-        assert [row[0] for row in backup.execute("select value from payload")] == ["original"]
-
-
-def test_a_further_revision_reached_takes_its_own_rollback_point(tmp_path: Path) -> None:
-    # The other half of the same rule. When the database really has moved to a
-    # revision the window does not hold, that is a rollback point nothing else
-    # can provide, and it is taken -- so a healthy machine still gets a copy per
-    # migration, and an upgrade that commits some of its stamps before failing
-    # still gets one for each boundary it actually reached.
+def test_every_call_holds_the_database_as_it_stands_at_that_call(tmp_path: Path) -> None:
+    # The one promise the window makes, stated as a property over however the
+    # database moves rather than as a list of the ways it can. That distinction
+    # is the whole history of this change: earlier revisions tried to recognise a
+    # copy already held and reuse it, ranking copies by wall-clock adjacency,
+    # then by the schema transition each attempt recorded, then by a fingerprint
+    # of each copy's schema, then by the revision stamp -- and each rule was
+    # defeated by a movement that leaves every label a backup can compare exactly
+    # as it was. Two of them are exercised below: a migration that commits rows
+    # without touching schema or stamp, and an operator restoring a copy and then
+    # serving writes under a stamp that never moved.
     db_path = tmp_path / "vibe.sqlite"
     backups_dir = tmp_path / "backups"
     _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('original')")
 
-    first = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
-    again = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
-    assert again == first
+    taken: list[Path] = []
 
+    def rollback_point() -> Path:
+        backup = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+        assert _db_contents(backup / "vibe.sqlite") == _db_contents(db_path)
+        taken.append(backup)
+        return backup
+
+    def write(statement: str) -> None:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(statement)
+
+    first = rollback_point()
+    write("update payload set value = 'rewritten'")
+    rollback_point()
+    shutil.copy(first / "vibe.sqlite", db_path)
+    write("insert into payload (value) values ('accepted after the restore')")
+    rollback_point()
+    write("create table added (value text)")
+    rollback_point()
     _stamp(db_path, "20260809_0049")
-    advanced = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
-    assert advanced != first
-    assert _sqlite_backup_roots(backups_dir) == sorted({first.name, advanced.name})
+    rollback_point()
+
+    assert len(set(taken)) == len(taken)
+    assert len(_sqlite_backup_roots(backups_dir)) == SQLITE_BACKUP_RETENTION
 
 
 def test_the_manifest_records_the_revisions_read_from_the_copy(tmp_path: Path) -> None:
     # Callers sample the revisions before handing the work over, and another
     # process can advance the database in between. A manifest describing
     # something other than the copy it sits next to is worse than one that says
-    # nothing: the next attempt uses it to decide whether the rollback point it
-    # needs already exists.
+    # nothing: an operator reading it to choose a rollback point is told the copy
+    # holds a schema it may never have held.
     db_path = tmp_path / "vibe.sqlite"
     backups_dir = tmp_path / "backups"
     _stamp(db_path, "20260811_0050")

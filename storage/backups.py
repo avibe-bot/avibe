@@ -47,7 +47,6 @@ class _BackupCandidate:
     kind: str
     timestamp: datetime
     suffix: int
-    revisions: tuple[str, ...] | None = None
 
     @property
     def order_key(self) -> tuple[datetime, int, str]:
@@ -124,23 +123,7 @@ def _directory_candidate(path: Path) -> _BackupCandidate | None:
         kind=kind,
         timestamp=timestamp,
         suffix=int(match.group("suffix") or 0),
-        revisions=_manifest_revisions(manifest),
     )
-
-
-def _manifest_revisions(manifest: dict) -> tuple[str, ...] | None:
-    """The revisions the backup's own copy of the database was stamped with.
-
-    A manifest that does not record them, or records them in a shape this
-    version does not understand, yields `None` -- which never matches anything,
-    so such a backup can never be mistaken for the rollback point a caller is
-    about to look for.
-    """
-
-    value = manifest.get("from_revisions")
-    if not isinstance(value, list):
-        return None
-    return tuple(sorted(str(revision) for revision in value))
 
 
 def _legacy_sqlite_candidate(path: Path) -> _BackupCandidate | None:
@@ -280,8 +263,8 @@ def _stamped_revisions(connection: sqlite3.Connection) -> tuple[str, ...]:
     """The alembic revisions the database behind `connection` is stamped with.
 
     A database with no `alembic_version` table yields the empty tuple, which is
-    a state like any other: it is what an unversioned database is, and two
-    copies of it are the same rollback point.
+    what an unversioned database is. This is recorded, never compared: a stamp
+    names where a database claims to be, not what it holds.
     """
 
     try:
@@ -289,15 +272,6 @@ def _stamped_revisions(connection: sqlite3.Connection) -> tuple[str, ...]:
     except sqlite3.DatabaseError:
         return ()
     return tuple(sorted({str(row[0]) for row in rows}))
-
-
-def _rollback_point_held(backups_dir: Path, revisions: tuple[str, ...]) -> Path | None:
-    """A surviving backup of the database as it is stamped now, if there is one."""
-
-    for candidate in sorted(_managed_candidates(backups_dir), key=lambda item: item.order_key, reverse=True):
-        if candidate.kind == "sqlite" and candidate.revisions == revisions:
-            return candidate.root
-    return None
 
 
 def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
@@ -334,24 +308,23 @@ def create_sqlite_migration_backup(
     the bound true for callers not yet written, including the ones that opt out
     of their own pruning.
 
-    The copy is skipped entirely when the window already holds one stamped with
-    the revisions the database is stamped with now. That is the same rollback
-    point, and taking it again is what created the problem this function exists
-    to solve: a migration failing partway is retried by every service entry
-    point that touches the store, and the copies pile up faster than any
-    retention rule can sort them out. Not making them is cheaper than deciding
-    which to keep, and safer -- earlier revisions of this code tried to rank the
-    copies by wall-clock adjacency, then by the schema transition each attempt
-    recorded, then by a fingerprint of each copy's schema, and each rule in turn
-    was defeated by something the environment could move or by damage the copy
-    could not show. A migration that commits row changes and then fails leaves a
-    half-migrated database that is byte-comparable to the clean one in every
-    respect a backup can measure. So the clean copy is the one kept, by never
-    being displaced.
+    The copy is unconditional, and the window promises exactly one thing: a
+    restorable copy of the database as it stands at this call. Nothing here
+    tries to recognize a copy it already holds and reuse it. Earlier revisions
+    of this change did, by ranking the copies on wall-clock adjacency, then on
+    the schema transition each attempt recorded, then on a fingerprint of each
+    copy's schema, and finally by skipping the copy when a backup carried the
+    same revision stamp -- and every one of those is a label standing in for the
+    database's contents. Labels can be made to agree while the contents differ:
+    a migration that commits row changes and then fails moves neither schema nor
+    stamp, and an operator who restores a copy and keeps serving writes moves
+    the contents under a stamp that never changed. Reusing a copy on any of
+    those grounds hands back a rollback point missing committed data, which is
+    worse than having none, because it is reported as one.
 
-    A copy that is taken reaches stable storage before any older one is deleted,
-    and is protected from its own prune, so this call can never destroy what it
-    just produced.
+    The copy reaches stable storage before any older one is deleted, and is
+    protected from its own prune, so this call can never destroy what it just
+    produced.
 
     The manifest records the revisions read back from the copy rather than
     anything the caller reported, because between a caller sampling them and
@@ -367,11 +340,6 @@ def create_sqlite_migration_backup(
         # in it counts as durable; a crash that keeps the upgrade but loses this
         # directory leaves no rollback point at all.
         _fsync_directory(target_root.parent)
-
-    with sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True) as probe:
-        held = _rollback_point_held(target_root, _stamped_revisions(probe))
-    if held is not None:
-        return held
 
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
@@ -415,8 +383,7 @@ def create_sqlite_migration_backup(
     # cleanup above runs and nothing is pruned at all. Being after the try means
     # a failure while pruning cannot reach that cleanup and delete the rollback
     # point this call just made. And it has to follow the manifest write,
-    # because a directory without one is not yet a recognized candidate: it
-    # would neither count itself against the bound nor be findable as the
-    # rollback point that lets the next attempt skip its copy.
+    # because a directory without one is not yet a recognized candidate and
+    # would not count itself against the bound.
     prune_state_backups(target_root, json_retention=None, protect=backup_dir)
     return backup_dir
