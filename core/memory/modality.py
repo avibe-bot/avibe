@@ -30,8 +30,6 @@ import shutil
 import zipfile
 from pathlib import Path
 
-import olefile
-
 from core.memory.types import MemoryContentKind
 
 
@@ -311,6 +309,8 @@ def _office_ole_matches(
     if not sample.startswith(_OLE_MAGIC):
         return False
     try:
+        import olefile
+
         with _open_attachment_file(path, file_fd) as file_obj:
             file_obj.seek(0)
             with olefile.OleFileIO(
