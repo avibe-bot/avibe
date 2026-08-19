@@ -7,17 +7,21 @@ never back. So editing a released revision's parentage does not change what thos
 databases have already done -- it changes what they will do next, silently, with no error
 at the moment of the edit and no error at the moment of the upgrade.
 
-Six properties, one primitive: the graph as a released tag actually shipped it, read
-straight out of git. Nothing here is a hand-maintained list of known-bad cases, and
-nothing needs an old Python environment -- ``env.py`` reads ``target_metadata`` only
-during autogenerate, so today's runtime can drive an older ``version_locations``.
+Seven properties, one primitive: the graph as a released tag actually shipped it, read
+straight out of git. Nothing here is an allowlist of known-bad cases that outlives its
+reason, and nothing needs an old Python environment -- ``env.py`` reads
+``target_metadata`` only during autogenerate, so today's runtime can drive an older
+``version_locations``.
 
     fresh_install_tables()        HEAD_TABLES is what a fresh install actually has, so
                                   the property below derives from something measured
     new_slot_collisions()         a change introduces no new duplicated slot number
     rechained_revisions()         a released revision keeps its identity and every edge
                                   Alembic orders the graph by
-    edited_released_bodies()      a released revision still does what the release ran
+    edited_released_bodies()      a released revision still does what the release ran,
+                                  or DECLARED_BODY_EDITS pins the body replacing it
+    spent_body_edit               no declaration outlives the edit it was written for,
+    _declarations()               so that list holds only unreleased edits
     unrepairable_releases()       a database built by a released graph, carrying rows,
                                   still comes out ready when the upgrade users run
                                   upgrades it
@@ -50,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import sqlite3
@@ -58,6 +63,7 @@ import sys
 import tempfile
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -532,6 +538,82 @@ def released_bodies(sources: dict[str, str]) -> dict[str, tuple[str, str]]:
     }
 
 
+def body_fingerprint(source: str) -> str:
+    """The sha256 a declaration pins a replacement body by."""
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class DeclaredBodyEdit:
+    """One released revision whose body was deliberately changed, and the body it became.
+
+    ``body`` is what makes this a declaration rather than an exemption. It authorises one
+    specific replacement, so a second edit to the same revision changes the fingerprint
+    and is reported like any undeclared one -- the entry cannot decay into a standing
+    permission for whatever that file says next.
+    """
+
+    revision: str
+    body: str
+    reason: str
+
+
+DECLARED_BODY_EDITS: tuple[DeclaredBodyEdit, ...] = (
+    DeclaredBodyEdit(
+        revision="20260725_0037",
+        body="d56e9ae949018bb1d0adc6edc1609d2f39052eb1bf70688add968c7304f4525a",
+        reason=(
+            "The revision backfilled media_object_references by regex-scanning every agent "
+            "message for media URLs. Only that scan is gone; the DDL and the precondition "
+            "20260819_0056 relies on to prove its replay repaired anything are untouched. "
+            "Removed because no forward revision can express the "
+            "removal: 20260819_0056 replays this body, so a later revision runs after the "
+            "scan it would have to prevent, and the rows the scan writes are byte-identical "
+            "to the ones media_service.register() writes when a second session reuses a "
+            "token, so nothing downstream can delete one without deleting the other. What "
+            "the divergence costs is bounded by the read path rather than argued: the table "
+            "only ever widens access, vibe/ui_server.py falls back to the media row's own "
+            "session and scope when the reference set is empty, and the owner short-circuit "
+            "returns before consulting it at all -- so a row the scan would have written is "
+            "at worst a 404 for a non-owner holding partial project access, never a leak. "
+            "The scan is also already inert wherever it can still run: a fresh install "
+            "crosses this revision with media_objects and messages empty, and a database "
+            "that already crossed it is stamped and never reruns it."
+        ),
+    ),
+)
+
+
+def _declared_body_edits() -> dict[str, DeclaredBodyEdit]:
+    return {declared.revision: declared for declared in DECLARED_BODY_EDITS}
+
+
+def spent_body_edit_declarations(baseline: str | None = None) -> list[str]:
+    """Declarations that no longer describe an edit, which is how the list stays short.
+
+    A declaration is spent the moment a release ships the body it pinned: the baseline
+    moves to that release, shipped and current agree, and ``edited_released_bodies`` has
+    nothing left to accept. Reporting that keeps ``DECLARED_BODY_EDITS`` holding only
+    edits made since the last release, so it never becomes the standing allowlist the
+    rest of this module refuses to keep -- and an entry written for an edit that was
+    never made, or reverted before shipping, fails here rather than sitting ready to
+    excuse a future one.
+    """
+    baseline = baseline or latest_released_tag()
+    current = released_bodies(working_tree_sources())
+    shipped = released_bodies(released_sources(baseline))
+    problems = []
+    for revision, declared in sorted(_declared_body_edits().items()):
+        if revision in shipped and revision in current and shipped[revision][1] != current[revision][1]:
+            continue
+        problems.append(
+            f"DECLARED_BODY_EDITS names {revision}, which is not an edit against {baseline}; "
+            "a declaration is spent once the release ships the body it pinned and must be "
+            "removed rather than left standing"
+        )
+    return problems
+
+
 def edited_released_bodies(baseline: str | None = None) -> list[str]:
     """Released revisions whose migration no longer does what the baseline ran.
 
@@ -554,23 +636,37 @@ def edited_released_bodies(baseline: str | None = None) -> list[str]:
     Restating it would describe one defect as two. The pair is what must be exhaustive,
     not either half, and ``collect_problems`` runs both.
 
-    No exemption for edits judged harmless. Judging them is the convention this guard
-    exists to replace, and no exemption is needed: restoring the shipped file and adding a
-    new migration carrying the change is always available, and is the only form of the
-    change every database can actually apply.
+    An edit passes only through ``DECLARED_BODY_EDITS``, which is a declaration and not an
+    exemption: it names the revision, pins the sha256 of the body replacing it, and
+    records why the divergence is bounded. Pinning is what stops the entry unguarding the
+    revision, and ``spent_body_edit_declarations`` is what stops the list accumulating, so
+    what a declaration buys is one reviewed edit rather than a standing permission.
+
+    This docstring used to claim no exemption was needed, because restoring the file and
+    carrying the change in a new revision is always available. That is true of a change a
+    later revision can apply and false of the one shape that reached here first: removing
+    work an earlier revision did, on databases that have already done it. A rule whose
+    stated alternative does not exist gets suspended in the moment rather than amended, so
+    the narrow declared form is the safer one to hold.
     """
     baseline = baseline or latest_released_tag()
+    declared = _declared_body_edits()
     current = released_bodies(working_tree_sources())
     problems = []
     for revision, (shipped_name, source) in sorted(released_bodies(released_sources(baseline)).items()):
         if revision not in current or current[revision][1] == source:
             continue
-        name = current[revision][0]
+        name, body = current[revision]
+        permitted = declared.get(revision)
+        if permitted is not None and permitted.body == body_fingerprint(body):
+            continue
         where = shipped_name if name == shipped_name else f"{shipped_name}, now {name}"
-        problems.append(
-            f"{revision} ({where}) is no longer what {baseline} shipped; a released "
-            "migration's body is fixed once a database has run it"
+        detail = (
+            f"DECLARED_BODY_EDITS pins {permitted.body} for it, not {body_fingerprint(body)}"
+            if permitted is not None
+            else "a released migration's body is fixed once a database has run it"
         )
+        problems.append(f"{revision} ({where}) is no longer what {baseline} shipped; {detail}")
     return problems
 
 
@@ -1433,6 +1529,7 @@ def collect_problems(
 
     problems.extend(rechained_revisions(baseline))
     problems.extend(edited_released_bodies(baseline))
+    problems.extend(spent_body_edit_declarations(baseline))
 
     if include_upgrade:
         failures, refused = unrepairable_releases()
