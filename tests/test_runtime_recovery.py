@@ -5,7 +5,7 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -635,11 +635,15 @@ async def test_cancel_settles_durable_owner_when_runtime_is_gone(tmp_path: Path)
 
     manager = SessionTurnManager(SimpleNamespace())
     manager._engine = engine
-    result = await manager.cancel("ses-zombie")
+    with patch("core.inbox_events.bus.publish") as publish:
+        result = await manager.cancel("ses-zombie")
 
     assert result["ok"] is True
     assert result["status"] == "stale_released"
     assert result["reason"] == "runtime_gone"
+    assert ("turn.end", {"session_id": "ses-zombie", "turn_id": "trn-zombie"}) in [
+        call.args for call in publish.call_args_list
+    ]
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, "trn-zombie")
         session = conn.execute(
@@ -844,7 +848,8 @@ async def test_cancel_settles_unaccepted_starting_owner_when_runtime_is_gone(
 
     manager = SessionTurnManager(SimpleNamespace())
     manager._engine = engine
-    result = await manager.cancel("ses-starting")
+    with patch("core.inbox_events.bus.publish"):
+        result = await manager.cancel("ses-starting")
 
     assert result["ok"] is True
     assert result["status"] == "stale_released"
@@ -861,3 +866,55 @@ async def test_cancel_settles_unaccepted_starting_owner_when_runtime_is_gone(
     assert turn["terminal_evidence_kind"] == "runtime_gone"
     assert delivery["state"] == "retired"
     assert session["agent_status"] != "running"
+
+
+@pytest.mark.anyio
+async def test_cancel_replays_unknown_start_instead_of_not_written(
+    tmp_path: Path,
+) -> None:
+    """An unknown start may already have written; Stop must not retire it as never-written."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        _session(conn, "ses-unknown", backend="opencode")
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses-unknown")
+            .values(agent_status="running")
+        )
+        _delivery(conn, "delivery-unknown", "ses-unknown")
+        queued = delivery_store.get_delivery(conn, "delivery-unknown")
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id="trn-unknown",
+            session_id="ses-unknown",
+            backend="opencode",
+            deliveries=[queued],
+            dispatch_text="unknown",
+            attempt_id="attempt-unknown",
+        )
+        turn = delivery_store.get_turn(conn, "trn-unknown")
+        assert turn is not None
+        assert delivery_store.mark_start_unknown(
+            conn,
+            "trn-unknown",
+            expected_version=int(turn["version"]),
+            receipt={"reason": "native_start_acceptance_unproven"},
+        )
+
+    manager = SessionTurnManager(SimpleNamespace())
+    manager._engine = engine
+    with patch("core.inbox_events.bus.publish"):
+        result = await manager.cancel("ses-unknown")
+
+    assert result["ok"] is True
+    assert result["status"] == "stale_released"
+    assert result["reason"] == "runtime_gone"
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, "trn-unknown")
+        delivery = delivery_store.get_delivery(conn, "delivery-unknown")
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "failed"
+    assert turn["settled_by"] == "stopped"
+    assert turn["terminal_evidence_kind"] == "runtime_gone"
+    assert delivery["state"] != "retired"

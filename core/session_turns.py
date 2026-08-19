@@ -8006,11 +8006,16 @@ class SessionTurnManager:
                 owner_id,
             )
             if restored_identity is None or restored_identity[0] != owner_id:
-                unaccepted_start = (
+                start_receipt = str(owner.get("start_receipt_outcome") or "")
+                never_started = (
                     str(owner.get("state") or "") == "starting"
-                    and str(owner.get("start_receipt_outcome") or "") != "accepted"
+                    and start_receipt not in {"accepted", "unknown"}
                 )
-                if unaccepted_start:
+                unknown_start = (
+                    str(owner.get("state") or "") == "starting"
+                    and start_receipt == "unknown"
+                )
+                if never_started:
                     with self._sqlite_engine().connect() as conn:
                         initial_delivery_ids = {
                             str(row["id"])
@@ -8029,6 +8034,15 @@ class SessionTurnManager:
                         retire_unwritten_delivery_ids=initial_delivery_ids,
                         retire_unwritten_attempt_outcome="canceled",
                     )
+                elif unknown_start:
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "failed",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_unknown_start"},
+                        replay_unknown_start=True,
+                    )
                 else:
                     terminal = self._terminalize_durable_turn(
                         owner_id,
@@ -8042,6 +8056,12 @@ class SessionTurnManager:
                         "Released durable Turn=%s for Session=%s after Stop found no live runtime",
                         owner_id,
                         session_id,
+                    )
+                    from core.inbox_events import bus
+
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, owner_id),
                     )
                     successor_turn_id = str(terminal.get("successor_turn_id") or "")
                     if successor_turn_id:
