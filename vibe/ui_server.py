@@ -12712,7 +12712,11 @@ def _is_show_page_markdown_request(asset_path: str, starlette_request: FastAPIRe
     # unusual Accept header. Keep email-shaped history routes (for example
     # ``users/alice@example.com``) as SPA routes.
     final_segment = segments[-1]
-    if "." in final_segment and not re.fullmatch(r"[^/@\s]+@[^/@\s]+", final_segment):
+    looks_like_email_route = re.fullmatch(r"[^/@\s]+@[^/@\s]+", final_segment) is not None
+    guessed_type = mimetypes.guess_type(final_segment)[0]
+    if "." in final_segment and (
+        not looks_like_email_route or guessed_type not in {None, "application/x-msdownload"}
+    ):
         return False
     return True
 
@@ -14248,9 +14252,19 @@ async def _show_page_agent_markdown_response(
             external_prefix=external_prefix,
         )
         markdown_text = content.decode("utf-8")
-        if re.search(r"https?://[^\s)\]}>,\"]*/show/[^\s)\]}>,]+", markdown_text, re.IGNORECASE):
+        normalized_text = html.unescape(markdown_text)
+        for _ in range(3):
+            decoded = unquote(normalized_text)
+            if decoded == normalized_text:
+                break
+            normalized_text = decoded
+        if re.search(
+            r"https?://[^\s)\]}>,\"]*/show/[^\s)\]}>,]+",
+            normalized_text,
+            re.IGNORECASE,
+        ):
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
-        if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", markdown_text):
+        if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", normalized_text):
             return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
     return FastAPIResponse(
         content=b"" if starlette_request.method == "HEAD" else content,

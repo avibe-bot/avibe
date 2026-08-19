@@ -272,6 +272,11 @@ class ShowRuntimeManager:
         }
         if session_part := _show_runtime_app_session_part(path):
             request_headers[SHOW_RUNTIME_BASE_HEADER] = f"/show/{session_part}/"
+        if max_response_bytes is not None:
+            # Markdown responses are bounded after decoding. Do not let the
+            # HTTP client inflate a compressed body before the byte budget is
+            # enforced.
+            request_headers["Accept-Encoding"] = "identity"
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             if max_response_bytes is None:
                 return await client.request(
@@ -286,6 +291,10 @@ class ShowRuntimeManager:
                 headers=request_headers,
                 content=body,
             ) as response:
+                if response.headers.get("content-encoding", "").strip().lower() not in {"", "identity"}:
+                    raise ShowRuntimeResponseTooLarge(
+                        "Show Runtime returned an encoded response for a bounded request"
+                    )
                 content_length = response.headers.get("content-length")
                 try:
                     declared_length = int(content_length) if content_length is not None else None
@@ -297,11 +306,11 @@ class ShowRuntimeManager:
                     )
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
-                    content.extend(chunk)
-                    if len(content) > max_response_bytes:
+                    if len(content) + len(chunk) > max_response_bytes:
                         raise ShowRuntimeResponseTooLarge(
                             f"Show Runtime response exceeds {max_response_bytes} bytes"
                         )
+                    content.extend(chunk)
                 return httpx.Response(response.status_code, headers=response.headers, content=bytes(content))
 
     async def request_global(

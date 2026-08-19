@@ -1693,7 +1693,37 @@ def test_public_show_page_agent_markdown_rejects_other_private_show_links(monkey
     assert b"other-session" not in response.content
 
 
-@pytest.mark.parametrize("asset_path", ["app.js", "report.pdf"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"# Status\n\n[Other](/show%2Fother-session/).\n",
+        b"# Status\n\n[Other](/show&#x2F;other-session/).\n",
+    ],
+)
+def test_public_show_page_agent_markdown_rejects_encoded_private_links(monkeypatch, tmp_path, body):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    manager = _FakeShowRuntimeManager(
+        body=body,
+        extra_headers={"content-type": "text/markdown; charset=utf-8"},
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/markdown"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "agent_markdown_private_link"}
+
+
+@pytest.mark.parametrize("asset_path", ["app.js", "report.pdf", "images/logo@2x.png"])
 def test_show_page_agent_markdown_does_not_capture_asset_requests(monkeypatch, tmp_path, asset_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
