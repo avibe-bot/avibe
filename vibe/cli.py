@@ -1210,15 +1210,22 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
         return items
 
-    # `_fail` in the restart supervisor is the only writer of ok=False, and a
-    # failed restart can leave the instance either up or down -- some of its
-    # sites fire after the old service was stopped, one fires precisely because
-    # it would not stop. Rather than enumerate them, observe the result: a
-    # recorded failure with nothing running means this metadata is the record of
-    # why the instance is down. It has to be read before the staleness branch
-    # below, because terminal metadata goes stale after
-    # DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that branch offers a repair
-    # that deletes the marker -- on a still-down instance, the reason it is down.
+    # A recorded failure explains the current downtime only when no service has
+    # been alive since it was written, which takes an observation at both ends.
+    # At the near end the supervisor records `service_alive`, because a failed
+    # restart leaves the instance up or down depending on which stage failed and
+    # only that moment can tell: the spawn path never stops anything, so the old
+    # service is still serving and this record never described downtime at all.
+    # At the far end a service observed alive retires the record outright (see
+    # `runtime._retire_failed_restart_status`), so a surviving record means
+    # nothing has come up since -- the instance never recovered, rather than
+    # having been stopped deliberately some time later. Records written before
+    # `service_alive` existed carry no such claim and keep the old reading.
+    #
+    # This has to be read before the staleness branch below, because terminal
+    # metadata goes stale after DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that
+    # branch offers a repair that deletes the marker -- on a still-down instance,
+    # the reason it is down.
     #
     # `service_process_running` is the question being asked, so it is the probe
     # used rather than a liveness rule reassembled here. Both halves of it
@@ -1228,12 +1235,7 @@ def _restart_state_items() -> list[dict]:
     # start` there would send the user into a wall. `_service_lifecycle_items`
     # already owns that state, so this record falls through to history and lets
     # the lifecycle items report it.
-    #
-    # A running service retires the record outright (see
-    # `runtime._retire_failed_restart_status`), so an ok=False record surviving
-    # here means nothing has come up since it was written: the instance never
-    # recovered, rather than having been stopped deliberately some time later.
-    if payload.get("ok") is False and not runtime.service_process_running():
+    if payload.get("ok") is False and payload.get("service_alive") is not True and not runtime.service_process_running():
         _add_doctor_item(
             items,
             "fail",

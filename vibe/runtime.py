@@ -1111,13 +1111,20 @@ def stop_process(pid_path, timeout=5):
 
 
 def _retire_failed_restart_status() -> None:
-    """Drop a recorded restart failure once a service is running again.
+    """Drop a recorded restart failure once a service is observed running again.
 
     The record exists to say why this instance is down, and nothing else ends
     that claim: neither ``vibe start`` nor ``vibe stop`` touches the file, so a
     failure recorded months ago would otherwise become a fresh diagnosis the
-    next time the instance is stopped on purpose. A service reaching "running"
+    next time the instance is stopped on purpose. A service actually being alive
     is the observation that retires it, whoever started it.
+
+    The ``running`` state that brought us here is not that observation. It is a
+    string, and callers copy it: ``/api/ui/reload`` carries the previous state
+    forward while it replaces the UI process, so a service that died between the
+    supervisor's status write and its liveness check would have its failure
+    record erased by a UI restart. Ask ``service_process_running`` instead -- the
+    state is only the cheap filter that decides whether asking is worth a probe.
 
     Only a recorded failure is retired. A restart in progress carries
     ``ok: None`` and is left alone, because it has not reported an outcome yet
@@ -1129,7 +1136,7 @@ def _retire_failed_restart_status() -> None:
 
     path = get_restart_status_path()
     payload = read_json(path)
-    if isinstance(payload, dict) and payload.get("ok") is False:
+    if isinstance(payload, dict) and payload.get("ok") is False and service_process_running():
         path.unlink(missing_ok=True)
 
 

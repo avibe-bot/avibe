@@ -12,6 +12,19 @@ from vibe import restart_supervisor
 from vibe import runtime
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_service_liveness(monkeypatch):
+    """Answer the liveness probe from the fixture, never from the real machine.
+
+    Recording a restart failure asks whether a service survived it, and the honest
+    answer costs a full process-table scan (~1s) of whatever the developer happens
+    to be running. Default it to "nothing alive", which is what a tmp_path AVIBE_HOME
+    describes; tests that care about the other answer set it themselves.
+    """
+
+    monkeypatch.setattr(runtime, "service_process_running", lambda: False)
+
+
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
@@ -157,6 +170,38 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
     assert status["ok"] is False
     assert status["state"] == "failed"
     assert "failed to spawn" in status["error"]
+
+
+@pytest.mark.parametrize("alive", [True, False], ids=["service-survived", "instance-down"])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"ok": False, "state": "failed", "error": "boom"},
+        {"ok": None, "state": "scheduled", "error": None},
+        {"ok": True, "state": "succeeded", "error": None},
+    ],
+    ids=["failed", "in-flight", "succeeded"],
+)
+def test_a_recorded_failure_carries_what_was_alive_when_it_was_written(monkeypatch, tmp_path, outcome, alive):
+    """Only a failure records liveness, and it records what was actually there.
+
+    Whether a failed restart left the instance down depends on which stage failed,
+    and only the moment of failure can tell -- a later reader sees the same empty
+    machine whether the restart killed the service or the user stopped it. The
+    other outcomes make no downtime claim, so they carry no such observation.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.setattr(restart_supervisor.runtime, "service_process_running", lambda: alive)
+
+    restart_supervisor._write_status({"job_id": "job-1", **outcome})
+
+    status = runtime.read_json(runtime.get_restart_status_path())
+    if outcome["ok"] is False:
+        assert status["service_alive"] is alive
+    else:
+        assert "service_alive" not in status
 
 
 def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):

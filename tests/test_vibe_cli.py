@@ -185,19 +185,22 @@ def test_status_written(tmp_path, monkeypatch):
     assert payload["detail"] == "pid=123"
 
 
+@pytest.mark.parametrize("alive", [True, False], ids=["service-alive", "nothing-alive"])
 @pytest.mark.parametrize("state", ["running", "starting", "stopped", "error", "degraded"])
 @pytest.mark.parametrize("ok", [False, None, True], ids=["failed", "in-flight", "succeeded"])
-def test_a_running_service_retires_only_a_recorded_restart_failure(tmp_path, monkeypatch, state, ok):
+def test_an_observed_live_service_retires_only_a_recorded_restart_failure(tmp_path, monkeypatch, state, ok, alive):
     """A restart record survives every status write except the one that ends it.
 
     The failure record claims "this instance is down because a restart failed",
-    and a service reaching running is the only observation that ends that claim
-    -- so every other combination of recorded outcome and written state has to
-    leave the file byte-identical, including a stop, which is the case that would
-    otherwise resurrect an old failure as a fresh diagnosis.
+    and a service being alive is the only observation that ends that claim -- so
+    every other combination of recorded outcome, written state, and liveness has
+    to leave the file byte-identical. Two of those matter in production: the stop
+    that would otherwise resurrect an old failure as a fresh diagnosis, and the
+    ``running`` state a caller copied forward without a service behind it.
     """
 
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    monkeypatch.setattr(runtime, "service_process_running", lambda: alive)
     runtime.ensure_dirs()
     restart_path = runtime.get_restart_status_path()
     payload = {"ok": ok, "state": "failed" if ok is False else "succeeded", "job_id": "job-1"}
@@ -205,16 +208,37 @@ def test_a_running_service_retires_only_a_recorded_restart_failure(tmp_path, mon
 
     runtime.write_status(state, detail="pid=123")
 
-    retired = ok is False and state == "running"
+    retired = ok is False and state == "running" and alive
     assert restart_path.exists() is not retired
     if not retired:
         assert runtime.read_json(restart_path) == payload
+
+
+def test_a_copied_running_state_does_not_retire_a_failure(tmp_path, monkeypatch):
+    """The UI reload carries the previous state forward; that is not an observation.
+
+    ``/api/ui/reload`` replaces the UI process and re-writes whatever state string
+    it read, so a service that died between the supervisor's status write and its
+    liveness check would have had its failure record erased by a UI restart.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    monkeypatch.setattr(runtime, "service_process_running", lambda: False)
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"ok": False, "state": "failed", "job_id": "job-1"})
+    stale = runtime.read_status().get("state", "running")
+
+    runtime.write_status(stale, "carried forward", None, 4321)
+
+    assert restart_path.exists()
 
 
 def test_write_status_survives_an_unreadable_restart_record(tmp_path, monkeypatch):
     """Retirement runs inside the status chokepoint, so it cannot fail a write."""
 
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    monkeypatch.setattr(runtime, "service_process_running", lambda: True)
     runtime.ensure_dirs()
     runtime.get_restart_status_path().write_text("[not a record]", encoding="utf-8")
 
@@ -1492,6 +1516,29 @@ def test_recorded_restart_failure_is_a_doctor_failure_exactly_while_nothing_runs
     assert [item["status"] for item in items] == [expected]
     if expected == "warn":
         assert items[0]["repair"]["target"] == "stale-restart-state"
+
+
+@pytest.mark.parametrize(
+    ("service_alive", "expected"),
+    [(True, "warn"), (False, "fail"), (None, "fail")],
+    ids=["failed-with-a-surviving-service", "failed-with-nothing-left", "recorded-before-the-field-existed"],
+)
+def test_a_restart_failure_that_left_a_service_running_never_claims_downtime(monkeypatch, service_alive, expected):
+    """What the supervisor observed at failure time decides whether this is downtime.
+
+    The spawn path fails before anything is stopped, so the old service keeps
+    serving and that record never described downtime -- a deliberate stop months
+    later must not be blamed on it. A record written before the field existed
+    carries no such observation, so it keeps the reading it always had.
+    """
+
+    payload = _restart_status_payload()
+    if service_alive is not None:
+        payload["service_alive"] = service_alive
+    _seed_restart_status(payload, age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60)
+    _stub_service_liveness(monkeypatch)
+
+    assert [item["status"] for item in cli._restart_state_items()] == [expected]
 
 
 def test_restart_state_items_classify_non_failures_without_probing_the_service(monkeypatch):
