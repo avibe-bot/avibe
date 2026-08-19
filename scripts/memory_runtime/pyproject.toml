@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "everos==1.2.3",
     "httpx==0.28.1",
+    "olefile==0.47",
     "psutil==7.2.2",
 ]
 
