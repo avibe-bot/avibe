@@ -2022,6 +2022,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Automatic Show Page history is unavailable", prompt)
         self.assertNotIn("History is saved automatically around each turn", prompt)
         self.assertNotIn("git restore --source", prompt)
+        self.assertIn("api/agent-markdown.ts", prompt)
+        self.assertIn("Content-Type: text/markdown; charset=utf-8", prompt)
+        self.assertIn("Public `/p/<share_id>/` Markdown is public data", prompt)
+        self.assertIn("receives no visitor identity", prompt)
 
     def test_show_pages_prompt_rechecks_mid_session_ownership_flip(self):
         session_id = "sesk8m4q2p7x"

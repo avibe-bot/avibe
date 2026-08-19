@@ -100,6 +100,12 @@ app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=Non
 _server = None
 SLOW_API_REQUEST_MS = float(os.environ.get("VIBE_UI_SLOW_API_MS", "2000"))
 SHOW_RUNTIME_SLOW_REQUEST_MS = float(os.environ.get("VIBE_SHOW_RUNTIME_SLOW_REQUEST_MS", "1000"))
+SHOW_PAGE_AGENT_MARKDOWN_TIMEOUT_SECONDS = float(
+    os.environ.get("VIBE_SHOW_AGENT_MARKDOWN_TIMEOUT_SECONDS", "10")
+)
+SHOW_PAGE_AGENT_MARKDOWN_MAX_BYTES = int(
+    os.environ.get("VIBE_SHOW_AGENT_MARKDOWN_MAX_BYTES", str(1024 * 1024))
+)
 _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST = {
     "accept",
     "accept-language",
@@ -12548,6 +12554,21 @@ def _show_page_accepts_html() -> bool:
     return html_quality > 0.0 and html_quality > json_quality
 
 
+def _show_page_accepts_markdown_header(accept: str) -> bool:
+    """Choose Markdown only for an explicit, preferred ``text/markdown`` range."""
+    if not accept:
+        return False
+    markdown_quality = _show_page_accept_quality(accept, "text/markdown")
+    if markdown_quality <= 0.0:
+        return False
+    # A wildcard must not turn the normal browser request into Markdown. The
+    # explicit media range is still allowed to win a tie against HTML.
+    if not re.search(r"(?:^|,)\s*text/markdown\s*(?:;|,|$)", accept, re.IGNORECASE):
+        return False
+    html_quality = _show_page_accept_quality(accept, "text/html")
+    return markdown_quality >= html_quality
+
+
 def _show_page_not_found_html_response():
     language = _request_ui_language()
     title = html.escape(t("show.pageUnavailable.title", language), quote=True)
@@ -12673,6 +12694,48 @@ def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIR
     if not segments or segments[0] in {"api", "__show"}:
         return False
     return True
+
+
+def _is_show_page_markdown_request(asset_path: str, starlette_request: FastAPIRequest) -> bool:
+    """Identify a document/SPA request that may use the agent representation."""
+    if starlette_request.method not in {"GET", "HEAD"}:
+        return False
+    if not _show_page_accepts_markdown_header(starlette_request.headers.get("accept", "")):
+        return False
+    relative = _decode_show_page_asset_path(asset_path)
+    if relative in {"", "index.html"}:
+        return True
+    segments = [segment for segment in relative.split("/") if segment]
+    if not segments or segments[0] in {"api", "__show"}:
+        return False
+    # An explicit asset extension remains an asset request even when a caller
+    # sends an unusual Accept header. Extensionless paths are SPA history routes.
+    asset_suffixes = {
+        ".css",
+        ".gif",
+        ".html",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".json",
+        ".map",
+        ".mjs",
+        ".mp3",
+        ".mp4",
+        ".png",
+        ".svg",
+        ".tsx",
+        ".ts",
+        ".txt",
+        ".wasm",
+        ".webmanifest",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".xml",
+    }
+    return not any(segment.lower().endswith(suffix) for segment in segments for suffix in asset_suffixes)
 
 
 def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
@@ -14059,6 +14122,138 @@ async def _show_page_runtime_response(
     return FastAPIResponse(content=content, status_code=proxied.status_code, headers=response_headers)
 
 
+def _show_page_agent_markdown_error_response(
+    code: str,
+    status_code: int,
+    *,
+    upstream_status: int | None = None,
+) -> FastAPIResponse:
+    payload: dict[str, Any] = {"error": code}
+    if upstream_status is not None:
+        payload["upstream_status"] = upstream_status
+    response = FastAPIResponse(
+        content=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        status_code=status_code,
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            "Vary": "Accept",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+    return response
+
+
+def _rewrite_public_show_agent_markdown(
+    content: bytes,
+    *,
+    session_id: str,
+    external_prefix: str,
+) -> bytes:
+    """Keep authored private Show URLs from leaking through a public response."""
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content
+    session_part = quote(session_id, safe="")
+    private_prefix = f"/show/{session_part}"
+    public_prefix = external_prefix.rstrip("/")
+    rewritten = re.sub(
+        r"(?<![A-Za-z0-9._~-])"
+        + re.escape(private_prefix)
+        + r"(?=$|[/?#\s)\]}>,])",
+        public_prefix,
+        text,
+    )
+    return rewritten.encode("utf-8")
+
+
+async def _show_page_agent_markdown_response(
+    session_id: str,
+    starlette_request: FastAPIRequest,
+    *,
+    external_prefix: str | None = None,
+) -> FastAPIResponse:
+    """Proxy the optional page-owned Markdown handler without HTML transforms."""
+    import httpx
+
+    from core.show_runtime import (
+        ShowRuntimeContext,
+        ShowRuntimeProtocolEnvelope,
+        get_show_runtime_manager,
+    )
+
+    session_part = quote(session_id, safe="")
+    runtime_path = f"/sessions/{session_part}/app/api/agent-markdown"
+    if starlette_request.url.query:
+        runtime_path = f"{runtime_path}?{starlette_request.url.query}"
+    context = ShowRuntimeContext.SHARED if external_prefix else ShowRuntimeContext.PRIVATE
+    if starlette_request.method != "GET":
+        return _show_page_agent_markdown_error_response("agent_markdown_method_not_allowed", 405)
+    request_headers = {
+        key: value
+        for key, value in _show_runtime_forwarded_headers(starlette_request.headers).items()
+        if key.lower() != SHOW_EVENT_WRITE_TOKEN_HEADER.lower()
+    }
+    envelope = ShowRuntimeProtocolEnvelope(context)
+    body = await starlette_request.body()
+    try:
+        proxied = await asyncio.wait_for(
+            get_show_runtime_manager().request(
+                starlette_request.method,
+                runtime_path,
+                envelope=envelope,
+                headers=request_headers,
+                body=body or None,
+            ),
+            timeout=SHOW_PAGE_AGENT_MARKDOWN_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return _show_page_agent_markdown_error_response("agent_markdown_timeout", 504)
+    except httpx.TimeoutException:
+        return _show_page_agent_markdown_error_response("agent_markdown_timeout", 504)
+
+    if proxied.status_code == 404:
+        return _show_page_agent_markdown_error_response("agent_markdown_unavailable", 406)
+    if proxied.status_code < 200 or proxied.status_code >= 300:
+        return _show_page_agent_markdown_error_response(
+            "agent_markdown_handler_error",
+            502,
+            upstream_status=proxied.status_code,
+        )
+    if len(proxied.content) > SHOW_PAGE_AGENT_MARKDOWN_MAX_BYTES:
+        return _show_page_agent_markdown_error_response("agent_markdown_too_large", 413)
+    content_type = proxied.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "text/markdown":
+        return _show_page_agent_markdown_error_response("agent_markdown_invalid_content_type", 502)
+    try:
+        proxied.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return _show_page_agent_markdown_error_response("agent_markdown_invalid_encoding", 502)
+
+    response_headers = {
+        key: value
+        for key, value in proxied.headers.items()
+        if key.lower() in {"content-language", "content-type"}
+    }
+    _set_response_header(response_headers, "Content-Type", "text/markdown; charset=utf-8")
+    _set_response_header(response_headers, "Cache-Control", "no-store")
+    _set_response_header(response_headers, "Vary", _append_vary_header(proxied.headers.get("vary"), "Accept"))
+    response_headers["X-Content-Type-Options"] = "nosniff"
+    response_headers["Referrer-Policy"] = "no-referrer"
+    content = proxied.content
+    if external_prefix:
+        content = _rewrite_public_show_agent_markdown(
+            content,
+            session_id=session_id,
+            external_prefix=external_prefix,
+        )
+        if re.search(r"(?<![A-Za-z0-9._~-])/show/[^\s)\]}>,]+", content.decode("utf-8")):
+            return _show_page_agent_markdown_error_response("agent_markdown_private_link", 502)
+    return FastAPIResponse(content=content, status_code=200, headers=response_headers)
+
+
 def _should_inject_show_runtime_config(
     status_code: int,
     headers: dict[str, str],
@@ -14614,6 +14809,15 @@ async def serve_private_show_page(session_id, asset_path):
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             return await _show_events_response(page.session_id)
+        if _is_show_page_markdown_request(asset_path, request._request):
+            try:
+                return await _show_page_agent_markdown_response(
+                    page.session_id,
+                    request._request,
+                )
+            except Exception:
+                logger.debug("Show Runtime Markdown handler unavailable", exc_info=True)
+                return _show_page_agent_markdown_error_response("show_runtime_unavailable", 503)
         page_dir = ensure_show_page_dir(page.session_id)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
@@ -15078,6 +15282,17 @@ async def serve_public_show_page(share_id, asset_path):
                 public_share_id=share_id,
                 allow_dispatch=can_annotate,
             )
+        if _is_show_page_markdown_request(asset_path, request._request):
+            try:
+                response = await _show_page_agent_markdown_response(
+                    page.session_id,
+                    request._request,
+                    external_prefix=f"/p/{quote(share_id, safe='')}",
+                )
+            except Exception:
+                logger.debug("Show Runtime public Markdown handler unavailable", exc_info=True)
+                response = _show_page_agent_markdown_error_response("show_runtime_unavailable", 503)
+            return _with_limited_show_policy(response) if limited_guest else response
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):
                 return shim_response
