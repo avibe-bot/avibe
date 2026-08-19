@@ -149,6 +149,34 @@ def _pin_attachment_bundle() -> tuple[AttachmentPinStore, PinnedBundle, Path]:
     return attachment_store, bundle, pinned_path
 
 
+def _pin_office_bundle(*, include_pdf: bool) -> tuple[AttachmentPinStore, PinnedBundle]:
+    home = paths.get_vibe_remote_dir()
+    source_root = home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    source_root.chmod(0o700)
+    specs = [("report.xlsx", "doc", b"pinned office document")]
+    if include_pdf:
+        specs.append(("evidence.pdf", "pdf", b"%PDF-1.7\npinned sibling"))
+    attachments = []
+    for name, kind, payload in specs:
+        source = source_root / name
+        source.write_bytes(payload)
+        source.chmod(0o600)
+        attachments.append(
+            CaptureAttachment(
+                kind=kind,
+                name=name,
+                uri=source.as_uri(),
+                ext=source.suffix.lstrip("."),
+            )
+        )
+    attachment_store = AttachmentPinStore(
+        effective_home=home,
+        source_root=source_root,
+    )
+    return attachment_store, attachment_store.pin(tuple(attachments))
+
+
 def _enqueue_attachment_bundle(
     store: MemoryStore,
     bundle: PinnedBundle,
@@ -3560,6 +3588,87 @@ async def test_attachment_preflight_failure_retries_caption_as_text_only(
     assert provider.captures[0].text == "remember the attachment"
     assert provider.captures[0].attachments == ()
     assert releases == [bundle.bundle_id]
+
+
+async def test_delivery_rechecks_soffice_and_preserves_non_office_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle = _pin_office_bundle(include_pdf=True)
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="soffice-removed-before-delivery",
+    )
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_conversion_available",
+        lambda: False,
+    )
+    provider = FakeMemoryProvider()
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert await coordinator.deliver(claimed, lease_owner="worker")
+
+    settled = store.get_queue_row(original.source_message_digest)
+    assert settled is not None
+    assert settled.state == "delivered"
+    assert [item.name for item in provider.captures[0].attachments] == ["evidence.pdf"]
+    assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+
+
+async def test_delivery_settles_captionless_office_when_soffice_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    attachment_store, bundle = _pin_office_bundle(include_pdf=False)
+    original = _enqueue_attachment_bundle(
+        store,
+        bundle,
+        source="captionless-soffice-removed-before-delivery",
+        payload_text="",
+    )
+    monkeypatch.setattr(
+        attachment_module.memory_modality,
+        "office_conversion_available",
+        lambda: False,
+    )
+    provider = FakeMemoryProvider()
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        attachment_store=attachment_store,
+    )
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+    settled = store.get_queue_row(original.source_message_digest)
+    assert settled is not None
+    assert (settled.state, settled.attempts, settled.last_error) == (
+        "dead",
+        1,
+        "memory_invalid_input",
+    )
+    assert provider.captures == []
+    assert store.attachment_bundle_sets() == (frozenset(), frozenset())
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,6 @@
+import io
 import sys
+import zipfile
 from pathlib import Path
 from types import ModuleType
 
@@ -116,9 +118,16 @@ def test_pinned_modality_admission_script_accepts_supported_upstream_containers(
     exec(pinned_modality_contract_script(), {})
 
 
-_ZIP_MAGIC = b"PK\x03\x04office"
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1office"
 _RTF_MAGIC = b"{\\rtf office"
+
+
+def _office_zip(*entries: str, mimetype: str | None = None) -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        for entry in entries:
+            archive.writestr(entry, mimetype if entry == "mimetype" else b"content")
+    return payload.getvalue()
 
 
 def test_classifier_keeps_svg_out_of_the_live_allowlist(tmp_path: Path) -> None:
@@ -152,6 +161,9 @@ def test_office_probe_uses_sidecar_path_and_macos_fallback(
 
     fallback = _write_private(tmp_path / "soffice", b"")
     monkeypatch.setattr("core.memory.modality._MACOS_SOFFICE", fallback)
+    assert office_conversion_available() is False
+
+    fallback.chmod(0o700)
     assert office_conversion_available() is True
 
 
@@ -160,7 +172,10 @@ def test_classifier_skips_office_without_soffice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: False)
-    path = _write_private(tmp_path / "report.docx", _ZIP_MAGIC)
+    path = _write_private(
+        tmp_path / "report.docx",
+        _office_zip("[Content_Types].xml", "word/document.xml"),
+    )
 
     assert classify_pinned_attachment(
         "report.docx",
@@ -174,7 +189,10 @@ def test_classifier_accepts_office_when_soffice_is_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
-    path = _write_private(tmp_path / "report.xlsx", _ZIP_MAGIC)
+    path = _write_private(
+        tmp_path / "report.xlsx",
+        _office_zip("[Content_Types].xml", "xl/workbook.xml"),
+    )
 
     assert classify_pinned_attachment(
         "report.xlsx",
@@ -194,6 +212,94 @@ def test_classifier_rejects_office_bytes_that_are_not_convertible(
         "report.docx",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         path,
+    ) is None
+
+
+def test_classifier_rejects_an_ordinary_zip_renamed_as_office(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / "report.docx", _office_zip("notes.txt"))
+
+    assert classify_pinned_attachment(
+        "report.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        path,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("filename", "mimetype"),
+    [
+        ("report.pages", "application/vnd.apple.pages"),
+        ("slides.key", "application/vnd.apple.keynote"),
+        ("budget.numbers", "application/vnd.apple.numbers"),
+    ],
+)
+def test_classifier_accepts_registered_iwork_mime_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    mimetype: str,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(tmp_path / filename, _office_zip("Index/Document.iwa"))
+
+    assert classify_pinned_attachment(filename, mimetype, path) == (
+        "doc",
+        Path(filename).suffix.lstrip("."),
+    )
+
+
+def test_classifier_requires_the_mime_for_the_same_office_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    path = _write_private(
+        tmp_path / "report.docx",
+        _office_zip("[Content_Types].xml", "word/document.xml"),
+    )
+
+    assert classify_pinned_attachment(
+        "report.docx",
+        "application/vnd.ms-excel",
+        path,
+    ) is None
+
+
+def test_classifier_requires_the_registered_odf_package_mimetype(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.memory.modality.office_conversion_available", lambda: True)
+    valid = _write_private(
+        tmp_path / "notes.odt",
+        _office_zip(
+            "mimetype",
+            "content.xml",
+            mimetype="application/vnd.oasis.opendocument.text",
+        ),
+    )
+    wrong = _write_private(
+        tmp_path / "sheet.odt",
+        _office_zip(
+            "mimetype",
+            "content.xml",
+            mimetype="application/vnd.oasis.opendocument.spreadsheet",
+        ),
+    )
+
+    assert classify_pinned_attachment(
+        "notes.odt",
+        "application/vnd.oasis.opendocument.text",
+        valid,
+    ) == ("doc", "odt")
+    assert classify_pinned_attachment(
+        "sheet.odt",
+        "application/vnd.oasis.opendocument.text",
+        wrong,
     ) is None
 
 

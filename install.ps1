@@ -135,7 +135,10 @@ function Install-Node {
 }
 
 function Warn-IfLibreOfficeMissing {
-    if (Test-Command "soffice") {
+    $runtimeSoffice = @("/usr/bin/soffice", "/bin/soffice") |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if ($runtimeSoffice) {
         Write-Success "LibreOffice is available for Memory Office attachment capture"
         return
     }

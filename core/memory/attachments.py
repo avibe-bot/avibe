@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from config import paths
+from core.memory import modality as memory_modality
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     ConfinedRoot,
@@ -24,12 +25,6 @@ from core.memory.confined_filesystem import (
     ensure_private_directory,
     open_confined_directory,
     required_no_follow_flag,
-)
-from core.memory.modality import (
-    OFFICE_ATTACHMENT_EXTENSIONS,
-    SUPPORTED_ATTACHMENT_EXTENSIONS,
-    office_attachment_bytes_match,
-    office_conversion_available,
 )
 from core.memory.types import (
     CaptureAttachment,
@@ -413,9 +408,18 @@ class AttachmentPinStore:
                 )
                 try:
                     projected: list[CaptureAttachment] = []
+                    office_available = not any(
+                        pinned.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                        for pinned in checked.attachments
+                    ) or memory_modality.office_conversion_available()
                     for index, pinned in enumerate(checked.attachments):
                         filename = _bundle_filename(index, pinned.ext)
                         _verify_pinned_file(bundle_fd, filename, pinned)
+                        if (
+                            pinned.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                            and not office_available
+                        ):
+                            continue
                         projected.append(
                             CaptureAttachment(
                                 kind=pinned.kind,
@@ -725,25 +729,25 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
         extension = path.suffix.lstrip(".").lower()
         if _EXTENSION_PATTERN.fullmatch(extension) is None:
             continue
-        if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+        if extension not in memory_modality.SUPPORTED_ATTACHMENT_EXTENSIONS:
             # The provider answers an unparseable extension with a permanent
             # rejection, so an upload it cannot read never becomes a capture.
             continue
-        if extension in OFFICE_ATTACHMENT_EXTENSIONS:
+        office_classification = None
+        if extension in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS:
             # EverOS aborts the whole /add batch when soffice is missing or the
             # bytes are not a convertible Office container.
-            try:
-                with path.open("rb") as file_obj:
-                    sample = file_obj.read(4096)
-            except OSError:
-                continue
-            if not office_conversion_available() or not office_attachment_bytes_match(
-                extension,
-                sample,
-            ):
+            office_classification = memory_modality.classify_pinned_attachment(
+                name,
+                mimetype,
+                path,
+            )
+            if office_classification is None:
                 continue
         normalized_mime = mimetype.lower().split(";", 1)[0].strip()
-        if normalized_mime.startswith("image/"):
+        if office_classification is not None:
+            kind, _classified_extension = office_classification
+        elif normalized_mime.startswith("image/"):
             kind: MemoryContentKind = "image"
         elif normalized_mime.startswith("audio/"):
             kind = "audio"
@@ -1211,7 +1215,7 @@ def _valid_kind_name_extension(kind: object, name: object, extension: object) ->
         or "\x00" in name
         or not isinstance(extension, str)
         or _EXTENSION_PATTERN.fullmatch(extension) is None
-        or extension not in SUPPORTED_ATTACHMENT_EXTENSIONS
+        or extension not in memory_modality.SUPPORTED_ATTACHMENT_EXTENSIONS
     ):
         return False
     try:
@@ -1284,7 +1288,7 @@ def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
             if (
                 match is None
                 or match.group(1) != f"{index:02d}"
-                or match.group(2) not in SUPPORTED_ATTACHMENT_EXTENSIONS
+                or match.group(2) not in memory_modality.SUPPORTED_ATTACHMENT_EXTENSIONS
             ):
                 raise AttachmentBundleInvalidError(
                     "memory_store_unavailable",

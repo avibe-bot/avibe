@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import os
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -40,6 +42,14 @@ async def _materialize(
         ),
         _Client(payloads),
     )
+
+
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
 
 
 @pytest.mark.asyncio
@@ -162,8 +172,8 @@ async def test_memory_selection_skips_office_without_soffice(
             (
                 "report.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                b"PK\x03\x04office",
-                13,
+                _xlsx_bytes(),
+                None,
             ),
         ],
     )
@@ -187,8 +197,8 @@ async def test_memory_selection_admits_office_when_soffice_is_present(
             (
                 "report.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                b"PK\x03\x04office",
-                13,
+                _xlsx_bytes(),
+                None,
             ),
             ("valid.pdf", "application/pdf", b"%PDF-1.7\n", 9),
         ],

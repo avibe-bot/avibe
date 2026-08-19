@@ -377,7 +377,7 @@ install_node() {
 }
 
 warn_if_libreoffice_missing() {
-    if command_exists soffice || [ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]; then
+    if PATH="/usr/bin:/bin" command -v soffice >/dev/null 2>&1 || [ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]; then
         success "LibreOffice is available for Memory Office attachment capture"
         return 0
     fi

@@ -27,6 +27,7 @@ from __future__ import annotations
 import codecs
 import os
 import shutil
+import zipfile
 from pathlib import Path
 
 from core.memory.types import MemoryContentKind
@@ -96,40 +97,62 @@ PINNED_UPSTREAM_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset({"svg"})
 _IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "webp", "tiff", "tif", "bmp"})
 _AUDIO_EXTENSIONS = frozenset({"mp3", "wav", "m4a", "amr", "aiff", "aac", "ogg", "flac"})
 _TEXT_EXTENSIONS = frozenset({"txt", "md", "vtt", "csv", "tsv"})
-_OFFICE_ZIP_EXTENSIONS = frozenset(
-    {
-        "docx",
-        "pptx",
-        "xlsx",
-        "odt",
-        "ods",
-        "odp",
-        "pages",
-        "key",
-        "numbers",
-    }
-)
+_OFFICE_ZIP_MARKERS: dict[str, frozenset[str]] = {
+    "docx": frozenset({"[Content_Types].xml", "word/document.xml"}),
+    "pptx": frozenset({"[Content_Types].xml", "ppt/presentation.xml"}),
+    "xlsx": frozenset({"[Content_Types].xml", "xl/workbook.xml"}),
+    "odt": frozenset({"mimetype", "content.xml"}),
+    "ods": frozenset({"mimetype", "content.xml"}),
+    "odp": frozenset({"mimetype", "content.xml"}),
+    # Current iWork packages share the IWA document index; the extension tells
+    # LibreOffice which filter to apply.
+    "pages": frozenset({"Index/Document.iwa"}),
+    "key": frozenset({"Index/Document.iwa"}),
+    "numbers": frozenset({"Index/Document.iwa"}),
+}
 _OFFICE_OLE_EXTENSIONS = frozenset({"doc", "ppt", "xls"})
 _OFFICE_RTF_EXTENSIONS = frozenset({"rtf"})
-_OFFICE_MIMES = frozenset(
-    {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/msword",
-        "application/vnd.ms-excel",
-        "application/vnd.ms-powerpoint",
-        "application/x-iwork-pages-sffpages",
-        "application/x-iwork-keynote-sffkey",
-        "application/x-iwork-numbers-sffnumbers",
-        "application/vnd.oasis.opendocument.text",
-        "application/vnd.oasis.opendocument.spreadsheet",
-        "application/vnd.oasis.opendocument.presentation",
-        "application/rtf",
-        "text/rtf",
-    }
-)
-_ZIP_MAGIC = b"PK\x03\x04"
+_OFFICE_MIMES_BY_EXTENSION: dict[str, frozenset[str]] = {
+    "docx": frozenset(
+        {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+    ),
+    "pptx": frozenset(
+        {"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
+    ),
+    "xlsx": frozenset(
+        {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+    ),
+    "doc": frozenset({"application/msword"}),
+    "ppt": frozenset({"application/vnd.ms-powerpoint"}),
+    "xls": frozenset({"application/vnd.ms-excel"}),
+    "pages": frozenset(
+        {
+            "application/vnd.apple.pages",
+            "application/x-iwork-pages-sffpages",
+        }
+    ),
+    "key": frozenset(
+        {
+            "application/vnd.apple.keynote",
+            "application/x-iwork-keynote-sffkey",
+        }
+    ),
+    "numbers": frozenset(
+        {
+            "application/vnd.apple.numbers",
+            "application/x-iwork-numbers-sffnumbers",
+        }
+    ),
+    "odt": frozenset({"application/vnd.oasis.opendocument.text"}),
+    "ods": frozenset({"application/vnd.oasis.opendocument.spreadsheet"}),
+    "odp": frozenset({"application/vnd.oasis.opendocument.presentation"}),
+    "rtf": frozenset({"application/rtf", "text/rtf"}),
+}
+_ODF_MIME_BY_EXTENSION = {
+    "odt": "application/vnd.oasis.opendocument.text",
+    "ods": "application/vnd.oasis.opendocument.spreadsheet",
+    "odp": "application/vnd.oasis.opendocument.presentation",
+}
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _RTF_MAGIC = b"{\\rtf"
 
@@ -144,14 +167,11 @@ def office_conversion_available() -> bool:
 
     return (
         shutil.which("soffice", path="/usr/bin:/bin") is not None
-        or _MACOS_SOFFICE.is_file()
+        or (
+            _MACOS_SOFFICE.is_file()
+            and os.access(_MACOS_SOFFICE, os.X_OK)
+        )
     )
-
-
-def office_attachment_bytes_match(extension: str, data: bytes) -> bool:
-    """Return whether ``data`` has the closed Office container magic for ``extension``."""
-
-    return _office_magic_matches(extension, data)
 
 
 def classify_pinned_attachment(
@@ -202,9 +222,17 @@ def classify_pinned_attachment(
             return None
         return "pdf", extension
     if extension in OFFICE_ATTACHMENT_EXTENSIONS:
-        if not office_conversion_available() or not _office_magic_matches(extension, sample):
+        if not office_conversion_available() or not _office_container_matches(
+            extension,
+            path,
+            file_fd,
+            sample,
+        ):
             return None
-        if normalized_mime != "application/octet-stream" and normalized_mime not in _OFFICE_MIMES:
+        if (
+            normalized_mime != "application/octet-stream"
+            and normalized_mime not in _OFFICE_MIMES_BY_EXTENSION[extension]
+        ):
             return None
         return "doc", extension
     if not _valid_utf8_text_file(path, file_fd):
@@ -249,14 +277,48 @@ def _extension_aliases_match(expected: str, detected: str) -> bool:
     return expected == detected or any({expected, detected} <= group for group in aliases)
 
 
-def _office_magic_matches(extension: str, data: bytes) -> bool:
-    if extension in _OFFICE_ZIP_EXTENSIONS:
-        return data.startswith(_ZIP_MAGIC)
+def _office_container_matches(
+    extension: str,
+    path: Path,
+    file_fd: int | None,
+    sample: bytes,
+) -> bool:
+    if extension in _OFFICE_ZIP_MARKERS:
+        return _office_zip_matches(extension, path, file_fd)
     if extension in _OFFICE_OLE_EXTENSIONS:
-        return data.startswith(_OLE_MAGIC)
+        return sample.startswith(_OLE_MAGIC)
     if extension in _OFFICE_RTF_EXTENSIONS:
-        return data.startswith(_RTF_MAGIC)
+        return sample.startswith(_RTF_MAGIC)
     return False
+
+
+def _office_zip_matches(extension: str, path: Path, file_fd: int | None) -> bool:
+    try:
+        with _open_attachment_file(path, file_fd) as file_obj:
+            file_obj.seek(0)
+            with zipfile.ZipFile(file_obj) as archive:
+                names = archive.namelist()
+                if len(names) != len(set(names)):
+                    return False
+                if not _OFFICE_ZIP_MARKERS[extension].issubset(names):
+                    return False
+                expected_mime = _ODF_MIME_BY_EXTENSION.get(extension)
+                if expected_mime is None:
+                    return True
+                mime_info = archive.getinfo("mimetype")
+                if mime_info.file_size > 128:
+                    return False
+                return archive.read(mime_info) == expected_mime.encode("ascii")
+    except (
+        KeyError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+    ):
+        return False
 
 
 def _image_extension(data: bytes) -> str | None:

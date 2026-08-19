@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
+import zipfile
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +29,14 @@ from tests.scenario_harness.memory_im_attachments import (
     MemoryIMAttachmentScenarioHarness,
 )
 from vibe import cli, internal_client
+
+
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
 
 
 def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
@@ -331,7 +341,7 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
                 "valid.png": ("image/png", PNG_BYTES),
                 "report.xlsx": (
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    b"PK\x03\x04office",
+                    _xlsx_bytes(),
                 ),
             },
         )
@@ -352,7 +362,7 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
                 "valid.png": ("image/png", PNG_BYTES),
                 "report.xlsx": (
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    b"PK\x03\x04office",
+                    _xlsx_bytes(),
                 ),
             },
         )
@@ -367,6 +377,33 @@ def test_office_attachment_requires_soffice_and_preserves_valid_siblings(
         "doc",
     ]
     assert with_soffice.memory_bundle_entries == ()
+
+    availability = [True, False]
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: availability.pop(0),
+    )
+    stale_home = tmp_path / "soffice-removed-before-delivery"
+    monkeypatch.setenv("AVIBE_HOME", str(stale_home / "avibe-home"))
+    stale_soffice = MemoryIMAttachmentScenarioHarness(stale_home)
+    asyncio.run(
+        stale_soffice.capture(
+            text="Keep the image after Office conversion disappears",
+            payloads={
+                "valid.png": ("image/png", PNG_BYTES),
+                "report.xlsx": (
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    _xlsx_bytes(),
+                ),
+            },
+        )
+    )
+
+    assert availability == []
+    assert [item.name for item in stale_soffice.provider.captures[0].attachments] == [
+        "valid.png"
+    ]
+    assert stale_soffice.memory_bundle_entries == ()
 
 
 class _ScenarioPrincipals:

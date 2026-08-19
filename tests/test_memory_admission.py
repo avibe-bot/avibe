@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -508,6 +510,14 @@ def _upload(uploads: Path, filename: str, mimetype: str) -> SimpleNamespace:
     return SimpleNamespace(name=filename, mimetype=mimetype, local_path=str(path))
 
 
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
+
+
 def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, tmp_path: Path) -> None:
     """The runtime answers an unparseable extension with a permanent rejection.
 
@@ -541,11 +551,11 @@ def test_workbench_office_uploads_require_soffice_and_convertible_bytes(
 ) -> None:
     uploads = _uploads_dir(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "core.memory.attachments.office_conversion_available",
+        "core.memory.modality.office_conversion_available",
         lambda: True,
     )
     valid = uploads / "report.xlsx"
-    valid.write_bytes(b"PK\x03\x04office")
+    valid.write_bytes(_xlsx_bytes())
     fake = _upload(
         uploads,
         "broken.docx",

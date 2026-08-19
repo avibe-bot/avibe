@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = REPO_ROOT / "install.sh"
+INSTALL_POWERSHELL = REPO_ROOT / "install.ps1"
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -387,7 +388,7 @@ def test_install_script_continues_when_node_install_fails(tmp_path):
     assert "avibe-os 9.9.9" in version_result.stdout
 
 
-def test_install_script_warns_when_libreoffice_is_missing(tmp_path):
+def test_install_script_probes_the_same_libreoffice_path_as_memory(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()
     path_dir = tmp_path / "path-bin"
@@ -401,16 +402,17 @@ def test_install_script_warns_when_libreoffice_is_missing(tmp_path):
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
     env["VIBE_INSTALL_SKIP_NODE"] = "1"
 
-    missing = _install(env, cwd=tmp_path)
-    assert missing.returncode == 0, missing.stdout + missing.stderr
-    assert "LibreOffice is not available" in missing.stdout
-    assert "Memory will skip Word, Excel, PowerPoint" in missing.stdout
-
     _write_executable(path_dir / "soffice", "#!/usr/bin/env bash\nexit 0\n")
-    present = _install(env, cwd=tmp_path)
-    assert present.returncode == 0, present.stdout + present.stderr
-    assert "LibreOffice is available for Memory Office attachment capture" in present.stdout
-    assert "LibreOffice is not available" not in present.stdout
+    result = _install(env, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LibreOffice is not available" in result.stdout
+    assert "Memory will skip Word, Excel, PowerPoint" in result.stdout
+    assert "LibreOffice is available for Memory Office attachment capture" not in result.stdout
+    assert 'PATH="/usr/bin:/bin" command -v soffice' in INSTALL_SCRIPT.read_text()
+    powershell = INSTALL_POWERSHELL.read_text()
+    assert 'Test-Command "soffice"' not in powershell
+    assert '@("/usr/bin/soffice", "/bin/soffice")' in powershell
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):
