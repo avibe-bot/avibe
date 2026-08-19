@@ -245,13 +245,9 @@ def _run_migrations_locked(
     cfg = alembic_config(target_db)
     backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
     if backup_revisions is not None:
-        current_revisions, target_revisions = backup_revisions
-        backup_path = create_sqlite_migration_backup(
-            target_db,
-            from_revisions=current_revisions,
-            to_revisions=target_revisions,
-        )
-        logger.info("Created pre-migration SQLite backup at %s", backup_path)
+        _current_revisions, target_revisions = backup_revisions
+        backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        logger.info("Pre-migration SQLite rollback point at %s", backup_path)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)

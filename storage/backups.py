@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -29,6 +30,15 @@ _LEGACY_SQLITE_REPAIR_RE = re.compile(
     r"(?P<timestamp>\d{8}T\d{6}Z)\.sqlite$"
 )
 
+# A platform or filesystem declining to sync a directory is an answer, not a
+# fault. Anything else -- ENOSPC, EIO -- means the data may not be on the disk,
+# so it must reach the caller instead of being logged and forgotten.
+_UNSUPPORTED_SYNC_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EACCES", "EPERM", "EINVAL", "EISDIR", "ENOSYS", "ENOTSUP", "EOPNOTSUPP")
+    if hasattr(errno, name)
+)
+
 
 @dataclass(frozen=True)
 class _BackupCandidate:
@@ -40,7 +50,15 @@ class _BackupCandidate:
 
     @property
     def order_key(self) -> tuple[datetime, int, str]:
-        return self.timestamp, self.suffix, self.root.name
+        """Creation order, as the backup's own name records it.
+
+        A movable clock can reorder this, and that is tolerable here, because
+        ordering only decides which of the older copies to drop first. The copy
+        a call just made is not defended by outranking them -- it is handed to
+        `prune_state_backups` as protected, which no clock can undo.
+        """
+
+        return (self.timestamp, self.suffix, self.root.name)
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -166,8 +184,16 @@ def prune_state_backups(
     *,
     json_retention: int | None = JSON_STATE_BACKUP_RETENTION,
     sqlite_retention: int | None = SQLITE_BACKUP_RETENTION,
+    protect: Path | None = None,
 ) -> list[Path]:
     """Keep a bounded rollback window of backups created by Avibe.
+
+    Newest first, and `protect` -- the backup its caller has just finished
+    writing -- is kept ahead of all of them. Ranking it there rather than
+    trusting it to sort highest is the difference between a bound and a bug: a
+    copy left behind by a machine whose clock ran ahead is dated into the future
+    forever, and every ordering rule that decides the fresh copy's fate by
+    comparing timestamps hands the slot to that stale one instead.
 
     Unknown files, symlinks, incomplete backups, and directories without a
     recognized manifest are intentionally left untouched.
@@ -181,11 +207,77 @@ def prune_state_backups(
     candidates = _managed_candidates(backups_dir)
     removed: list[Path] = []
     for kind, limit in limits.items():
-        matching = sorted((candidate for candidate in candidates if candidate.kind == kind), key=lambda item: item.order_key)
-        for candidate in matching[: max(0, len(matching) - limit)]:
-            if _remove_candidate(candidate):
+        matching = [candidate for candidate in candidates if candidate.kind == kind]
+        ordered = sorted(matching, key=lambda item: item.order_key, reverse=True)
+        if protect is not None:
+            ordered.sort(key=lambda item: item.root != protect)
+        keep = {candidate.root for candidate in ordered[:limit]}
+        for candidate in sorted(matching, key=lambda item: item.order_key):
+            if candidate.root not in keep and _remove_candidate(candidate):
                 removed.append(candidate.root)
     return removed
+
+
+def _fsync_file(path: Path) -> None:
+    """Push a file's contents to stable storage.
+
+    A failure here is never tolerable: it says the copy may not survive the
+    crash it was made for, and raising is what stops the caller from deleting
+    the copies it was meant to replace.
+
+    The descriptor is opened for writing because on Windows `os.fsync` reaches
+    `FlushFileBuffers`, which refuses a handle without write access. A
+    read-only descriptor would turn every pre-migration backup on that platform
+    into a failed schema upgrade -- the flush is here to make an upgrade safe,
+    so it must not be the thing that stops one.
+    """
+
+    fd = os.open(path, os.O_RDWR)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Push a directory's own entries to stable storage, where that is a thing.
+
+    Syncing the directory is how a rename becomes durable on POSIX. Windows has
+    no equivalent and refuses to open a directory at all, and some filesystems
+    reject the call; those refusals are the platform answering. A storage error
+    is not an answer, so it propagates like any other.
+    """
+
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError as error:
+        if error.errno not in _UNSUPPORTED_SYNC_ERRNOS:
+            raise
+        logger.debug("Directory sync is unavailable for %s on this platform", path)
+        return
+    try:
+        os.fsync(fd)
+    except OSError as error:
+        if error.errno not in _UNSUPPORTED_SYNC_ERRNOS:
+            raise
+        logger.debug("Directory sync is unavailable for %s on this filesystem", path)
+    finally:
+        os.close(fd)
+
+
+def _stamped_revisions(connection: sqlite3.Connection) -> tuple[str, ...]:
+    """The alembic revisions the database behind `connection` is stamped with.
+
+    A database with no `alembic_version` table yields the empty tuple, which is
+    what an unversioned database is. This is recorded, never compared: a stamp
+    names where a database claims to be, not what it holds.
+    """
+
+    try:
+        rows = connection.execute("select version_num from alembic_version").fetchall()
+    except sqlite3.DatabaseError:
+        return ()
+    return tuple(sorted({str(row[0]) for row in rows}))
 
 
 def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
@@ -208,16 +300,56 @@ def create_sqlite_migration_backup(
     db_path: Path,
     *,
     backups_dir: Path | None = None,
-    from_revisions: Iterable[str] = (),
     to_revisions: Iterable[str] = (),
     now: datetime | None = None,
 ) -> Path:
-    """Create a consistent, self-identifying SQLite backup before migration."""
+    """Hold a rollback point for the database as it stands, in a bounded window.
+
+    Bounding the window belongs here rather than at the call sites. A backup is
+    a rollback point the moment it is durable, so whether the migration that
+    follows it succeeds says nothing about how many older copies are still
+    worth keeping -- and every caller that pruned on that outcome instead left
+    a failing migration adding one full copy of the database per attempt,
+    forever. Owning it at the one function that grows the window is what makes
+    the bound true for callers not yet written, including the ones that opt out
+    of their own pruning.
+
+    The copy is unconditional, and the window promises exactly one thing: a
+    restorable copy of the database as it stands at this call. Nothing here
+    tries to recognize a copy it already holds and reuse it. Earlier revisions
+    of this change did, by ranking the copies on wall-clock adjacency, then on
+    the schema transition each attempt recorded, then on a fingerprint of each
+    copy's schema, and finally by skipping the copy when a backup carried the
+    same revision stamp -- and every one of those is a label standing in for the
+    database's contents. Labels can be made to agree while the contents differ:
+    a migration that commits row changes and then fails moves neither schema nor
+    stamp, and an operator who restores a copy and keeps serving writes moves
+    the contents under a stamp that never changed. Reusing a copy on any of
+    those grounds hands back a rollback point missing committed data, which is
+    worse than having none, because it is reported as one.
+
+    The copy reaches stable storage before any older one is deleted, and is
+    protected from its own prune, so this call can never destroy what it just
+    produced.
+
+    The manifest records the revisions read back from the copy rather than
+    anything the caller reported, because between a caller sampling them and
+    this function running, another process can advance the database.
+    """
 
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
     target_root.mkdir(parents=True, exist_ok=True)
+    # The entry for the window itself has to be on the disk before anything in
+    # it counts as durable; a crash that keeps the upgrade but loses this
+    # directory leaves no rollback point at all. Unconditionally, because the
+    # attempt that created the directory is also the attempt whose sync can
+    # fail: it leaves a root that exists without a durable entry, and every
+    # later attempt that treated an existing root as a synced one would inherit
+    # that silently, for as long as the window lives.
+    _fsync_directory(target_root.parent)
+
     backup_dir = _unique_backup_dir(target_root, now=created_at)
     backup_dir.mkdir(mode=0o700)
     temp_db = backup_dir / "vibe.sqlite.tmp"
@@ -231,7 +363,9 @@ def create_sqlite_migration_backup(
                 check = destination.execute("PRAGMA quick_check").fetchone()
                 if check != ("ok",):
                     raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
+                from_revisions = _stamped_revisions(destination)
         os.chmod(temp_db, 0o600)
+        _fsync_file(temp_db)
         temp_db.replace(backup_db)
         manifest = {
             "schema_version": BACKUP_MANIFEST_VERSION,
@@ -239,12 +373,26 @@ def create_sqlite_migration_backup(
             "kind": "sqlite-migration",
             "created_at": created_at.astimezone(timezone.utc).isoformat(),
             "database": "vibe.sqlite",
-            "from_revisions": sorted(set(from_revisions)),
+            "from_revisions": list(from_revisions),
             "to_revisions": sorted(set(to_revisions)),
         }
-        (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        manifest_path = backup_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        _fsync_file(manifest_path)
+        _fsync_directory(backup_dir)
+        _fsync_directory(target_root)
     except Exception:
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
 
+    # Everything above has to happen before the prune, and each for its own
+    # reason. The fsyncs put the replacement on the disk first, so the
+    # filesystem can never persist the deletion of durable copies while losing
+    # the one that replaced them -- and if a sync reports a storage failure, the
+    # cleanup above runs and nothing is pruned at all. Being after the try means
+    # a failure while pruning cannot reach that cleanup and delete the rollback
+    # point this call just made. And it has to follow the manifest write,
+    # because a directory without one is not yet a recognized candidate and
+    # would not count itself against the bound.
+    prune_state_backups(target_root, json_retention=None, protect=backup_dir)
     return backup_dir
