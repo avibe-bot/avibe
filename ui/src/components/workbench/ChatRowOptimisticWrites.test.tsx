@@ -9,7 +9,7 @@
 // server refuses the burst.
 
 import { useEffect } from 'react';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
@@ -33,6 +33,11 @@ const mocks = vi.hoisted(() => ({
     convergeSessionArchived: vi.fn(),
   },
   apiFetch: vi.fn(),
+  // The live subscription's handlers, so a test can deliver the server's own
+  // events — the arrival point that has no request to be ordered against.
+  events: null as null | {
+    onSessionActivity?: (data: { session_id: string; event: string; title?: string | null }) => void;
+  },
   // Captured from the mocked leaf components: the route pick and the send are
   // both props ChatPage hands down, so driving them needs no DOM choreography.
   onPatch: null as null | ((patch: AgentRoutePatch) => void),
@@ -233,6 +238,21 @@ function shownRoute() {
   return screen.getByTestId('route').dataset;
 }
 
+// The title is click-to-edit, so what the user is looking at is the label of the
+// button it collapses to. The real field is driven here rather than synthesized:
+// a rename and a route pick come from two different controls, which is the whole
+// point of the cases below.
+function renameFrom(current: string, next: string) {
+  act(() => {
+    fireEvent.click(screen.getByRole('button', { name: current }));
+  });
+  const input = screen.getByPlaceholderText('chat.titlePlaceholder');
+  act(() => {
+    fireEvent.change(input, { target: { value: next } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+  });
+}
+
 async function mountChat() {
   render(
     <MemoryRouter initialEntries={[`/chat/${SESSION_ID}`]}>
@@ -265,6 +285,7 @@ describe('the chat row under an optimistic write', () => {
     mocks.onPatch = null;
     mocks.onSend = null;
     mocks.onStop = null;
+    mocks.events = null;
     navigate = null;
     vi.clearAllMocks();
     // The writer's store and the record of what an open write is holding are both
@@ -273,7 +294,10 @@ describe('the chat row under an optimistic write', () => {
     resetCoalescedWrites();
     resetOpenSessionRowWrites();
 
-    mocks.api.connectWorkbenchEvents.mockImplementation(() => () => {});
+    mocks.api.connectWorkbenchEvents.mockImplementation((handlers: unknown) => {
+      mocks.events = handlers as typeof mocks.events;
+      return () => {};
+    });
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
     mocks.api.getSession.mockImplementation(async (id: string) => rowsById[id] ?? sessionRow);
     mocks.api.getSessionBootstrap.mockImplementation(async (id: string) => ({
@@ -491,6 +515,114 @@ describe('the chat row under an optimistic write', () => {
     // with the route the chat started on, so the settle re-read is visible: an
     // overlay left standing would pin a pick nothing is writing any more.
     expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', effort: '', saving: 'no' });
+  });
+
+  it('sends a route pick made behind a rename as its own request, and keeps it when the rename is refused', async () => {
+    const gates: Deferred<unknown>[] = [];
+    mocks.api.updateSession.mockImplementation(() => {
+      const gate = deferred<unknown>();
+      gates.push(gate);
+      return gate.promise;
+    });
+    await mountChat();
+
+    renameFrom('Route ordering', 'Renamed');
+    expect(mocks.api.updateSession).toHaveBeenCalledWith(SESSION_ID, { title: 'Renamed' });
+
+    // Two requests, not one merged patch and not one waiting behind the other.
+    // The title and the route overwrite nothing of each other's, and the server
+    // writes only the columns each PATCH names.
+    act(() => mocks.onPatch!({ model: 'opus' }));
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, { model: 'opus' });
+
+    // Offline for reads, so only the local rollback is acting.
+    mocks.api.getSession.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      gates[0].reject(new Error('nope'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // The rename goes back. The pick does not: it is a different write, still in
+    // flight, and nothing about it was refused. While the two shared one writer
+    // key, this rejection ENDED that key's burst — which dropped the pick before
+    // it was ever sent AND reverted it on screen.
+    expect(screen.getByRole('button', { name: 'Route ordering' })).toBeTruthy();
+    expect(shownRoute()).toMatchObject({ model: 'opus', saving: 'yes' });
+
+    await act(async () => {
+      gates[1].resolve({ ...sessionRow, model: 'opus' });
+      await gates[1].promise;
+    });
+    await settle();
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(shownRoute()).toMatchObject({ model: 'opus', saving: 'no' });
+  });
+
+  it('keeps a rename made behind a route pick when the pick is refused', async () => {
+    const gates: Deferred<unknown>[] = [];
+    mocks.api.updateSession.mockImplementation(() => {
+      const gate = deferred<unknown>();
+      gates.push(gate);
+      return gate.promise;
+    });
+    await mountChat();
+
+    act(() => mocks.onPatch!({ agent_name: 'codex', agent_variant: 'codex', model: 'gpt-5' }));
+    renameFrom('Route ordering', 'Renamed');
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, { title: 'Renamed' });
+
+    mocks.api.getSession.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      gates[0].reject(new Error('nope'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // The route reverts and the rename stays — including its request, which the
+    // refusal has no claim over. The indicator is still on, because the header
+    // shows one for the row and the row is still being written.
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', saving: 'yes' });
+    expect(screen.getByRole('button', { name: 'Renamed' })).toBeTruthy();
+
+    await act(async () => {
+      gates[1].resolve({ ...sessionRow, title: 'Renamed' });
+      await gates[1].promise;
+    });
+    await settle();
+    expect(screen.getByRole('button', { name: 'Renamed' })).toBeTruthy();
+    expect(shownRoute()).toMatchObject({ saving: 'no' });
+  });
+
+  it('keeps a pending rename when a session event carries the title the server still holds', async () => {
+    const patchGate = deferred<unknown>();
+    mocks.api.updateSession.mockReturnValue(patchGate.promise);
+    await mountChat();
+
+    renameFrom('Route ordering', 'Renamed');
+    expect(mocks.api.updateSession).toHaveBeenCalledWith(SESSION_ID, { title: 'Renamed' });
+
+    // The rename broadcast for THIS row, carrying the title as the server still
+    // holds it. An event has no request of its own, so no read fence orders it
+    // against the write — which is why the defence cannot live in the fence.
+    await act(async () => {
+      mocks.events!.onSessionActivity!({ session_id: SESSION_ID, event: 'updated', title: 'Route ordering' });
+    });
+    await settle();
+    // Installing it would not just flicker: it re-seeds the header's editor from
+    // the prop, so a user still typing loses what they typed.
+    expect(screen.getByRole('button', { name: 'Renamed' })).toBeTruthy();
+
+    await act(async () => {
+      patchGate.resolve({ ...sessionRow, title: 'Renamed' });
+      await patchGate.promise;
+    });
+    await settle();
+    // And the defence ends with the write: this harness's row read still answers
+    // with the stored title, so an overlay left standing would be visible here.
+    expect(screen.getByRole('button', { name: 'Route ordering' })).toBeTruthy();
   });
 
   it('keeps each chat rollback to itself when two rows have a write in flight', async () => {
