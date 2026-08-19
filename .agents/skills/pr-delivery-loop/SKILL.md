@@ -170,30 +170,25 @@ turn ends because you armed a watch and are waiting, say exactly that.
 - The Codex bot usually auto-reviews new pushes, but not reliably. After every
   push, confirm a review of the new head is in flight within a few minutes; if
   none appears, comment `@codex review`. An auto-review that finds something
-  submits a review with inline threads, exactly like a triggered one — that is a
-  verdict, act on it. Only the passing case is asymmetric: an auto-review that
-  finds nothing announces only through the PR-body reaction, and never emits the
-  sha-bearing pass comment, which is produced by an explicit trigger and by
-  nothing else. So `@codex review` is not only how a stalled review is restarted
-  — it is the only way to obtain comment-shaped head-bound pass evidence.
-- A trigger only counts once the bot reacts 👀 (`eyes`) to that comment — but
-  **the bot withdraws the reaction when the review completes**, so 👀 is
-  evidence only inside its own window. Capture the URL returned by
-  `gh pr comment <pr> --body '@codex review'`, extract that comment's ID, and
-  query `repos/<o>/<r>/issues/comments/<comment-id>/reactions` directly within ~2
-  minutes. Require a reaction with `content == "eyes"` whose `user.login` is
-  `chatgpt-codex-connector` or `chatgpt-codex-connector[bot]`; aggregate counts or
-  reactions from other users do not prove pickup. Before retriggering because
-  👀 is absent, check for a current-head Codex verdict or another in-flight
-  review signal; a completed review may already have withdrawn 👀. Never use
-  `issues/<pr>/comments --jq '.[-1]'` to identify the trigger, and never find one
-  by matching `@codex review` in comment bodies: the bot quotes that phrase in the
-  boilerplate appended to its own verdicts, so the pattern selects its output as
-  readily as your input. The trigger is the comment ID your own `gh pr comment`
-  call returned — identify it by that ID, never by its text.
-  Outside that window every historical trigger reads 0 including the ones that
-  were reviewed, so never infer "it never started" from a reaction count after
-  the fact — look for a current-head verdict instead.
+  submits a review with inline threads, exactly like a triggered one — act on
+  it. Only the passing case is asymmetric: it announces through the PR-body
+  reaction alone, never the sha-bearing pass comment, which is produced by an
+  explicit trigger and by nothing else. Triggering is therefore the only route
+  to comment-shaped head-bound pass evidence.
+- A trigger only counts once the bot reacts 👀 (`eyes`) to that comment. The
+  trigger is the comment ID your own `gh pr comment <pr> --body '@codex review'`
+  call returned — identify it by that ID. Never use `issues/<pr>/comments --jq
+  '.[-1]'`, and never find one by matching `@codex review` in comment bodies:
+  the bot quotes that phrase in the boilerplate appended to its own verdicts, so
+  the pattern selects its output as readily as your input. Query
+  `repos/<o>/<r>/issues/comments/<comment-id>/reactions` within ~2 minutes and
+  require `content == "eyes"` from the Codex bot (`chatgpt-codex-connector` in
+  the API, often displayed as `chatgpt-codex-connector[bot]`); aggregate counts
+  or other users' reactions do not prove pickup. **The bot withdraws the
+  reaction when the review completes**, so 👀 is evidence only inside that
+  window — afterwards every trigger reads 0, including the reviewed ones. Never
+  infer "it never started" from a reaction count after the fact; look for a
+  current-head verdict instead.
 - Liveness invariant: at every pause there is either a pending bot review of
   the current head, or one you just triggered. Never wait on nothing.
 - Use `background-watch-hook` to create one durable `--forever` combined PR watch
@@ -205,9 +200,12 @@ turn ends because you armed a watch and are waiting, say exactly that.
   monitoring, and reserve `wait_action.py` for Actions targets that are not attached
   to a PR.
 - Set the durable PR Watch's per-cycle `--timeout 0`. The Harness default is
-  21600 seconds, so leaving it implicit turns six hours without PR activity into a
-  terminal timeout. The waiter's individual GitHub requests remain bounded; an idle
-  PR is expected state, not a failed cycle.
+  21600 seconds, so leaving it implicit turns six quiet hours into a terminal
+  timeout; an idle PR is expected state, not a failed cycle.
+- The CI waiter matches every distinct Actions run ID for each requested
+  workflow name at the exact SHA and branch. A workflow name is not a unique
+  run identity; do not declare CI complete while a second matching run is
+  pending or failed.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
   watch per PR, plus one independent orchestrator gate watch when work is
   delegated. Review activity and the PR's exact-head CI are one lane concern
@@ -216,82 +214,66 @@ turn ends because you armed a watch and are waiting, say exactly that.
   cursor state between concurrent watches or count unrelated global monitors as
   the lane watch.
 - Follow `background-watch-hook` for waiter commands, state, baseline seeding,
-  catch-up,
-  filtering, settling, retries, and delivery acknowledgement. Those mechanics
-  belong to the reusable skill; this policy only constrains when and why the
-  watch is armed.
+  catch-up, filtering, settling, retries, and delivery acknowledgement. Those
+  mechanics belong to the reusable skill; this policy only constrains when and
+  why the watch is armed.
 - Before the first push or review trigger, use `background-watch-hook` to seed one
   complete owner-specific state file, then arm the forever Watch with that same
   file. This is the only routine baseline creation in the loop. Never reseed,
   rotate, or replace it between rounds: review or CI activity can land while the
   current follow-up runs, and making the already-arrived event a fresh baseline
-  silently drops it. The durable delivery acknowledgement advances the state only
-  after a report was queued, so the next automatic cycle catches the whole handoff
-  window.
+  silently drops it. Catch-up is for deliberately replaying historical activity
+  before the loop starts, and a replacement Watch is recovery from a real
+  failure — neither is normal per-round operation.
 - Keep the Watch alive while pushing, replying, and resolving threads. Those own
   actions may produce one extra batched callback, but they cannot consume the Watch
   or leave the real next review unobserved. End every round by using the
   `background-watch-hook` management commands to verify exactly one live Watch for
   this owner, concern, repository, and PR. Do not rely on a remembered Watch ID or
   one bookkeeping field as proof that its waiter is live.
-- Use catch-up only when deliberately processing historical activity before the
-  durable loop starts. A first-poll baseline after a watched action is not a valid
-  handoff, and a replacement Watch is recovery from a real failure, not normal
-  per-round operation.
 - For whoever gates the PR: a lane run that ended `succeeded` proves nothing
   about the loop. A watch-triggered run can finish clean having pushed nothing
   and armed nothing, leaving the PR with new findings and no watcher on either
   side. When your gate watch fires on a findings review, verify the lane still
   has a live PR watch before concluding it has the round handled.
-- The bot has three verdict shapes. A PASS is either (a) a plain issue comment
-  by the Codex bot (`chatgpt-codex-connector` in the API; often displayed as
-  `chatgpt-codex-connector[bot]`) whose body says
-  "Codex Review: Didn't find any major issues" and names
+- The bot has three verdict shapes. Findings arrive as a review with inline
+  threads. A PASS is either (a) a plain issue comment by the Codex bot whose
+  body says "Codex Review: Didn't find any major issues" and names
   `Reviewed commit: <sha>` equal to the current head, or (b) a `+1` reaction
-  from that bot on the PR body. Findings arrive as a review with inline
-  threads. A contributor comment that quotes the pass text is never a verdict.
-- The CI waiter matches every distinct Actions run ID for each requested
-  workflow name at the exact SHA and branch. A workflow name is not a unique
-  run identity; do not declare CI complete while a second matching run is
-  pending or failed.
-- The bot's PR-body reaction is one state slot, not an append-only log: 👀 while
-  a review runs, `+1` once one completes with no comments, each write withdrawing
-  the last. The `+1` names no sha, but its `created_at` is not stale either — it
-  is when the most recent completed review passed, and the only open question is
-  which head that review ran against. Do not push another head while a review is
-  pending. Accept the reaction when the durable Watch reports it as new after the
-  current head epoch began, the prior-head review was already terminal, and the
-  PR head is unchanged. Never reseed to manufacture that boundary. When the
-  timeline cannot settle it — an intervening head that was never reviewed, say —
-  force the binding rather than infer it: comment `@codex review` on the
-  unchanged head and take whatever verdict that trigger returns. It is head-bound
-  in either branch — a pass comment naming the sha, or a findings review naming
-  it — so the reaction stops being the thing you have to reason about. Do not
-  make the slot's 👀 → `+1` transition your evidence: the mandated waiter queries
-  PR-body reactions with `?content=+1`, so it cannot report the 👀 half, and a
-  rule resting on it would demand evidence the required tooling never collects.
-  Waiting for that comment instead of triggering waits forever.
-- Keep the two 👀 apart by location. On your trigger comment it says the trigger
-  was picked up, and it is withdrawn on completion, so it is evidence only inside
-  its own window. On the PR body it is the slot's in-flight value: a review is
-  running right now — the more durable of the two as a liveness probe. Reactions
-  from other authors, or on any other comment, are not verdicts.
+  from that bot on the PR body. Nothing else is one: not a contributor comment
+  quoting the pass text, not a reaction by another author, not a reaction on any
+  other comment.
+- That PR-body reaction is one state slot, not an append-only log: 👀 while a
+  review runs, `+1` once one completes with no comments, each write withdrawing
+  the last. So 👀 there means a review is running right now — a more durable
+  liveness probe than the 👀 on your trigger comment. The `+1` names no sha, but
+  its `created_at` is not stale either: it is when the most recent completed
+  review passed, and the only open question is which head that review ran
+  against. So do not push another head while a review is pending, and accept the
+  reaction when the durable Watch reports it as new after the current head epoch
+  began, the prior-head review was already terminal, and the PR head is
+  unchanged. Never reseed to manufacture that boundary. When the timeline cannot
+  settle it — an intervening head that was never reviewed, say — force the
+  binding rather than infer it: comment `@codex review` on the unchanged head
+  and take whatever verdict returns, a pass comment naming the sha or a findings
+  review naming it. Waiting for that comment instead of triggering waits
+  forever. The slot's 👀 → `+1` transition cannot stand in for it either: the
+  mandated waiter queries PR-body reactions with `?content=+1`, so it never sees
+  the 👀 half.
 - Do not treat `Reviewed commit:` alone as a pass signal. A findings verdict is
   a `COMMENTED` review whose body also opens
   `### 💡 Codex Review … **Reviewed commit:** <sha>`, so a gate that merely
-  greps for the sha merges over live findings. For a comment-shaped pass, match
-  the bot author, pass phrase, and exact head together; for a reaction-shaped
-  pass, require the head-bound waiter evidence above. In both cases, also gate
-  on every unresolved thread on the PR, including threads opened on earlier or
-  outdated heads.
+  greps for the sha merges over live findings. Match the bot author, pass
+  phrase, and exact head together for a comment-shaped pass; require the
+  head-bound waiter evidence above for a reaction-shaped one. Neither is enough
+  alone: the bot double-passes commits, so close-out also gates on zero
+  unresolved threads across the entire PR, including threads opened on earlier
+  or outdated heads — never on a quiet latest review.
 - A review attributed to the repo owner with an **empty body** is a phantom, not
   a review: replying to a review thread creates a `COMMENTED` review under your
   own account, stamped with the current head's `commit_id`. Any check that
   selects reviews by head sha will count it as "the bot has started". Filter it
   out by author and empty body.
-- A 0-finding review is not clean. The bot double-passes commits; close-out
-  requires zero unresolved threads across the entire PR, including threads
-  opened on earlier or outdated heads, not a quiet latest review.
 - Resolve every thread you address (reply, then resolve). For intentional
   non-changes the bot keeps re-flagging: keep a **Known-by-design ledger** in
   the PR body and answer re-flags by linking the entry.
@@ -344,16 +326,18 @@ turn ends because you armed a watch and are waiting, say exactly that.
   review ran on, so name that head when you act on it. If the branch has moved
   since, reconcile the finding against the current head rather than re-doing the
   fix; the work may already be there.
-- An escalation only counts when it is **delivered to the orchestrator**:
-  a watch-triggered run must send the escalation directly to the orchestrator's
-  session with `vibe agent run --session-id <orchestrator> --no-callback`, then
-  verify that send succeeded. Merely finishing the watch-triggered run leaves
-  the result in the lane session and notifies nobody. While blocked, the PR
-  waiter observes GitHub activity only; it does not observe Session decisions.
-  The orchestrator must deliver the circuit-breaker decision explicitly to the
-  lane session (for example with `vibe agent run --session-id <lane-session>
-  --message-file <decision> --no-callback`). Keep the GitHub watch armed and
-  state exactly which decision the lane needs.
+- **Delivery rule.** An escalation — and the §5 final report — only counts once
+  it is delivered to the orchestrator: a watch-triggered run must send it to the
+  orchestrator's session with `vibe agent run --session-id <orchestrator>
+  --no-callback`, then verify the send succeeded. Merely finishing the run
+  leaves the result in the lane session and notifies nobody. `--no-callback`
+  matters: without it the orchestrator's next user-facing reply is auto-queued
+  back into YOUR session as a stray instruction. While blocked, the PR waiter
+  observes GitHub activity only, never Session decisions, so the orchestrator
+  must deliver the circuit-breaker decision explicitly to the lane session (for
+  example `vibe agent run --session-id <lane-session> --message-file <decision>
+  --no-callback`). Keep the GitHub watch armed and state exactly which decision
+  the lane needs.
 
 ## 5. Close-out — all conditions, then stop
 
@@ -365,16 +349,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
    on which each thread was opened;
 4. Post the final report: PR URL, what shipped, evidence layers, residual
    manual checks (state what end-to-end verification is deferred to the
-   orchestrator's integration pass);
-   **Delivery rule (same as escalations):** the final report must be
-   DELIVERED to the orchestrator — send it to the orchestrator's session (or
-   finish the run the orchestrator dispatched with it as the result). When
-   sending via `vibe agent run --session-id <orchestrator>`, pass
-   `--no-callback` — otherwise the orchestrator's next user-facing reply is
-   auto-queued back into YOUR session as a stray instruction. A
-   watch-triggered run's result text stays in your own session and notifies
-   NOBODY; ending your close-out round there means the orchestrator never
-   learns you finished. Verify the send succeeded before stopping.
+   orchestrator's integration pass). Deliver it by §4's delivery rule, or
+   finish the run the orchestrator dispatched with it as the result; ending a
+   watch-triggered round without that send means the orchestrator never learns
+   you finished.
    **Tripwire:** the round where the clean pass finally lands is exactly the
    round where lanes forget this and stop after tidying watches. When you notice
    conditions 1–3 are already true at the start of a watch-triggered round, SEND
