@@ -12,7 +12,7 @@
 // waiting for the next crossing. So each test declares where the reader is as a
 // standing fact and lets the component ask as often as it likes.
 
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { createRef } from 'react';
@@ -67,10 +67,22 @@ class FakeIntersectionObserver {
 
   private callback: IntersectionObserverCallback;
   private observed = new Set<Element>();
+  private readonly root: Element | null;
 
-  constructor(callback: IntersectionObserverCallback) {
+  constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
     this.callback = callback;
+    this.root = (options?.root as Element | null) ?? null;
     FakeIntersectionObserver.live.push(this);
+  }
+
+  // The element the transcript scrolls. The observer is rooted at it, so a test
+  // reaches it through the observer rather than by matching a class name.
+  static scroller(): HTMLElement {
+    const root = FakeIntersectionObserver.live[0]?.root;
+    if (!(root instanceof HTMLElement)) {
+      throw new Error('the older-page observer was not rooted at the scroll container');
+    }
+    return root;
   }
 
   observe(target: Element) {
@@ -108,10 +120,35 @@ const session = (): WorkbenchSession =>
     archived_at: null,
   }) as unknown as WorkbenchSession;
 
+// A transcript taller than its viewport, scrolled up to the top of the loaded
+// window: the reader is in history, which is what paging exists for.
+const READING_HISTORY = { scrollTop: 0, scrollHeight: 10_000, clientHeight: 800 };
+// A transcript SHORT enough to fit its viewport. There is nothing to scroll, so
+// the reader is still following the live tail even though the top of the loaded
+// window — and the sentinel with it — is permanently in view.
+const FITS_VIEWPORT = { scrollTop: 0, scrollHeight: 800, clientHeight: 800 };
+
+// jsdom has no layout, so where the reader sits is stated as geometry and
+// announced with the scroll event a browser would emit. This is the production
+// path: the transcript derives "following the live tail" from exactly these
+// three numbers, and nothing else tells it where the reader is.
+const placeReader = (
+  el: HTMLElement,
+  geometry: { scrollTop: number; scrollHeight: number; clientHeight: number },
+) => {
+  for (const [prop, value] of Object.entries(geometry)) {
+    Object.defineProperty(el, prop, { value, writable: true, configurable: true });
+  }
+  fireEvent.scroll(el);
+};
+
 const renderTranscript = (over: {
   hasOlder?: boolean;
   loadingOlder?: boolean;
   onLoadOlder?: () => void | Promise<boolean>;
+  // Whether the reader is following the live tail. Defaults to "scrolled up in
+  // history", the state every paging assertion below is about.
+  following?: boolean;
 }) => {
   const props = {
     messages: [],
@@ -138,13 +175,16 @@ const renderTranscript = (over: {
     readOnly: false,
     followingTailRef: createRef<boolean>() as React.MutableRefObject<boolean>,
   };
-  props.followingTailRef.current = false;
-
   const view = render(
     <MemoryRouter>
       <Transcript {...props} />
     </MemoryRouter>,
   );
+  // The mount effect jumps to the bottom inside a frame callback and pins the
+  // transcript there; frames run synchronously here, so that jump has already
+  // landed and this placement is what the component ends up believing.
+  placeReader(FakeIntersectionObserver.scroller(), over.following ? FITS_VIEWPORT : READING_HISTORY);
+
   const rerender = (next: Partial<typeof props>) =>
     view.rerender(
       <MemoryRouter>
@@ -159,6 +199,14 @@ describe('transcript older-page loading', () => {
     FakeIntersectionObserver.live = [];
     FakeIntersectionObserver.atTop = false;
     vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
+    // Run frame callbacks inline so the mount jump-to-bottom is complete by the
+    // time ``renderTranscript`` returns, instead of landing mid-test and
+    // re-pinning the transcript behind the assertions' back.
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
     vi.stubGlobal(
       'ResizeObserver',
       class {
@@ -210,6 +258,21 @@ describe('transcript older-page loading', () => {
     await act(async () => rerender({ hasOlder: false }));
     await act(async () => FakeIntersectionObserver.move(true));
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not page while the reader is following the live tail', async () => {
+    const onLoadOlder = vi.fn().mockResolvedValue(true);
+    const { rerender } = renderTranscript({ onLoadOlder, following: true });
+
+    // A transcript short enough to fit its viewport leaves the sentinel in the
+    // band with the reader still parked on the latest message. Sentinel in view
+    // is only a REQUEST for older history if the reader went looking for it —
+    // otherwise opening or resizing such a chat would walk backwards through
+    // history nobody asked to see.
+    await act(async () => FakeIntersectionObserver.move(true));
+    await act(async () => rerender({ loadingOlder: true }));
+    await act(async () => rerender({ loadingOlder: false }));
+    expect(onLoadOlder).not.toHaveBeenCalled();
   });
 
   it('offers an explicit retry instead of re-asking after a failed page', async () => {

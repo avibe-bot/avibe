@@ -3643,12 +3643,18 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // they change — so it can never act on a stale snapshot.
   const maybeLoadOlder = useCallback(() => {
     if (!atTopRef.current || !hasOlder || loadingOlder || loadFailedRef.current) return;
+    // Sentinel in view is only a REQUEST for older history if the reader went
+    // looking for it. A transcript that fits its viewport — tall display, zoomed
+    // out, enlarged window — puts the sentinel in the band while the reader is
+    // still following the live tail, and paging there would walk backwards
+    // through history nobody asked to see, on open and on every resize.
+    if (pinnedRef.current) return;
     // A programmatic deep-link jump owns scrollTop right now, and the anchor
     // restore is suppressed along with it. Prepending under the jump would have
     // nothing holding the reader's row in place.
     if (suppressAnchorRef.current) return;
     runLoadOlder();
-  }, [hasOlder, loadingOlder, runLoadOlder]);
+  }, [hasOlder, loadingOlder, pinnedRef, runLoadOlder]);
 
   // Older-page trigger. The observer answers "is the reader within
   // OLDER_TRIGGER_BAND_PX of the top of the loaded window?" and re-answers on
