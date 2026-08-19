@@ -577,6 +577,7 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_id = "organization-instance"
     config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
 
     issued_at = 1_700_000_000
@@ -621,6 +622,7 @@ def test_deferred_personal_context_keeps_instance_kind(monkeypatch, tmp_path) ->
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_id = "personal-instance"
     config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
 
     context = resource_access_service.ResourceUserContext(
@@ -645,6 +647,7 @@ def test_deferred_context_from_previous_pairing_is_rejected(monkeypatch, tmp_pat
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_id = "current-instance"
     config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
 
     stale_context = resource_access_service.ResourceUserContext(
@@ -661,7 +664,7 @@ def test_deferred_context_from_previous_pairing_is_rejected(monkeypatch, tmp_pat
     assert not resource_access_service.metadata_allows_harness_runtime(metadata)
 
 
-@pytest.mark.parametrize("pairing_state", ["disabled", "unreadable"])
+@pytest.mark.parametrize("pairing_state", ["disabled", "unreadable", "partial"])
 def test_explicit_deferred_context_requires_current_pairing(
     monkeypatch,
     tmp_path,
@@ -672,6 +675,8 @@ def test_explicit_deferred_context_requires_current_pairing(
     config.remote_access.vibe_cloud.enabled = pairing_state != "disabled"
     config.remote_access.vibe_cloud.instance_id = "personal-instance"
     config.remote_access.vibe_cloud.instance_kind = "personal"
+    if pairing_state != "partial":
+        config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
     if pairing_state == "unreadable":
         def fail_load(_cls, *_args, **_kwargs):
@@ -707,6 +712,8 @@ def test_legacy_deferred_context_uses_only_known_current_pairing_kind(
     config = V2Config.default()
     config.remote_access.vibe_cloud.enabled = True
     config.remote_access.vibe_cloud.instance_kind = paired_kind
+    config.remote_access.vibe_cloud.instance_id = "paired-instance"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
 
     legacy_metadata = {
@@ -721,6 +728,35 @@ def test_legacy_deferred_context_uses_only_known_current_pairing_kind(
 
     assert restored is not None
     assert restored.instance_kind == expected_kind
+
+
+def test_kindless_deferred_context_adopts_matching_validated_pairing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "paired-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_id": "paired-instance",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "owner",
+            "vibe_instance_kind": None,
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+
+    restored = resource_access_service.resource_user_context_from_metadata(legacy_metadata)
+
+    assert restored is not None
+    assert restored.is_personal_instance
 
 
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:

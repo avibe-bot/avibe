@@ -350,7 +350,7 @@ def resource_user_context_from_metadata(
             return None
         if context.instance_kind and paired_kind and context.instance_kind != paired_kind:
             return None
-    if context.instance_kind is not None or "vibe_instance_kind" in snapshot:
+    if context.instance_kind is not None or snapshot.get("vibe_instance_kind") is not None:
         return context
 
     # Released snapshots predate the instance-kind field. Recover their kind
@@ -418,9 +418,12 @@ def _configured_resource_instance() -> tuple[str | None, str | None] | None | ob
         from config.v2_config import V2Config
 
         cloud = V2Config.load().remote_access.vibe_cloud
-        if not cloud.enabled:
+        credentials = cloud.runtime_credentials()
+        if credentials is None:
             return None
-        instance_id = _clean_optional_string(cloud.instance_id)
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        instance_id = _clean_optional_string(credentials[1])
         instance_kind = (
             cloud.instance_kind if cloud.instance_kind in {"personal", "organization"} else None
         )
