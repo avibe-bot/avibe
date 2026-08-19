@@ -7995,6 +7995,78 @@ class SessionTurnManager:
                     session_id
                 ),
             }
+        memory_dead = turn is None or turn.task.done()
+        if owner is not None and memory_dead and not agent_run_id:
+            owner_id = str(owner["id"])
+            restored_identity = self._active_identity(
+                str(owner["backend"]),
+                session_id,
+                owner_id,
+            )
+            if restored_identity is None or restored_identity[0] != owner_id:
+                start_receipt = str(owner.get("start_receipt_outcome") or "")
+                starting = str(owner.get("state") or "") == "starting"
+                never_started = starting and start_receipt not in {"accepted", "unknown"}
+                unknown_start = starting and start_receipt == "unknown"
+                if never_started:
+                    with self._sqlite_engine().connect() as conn:
+                        initial_delivery_ids = {
+                            str(row["id"])
+                            for row in delivery_store.initial_deliveries_for_turn(
+                                conn,
+                                owner_id,
+                            )
+                            if row["state"] == "claimed"
+                        }
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "not_written",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_no_live_runtime"},
+                        retire_unwritten_delivery_ids=initial_delivery_ids,
+                        retire_unwritten_attempt_outcome="canceled",
+                    )
+                elif unknown_start:
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "failed",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_unknown_start"},
+                        abandon_unaccepted_start=True,
+                    )
+                else:
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "canceled",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_no_live_runtime"},
+                    )
+                if terminal.get("changed"):
+                    logger.info(
+                        "Released durable Turn=%s for Session=%s after Stop found no live runtime",
+                        owner_id,
+                        session_id,
+                    )
+                    from core.inbox_events import bus
+
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, owner_id),
+                    )
+                    successor_turn_id = str(terminal.get("successor_turn_id") or "")
+                    if successor_turn_id:
+                        await self._start_persisted_turn(successor_turn_id)
+                    elif not terminal.get("defer_queue_resume"):
+                        await self._resume_post_terminal(session_id)
+                    return {
+                        "ok": True,
+                        "session_id": session_id,
+                        "status": "stale_released",
+                        "reason": "runtime_gone",
+                    }
         result = await self.deliver(
             DeliveryRequest(
                 session_id=session_id,
