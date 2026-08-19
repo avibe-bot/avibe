@@ -24,7 +24,10 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-from core.session_turns import TURN_LIFECYCLE_EPOCH_KEY
+
+# Keep this string local: importing ``core.session_turns`` here cycles through
+# Memory admission into ``core.handlers``.
+TURN_LIFECYCLE_EPOCH_KEY = "_turn_lifecycle_epoch"
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext

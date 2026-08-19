@@ -155,6 +155,15 @@ class CommandHandlers(BaseHandler):
     ) -> _NewSessionResult:
         """Run `/new`, waiting briefly for capture then failing open."""
 
+        budget = 5.0
+        deadline_at = time.monotonic() + budget
+
+        def remaining_seconds() -> float:
+            leftover = deadline_at - time.monotonic()
+            if leftover >= budget - 0.05:
+                return budget
+            return max(leftover, 0.001)
+
         async def run_memory_lifecycle() -> _NewSessionResult:
             lifecycle = getattr(
                 self.controller,
@@ -166,7 +175,7 @@ class CommandHandlers(BaseHandler):
                     context,
                     session_anchor,
                     operation,
-                    deadline_seconds=5.0,
+                    deadline_seconds=remaining_seconds(),
                 )
 
             await self._final_flush_for_new(context, session_anchor)
@@ -178,7 +187,7 @@ class CommandHandlers(BaseHandler):
             return await turn_lifecycle(
                 session_anchor,
                 run_memory_lifecycle,
-                deadline_seconds=5.0,
+                deadline_seconds=budget,
             )
         return await run_memory_lifecycle()
 
