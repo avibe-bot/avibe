@@ -1167,8 +1167,8 @@ class ShowRuntimeManager:
             iterator = os.scandir(downloads_dir)
             try:
                 for entry in iterator:
-                    is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.match(entry.name))
-                    if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.match(entry.name):
+                    is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(entry.name))
+                    if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(entry.name):
                         continue
                     try:
                         entry_stat = entry.stat(follow_symlinks=False)
@@ -1202,8 +1202,8 @@ class ShowRuntimeManager:
             with os.scandir(dir_fd) as entries:
                 names = [entry.name for entry in entries]
             for name in sorted(names):
-                is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.match(name))
-                if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.match(name):
+                is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(name))
+                if not is_claim and not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(name):
                     continue
                 try:
                     stat_result = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -1290,10 +1290,11 @@ class ShowRuntimeManager:
                 # Windows unlink by path. A fresh runtime with no candidates
                 # never opens the directory at all.
                 if candidates:
+                    candidates.sort(key=lambda item: (0 if _ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(item[2]) else 1, item[2]))
                     if os.name == "nt":
                         downloads_identity = getattr(self, "_downloads_dir_identity", None)
                         for path, size, name, inode in candidates:
-                            is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.match(name))
+                            is_claim = bool(_ABANDONED_ARCHIVE_CLAIM_RE.fullmatch(name))
                             claimed = path if is_claim else path.with_name(f"{name}.avibe-removing")
                             try:
                                 if downloads_identity is not None:

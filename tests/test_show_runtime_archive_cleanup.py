@@ -127,6 +127,10 @@ def test_archive_cleanup_never_touches_unknown_symlink_or_tmp_files(tmp_path: Pa
     directory.mkdir()
     unknown_claim = manager.runtime_dir / "downloads" / "backup.tgz.avibe-removing"
     unknown_claim.write_bytes(b"not ours")
+    newline_archive = manager.runtime_dir / "downloads" / f"{_sha(6)}.tgz\n"
+    newline_archive.write_bytes(b"newline")
+    newline_claim = manager.runtime_dir / "downloads" / f"{_sha(7)}.tgz.avibe-removing\n"
+    newline_claim.write_bytes(b"newline-claim")
 
     result = manager.clean()
 
@@ -136,6 +140,8 @@ def test_archive_cleanup_never_touches_unknown_symlink_or_tmp_files(tmp_path: Pa
     assert symlink.is_symlink() and outside.exists()
     assert directory.is_dir()
     assert unknown_claim.exists()
+    assert newline_archive.exists()
+    assert newline_claim.exists()
 
 
 def test_clean_is_idempotent_for_archives(tmp_path: Path) -> None:
@@ -1043,6 +1049,24 @@ def test_abandoned_windows_claim_is_reclaimed(tmp_path: Path) -> None:
     result = manager.clean()
     assert not claim.exists()
     assert result["archives"]["removed_count"] >= 1
+
+
+def test_cleanup_removes_abandoned_claim_before_same_digest_archive(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    digest = _sha(2)
+    leftover = manager.runtime_dir / "downloads"
+    leftover.mkdir(parents=True, exist_ok=True)
+    claim = leftover / f"{digest}.tgz.avibe-removing"
+    claim.write_bytes(b"abandoned")
+    archive = _write_archive(manager, digest, b"redownloaded")
+    stamp = time.time() - 3600
+    os.utime(claim, (stamp, stamp))
+    result = manager.clean()
+    assert not claim.exists()
+    assert not archive.exists()
+    assert result["archives"]["removed_count"] == 2
+    assert result["archives"].get("skipped_reason") is None
 
 
 def test_dry_run_includes_abandoned_claims(tmp_path: Path) -> None:
