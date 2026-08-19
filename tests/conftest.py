@@ -222,15 +222,24 @@ def _seed_sqlite_state_template(
 
 @pytest.fixture(autouse=True)
 def _reset_cached_sqlite_engines():
-    """Keep process-local SQLite engine caches scoped to each isolated test."""
-    try:
-        from storage.db import dispose_cached_sqlite_engines
-    except Exception:
-        yield
-        return
-    dispose_cached_sqlite_engines()
+    """Keep process-local SQLite caches scoped to each isolated test.
+
+    Both caches key on the resolved database path, so a rebuilt home never
+    inherits a previous test's engine or its "already migrated" result.
+    """
+
+    def _reset() -> None:
+        try:
+            from storage.db import dispose_cached_sqlite_engines
+            from storage.importer import reset_ensured_sqlite_state
+        except Exception:
+            return
+        dispose_cached_sqlite_engines()
+        reset_ensured_sqlite_state()
+
+    _reset()
     yield
-    dispose_cached_sqlite_engines()
+    _reset()
 
 
 @pytest.fixture(autouse=True)

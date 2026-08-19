@@ -20,8 +20,9 @@ from sqlalchemy.schema import CreateIndex
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
-from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
-from storage import message_deliveries, messages_service, migrations
+from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state, reset_ensured_sqlite_state
+from storage.lock import MigrationFileLock
+from storage import importer, message_deliveries, messages_service, migrations
 from storage.background import SQLiteBackgroundTaskStore
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
@@ -5228,6 +5229,11 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
     _write_discovered_chats(state_dir / "discovered_chats.json")
 
     first = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    # Drop the process-local "already ensured" result so the second call really
+    # replays the pipeline against the migrated database, the way the next
+    # process to start will. Without the reset this would assert the
+    # short-circuit (covered separately) instead of re-run idempotence.
+    reset_ensured_sqlite_state()
     second = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
 
     assert first.imported is True
@@ -5312,6 +5318,62 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
             "background_runs_imported",
         }
     }
+
+
+def test_ensure_sqlite_state_short_circuits_after_first_success(tmp_path: Path, monkeypatch) -> None:
+    # Callers put ensure_sqlite_state in front of ordinary operations (a login,
+    # a read-only query, a skill delete), so a repeat call must cost nothing.
+    # Re-running the pipeline per request serialized unrelated work on the
+    # cross-process migration lock and turned transient SQLite contention into a
+    # failed login (page: error=oauth_exchange_failed reason=OperationalError).
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+
+    first = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+
+    migrations_run = 0
+    real_run_migrations = importer.run_migrations
+
+    def counting_run_migrations(*args, **kwargs):
+        nonlocal migrations_run
+        migrations_run += 1
+        return real_run_migrations(*args, **kwargs)
+
+    monkeypatch.setattr(importer, "run_migrations", counting_run_migrations)
+
+    # An already-held migration lock is exactly the contention that failed the
+    # login. The repeat call must not queue behind it, so holding it here would
+    # deadlock the test if the short-circuit regressed.
+    with MigrationFileLock(state_dir / "migration.lock", timeout_seconds=1.0):
+        second = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+
+    assert second is first
+    assert migrations_run == 0
+
+    # The guard is per target, not process-global: a different home still migrates.
+    other_state_dir = tmp_path / "other"
+    other_state_dir.mkdir()
+    other = ensure_sqlite_state(
+        db_path=other_state_dir / "vibe.sqlite",
+        state_dir=other_state_dir,
+        primary_platform="slack",
+    )
+    assert other.db_path != first.db_path
+    assert migrations_run == 1
+
+    # Both homes are migrated now, so nothing on disk distinguishes them any
+    # more -- only the key does. A memo that is not per target would hand the
+    # first home's caller the second home's report, with the wrong db_path and
+    # the wrong counts, and no call would ever notice.
+    assert ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack") is first
+    assert migrations_run == 1
+
+    # A database that disappeared is no longer ensured, whatever we remember.
+    for suffix in ("", "-wal", "-shm"):
+        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+    ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    assert migrations_run == 2
 
 
 def test_ensure_sqlite_state_collapses_multi_backend_anchor_on_import(tmp_path: Path) -> None:
@@ -5431,6 +5493,11 @@ def test_ensure_sqlite_state_preserves_backend_aliases_without_deprecated_backen
         conn.commit()
 
     first = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    # Drop the process-local "already ensured" result so the second call really
+    # replays the pipeline against the migrated database, the way the next
+    # process to start will. Without the reset this would assert the
+    # short-circuit (covered separately) instead of re-run idempotence.
+    reset_ensured_sqlite_state()
     second = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
 
     with sqlite3.connect(db_path) as conn:
