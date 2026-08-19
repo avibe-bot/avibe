@@ -264,20 +264,39 @@ def test_repeated_migration_failures_keep_the_rollback_window_bounded(monkeypatc
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
     run_migrations(db_path, revision="20260627_0025")
-    monkeypatch.setattr(
-        "storage.migrations.command.upgrade",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("migration boom")),
-    )
+    before_the_storm = _db_contents(db_path)
+
+    def failing_upgrade(*args, **kwargs):
+        # Committing before failing is the ordinary shape, not a contrived one:
+        # each attempt leaves the database a little further from where the storm
+        # started, which is exactly what makes the earliest copy the valuable one
+        # and every later copy a worse answer to the same question.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("create table if not exists boom (attempt integer)")
+            conn.execute("insert into boom (attempt) values ((select count(*) from boom))")
+        raise RuntimeError("migration boom")
+
+    monkeypatch.setattr("storage.migrations.command.upgrade", failing_upgrade)
 
     for _ in range(SQLITE_BACKUP_RETENTION + 3):
         with pytest.raises(RuntimeError, match="migration boom"):
             ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
 
     surviving = _sqlite_backup_roots(state_dir / "backups")
-    assert 0 < len(surviving) <= SQLITE_BACKUP_RETENTION
+    assert 0 < len(surviving) <= SQLITE_BACKUP_RETENTION * 2
     for name in surviving:
         with sqlite3.connect(state_dir / "backups" / name / "vibe.sqlite") as backup:
             assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
+    # Bounded is half the promise. The attempts all copy a database sitting at
+    # the same revisions, so a window counting copies fills with them and evicts
+    # the one copy taken before the first attempt -- the only one predating
+    # whatever the failing migration did on its way down, and the one an operator
+    # reaches for. Counting rollback positions instead keeps it here for as long
+    # as the storm lasts.
+    assert any(
+        _db_contents(state_dir / "backups" / name / "vibe.sqlite") == before_the_storm
+        for name in surviving
+    )
 
 
 def _db_contents(path: Path) -> list[tuple[str, list[tuple]]]:
@@ -331,7 +350,12 @@ def test_every_call_holds_the_database_as_it_stands_at_that_call(tmp_path: Path)
     rollback_point()
 
     assert len(set(taken)) == len(taken)
-    assert len(_sqlite_backup_roots(backups_dir)) == SQLITE_BACKUP_RETENTION
+    # Two stamps were visited, so the window holds two positions, and of each the
+    # first and the last copy taken there. The pre-restore original is the first
+    # copy at its position and survives; the copy holding the writes accepted
+    # after the restore is the last one there and survives too. Neither rule
+    # alone gets both -- that is why the pair is what a position keeps.
+    assert set(_sqlite_backup_roots(backups_dir)) == {taken[0].name, taken[3].name, taken[4].name}
 
 
 def test_the_manifest_records_the_revisions_read_from_the_copy(tmp_path: Path) -> None:

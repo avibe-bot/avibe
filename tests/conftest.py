@@ -48,6 +48,7 @@ import shutil
 import sqlite3
 import sys
 import warnings
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
@@ -240,6 +241,50 @@ def _reset_cached_sqlite_engines():
     _reset()
     yield
     _reset()
+
+
+@pytest.fixture
+def hold_migration_lock_elsewhere():
+    """Hold a migration lock path from a thread that is genuinely not the caller.
+
+    Taking it in the calling thread is not a stand-in for a competing holder and
+    never was, it only used to look like one: `MigrationFileLock` is re-entrant
+    per path and thread, so code under test running in that same thread takes the
+    lock again and proceeds. A test written that way asserts nothing about
+    exclusion and keeps passing after the exclusion is gone.
+    """
+
+    import threading
+
+    from storage.lock import MigrationFileLock
+
+    @contextmanager
+    def _holder(lock_path: Path):
+        acquired = threading.Event()
+        release = threading.Event()
+        failures: list[BaseException] = []
+
+        def hold() -> None:
+            try:
+                with MigrationFileLock(lock_path, timeout_seconds=None):
+                    acquired.set()
+                    release.wait(30)
+            except BaseException as exc:  # surfaced to the test, never swallowed
+                failures.append(exc)
+                acquired.set()
+
+        holder = threading.Thread(target=hold, name="migration-lock-holder", daemon=True)
+        holder.start()
+        assert acquired.wait(30), f"lock holder never started for {lock_path}"
+        assert not failures, failures[0]
+        try:
+            yield
+        finally:
+            release.set()
+            holder.join(30)
+        assert not failures, failures[0]
+
+    return _holder
 
 
 @pytest.fixture(autouse=True)

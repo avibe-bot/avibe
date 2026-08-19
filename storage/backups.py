@@ -15,6 +15,9 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
+#: Retention counts rollback POSITIONS, not copies. A position keeps the first
+#: and the last copy taken there, so the ceiling is twice these numbers and is
+#: only reached by repeated attempts at one upgrade. See `prune_state_backups`.
 JSON_STATE_BACKUP_RETENTION = 3
 SQLITE_BACKUP_RETENTION = 2
 BACKUP_MANIFEST_VERSION = 1
@@ -47,6 +50,25 @@ class _BackupCandidate:
     kind: str
     timestamp: datetime
     suffix: int
+    #: The revisions the copied database was stamped with, or None when the
+    #: backup does not record them. Two copies taken at the same revisions were
+    #: taken to roll back to the same place in the schema history.
+    position: tuple[str, ...] | None = None
+
+    @property
+    def position_key(self) -> tuple[str, str]:
+        """Which rollback position this copy belongs to.
+
+        A copy that does not record its revisions is its own position rather
+        than a member of a shared unknown one. Grouping unknowns together would
+        let one of them stand in for another, and nothing here knows they are
+        interchangeable; keeping them separate reproduces exactly the
+        newest-N-copies behavior those backups have always had.
+        """
+
+        if self.position is None:
+            return ("copy", self.root.name)
+        return ("revisions", "\x1f".join(self.position))
 
     @property
     def order_key(self) -> tuple[datetime, int, str]:
@@ -123,7 +145,22 @@ def _directory_candidate(path: Path) -> _BackupCandidate | None:
         kind=kind,
         timestamp=timestamp,
         suffix=int(match.group("suffix") or 0),
+        position=_manifest_position(manifest),
     )
+
+
+def _manifest_position(manifest: dict) -> tuple[str, ...] | None:
+    """The revisions the copied database carried, when the manifest records them.
+
+    An empty list is a position -- an unversioned database is a place in the
+    schema history like any other -- so this answers None only when the field is
+    absent or malformed.
+    """
+
+    recorded = manifest.get("from_revisions")
+    if not isinstance(recorded, list) or not all(isinstance(item, str) for item in recorded):
+        return None
+    return tuple(sorted(set(recorded)))
 
 
 def _legacy_sqlite_candidate(path: Path) -> _BackupCandidate | None:
@@ -188,12 +225,34 @@ def prune_state_backups(
 ) -> list[Path]:
     """Keep a bounded rollback window of backups created by Avibe.
 
-    Newest first, and `protect` -- the backup its caller has just finished
-    writing -- is kept ahead of all of them. Ranking it there rather than
-    trusting it to sort highest is the difference between a bound and a bug: a
-    copy left behind by a machine whose clock ran ahead is dated into the future
-    forever, and every ordering rule that decides the fresh copy's fate by
-    comparing timestamps hands the slot to that stale one instead.
+    The window holds the newest `retention` rollback POSITIONS, and of each one
+    the first and the last copy taken there. Counting positions rather than
+    copies is what makes the bound survive a migration that keeps failing: every
+    entry point that reaches `run_migrations` re-attempts it and copies the
+    database again, so a window counting copies fills with re-attempts of one
+    upgrade and evicts the copy taken before the first of them -- the only one in
+    the window predating the damage, and the one a user reaching for a rollback
+    wants. Positions do not accumulate that way, because those re-attempts all
+    copy a database sitting at the same revisions.
+
+    Keeping two copies per position, the first and the last, is not a doubled
+    quota; it is the pair that brackets everything that happened there. Which one
+    is worth keeping cannot be decided from the position alone, and the two
+    plausible rules fail on opposite cases: a re-attempt after a partial repair
+    makes the later copy the damaged one, while an operator who restores a copy
+    and keeps serving writes makes the later copy the only one holding that
+    work. Keeping both ends answers both without asking the label a question it
+    cannot answer. A healthy machine is unaffected -- successive upgrades each
+    start from a different revision, so each is its own position with one copy in
+    it -- and so are copies whose position is unknown, since each is its own
+    position and the window is again the newest `retention` copies.
+
+    `protect` -- the backup its caller has just finished writing -- is kept ahead
+    of all of them. Ranking it there rather than trusting it to sort highest is
+    the difference between a bound and a bug: a copy left behind by a machine
+    whose clock ran ahead is dated into the future forever, and every ordering
+    rule that decides the fresh copy's fate by comparing timestamps hands the
+    slot to that stale one instead.
 
     Unknown files, symlinks, incomplete backups, and directories without a
     recognized manifest are intentionally left untouched.
@@ -208,14 +267,37 @@ def prune_state_backups(
     removed: list[Path] = []
     for kind, limit in limits.items():
         matching = [candidate for candidate in candidates if candidate.kind == kind]
-        ordered = sorted(matching, key=lambda item: item.order_key, reverse=True)
+        positions: dict[tuple[str, str], list[_BackupCandidate]] = {}
+        for candidate in matching:
+            positions.setdefault(candidate.position_key, []).append(candidate)
+        ordered = sorted(
+            positions.values(),
+            key=lambda group: max(item.order_key for item in group),
+            reverse=True,
+        )
         if protect is not None:
-            ordered.sort(key=lambda item: item.root != protect)
-        keep = {candidate.root for candidate in ordered[:limit]}
+            ordered.sort(key=lambda group: all(item.root != protect for item in group))
+        keep: set[Path] = set()
+        for group in ordered[:limit]:
+            keep |= _kept_within_position(group, protect)
         for candidate in sorted(matching, key=lambda item: item.order_key):
             if candidate.root not in keep and _remove_candidate(candidate):
                 removed.append(candidate.root)
     return removed
+
+
+def _kept_within_position(group: list[_BackupCandidate], protect: Path | None) -> set[Path]:
+    """The copies to keep from one rollback position: the first and the last.
+
+    `protect` takes the last slot when it is here, for the same reason it ranks
+    first among positions -- a clock that ran ahead can leave a stale copy
+    sorting later than the one just written.
+    """
+
+    ordered = sorted(group, key=lambda item: item.order_key)
+    protected = next((item for item in group if item.root == protect), None)
+    latest = protected if protected is not None else ordered[-1]
+    return {ordered[0].root, latest.root}
 
 
 def _fsync_file(path: Path) -> None:

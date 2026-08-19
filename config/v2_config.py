@@ -44,45 +44,27 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
-_memory_config_tx_state = threading.local()
-_config_file_lock_state = threading.local()
+
+#: How long a config write waits for a peer process before giving up. Config
+#: writes are small and bounded, so a wait this long says the holder is stuck
+#: rather than busy, and a settings save that fails is better than one that
+#: never returns.
+CONFIG_FILE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
-def _acquire_memory_config_file_lock(descriptor: int) -> None:
-    """Acquire a cross-process exclusive lock with a platform-supported API."""
+def _path_file_lock(lock_path: Path, *, timeout_seconds: float | None):
+    """The shared cross-process lock for one path.
 
-    if os.name == "nt":
-        import msvcrt
+    Nesting is safe, and that is why this file no longer keeps a lock of its
+    own: ``MigrationFileLock`` is re-entrant per path and thread, which both
+    transactions here used to hand-roll as a thread-local depth counter beside
+    a private descriptor and a private copy of the platform lock calls.
+    """
 
-        # Lock one byte of the file; Windows keeps the range until unlocked.
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        try:
-            os.write(descriptor, b"\0")
-        except OSError:
-            pass
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
-        return
-    import fcntl
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
 
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
-
-
-def _release_memory_config_file_lock(descriptor: int) -> None:
-    """Release the cross-process exclusive lock acquired by the helper above."""
-
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-    except Exception:
-        pass
+    return MigrationFileLock(lock_path, timeout_seconds=timeout_seconds)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -142,36 +124,21 @@ def _memory_config_transaction(config_path: Path) -> Iterator[None]:
 
     Lock order is always ``CONFIG_LOCK`` then the file lock, matching existing
     callers that already hold ``CONFIG_LOCK`` when they enter ``save_config``.
-    Nested acquisitions only re-enter the process lock.
+    Nesting re-enters both: ``MigrationFileLock`` is re-entrant per path and
+    thread, which is what this used to hand-roll as a thread-local depth counter
+    beside its own descriptor and its own platform lock calls.
     """
 
-    depth = getattr(_memory_config_tx_state, "depth", 0)
-    if depth > 0:
-        with CONFIG_LOCK:
-            yield
-        return
-
     lock_path = config_path.parent / "memory-config.tx.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        lock_path,
-        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
-    _memory_config_tx_state.depth = 1
     # CONFIG_LOCK first so threads that already hold it (remote_access/settings
     # helpers) never wait on the file lock while another waiter holds the file
     # lock and waits for CONFIG_LOCK.
     with CONFIG_LOCK:
-        try:
-            _acquire_memory_config_file_lock(descriptor)
-            try:
-                yield
-            finally:
-                _release_memory_config_file_lock(descriptor)
-        finally:
-            _memory_config_tx_state.depth = 0
-            os.close(descriptor)
+        # Unbounded, as this always was: the section holds a config read-modify-
+        # write, so the only way to wait forever is for a live peer to still be
+        # inside one.
+        with _path_file_lock(lock_path, timeout_seconds=None):
+            yield
 
 
 @contextmanager
@@ -184,8 +151,8 @@ def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2
     fields (the stale-snapshot race ``CONFIG_LOCK`` cannot fix because it
     is process-local while the UI API and controller are separate
     processes). Lock order and re-entrancy match the Memory transaction:
-    ``CONFIG_LOCK`` first, then the file lock; nested acquisitions
-    re-enter the process lock only.
+    ``CONFIG_LOCK`` first, then the file lock; both are re-entrant, so a
+    nested transaction on the same config takes the same pair.
 
     Yields a freshly loaded ``V2Config``; mutate it in place and it is
     saved on clean context exit. Mutator exceptions abort with no write.
@@ -1506,40 +1473,12 @@ def _backup_config_file(
 
 
 def _config_file_lock(path: Path):
-    """Return the shared cross-process lock for one config path."""
+    """The shared cross-process lock guarding one config file."""
 
-    # Import lazily because storage's package initializer imports V2Config.
-    from storage.lock import MigrationFileLock
-
-    return MigrationFileLock(path.with_name(f".{path.name}.lock"))
-
-
-@contextmanager
-def _config_file_transaction_lock(path: Path) -> Iterator[None]:
-    """Hold one config migration lock, re-entering it within this thread."""
-
-    key = os.path.normcase(os.path.abspath(os.fspath(path)))
-    locks = getattr(_config_file_lock_state, "locks", None)
-    if locks is None:
-        locks = {}
-        _config_file_lock_state.locks = locks
-    active = locks.get(key)
-    if active is not None:
-        lock, depth = active
-        locks[key] = (lock, depth + 1)
-        try:
-            yield
-        finally:
-            locks[key] = (lock, depth)
-        return
-
-    lock = _config_file_lock(path)
-    with lock:
-        locks[key] = (lock, 1)
-        try:
-            yield
-        finally:
-            del locks[key]
+    return _path_file_lock(
+        path.with_name(f".{path.name}.lock"),
+        timeout_seconds=CONFIG_FILE_LOCK_TIMEOUT_SECONDS,
+    )
 
 
 @contextmanager
@@ -1558,7 +1497,7 @@ def config_file_lock(config_path: Optional[Path] = None) -> Iterator[None]:
     path = config_path or paths.get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with _memory_config_transaction(path):
-        with _config_file_transaction_lock(path):
+        with _config_file_lock(path):
             yield
 
 
@@ -1615,7 +1554,7 @@ def _persist_migrated_config_payload(
 
     try:
         with CONFIG_LOCK:
-            with _config_file_transaction_lock(path):
+            with _config_file_lock(path):
                 try:
                     current_raw = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as exc:

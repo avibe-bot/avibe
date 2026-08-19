@@ -67,9 +67,7 @@ _refresh_locks_lock = threading.Lock()
 _refresh_locks: dict[str, threading.Lock] = {}
 _scheduled_refreshes_lock = threading.Lock()
 _scheduled_refreshes: set[str] = set()
-_migration_lock = threading.Lock()
 _legacy_migration_lock = threading.Lock()
-_migrated_db_paths: set[Path] = set()
 
 
 @dataclass
@@ -161,13 +159,26 @@ def _db_path(db_path: Path | None = None) -> Path:
 
 
 def _ensure_sqlite(db_path: Path | None = None) -> Path:
+    """Make the discovery tables usable, the same way every other store does.
+
+    This used to keep its own lock and its own set of already-migrated paths --
+    a third answer to a question `ensure_sqlite_state` and `run_migrations`
+    already answer between them, and a weaker one on both counts: the lock was
+    process-local, so it never excluded the Web UI process, and the memo skipped
+    `ensure_sqlite_state` entirely. Discovery can be the first code to touch the
+    database on a machine upgrading from JSON state, and when it was, it created
+    the schema without the JSON import every other entry point guarantees.
+    """
+
     target = _db_path(db_path)
+    if db_path is None:
+        from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+
+        ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+        return target
     guard_source_checkout_default_state_migration(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with _migration_lock:
-        if target not in _migrated_db_paths:
-            run_migrations(target)
-            _migrated_db_paths.add(target)
+    run_migrations(target)
     return target
 
 
