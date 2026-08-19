@@ -278,5 +278,11 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_background_work_banner.py::test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries
+  - id: MESSAGE-DELIVERY-316
+    name: WeChat outbound send uses the hydrated platform author, not the Memory principal
+    status: covered
+    kind: regression
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_wechat_outbound_send_uses_hydrated_author_id
 next_priority:
-  - MESSAGE-DELIVERY-316
+  - MESSAGE-DELIVERY-317

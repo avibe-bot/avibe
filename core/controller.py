@@ -1895,6 +1895,17 @@ class Controller:
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        metadata = payload.get("message_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        memory_user_id = metadata.get("_memory_user_id")
+        if isinstance(memory_user_id, str) and memory_user_id.strip():
+            user_id = memory_user_id.strip()
+        else:
+            # IM: the platform sender id is what admission and
+            # ``principal_for_user_key(f"{platform}:{user_id}")`` expect.
+            # Workbench without ``_memory_user_id`` keeps the scope fallback
+            # (typically ``"workbench"``), which admission rejects.
+            user_id = getattr(context, "user_id", None)
         workdir = None
         if include_workdir:
             try:
@@ -1903,7 +1914,7 @@ class Controller:
                 workdir = None
         return InboundTurnFacts(
             platform=context.platform or payload.get("platform"),
-            user_id=getattr(context, "user_id", None),
+            user_id=user_id,
             message_id=getattr(context, "message_id", None),
             session_id=session_id,
             workdir=workdir,

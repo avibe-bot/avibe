@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -103,6 +103,19 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
             },
         },
     )
+
+
+def _memory_facts_controller():
+    from core.controller import Controller
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller.memory_runtime = SimpleNamespace(
+        principal_for_user_key=lambda user_key: f"principal:{user_key}",
+    )
+    controller.platform_settings_managers = {}
+    controller.get_cwd = lambda _context: None
+    return controller
 
 
 def _complete_capture_admission(context: MessageContext) -> None:
@@ -1741,7 +1754,7 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     payload = manager._hydrate_delivery_context(context, delivery)
 
     assert payload["metadata"] == {"visible": "record metadata"}
-    assert context.user_id is None
+    assert context.user_id == "user"
     assert context.platform_specific["delivery_admission_context"] == {
         "message_handler_route": {
             "base_session_id": "slack_C1:reviewer",
@@ -1749,6 +1762,162 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
             "routing_subagent": True,
         }
     }
+
+
+def test_hydrate_delivery_context_preserves_im_author_as_routing_identity(
+    managers,
+) -> None:
+    """Hydrating an IM delivery keeps the outbound recipient on author_id.
+
+    This is the guardrail that would have caught avibe-bot/avibe#1584: Memory
+    identity must not replace MessageContext.user_id.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                author_name="Ada",
+                native_message_id="wc-msg-1",
+                metadata={"_memory_user_id": "local"},
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=author_id,
+        platform="wechat",
+    )
+
+    manager._hydrate_delivery_context(context, delivery)
+
+    assert context.user_id == author_id
+    assert context.platform_specific["message_metadata"]["_memory_user_id"] == "local"
+
+
+def test_wechat_outbound_send_uses_hydrated_author_id(managers) -> None:
+    """Scenario: MESSAGE-DELIVERY-316.
+
+    WeChat reply addresses the real platform user, never a Memory principal.
+    """
+
+    from modules.im.wechat import WeChatBot, WeChatConfig
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                native_message_id="wc-msg-2",
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id=None,
+        channel_id=author_id,
+        platform="wechat",
+        platform_specific={"context_token": "ctx-1"},
+    )
+    manager._hydrate_delivery_context(context, delivery)
+    bot = WeChatBot(
+        WeChatConfig(bot_token="token", base_url="https://ilinkai.weixin.qq.com")
+    )
+
+    with patch(
+        "modules.im.wechat.wechat_api.send_message",
+        new=AsyncMock(return_value={}),
+    ) as mock_send:
+        message_id = asyncio.run(bot.send_message(context, "reply"))
+
+    to_user_id = mock_send.await_args.args[2]
+    assert to_user_id == author_id
+    assert to_user_id
+    assert message_id
+
+
+def test_workbench_memory_principal_stays_in_turn_facts(managers) -> None:
+    """Workbench Memory identity is metadata-only; missing metadata skips capture."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    controller = _memory_facts_controller()
+    workbench = _context()
+    workbench.user_id = "workbench"
+    skipped = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="no memory identity",
+            ),
+            context=workbench,
+        )
+    )
+    skipped_delivery = _row(engine, str(skipped.delivery_id))
+    skipped_context = _context()
+    skipped_context.user_id = "workbench"
+    manager._hydrate_delivery_context(skipped_context, skipped_delivery)
+    skipped_facts = controller._memory_turn_facts(
+        skipped_context, include_workdir=False
+    )
+
+    assert skipped_context.user_id == "workbench"
+    assert skipped_facts.user_id == "workbench"
+    assert controller.memory_capture_admitted(skipped_context) is False
+    assert controller.memory_principal_for_context(skipped_context) is None
+    assert starts
+
+    remembered_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=remembered_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="remember this",
+                author_id="push-user",
+                metadata={
+                    "_memory_user_id": "local",
+                    "_memory_ordinary_text": True,
+                },
+            ),
+            dispatch_text="remember this",
+        )
+    context = _context()
+    context.user_id = "workbench"
+    manager._hydrate_delivery_context(context, _row(engine, remembered_id))
+    facts = controller._memory_turn_facts(context, include_workdir=False)
+
+    assert context.user_id == "push-user"
+    assert facts.user_id == "local"
+    assert controller.memory_principal_for_context(context) == "principal:avibe:local"
 
 
 @pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
@@ -1761,7 +1930,8 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
 
     manager, _other, engine, _engine_b, _starts = managers
     classifications: list[bool | None] = []
-    hydrated_users: list[str | None] = []
+    routing_users: list[str | None] = []
+    memory_users: list[str | None] = []
     memory_cli_observations: list[tuple[bool, bool, tuple[str, str] | None]] = []
     principal_id = "u-" + ("1" * 32)
     project_id = "p-" + ("2" * 32)
@@ -1770,6 +1940,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
         project_for=lambda _facts: project_id,
         admits=lambda _facts: True,
     )
+    facts_controller = _memory_facts_controller()
     prompt_controller = SimpleNamespace(
         config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
         _memory_scopes_by_session={},
@@ -1786,7 +1957,10 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
 
     async def capture_start(_session_id, context, _text, **_kwargs):
         classifications.append(context.is_ordinary_text)
-        hydrated_users.append(context.user_id)
+        routing_users.append(context.user_id)
+        memory_users.append(
+            facts_controller._memory_turn_facts(context, include_workdir=False).user_id
+        )
         prompt_admitted = memory_cli_prompt_admitted(prompt_controller, context)
         payload = context.platform_specific or {}
         memory_cli_observations.append(
@@ -1845,7 +2019,8 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
             asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
 
     assert classifications == [True]
-    assert hydrated_users == ["local"]
+    assert routing_users == ["user"]
+    assert memory_users == ["local"]
     assert memory_cli_observations == [
         (True, True, (principal_id, project_id)),
     ]
