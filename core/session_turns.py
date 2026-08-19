@@ -92,6 +92,7 @@ logger = logging.getLogger(__name__)
 
 
 TURN_LIFECYCLE_ADMISSION_KEY = "_turn_lifecycle_admission"
+TURN_LIFECYCLE_EPOCH_KEY = "_turn_lifecycle_epoch"
 
 
 @dataclass
@@ -106,12 +107,6 @@ class TurnLifecycleAdmission:
             return
         self._released = True
         self._lock.release()
-
-
-class SessionTurnLifecycleBusyError(RuntimeError):
-    """A destructive lifecycle operation could not quiesce admitted turns."""
-
-    code = "memory_session_lifecycle_busy"
 
 
 def _utc_now_iso() -> str:
@@ -672,7 +667,11 @@ class SessionTurnManager:
         self,
         raw_session_id: str,
     ) -> TurnLifecycleAdmission:
-        """Fence one admitted turn until its Memory capture is durably decided."""
+        """Best-effort lease so a capture can quiesce before a destructive op.
+
+        Turn dispatch must not await this lock. Capture tasks acquire it on
+        their own task so a hung sidecar cannot fence the next message.
+        """
 
         if not isinstance(raw_session_id, str) or not raw_session_id:
             raise ValueError("session lifecycle admission requires a session id")
@@ -695,9 +694,20 @@ class SessionTurnManager:
         raw_session_id: str,
         expected_epoch: int,
     ) -> bool:
-        """Revalidate a pre-await lifecycle fact inside lifecycle admission."""
+        """Revalidate a pre-await lifecycle fact before Memory attribution."""
 
         return self.session_lifecycle_epoch(raw_session_id) == expected_epoch
+
+    def _advance_session_lifecycle_epoch(self, raw_session_id: str) -> int:
+        """Abandon captures admitted against the previous generation."""
+
+        next_epoch = self.session_lifecycle_epoch(raw_session_id) + 1
+        self._session_lifecycle_epochs[raw_session_id] = next_epoch
+        handler = getattr(self.controller, "message_handler", None)
+        abandon = getattr(handler, "abandon_memory_captures_for_session", None)
+        if callable(abandon):
+            abandon(raw_session_id)
+        return next_epoch
 
     async def run_session_lifecycle(
         self,
@@ -706,21 +716,34 @@ class SessionTurnManager:
         *,
         deadline_seconds: float = 5.0,
     ) -> Any:
-        """Run a destructive transition after admitted turns finish capture."""
+        """Run a destructive transition, failing open if capture is still busy.
 
+        Waits up to ``deadline_seconds`` so a nearly-finished capture can
+        flush. On timeout the epoch advances, in-flight captures are
+        abandoned, and ``operation`` still runs. A hung Memory sidecar
+        must not fail ``/new`` or archive.
+        """
+
+        admission = None
         try:
             admission = await asyncio.wait_for(
                 self.acquire_lifecycle_admission(raw_session_id),
                 timeout=max(float(deadline_seconds), 0.001),
             )
-        except asyncio.TimeoutError as exc:
-            raise SessionTurnLifecycleBusyError(
-                "turn capture admission did not quiesce before the deadline"
-            ) from exc
+        except asyncio.TimeoutError:
+            logger.warning(
+                "session lifecycle admission did not quiesce before the "
+                "deadline; abandoning in-flight captures and proceeding "
+                "session=%s",
+                raw_session_id,
+            )
+            self._advance_session_lifecycle_epoch(raw_session_id)
+            return await operation()
         try:
             pre_epoch = self.session_lifecycle_epoch(raw_session_id)
             result = await operation()
-            self._session_lifecycle_epochs[raw_session_id] = pre_epoch + 1
+            if self.session_lifecycle_epoch(raw_session_id) == pre_epoch:
+                self._advance_session_lifecycle_epoch(raw_session_id)
             return result
         finally:
             admission.release()
@@ -4050,110 +4073,88 @@ class SessionTurnManager:
                 evidence_kind="context_build_failed",
             )
             return False
-        lifecycle_admission = await self.acquire_lifecycle_admission(
-            self._lifecycle_anchor_for_delivery(delivery, str(turn["session_id"]))
+        lifecycle_anchor = self._lifecycle_anchor_for_delivery(
+            delivery,
+            str(turn["session_id"]),
         )
-
-        def release_lifecycle_admission_if_owned() -> None:
-            payload = getattr(resolved, "platform_specific", None)
-            if isinstance(payload, dict) and payload.get(
-                TURN_LIFECYCLE_ADMISSION_KEY
-            ) is lifecycle_admission:
-                payload.pop(TURN_LIFECYCLE_ADMISSION_KEY, None)
-            lifecycle_admission.release()
-
-        @contextmanager
-        def release_lifecycle_admission_on_error() -> Iterator[None]:
-            try:
-                yield
-            except BaseException:
-                release_lifecycle_admission_if_owned()
-                raise
-
-        def terminalize_and_release(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            try:
-                return self._terminalize_durable_turn(*args, **kwargs)
-            finally:
-                release_lifecycle_admission_if_owned()
+        lifecycle_epoch = self.session_lifecycle_epoch(lifecycle_anchor)
 
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
         invalid_delivery_ids: set[str] = set()
         remote_authorization_denials: dict[str, str] = {}
-        with release_lifecycle_admission_on_error():
-            with self._sqlite_engine().begin() as conn:
-                reserve_write_lock(conn)
-                latest = delivery_store.get_turn(conn, turn_id)
-                session_status = conn.execute(
-                    select(agent_sessions.c.status).where(
-                        agent_sessions.c.id == str(turn["session_id"])
-                    )
-                ).scalar_one_or_none()
-                fresh_deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
-                fresh_delivery = fresh_deliveries[0] if fresh_deliveries else None
-                if (
-                    latest is None
-                    or latest["state"] != "starting"
-                    or latest.get("start_attempt_id") != attempt_id
-                    or (
-                        expected_start_attempt_id is not None
-                        and str(latest.get("start_attempt_id") or "")
-                        != expected_start_attempt_id
-                    )
-                    or fresh_delivery is None
-                    or latest.get("initial_delivery_id") != fresh_delivery.get("id")
-                    or any(row["state"] != "claimed" for row in fresh_deliveries)
-                ):
-                    release_lifecycle_admission_if_owned()
-                    return False
-                turn = latest
-                deliveries = fresh_deliveries
-                delivery = fresh_delivery
-                archived_before_dispatch = session_status != "active"
-                invalid_delivery_ids = {
-                    str(row["id"])
-                    for row in deliveries
-                    if not self._has_resolvable_delivery_input(conn, row)
-                }
-                remote_authorization_denials = {
-                    str(row["id"]): reason
-                    for row in deliveries
-                    if (
-                        reason := self._remote_delivery_execution_denial(conn, row)
-                    )
-                    is not None
-                }
-                run_ids = list(
-                    dict.fromkeys(
-                        run_id
-                        for row in deliveries
-                        for run_id in delivery_store.agent_run_ids_for_delivery(conn, row)
-                    )
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            latest = delivery_store.get_turn(conn, turn_id)
+            session_status = conn.execute(
+                select(agent_sessions.c.status).where(
+                    agent_sessions.c.id == str(turn["session_id"])
                 )
-                if not archived_before_dispatch and run_ids:
-                    run_rows = {
-                        str(row["id"]): row
-                        for row in conn.execute(
-                            select(
-                                agent_runs.c.id,
-                                agent_runs.c.status,
-                                agent_runs.c.cancel_requested,
-                                agent_runs.c.metadata_json,
-                            ).where(agent_runs.c.id.in_(run_ids))
-                        ).mappings()
-                    }
-                    for run_id in run_ids:
-                        run_row = run_rows.get(run_id)
-                        if run_row is None:
-                            continue
-                        run_status = normalize_run_status(run_row["status"])
-                        if bool(run_row["cancel_requested"]) or run_status not in {
-                            "queued",
-                            "running",
-                        }:
-                            run_terminal_before_dispatch = True
+            ).scalar_one_or_none()
+            fresh_deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
+            fresh_delivery = fresh_deliveries[0] if fresh_deliveries else None
+            if (
+                latest is None
+                or latest["state"] != "starting"
+                or latest.get("start_attempt_id") != attempt_id
+                or (
+                    expected_start_attempt_id is not None
+                    and str(latest.get("start_attempt_id") or "")
+                    != expected_start_attempt_id
+                )
+                or fresh_delivery is None
+                or latest.get("initial_delivery_id") != fresh_delivery.get("id")
+                or any(row["state"] != "claimed" for row in fresh_deliveries)
+            ):
+                return False
+            turn = latest
+            deliveries = fresh_deliveries
+            delivery = fresh_delivery
+            archived_before_dispatch = session_status != "active"
+            invalid_delivery_ids = {
+                str(row["id"])
+                for row in deliveries
+                if not self._has_resolvable_delivery_input(conn, row)
+            }
+            remote_authorization_denials = {
+                str(row["id"]): reason
+                for row in deliveries
+                if (
+                    reason := self._remote_delivery_execution_denial(conn, row)
+                )
+                is not None
+            }
+            run_ids = list(
+                dict.fromkeys(
+                    run_id
+                    for row in deliveries
+                    for run_id in delivery_store.agent_run_ids_for_delivery(conn, row)
+                )
+            )
+            if not archived_before_dispatch and run_ids:
+                run_rows = {
+                    str(row["id"]): row
+                    for row in conn.execute(
+                        select(
+                            agent_runs.c.id,
+                            agent_runs.c.status,
+                            agent_runs.c.cancel_requested,
+                            agent_runs.c.metadata_json,
+                        ).where(agent_runs.c.id.in_(run_ids))
+                    ).mappings()
+                }
+                for run_id in run_ids:
+                    run_row = run_rows.get(run_id)
+                    if run_row is None:
+                        continue
+                    run_status = normalize_run_status(run_row["status"])
+                    if bool(run_row["cancel_requested"]) or run_status not in {
+                        "queued",
+                        "running",
+                    }:
+                        run_terminal_before_dispatch = True
         if archived_before_dispatch:
-            terminalize_and_release(
+            self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="session_archive",
@@ -4161,7 +4162,7 @@ class SessionTurnManager:
             )
             return False
         if run_terminal_before_dispatch:
-            terminal = terminalize_and_release(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="agent_run_terminal",
@@ -4176,7 +4177,7 @@ class SessionTurnManager:
                 turn_id,
                 remote_authorization_denials,
             )
-            terminal = terminalize_and_release(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="remote_authorization_denied",
@@ -4196,7 +4197,7 @@ class SessionTurnManager:
                 "durable Turn=%s lost its resolvable input before native dispatch",
                 turn_id,
             )
-            terminal = terminalize_and_release(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="invalid_input",
@@ -4209,9 +4210,7 @@ class SessionTurnManager:
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
-            resolved.platform_specific[TURN_LIFECYCLE_ADMISSION_KEY] = (
-                lifecycle_admission
-            )
+            resolved.platform_specific[TURN_LIFECYCLE_EPOCH_KEY] = lifecycle_epoch
             resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
@@ -4258,7 +4257,7 @@ class SessionTurnManager:
                 "durable native start failed during pre-dispatch preparation for Turn=%s",
                 turn_id,
             )
-            terminalize_and_release(
+            self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="pre_write_failure",
@@ -4276,11 +4275,7 @@ class SessionTurnManager:
                 durable_preallocated=True,
             )
             return True
-        except asyncio.CancelledError:
-            release_lifecycle_admission_if_owned()
-            raise
         except Exception:
-            release_lifecycle_admission_if_owned()
             logger.exception("durable native start became ambiguous for Turn=%s", turn_id)
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)

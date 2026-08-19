@@ -1,0 +1,35 @@
+version: 1
+capability:
+  id: memory_independence
+  name: Memory capture must not fence dispatch or destructive session ops
+  canonical_tests:
+    - tests/test_session_delivery_fsm.py
+    - tests/test_message_handler_typing.py
+    - tests/test_command_handler_user_names.py
+    - tests/test_memory_runtime.py
+contract:
+  dispatch: capture_must_not_fence_turn_start
+  destructive_ops: new_and_archive_fail_open_on_capture_timeout
+  generation: epoch_snapshot_prevents_cross_generation_attribution
+  shutdown: drain_and_cancel_still_settle_accepted_captures
+status_legend:
+  covered: executable evidence exists
+scenarios:
+  - id: MEMORY-INDEP-001
+    name: A hung capture does not block the next turn, /new, or archive
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops
+  - id: MEMORY-INDEP-002
+    name: A capture admitted before /new or archive is discarded after the transition
+    status: covered
+    kind: correctness
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_capture_admitted_before_new_is_discarded_after_transition
+  - id: MEMORY-INDEP-003
+    name: Idle-session capture still attributes and shutdown still drains accepted captures
+    status: covered
+    kind: regression_keep
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_idle_session_capture_attributes_and_shutdown_drains

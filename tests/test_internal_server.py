@@ -37,7 +37,6 @@ from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
 from core.memory.maintenance import MemoryStoreUnavailableError
-from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -527,11 +526,6 @@ def test_memory_archive_session_rejects_widened_or_invalid_payloads(
     "error,status_code,error_code",
     [
         (LookupError("missing"), 404, "session_not_found"),
-        (
-            MemorySessionLifecycleBusyError("busy"),
-            503,
-            "memory_session_lifecycle_busy",
-        ),
         (RuntimeError("failed"), 503, "session_archive_unavailable"),
     ],
 )

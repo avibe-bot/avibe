@@ -53,7 +53,6 @@ from core.memory.process import (
 from core.memory.provider_root import ProviderRootMetadata
 from core.memory.runtime import (
     MemoryRuntime,
-    MemorySessionLifecycleBusyError,
     MemoryStoreUnavailableError,
     create_memory_runtime,
 )
@@ -2037,7 +2036,7 @@ async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fence
     await memory_runtime_factory.close(runtime)
 
 
-async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
+async def test_session_lifecycle_resets_when_capture_fence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     memory_runtime_factory,
@@ -2060,23 +2059,20 @@ async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
     await admission_lock.acquire()
     operation_called = False
 
-    async def reset_session() -> None:
+    async def reset_session() -> str:
         nonlocal operation_called
         operation_called = True
+        return "reset"
 
     try:
-        with pytest.raises(
-            MemorySessionLifecycleBusyError,
-            match="did not quiesce",
-        ):
-            await runtime.run_session_lifecycle(
-                principal_id=principal_id,
-                project_id=PROJECT,
-                raw_session_id=session_id,
-                operation=reset_session,
-                deadline_seconds=0.01,
-            )
-        assert operation_called is False
+        assert await runtime.run_session_lifecycle(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            raw_session_id=session_id,
+            operation=reset_session,
+            deadline_seconds=0.01,
+        ) == "reset"
+        assert operation_called is True
     finally:
         admission_lock.release()
         await memory_runtime_factory.close(runtime)
@@ -2382,14 +2378,21 @@ async def test_session_lifecycle_ticket_barrier_is_bounded() -> None:
         session_id="stalled-session",
     )
 
-    with pytest.raises(MemorySessionLifecycleBusyError, match="did not quiesce"):
-        await module.run_session_lifecycle(
-            principal_id=PRINCIPAL,
-            project_id=PROJECT,
-            raw_session_id="stalled-session",
-            operation=lambda: asyncio.sleep(0),
-            deadline_seconds=0.01,
-        )
+    ran = False
+
+    async def reset_session() -> str:
+        nonlocal ran
+        ran = True
+        return "reset"
+
+    assert await module.run_session_lifecycle(
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        raw_session_id="stalled-session",
+        operation=reset_session,
+        deadline_seconds=0.01,
+    ) == "reset"
+    assert ran is True
 
     module.cancel_capture_reservation(reservation)
 

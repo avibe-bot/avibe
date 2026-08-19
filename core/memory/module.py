@@ -380,7 +380,7 @@ class MemoryModule:
         operation: Callable[[], Awaitable[_SessionLifecycleResult]],
         deadline_seconds: float = 5.0,
     ) -> _SessionLifecycleResult:
-        """Flush and run one destructive session transition under one fence."""
+        """Flush if capture is quiet, then run the transition; fail open on timeout."""
 
         if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
             return await operation()
@@ -406,10 +406,13 @@ class MemoryModule:
                     timeout=max(deadline - loop.time(), 0.001),
                 )
                 acquired = True
-            except asyncio.TimeoutError as error:
-                raise MemorySessionLifecycleBusyError(
-                    "memory capture admission did not quiesce before the deadline"
-                ) from error
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "memory capture admission did not quiesce before the "
+                    "deadline; skipping final flush session=%s",
+                    raw_session_id,
+                )
+                return await operation()
             await self._final_flush_under_admission(
                 principal_id=principal_id,
                 project_id=project_id,
@@ -478,10 +481,13 @@ class MemoryModule:
                         raise asyncio.TimeoutError
                     await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
                     acquired.append(admission_lock)
-            except asyncio.TimeoutError as error:
-                raise MemorySessionLifecycleBusyError(
-                    "memory capture admission did not quiesce before the deadline"
-                ) from error
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "memory capture admission did not quiesce before the "
+                    "deadline; skipping final flush session=%s",
+                    raw_session_id,
+                )
+                return await operation()
             flush_succeeded = True
             for principal_id, project_id in canonical_scopes:
                 flush_succeeded = (

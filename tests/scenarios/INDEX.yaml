@@ -67,6 +67,17 @@ capabilities:
       - tests/test_memory_cli.py
       - ui/src/components/settings/memory/MemorySearchPanel.test.tsx
       - ui/src/context/ApiContext.memoryList.test.tsx
+  - id: memory_independence
+    name: Memory capture must not fence dispatch or destructive session ops
+    status: active
+    catalog: tests/scenarios/memory_independence/catalog.yaml
+    scenario_tests:
+      - tests/test_session_delivery_fsm.py
+    unit_or_contract_tests:
+      - tests/test_message_handler_typing.py
+      - tests/test_command_handler_user_names.py
+      - tests/test_memory_runtime.py
+      - tests/test_internal_server.py
   - id: memory_im_attachment_capture
     name: Bound-DM attachment capture through EverOS multimodal ingest
     status: active
