@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 import hashlib
@@ -6100,3 +6101,79 @@ def test_run_migrations_upgrades_released_0030_to_acl_head(tmp_path: Path) -> No
         )
         assert "resource_access_policies" in tables
         assert "resource_access_groups" in tables
+
+
+def _initial_era_db(db_path: Path, tables: Iterable[str], stamp: str = migrations.INITIAL_REVISION) -> Path:
+    """A database stamped at ``stamp`` carrying ``tables``, each holding one row.
+
+    The tables are placeholders on purpose. What decides whether the reset below fires is
+    which names are present and what the stamp says, so a faithful copy of any particular
+    release's DDL would only make the fixture look more specific than the thing it tests.
+    The rows are there so a drop is visible as lost data rather than as a lost empty shell.
+    """
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table alembic_version (version_num varchar(32) not null)")
+        conn.execute("insert into alembic_version (version_num) values (?)", (stamp,))
+        for table in tables:
+            conn.execute(f'create table "{table}" (id text primary key)')
+            conn.execute(f'insert into "{table}" (id) values (?)', (f"row-of-{table}",))
+        conn.commit()
+    return db_path
+
+
+def _surviving_tables(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        names = [
+            str(name)
+            for (name,) in conn.execute(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+            )
+        ]
+        return {name: conn.execute(f'select count(*) from "{name}"').fetchone()[0] for name in names}
+
+
+@pytest.mark.parametrize("absent", sorted(migrations.INITIAL_TABLES))
+def test_the_initial_drift_reset_never_touches_a_released_database(tmp_path: Path, absent: str) -> None:
+    """A database carrying only released tables is not drift, however incomplete it is.
+
+    The reset only runs at all once INITIAL_TABLES is not a subset of what the database
+    carries, which sounds like a shape no release ships and is not: the initial migration
+    has gained tables since it was first released, so a database from an older release is
+    stamped at INITIAL_REVISION and short of today's set. That is a released database, and
+    the reset dropping `scopes` and the stamp out of it is what made every v2.3-era
+    upgrade abort. The cases come from INITIAL_TABLES itself, so a table added to it later
+    is covered without editing this test, and one absence is the general case because the
+    reset decides once for the database and then drops table by table.
+    """
+
+    present = sorted(migrations.INITIAL_TABLES - {absent})
+    db_path = _initial_era_db(tmp_path / f"without-{absent}.sqlite", present)
+    before = _surviving_tables(db_path)
+
+    migrations._reset_unreleased_initial_schema_drift(db_path)
+
+    assert _surviving_tables(db_path) == before
+
+
+@pytest.mark.parametrize("drifted", migrations.UNRELEASED_ONLY_INITIAL_TABLES)
+def test_the_initial_drift_reset_still_clears_an_unreleased_database(tmp_path: Path, drifted: str) -> None:
+    """Every table the reset treats as evidence of an unreleased build has to be evidence.
+
+    Parametrized over the list the reset reads rather than over a sample of it, so a member
+    that stops firing -- or a list narrowed until nothing does -- fails here instead of
+    leaving a dev database to be upgraded as if it were a released one. Seeded with a
+    released database's tables as well, because the drifted shape carries both and the
+    reset is meant to clear it regardless.
+    """
+
+    db_path = _initial_era_db(
+        tmp_path / f"drifted-{drifted}.sqlite",
+        [*sorted(migrations.INITIAL_TABLES - {"agents"}), drifted],
+    )
+
+    migrations._reset_unreleased_initial_schema_drift(db_path)
+
+    surviving = _surviving_tables(db_path)
+    assert drifted not in surviving
+    assert "alembic_version" not in surviving
