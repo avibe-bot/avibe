@@ -23,6 +23,7 @@ from config import paths
 from core.show_pages import (
     SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS,
     VISIBILITIES,
+    ShowPageError,
     ShowPageStore,
     ensure_show_page_dir,
     show_cli_event_token,
@@ -1861,24 +1862,80 @@ def test_show_page_read_returns_a_page_without_writing_the_table(monkeypatch, tm
     before = _show_page_rows()
     assert len(before) == len(seeded)
     client = app.test_client()
+    responses = []
 
     for index, visibility in enumerate(seeded):
         response = client.get(f"/api/show-pages/ses{index}", base_url="http://127.0.0.1:5123")
+        responses.append(response)
         assert response.status_code == 200, visibility
         body = response.get_json()
         assert body["ok"] is True
         assert body["session_id"] == f"ses{index}"
         # The read reports no creation fact, so no caller can consume one.
         assert "existed" not in body
-        # A GET carries per-caller page data, so it must not be stored by caches.
-        assert response.headers["Cache-Control"] == "no-store, private"
-        assert response.headers["Vary"] == "Cookie"
 
     missing = client.get("/api/show-pages/sesabsent", base_url="http://127.0.0.1:5123")
+    responses.append(missing)
     assert missing.status_code == 404
     assert missing.get_json()["code"] == "show_page_not_found"
 
+    # The ensure POST was uncacheable by method. This route is a GET, so caching is
+    # opt-out — and the property is per route, not per status: EVERY response it
+    # produces carries per-caller page state and must be marked. A 404 is
+    # heuristically cacheable, so an unmarked "no page here" could outlive the
+    # page's creation and leave the share panel empty until it expired.
+    for response in responses:
+        assert response.headers["Cache-Control"] == "no-store, private", response.status
+        assert response.headers["Vary"] == "Cookie", response.status
+
     assert _show_page_rows() == before
+
+
+def test_show_page_read_hides_page_existence_without_project_access(monkeypatch, tmp_path):
+    # The route policy screens the Instance role only, so an Editor still reaches this
+    # read for sessions in projects they are not bound to. The property: to a caller
+    # who fails the project check, a session that HAS a page and a session that has
+    # none are indistinguishable. Without it the read is a page-existence oracle over
+    # arbitrary session ids -- the create path already checks project access before it
+    # acts, and a read must not be the cheaper way to learn what create would refuse.
+    from storage import project_access_service
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("seswith")
+    _create_agent_session("seswithout")
+    _create_show_page("seswith", "private")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        result = project_access_service.apply_project_access_intent(
+            conn,
+            {"project_id": "proj_show", "revision": 1, "mode": "restricted", "bindings": []},
+        )
+    assert result.changed is True
+    engine.dispose()
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="remote-editor",
+        email="alice@example.com",
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+    store = ShowPageStore()
+    try:
+        codes = []
+        for session_id in ("seswith", "seswithout"):
+            with pytest.raises(ShowPageError) as excinfo:
+                store.get_for_use(session_id, user_context=context)
+            codes.append(excinfo.value.code)
+    finally:
+        store.close()
+
+    # Which code the caller gets is not the property -- that one session cannot be
+    # told from the other is. Normalizing the pair either way keeps this passing.
+    assert len(set(codes)) == 1, codes
 
 
 def test_remote_personal_owner_can_ensure_show_page(monkeypatch, tmp_path):

@@ -11,18 +11,11 @@ import { useDock } from '../../context/DockContext';
 import { showDockId } from '../../context/dockDoc';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
-import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
 import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
 import { ShowPageWorkspaceAccessControl } from './ShowPageWorkspaceAccessControl';
-
-type ShowPagePayload = ShowPageLinkInfo & {
-  url_available: boolean;
-  url_guidance?: string | null;
-  offline: boolean;
-  title?: string | null;
-};
 
 export const ShowPageShareControl: React.FC<{
   sessionId: string;

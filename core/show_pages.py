@@ -847,6 +847,14 @@ class ShowPageStore:
             with self.engine.begin() as conn:
                 page = self._existing_page_for_use(conn, session_id, context, ownership)
                 if page is None:
+                    # Absence is only reported to a caller allowed to work on the
+                    # project, exactly as ``ensure`` checks before it creates. The
+                    # route policy screens the Instance role alone, so skipping this
+                    # would let an Editor without project access tell a session that
+                    # HAS a page (forbidden) from one that does not (not found) —
+                    # turning a read into a page-existence oracle over arbitrary
+                    # session ids.
+                    self._require_project_edit_access(conn, session_id, context)
                     raise ShowPageError(
                         "This session has no Show Page.",
                         code="show_page_not_found",

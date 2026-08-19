@@ -9,6 +9,17 @@ export type ShowPageLinkInfo = {
   share_id: string | null;
 };
 
+// One session's page as the server reports it: the link fields above plus the
+// serving state. Lives beside `ShowPageLinkInfo` because it is the same family —
+// the API read and the components that render its result share this shape rather
+// than restating it.
+export type ShowPagePayload = ShowPageLinkInfo & {
+  url_available: boolean;
+  url_guidance?: string | null;
+  offline: boolean;
+  title?: string | null;
+};
+
 // Same-origin path a Show Page is served at locally. Limited and Public share
 // one stable /p route; the server decides whether to start identity admission
 // or serve the page anonymously.

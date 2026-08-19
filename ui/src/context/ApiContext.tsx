@@ -7,6 +7,7 @@ import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated } from '../lib/pageActivity';
+import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
@@ -527,10 +528,11 @@ export type ApiContextType = {
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
-  /** Read the session's Show Page without creating it; rejects when there is none.
+  /** Read the session's Show Page without creating it; rejects with
+   *  `show_page_not_found` — silently, as an expected answer — when there is none.
    *  Everything that only DISPLAYS the page uses this — `ensureShowPage` is reserved
    *  for the one caller that owns the first-creation prompt. */
-  getShowPage: (sessionId: string) => Promise<any>;
+  getShowPage: (sessionId: string) => Promise<ShowPagePayload>;
   /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. Callers
    *  MUST honor `existed === false` by sending the visualize prompt: that edge is
    *  reported once, so a caller that ignores it silently consumes it. To only read the
@@ -2628,10 +2630,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const handleApiError = async (res: Response, path: string) => {
+  const handleApiError = async (
+    res: Response,
+    path: string,
+    { expectedCodes }: { expectedCodes?: readonly string[] } = {},
+  ) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
     let errorCode: string | null = null;
-    
+
     try {
       const data = await res.json();
       const parsed = selectApiErrorFields(data, errorMessage);
@@ -2648,15 +2654,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       errorMessage = `${path}: ${res.statusText || 'Unknown error'} (${res.status})`;
     }
 
-    // Log error details to console
-    console.error(`[API Error] ${path}`, {
-      status: res.status,
-      statusText: res.statusText,
-      error: errorMessage,
-    });
+    // A code the caller declared EXPECTED is an answer, not a failure: it still
+    // rejects, so no caller can mistake an error body for data, but it is neither
+    // announced to the user nor logged as an error. Declared per call site, applied
+    // here, so "expected" cannot mean two different things in two helpers.
+    if (!(errorCode !== null && expectedCodes?.includes(errorCode))) {
+      // Log error details to console
+      console.error(`[API Error] ${path}`, {
+        status: res.status,
+        statusText: res.statusText,
+        error: errorMessage,
+      });
 
-    // Show toast to user
-    showToast(errorMessage, 'error');
+      // Show toast to user
+      showToast(errorMessage, 'error');
+    }
 
     // Archive is TERMINAL, so this particular refusal is not a failure to retry
     // but a state change the client missed (a backgrounded/offline tab can drop
@@ -2679,10 +2691,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
+  const getJson = async (
+    path: string,
+    { handleError = true, expectedCodes }: { handleError?: boolean; expectedCodes?: readonly string[] } = {},
+  ) => {
     const res = await apiFetch(path);
     if (!res.ok && handleError) {
-      await handleApiError(res, path);
+      await handleApiError(res, path, { expectedCodes });
     }
     return res.json();
   };
@@ -3326,7 +3341,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
       { offline },
     ),
-    getShowPage: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}`),
+    getShowPage: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}`, {
+      // "This session has no page" is this read's expected answer, not an incident
+      // to announce: the share panel handles it by leaving the link empty. It must
+      // still REJECT — resolving with the error body would hand the panel a
+      // non-payload, and is what would tempt a caller back onto the ensure POST.
+      expectedCodes: ['show_page_not_found'],
+    }),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes
