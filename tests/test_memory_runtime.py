@@ -2421,6 +2421,30 @@ async def test_session_scopes_lifecycle_proceeds_during_maintenance() -> None:
     module.leave_maintenance()
 
 
+async def test_session_scopes_lifecycle_timeout_reports_flush_unsuccessful() -> None:
+    module = memory_module.MemoryModule(
+        MemoryStore(),
+        FakeMemoryProvider(),
+        enabled=True,
+    )
+    reservation = module.reserve_capture_admission(
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        session_id="flush-timeout-session",
+    )
+
+    async def flushed() -> bool:
+        return True
+
+    assert await module.run_session_scopes_lifecycle(
+        scopes=((PRINCIPAL, PROJECT),),
+        raw_session_id="flush-timeout-session",
+        operation=flushed,
+        deadline_seconds=0.01,
+    ) is False
+    module.cancel_capture_reservation(reservation)
+
+
 async def test_retired_close_aborts_when_claim_quiescence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

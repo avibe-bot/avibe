@@ -820,7 +820,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, "materialization failed")
-        controller.capture_user_memory.assert_not_called()
+        controller.capture_user_memory.assert_not_awaited()
         self.assertIs(
             handler._emit_agent_dispatch_failure.await_args.args[2],
             materialization_error,
@@ -1678,7 +1678,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         lease.retain.assert_called_once_with()
         retained_lease.release.assert_called()
-        controller.capture_user_memory.assert_not_called()
+        controller.capture_user_memory.assert_not_awaited()
 
     async def test_shutdown_quiesce_closes_capture_registration_before_sweep(
         self,
@@ -1751,7 +1751,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         release_acquisition.set()
         await asyncio.wait_for(turn, timeout=1.0)
 
-        controller.capture_user_memory.assert_not_called()
+        controller.capture_user_memory.assert_not_awaited()
         assert handler._memory_capture_tasks == set()
 
     async def test_cancelled_attachment_registration_removes_real_lease_directory(
@@ -1823,7 +1823,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler._schedule_memory_capture_task(
             session_id="base-session",
             expected_epoch=0,
-            capture_factory=capture_write,
+            capture=capture_write(),
             attachment_lease=retained_lease,
         )
         await asyncio.wait_for(acquisition_started.wait(), timeout=1.0)

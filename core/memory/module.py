@@ -454,7 +454,8 @@ class MemoryModule:
                 "skipping final flush session=%s",
                 raw_session_id,
             )
-            return await operation()
+            result = await operation()
+            return False if isinstance(result, bool) else result
 
         timeout = _positive_timeout(deadline_seconds)
         loop = asyncio.get_running_loop()
@@ -492,7 +493,8 @@ class MemoryModule:
                     "deadline; skipping final flush session=%s",
                     raw_session_id,
                 )
-                return await operation()
+                result = await operation()
+                return False if isinstance(result, bool) else result
             flush_succeeded = True
             for principal_id, project_id in canonical_scopes:
                 flush_succeeded = (

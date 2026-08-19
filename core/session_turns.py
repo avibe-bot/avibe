@@ -624,6 +624,7 @@ class SessionTurnManager:
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._session_lifecycle_epochs: dict[str, int] = {}
+        self._session_lifecycle_held: set[str] = set()
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
@@ -743,17 +744,30 @@ class SessionTurnManager:
                 timeout=max(float(deadline_seconds), 0.001),
             )
         except asyncio.TimeoutError:
-            logger.warning(
-                "session lifecycle admission did not quiesce before the "
-                "deadline; abandoning in-flight captures and proceeding "
-                "session=%s",
-                raw_session_id,
-            )
-            self._advance_session_lifecycle_epoch(
-                raw_session_id,
-                abandon_captures=True,
-            )
-            return await operation()
+            if raw_session_id in self._session_lifecycle_held:
+                admission = await self.acquire_lifecycle_admission(raw_session_id)
+            else:
+                logger.warning(
+                    "session lifecycle admission did not quiesce before the "
+                    "deadline; abandoning in-flight captures and proceeding "
+                    "session=%s",
+                    raw_session_id,
+                )
+                handler = getattr(self.controller, "message_handler", None)
+                abandon = getattr(
+                    handler,
+                    "abandon_memory_captures_for_session",
+                    None,
+                )
+                if callable(abandon):
+                    abandon(raw_session_id)
+                try:
+                    result = await operation()
+                except BaseException:
+                    raise
+                self._advance_session_lifecycle_epoch(raw_session_id)
+                return result
+        self._session_lifecycle_held.add(raw_session_id)
         try:
             pre_epoch = self.session_lifecycle_epoch(raw_session_id)
             result = await operation()
@@ -761,6 +775,7 @@ class SessionTurnManager:
                 self._advance_session_lifecycle_epoch(raw_session_id)
             return result
         finally:
+            self._session_lifecycle_held.discard(raw_session_id)
             admission.release()
 
     @staticmethod

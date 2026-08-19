@@ -4,7 +4,7 @@ import asyncio
 import logging
 import inspect
 from datetime import datetime
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
@@ -82,6 +82,7 @@ class MessageHandler(BaseHandler):
         session_id: str | None = None,
         lifecycle_admission: Any = None,
         attachment_lease: Any = None,
+        attachment_reservation: Any = None,
     ) -> None:
         """Retain a best-effort capture until asyncio reports its completion."""
 
@@ -102,6 +103,13 @@ class MessageHandler(BaseHandler):
                 release_attachment = getattr(attachment_lease, "release", None)
                 if callable(release_attachment):
                     release_attachment()
+                release_reservation = getattr(
+                    attachment_reservation,
+                    "release",
+                    None,
+                )
+                if callable(release_reservation):
+                    release_reservation()
                 release = getattr(lifecycle_admission, "release", None)
                 if callable(release):
                     release()
@@ -144,53 +152,63 @@ class MessageHandler(BaseHandler):
         self,
         session_id: str,
         expected_epoch: int,
-        capture_factory: Callable[[], Awaitable[None]],
+        capture: Awaitable[None],
     ) -> None:
         """Acquire the lifecycle lock and attribute only if the epoch still matches."""
 
-        if not self._memory_capture_registration_open:
-            return
-        admission = await self._acquire_memory_capture_admission(session_id)
+        pending: Awaitable[None] | None = capture
         try:
             if not self._memory_capture_registration_open:
                 return
-            if not self._memory_session_lifecycle_epoch_matches(
-                session_id,
-                expected_epoch,
-            ):
-                logger.info(
-                    "Memory capture abandoned after session lifecycle "
-                    "transition session=%s epoch=%s",
+            admission = await self._acquire_memory_capture_admission(session_id)
+            try:
+                if not self._memory_capture_registration_open:
+                    return
+                if not self._memory_session_lifecycle_epoch_matches(
                     session_id,
                     expected_epoch,
-                )
-                return
-            await capture_factory()
+                ):
+                    logger.info(
+                        "Memory capture abandoned after session lifecycle "
+                        "transition session=%s epoch=%s",
+                        session_id,
+                        expected_epoch,
+                    )
+                    return
+                await capture
+                pending = None
+            finally:
+                release = getattr(admission, "release", None)
+                if callable(release):
+                    release()
         finally:
-            release = getattr(admission, "release", None)
-            if callable(release):
-                release()
+            if pending is not None:
+                close = getattr(pending, "close", None)
+                if callable(close):
+                    close()
 
     def _schedule_memory_capture_task(
         self,
         *,
         session_id: str,
         expected_epoch: int,
-        capture_factory: Callable[[], Awaitable[None]],
+        capture: Awaitable[None],
         attachment_lease: Any = None,
+        attachment_reservation: Any = None,
     ) -> asyncio.Task[Any] | None:
         """Register a capture without awaiting Memory on the turn path."""
 
         if not self._memory_capture_registration_open:
             return None
         capture_task = asyncio.create_task(
-            self._run_memory_capture(session_id, expected_epoch, capture_factory),
+            self._run_memory_capture(session_id, expected_epoch, capture),
             name="memory-capture",
         )
         self._track_memory_capture_task(
             capture_task,
             session_id=session_id,
             attachment_lease=attachment_lease,
+            attachment_reservation=attachment_reservation,
         )
         return capture_task
 
@@ -207,11 +225,18 @@ class MessageHandler(BaseHandler):
             return
         if not self._memory_capture_registration_open:
             return
-        self._schedule_memory_capture_task(
-            session_id=session_id,
-            expected_epoch=expected_epoch,
-            capture_factory=lambda: capture_memory(context, text, session_id),
-        )
+        capture = capture_memory(context, text, session_id)
+        if (
+            self._schedule_memory_capture_task(
+                session_id=session_id,
+                expected_epoch=expected_epoch,
+                capture=capture,
+            )
+            is None
+        ):
+            close = getattr(capture, "close", None)
+            if callable(close):
+                close()
 
     def _memory_session_lifecycle_epoch(self, session_id: str) -> int:
         manager = getattr(self.controller, "session_turns", None)
@@ -935,18 +960,23 @@ class MessageHandler(BaseHandler):
                             capture_options["attachment_lease"] = memory_attachment_lease
                         if attachment_text_only:
                             capture_options["attachment_text_only"] = True
+                        capture = capture_memory(
+                            context,
+                            control_message,
+                            memory_session_id,
+                            **capture_options,
+                        )
                         capture_task = self._schedule_memory_capture_task(
                             session_id=memory_session_id,
                             expected_epoch=memory_session_pre_epoch,
-                            capture_factory=lambda: capture_memory(
-                                context,
-                                control_message,
-                                memory_session_id,
-                                **capture_options,
-                            ),
+                            capture=capture,
                             attachment_lease=memory_attachment_lease,
+                            attachment_reservation=memory_capture_reservation,
                         )
                         if capture_task is None:
+                            close = getattr(capture, "close", None)
+                            if callable(close):
+                                close()
                             raise _MemoryCaptureRegistrationClosed
                     except _MemoryCaptureRegistrationClosed:
                         if memory_attachment_lease is not None:

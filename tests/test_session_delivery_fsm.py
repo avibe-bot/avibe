@@ -234,7 +234,7 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
         handler._schedule_memory_capture_task(
             session_id="ses_fsm",
             expected_epoch=expected_epoch,
-            capture_factory=capture,
+            capture=capture(),
         )
 
     async def lifecycle_operation() -> str:
@@ -325,7 +325,7 @@ async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
     handler._schedule_memory_capture_task(
         session_id="ses_fsm",
         expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
-        capture_factory=hung_capture,
+        capture=hung_capture(),
     )
     await asyncio.wait_for(capture_holding.wait(), timeout=1.0)
 
@@ -400,7 +400,7 @@ async def test_capture_admitted_before_new_is_discarded_after_transition(
         await handler._run_memory_capture(
             "ses_fsm",
             sampled_epoch,
-            capture_write,
+            capture_write(),
         )
 
     capture_task = asyncio.create_task(delayed_capture())
@@ -438,7 +438,7 @@ async def test_idle_session_capture_attributes_and_shutdown_drains(
     await handler._run_memory_capture(
         "ses_fsm",
         manager.session_lifecycle_epoch("ses_fsm"),
-        capture_write,
+        capture_write(),
     )
     assert attributed == ["wrote"]
 
@@ -471,7 +471,7 @@ async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
         task = handler._schedule_memory_capture_task(
             session_id="ses_fsm",
             expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
-            capture_factory=lambda: asyncio.sleep(0),
+            capture=asyncio.sleep(0),
         )
         assert task is not None
         scheduled.append(task)
