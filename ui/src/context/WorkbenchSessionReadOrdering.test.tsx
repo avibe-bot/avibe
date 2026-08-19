@@ -292,6 +292,7 @@ describe('Workbench session read ownership', () => {
       getWorkbenchProjectsBootstrap,
       listSessions: vi.fn().mockResolvedValue({ sessions: [session], next_before_id: null }),
       connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      createProject: vi.fn().mockResolvedValue(project),
     };
     let tree: ReturnType<typeof useWorkbenchProjectsTree> | null = null;
     const Probe = () => {
@@ -308,8 +309,8 @@ describe('Workbench session read ownership', () => {
       </WorkbenchProjectsProvider>,
     );
     await settle();
-    act(() => {
-      tree?.upsertProjectToTop(project);
+    await act(async () => {
+      await tree?.createProject({ folder_path: '/tmp/a' });
     });
     await settle();
     await act(async () => {
@@ -345,6 +346,7 @@ describe('Workbench session read ownership', () => {
     let handlers: WorkbenchEventHandlers | null = null;
     apiRef.current = {
       getWorkbenchProjectsBootstrap,
+      createProject: vi.fn().mockResolvedValue(localProject),
       connectWorkbenchEvents: vi.fn((next) => {
         handlers = next;
         return vi.fn();
@@ -370,8 +372,8 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
-    act(() => {
-      tree?.upsertProjectToTop(localProject);
+    await act(async () => {
+      await tree?.createProject({ folder_path: '/tmp/local' });
     });
     await act(async () => {
       staleReconnect.resolve({

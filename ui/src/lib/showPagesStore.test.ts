@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { ApiContextType } from '../context/ApiContext';
 import {
+  commitShowPagesInventoryStore,
+  getShowPagesInventoryStore,
   ShowPagesInventoryStore,
   type ShowPage,
   type ShowPagesInventoryApi,
@@ -43,7 +46,7 @@ const deferred = <T,>() => {
 type EventHandlers = Parameters<ShowPagesInventoryApi['connectWorkbenchEvents']>[0];
 
 describe('ShowPagesInventoryStore', () => {
-  it('single-flights simultaneous consumers and owns one events subscription', async () => {
+  it('single-flights simultaneous consumers and keeps one events subscription', async () => {
     const response = deferred<{ pages: ShowPage[] }>();
     const disconnect = vi.fn();
     const api: ShowPagesInventoryApi = {
@@ -66,8 +69,164 @@ describe('ShowPagesInventoryStore', () => {
 
     releaseFirst();
     expect(disconnect).not.toHaveBeenCalled();
+    // The last consumer leaving does not end the subscription: the snapshot it
+    // leaves behind is what an authorization change has to be able to reach.
     releaseSecond();
+    expect(disconnect).not.toHaveBeenCalled();
+    expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a retained snapshot when access changes with nothing reading it', async () => {
+    let handlers: EventHandlers | undefined;
+    const disconnect = vi.fn();
+    const revalidation = deferred<{ pages: ShowPage[] }>();
+    const getShowPages = vi
+      .fn()
+      .mockResolvedValueOnce({ pages: [page({ share_id: 'share-1' })] })
+      .mockImplementationOnce(() => revalidation.promise);
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return disconnect;
+      }),
+    });
+
+    const close = store.activate();
+    await store.reload();
+    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+    expect(store.getSnapshot().pages).toHaveLength(1);
+    close();
+
+    // Still subscribed, but invalidation-only: a reconnect or a session event
+    // with nobody reading must not put a request on a route that renders none.
+    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+    handlers?.onSessionActivity?.({
+      session_id: 'session-1',
+      scope_id: null,
+      event: 'show_event',
+    });
+    await Promise.resolve();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+
+    // Asserted before any re-read resolves: the property must hold for a
+    // revalidation that is slow, failing, or never issued at all, because the
+    // next consumer renders this snapshot synchronously on its first frame.
+    expect(store.getSnapshot().pages).toEqual([]);
+    expect(store.getSnapshot().loaded).toBe(false);
+    // Nothing left to protect and nobody reading, so the subscription ends too.
     expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    const reopened = store.activate();
+    expect(store.getSnapshot().pages).toEqual([]);
+    revalidation.resolve({ pages: [] });
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    reopened();
+  });
+
+  it('fences a read already in flight when access changes with nothing reading it', async () => {
+    let handlers: EventHandlers | undefined;
+    const stale = deferred<{ pages: ShowPage[] }>();
+    const getShowPages = vi
+      .fn()
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValueOnce({ pages: [] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const close = store.activate();
+    const flight = store.reload();
+    close();
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+
+    // The response left the server before the change, so it cannot repopulate
+    // what was just dropped; the same single-flight promise reconciles instead.
+    stale.resolve({ pages: [page({ share_id: 'share-1' })] });
+    await flight;
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages).toEqual([]);
+  });
+
+  it('leaves one live subscription however often the API identity changes', async () => {
+    let connected = 0;
+    let disconnected = 0;
+    const identityCount = 3;
+    const identities = Array.from({ length: identityCount }, () => ({
+      getShowPages: vi.fn().mockResolvedValue({ pages: [page()] }),
+      connectWorkbenchEvents: vi.fn(() => {
+        connected += 1;
+        return () => {
+          disconnected += 1;
+        };
+      }),
+    }) as unknown as ApiContextType);
+
+    // Each identity gets a consumer that reads, retains a snapshot, and leaves:
+    // exactly the state the invalidation-only subscription is kept alive for, and
+    // therefore the state in which a superseded store would strand one.
+    for (const api of identities) {
+      const store = getShowPagesInventoryStore(api);
+      commitShowPagesInventoryStore(api);
+      const close = store.activate();
+      await store.reload();
+      expect(store.getSnapshot().pages).toHaveLength(1);
+      close();
+    }
+
+    // The count is the property: whatever the number of switches, one document
+    // watches once. Asserted as a difference so it cannot be satisfied by never
+    // subscribing in the first place.
+    expect(connected).toBe(identityCount);
+    expect(connected - disconnected).toBe(1);
+
+    // ...and it is the current one that survives, still loaded and still able to
+    // serve the snapshot its consumers render synchronously.
+    const live = getShowPagesInventoryStore(identities[identityCount - 1]);
+    expect(live.getSnapshot().pages).toHaveLength(1);
+    const reopened = live.activate();
+    await live.reload();
+    expect(live.getSnapshot().pages).toHaveLength(1);
+    reopened();
+  });
+
+  it('abandons the read a retired store had in flight', async () => {
+    const stale = deferred<{ pages: ShowPage[] }>();
+    const disconnect = vi.fn();
+    const connectWorkbenchEvents = vi.fn(() => disconnect);
+    const store = new ShowPagesInventoryStore({
+      getShowPages: vi.fn(() => stale.promise),
+      connectWorkbenchEvents,
+    });
+
+    const close = store.activate();
+    const flight = store.reload();
+    close();
+    store.retire();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+
+    // Retirement fences the read with the same revision bump a mutation uses, so
+    // the response must be abandoned rather than retried: repopulating would
+    // restore a snapshot nothing can render, and the settling read would
+    // resubscribe on its way out.
+    stale.resolve({ pages: [page()] });
+    await flight;
+    expect(store.getSnapshot().pages).toEqual([]);
+    expect(connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
 
   it('does not refetch when the initial events connection arrives after the activation read', async () => {
@@ -248,6 +407,72 @@ describe('ShowPagesInventoryStore', () => {
 
     expect(getShowPages).toHaveBeenCalledTimes(2);
     expect(store.getSnapshot().pages).toEqual([]);
+    release();
+  });
+
+  // Same class as the workbench caches: the authorization change IS the
+  // invalidation, and demand decides only whether a replacement read follows it.
+  // Revalidating instead keeps revoked titles, paths and share URLs on screen for
+  // as long as the re-read takes — and indefinitely when it fails, because
+  // ``fetchCurrentRevision`` deliberately preserves the pages it could not replace.
+  it('drops revoked pages at the edge even while a consumer is reading them', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi
+      .fn()
+      .mockResolvedValueOnce({ pages: [page({ share_id: 'share-1' })] })
+      .mockRejectedValueOnce(new Error('read failed'));
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    await store.reload();
+    expect(store.getSnapshot().pages).toHaveLength(1);
+
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+
+    // Asserted before the replacement read settles.
+    expect(store.getSnapshot().pages).toEqual([]);
+    expect(store.getSnapshot().loaded).toBe(false);
+    // A consumer is reading, so the drop is followed by a replacement read.
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+
+    // Which fails — and the pages stay dropped, because the drop never depended
+    // on it. ``reload()`` joins that same single-flight rather than starting one.
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages).toEqual([]);
+    release();
+  });
+
+  // Same rule as the workbench providers' looping reads: this one goes round again
+  // only on evidence its own pass produced — a mutation that bumped the revision
+  // under it. A failed request produced none, so it settles and waits for the next
+  // trigger instead of retrying itself against a failing API.
+  it('stops a read whose request failed instead of reading again', async () => {
+    let attempts = 0;
+    const getShowPages = vi.fn(async () => {
+      attempts += 1;
+      if (attempts <= 20) throw new Error('read failed');
+      return { pages: [page()] };
+    });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    });
+
+    const release = store.activate();
+    await store.reload();
+
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().loaded).toBe(true);
     release();
   });
 

@@ -22,7 +22,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 }));
 vi.mock('../../context/WorkbenchProjectsContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../context/WorkbenchProjectsContext')>()),
-  useWorkbenchProjectsTree: () => ({
+  useWorkbenchProjectsActions: () => ({
     renameSession: vi.fn(),
     forkSession: vi.fn(),
     setSessionPinned: vi.fn(),

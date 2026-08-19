@@ -74,6 +74,7 @@ export class ShowPagesInventoryStore {
   private disconnectEvents: (() => void) | null = null;
   private inFlight: Promise<void> | null = null;
   private revision = 0;
+  private retired = false;
 
   constructor(api: ShowPagesInventoryApi) {
     this.api = api;
@@ -88,7 +89,7 @@ export class ShowPagesInventoryStore {
 
   activate = (): (() => void) => {
     this.activeConsumers += 1;
-    if (this.activeConsumers === 1) this.connectEvents();
+    this.syncEventSubscription();
 
     // Every newly visible projection revalidates, but simultaneous activations
     // share one request. The retained snapshot remains readable while it runs.
@@ -99,11 +100,53 @@ export class ShowPagesInventoryStore {
       if (!active) return;
       active = false;
       this.activeConsumers -= 1;
-      if (this.activeConsumers === 0) {
-        this.disconnectEvents?.();
-        this.disconnectEvents = null;
-      }
+      this.syncEventSubscription();
     };
+  };
+
+  // The subscription is keyed on whether there is anything to protect, not on
+  // whether anyone is reading. Those are different questions: a consumer needs
+  // revalidation, but a RETAINED snapshot needs invalidation — and a store that
+  // unsubscribed when its last window closed cannot hear the revocation it would
+  // have to act on. Reopening then renders the retained pages synchronously
+  // (titles, paths, share URLs) while ``activate()``'s reload is still in flight,
+  // and ``fetchCurrentRevision`` keeps them when that reload fails, so revoked
+  // metadata can stay on screen indefinitely.
+  //
+  // A read in flight counts: it will produce a snapshot, so the invalidation
+  // window has to stay open across it. This adds no request on any route — while
+  // no consumer reads the inventory the subscription handles invalidation only
+  // (below), and the shared events stream is already open for the shell-wide
+  // badges wherever a snapshot can exist.
+  private shouldWatchEvents(): boolean {
+    return this.activeConsumers > 0 || this.snapshot.pages.length > 0 || this.inFlight !== null;
+  }
+
+  private syncEventSubscription(): void {
+    if (!this.retired && this.shouldWatchEvents()) {
+      this.connectEvents();
+      return;
+    }
+    this.disconnectEvents?.();
+    this.disconnectEvents = null;
+  }
+
+  // A newer ApiContext identity has superseded this store (see the factory
+  // below). "Temporarily unread" and "unreachable" are different states, and
+  // only the retained-snapshot rule above makes the difference matter: keeping a
+  // subscription alive to protect a snapshot is right while a consumer can still
+  // render it, and a leak once none can — the registration is what keeps the
+  // store, its pages and the old api value alive, so every later identity change
+  // would strand another one.
+  //
+  // The consumers that could reach it are switching to the new store in this same
+  // commit, so there is nothing left to protect now rather than later. Fencing
+  // the read in flight matters as much as the disconnect: without it the response
+  // would repopulate `pages` and resubscribe through the ``finally`` below.
+  retire = (): void => {
+    this.retired = true;
+    this.revision += 1;
+    this.syncEventSubscription();
   };
 
   reload = (): Promise<void> => {
@@ -145,6 +188,18 @@ export class ShowPagesInventoryStore {
     });
   };
 
+  // Access to Show Pages was revoked or re-granted. Advancing the revision fences
+  // any read already in flight — the single-flight loop discards that response and
+  // reconciles again — and the snapshot drops to pre-first-read state, so neither
+  // the consumer reading it now nor the next one to reopen can render revoked
+  // titles, paths or share URLs while a replacement read is slow, or after one
+  // fails. Stronger than revalidating, which depended on a fetch succeeding.
+  private discardAuthorizedPages(): void {
+    this.revision += 1;
+    this.updateSnapshot({ pages: [], loaded: false });
+    this.syncEventSubscription();
+  }
+
   private updateSnapshot(patch: Partial<ShowPagesInventorySnapshot>): void {
     const next = { ...this.snapshot, ...patch };
     if (
@@ -167,6 +222,10 @@ export class ShowPagesInventoryStore {
         const revision = this.revision;
         try {
           const res = (await this.api.getShowPages()) as { pages?: unknown };
+          // Retirement fences the read through the same revision bump a mutation
+          // uses, so it has to be distinguished here: a mutation wants the read
+          // repeated, a disposal wants it abandoned.
+          if (this.retired) return;
           if (revision !== this.revision) continue;
           this.updateSnapshot({
             pages: Array.isArray(res.pages) ? (res.pages as ShowPage[]) : [],
@@ -174,6 +233,7 @@ export class ShowPagesInventoryStore {
           });
           return;
         } catch {
+          if (this.retired) return;
           if (revision !== this.revision) continue;
           this.updateSnapshot({ loaded: true });
           return;
@@ -182,6 +242,9 @@ export class ShowPagesInventoryStore {
     } finally {
       this.inFlight = null;
       this.updateSnapshot({ loading: false });
+      // A consumer may have detached mid-read; now that the snapshot is settled
+      // it is decidable whether anything is left to keep watching for.
+      this.syncEventSubscription();
     }
   }
 
@@ -204,9 +267,15 @@ export class ShowPagesInventoryStore {
           connected = true;
           return;
         }
+        // Revalidation, so it may wait for a consumer: activation re-reads
+        // anyway. Only invalidation has to act with nobody reading.
+        if (this.activeConsumers === 0) return;
         this.invalidateAndReload();
       },
       onSessionActivity: (data) => {
+        // Same rule: keeping a retained snapshot merged is revalidation, and the
+        // reload below would be a request on a route that reads nothing.
+        if (this.activeConsumers === 0) return;
         const hasPage = this.snapshot.pages.some(
           (page) => page.session_id === data.session_id,
         );
@@ -233,12 +302,27 @@ export class ShowPagesInventoryStore {
         // Normal session/user-message events do not change this inventory.
         if (data.event === 'show_event') this.invalidateAndReload();
       },
-      onAuthorizationChanged: () => this.invalidateAndReload(),
+      // Invalidation, so unlike the two above it is not the consumer count that
+      // decides whether it acts — only whether a replacement READ follows.
+      // Revalidating for an active consumer left the revoked pages in the
+      // snapshot until the re-read landed, and ``fetchCurrentRevision``
+      // deliberately keeps them when it fails, so a failed replacement kept
+      // revoked titles, paths and share URLs readable indefinitely.
+      onAuthorizationChanged: () => {
+        this.discardAuthorizedPages();
+        if (this.activeConsumers > 0) void this.reload();
+      },
     });
   }
 }
 
 const stores = new WeakMap<ApiContextType, ShowPagesInventoryStore>();
+
+// The store the mounted tree has committed to. One slot, because a document has
+// one ``ApiProvider``: a new context identity (its value is memoized on ``t``, so
+// a locale switch rebuilds it) means the previous store became unreachable, not
+// that a second one went live.
+let committed: { api: ApiContextType; store: ShowPagesInventoryStore } | null = null;
 
 export function getShowPagesInventoryStore(api: ApiContextType): ShowPagesInventoryStore {
   let store = stores.get(api);
@@ -247,4 +331,27 @@ export function getShowPagesInventoryStore(api: ApiContextType): ShowPagesInvent
     stores.set(api, store);
   }
   return store;
+}
+
+/** Record the identity the tree has committed to, retiring the store a previous
+ *  identity handed out.
+ *
+ *  Disposal belongs to the commit phase, not to the render that creates the new
+ *  store: a re-render can be double-invoked or discarded, and closing the
+ *  subscription of a store the mounted tree is still reading would lose the
+ *  invalidation it is kept open for. Every consumer of a changed context value
+ *  re-renders in one commit, so by the time any of their effects runs, all of
+ *  them hold this store — which makes the call idempotent and its ordering among
+ *  them irrelevant. A document with no inventory consumer never calls it and
+ *  never needs to: nothing was created, so nothing was superseded.
+ */
+export function commitShowPagesInventoryStore(api: ApiContextType): void {
+  if (committed?.api === api) return;
+  if (committed) {
+    // Dropping the WeakMap entry with it keeps the factory from ever handing a
+    // retired store to a consumer, should an identity somehow come back.
+    stores.delete(committed.api);
+    committed.store.retire();
+  }
+  committed = { api, store: getShowPagesInventoryStore(api) };
 }

@@ -241,7 +241,10 @@ export const ChatPage: React.FC = () => {
     canManageShowPageAsInstance,
     showPageAccess,
   );
-  const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
+  // This session's own unread state, plus the mark-read write. Neither needs the
+  // feed page, so this component never asks for one; whether the document loads
+  // one at all is decided by the sidebar, which mounts on desktop only.
+  const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox({ feed: false });
   const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
   const pageActive = usePageActive();

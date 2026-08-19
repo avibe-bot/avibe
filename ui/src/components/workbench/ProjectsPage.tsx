@@ -20,7 +20,7 @@ import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
@@ -85,7 +85,7 @@ const MobileProjectRow: React.FC<{
   const canManageProjects = capabilities.can_manage_projects;
   const canArchive = canManageProjects;
   const canEditAgentsMd = canManageProjects;
-  const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
+  const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsActions();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
   const creatingSessionRef = useRef(false);
@@ -264,7 +264,7 @@ const MobileSessionRow: React.FC<{
   onOpen: () => void;
 }> = ({ projectId, session, unread, canChat, canManageMetadata, onOpen }) => {
   const { t } = useTranslation();
-  const { renameSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsActions();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -382,7 +382,8 @@ export const ProjectsPage: React.FC = () => {
     capabilities,
   } = useInstanceAuthorization();
   const canCreateProject = canCreateLocalProject(capabilities);
-  const { unreadBySession } = useWorkbenchInbox();
+  // Per-session dots only; the feed list itself lives in the sidebar / Inbox.
+  const { unreadBySession } = useWorkbenchInbox({ feed: false });
   const {
     projects,
     projectsError,
@@ -392,7 +393,6 @@ export const ProjectsPage: React.FC = () => {
     toggleExpanded,
     loadMore,
     reloadSessions,
-    upsertProjectToTop,
   } = useWorkbenchProjectsTree();
   const [showNewProject, setShowNewProject] = useState(false);
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
@@ -516,10 +516,7 @@ export const ProjectsPage: React.FC = () => {
       {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setShowNewProject(false);
-            upsertProjectToTop(project);
-          }}
+          onCreated={() => setShowNewProject(false)}
         />
       )}
     </div>

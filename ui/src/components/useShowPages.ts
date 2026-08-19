@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import {
+  commitShowPagesInventoryStore,
   getShowPagesInventoryStore,
   type ShowPage,
 } from '../lib/showPagesStore';
@@ -22,6 +23,14 @@ export function useShowPageInventory(enabled = true) {
     store.getSnapshot,
     store.getSnapshot,
   );
+
+  // The tree has now committed to this identity's store, which is what makes the
+  // one a previous identity handed out unreachable and its retained
+  // subscription a leak. Runs whether or not this consumer activates: holding
+  // the store is what supersedes, reading it is a separate question.
+  useEffect(() => {
+    commitShowPagesInventoryStore(api);
+  }, [api]);
 
   useEffect(() => {
     if (enabled) return store.activate();
