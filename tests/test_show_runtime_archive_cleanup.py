@@ -162,6 +162,39 @@ def test_clean_after_managed_install_prunes_stale_archives(tmp_path: Path) -> No
     assert not stale.exists()
 
 
+def test_clean_after_custom_manifest_install_prunes_stale_installs(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "custom-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        runtime_dir=tmp_path / "show-runtime",
+        offline=True,
+        runtime_source="manifest-cache",
+        manifest_path=manifest_path,
+    )
+    def _retag(install_dir: Path) -> None:
+        metadata_path = next(install_dir.rglob(".vibe-show-runtime.json"))
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload["manifest_source"] = str(manifest_path)
+        metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    rollback_install = _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    stale_install = _write_install_metadata(manager, version="v0", sha256=_sha(9), mtime=-999999)
+    _retag(current_install)
+    _retag(rollback_install)
+    _retag(stale_install)
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    current_archive = _write_archive(manager, _sha(1), b"current")
+    rollback_archive = _write_archive(manager, _sha(8), b"rollback")
+    stale_archive = _write_archive(manager, _sha(9), b"stale-custom")
+
+    manager._clean_after_managed_install(["node", str(current_install / "cli.js")])
+
+    assert current_archive.exists() and current_install.exists()
+    assert rollback_archive.exists() and rollback_install.exists()
+    assert not stale_install.exists() and not stale_archive.exists()
+
+
 def test_archive_cache_status_is_read_only(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))
@@ -449,12 +482,13 @@ def test_install_guard_unavailable_falls_back_to_verified_install(tmp_path: Path
     cli_path.parent.mkdir(parents=True, exist_ok=True)
     cli_path.write_text("runtime", encoding="utf-8")
 
-    from storage.lock import MigrationFileLock
+    def _unwritable_open(path, flags, *args, **kwargs):
+        if Path(path) == manager.runtime_dir / ".install.lock":
+            raise OSError("read-only filesystem")
+        return real_open(path, flags, *args, **kwargs)
 
-    def _unwritable_lock(self, *args, **kwargs):
-        raise OSError("read-only filesystem")
-
-    monkeypatch.setattr(MigrationFileLock, "acquire", _unwritable_lock)
+    real_open = os.open
+    monkeypatch.setattr(os, "open", _unwritable_open)
 
     command = manager._install_manifest_runtime()
 
@@ -939,3 +973,34 @@ def test_install_guard_refuses_path_fd_identity_mismatch(tmp_path: Path, monkeyp
     with manager._install_guard_locked() as (acquired, reason):
         assert acquired is False
         assert reason == "runtime_install_guard_unavailable"
+
+
+def test_preview_discards_plan_when_lock_appears_mid_scan(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    _write_archive(manager, _sha(2), b"stale")
+    real_clean = manager._clean_downloaded_archives
+
+    def _observe(*, dry_run=False, skip_metadata_under=None):
+        (manager.runtime_dir / "manifest-live").mkdir(parents=True, exist_ok=True)
+        (manager.runtime_dir / ".install.lock").write_text("busy", encoding="utf-8")
+        return real_clean(dry_run=dry_run, skip_metadata_under=skip_metadata_under)
+
+    manager._clean_downloaded_archives = _observe
+    result = manager.clean(dry_run=True)
+    assert result["ok"] is False
+    assert result["archives"]["skipped_reason"] == "runtime_install_already_running"
+
+
+def test_abandoned_windows_claim_is_reclaimed(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    _write_current_pointer(manager, _sha(1))
+    leftover = manager.runtime_dir / "downloads"
+    leftover.mkdir(parents=True, exist_ok=True)
+    claim = leftover / f"{_sha(2)}.tgz.avibe-removing"
+    claim.write_bytes(b"abandoned")
+    stamp = time.time() - 3600
+    os.utime(claim, (stamp, stamp))
+    result = manager.clean()
+    assert not claim.exists()
+    assert result["archives"]["removed_count"] >= 1

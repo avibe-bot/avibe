@@ -640,40 +640,20 @@ class ShowRuntimeManager:
         return command
 
     def _clean_after_managed_install(self, command: list[str]) -> None:
-        managed_packaged_install = (
-            self.runtime_source == _RUNTIME_SOURCE_MANIFEST
-            and self.manifest_path is None
-            and self.manifest_url is None
-        )
-        if not managed_packaged_install:
-            # Custom-manifest installs populate the same content-addressed
-            # downloads cache, so still prune archives; only the install-dir
-            # pruning stays packaged-manifest-specific (its metadata filter
-            # assumes the packaged manifest source).
-            try:
-                archives = self._clean_downloaded_archives()
-                if archives.get("removed_count"):
-                    logger.info(
-                        "Removed %d stale Show Runtime archive(s), reclaimed %d byte(s)",
-                        archives["removed_count"],
-                        archives["removed_bytes"],
-                    )
-            except Exception:
-                logger.warning("Failed to clean stale Show Runtime archives", exc_info=True)
-            return
         try:
-            protected_install_dirs = self._manifest_install_dirs_for_command(command)
-            removed = self._clean_manifest_install_dirs(
-                keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
-                manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
-                protected_install_dirs=protected_install_dirs,
-            )
-            if removed:
-                logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
+            if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+                protected_install_dirs = self._manifest_install_dirs_for_command(command)
+                removed = self._clean_manifest_install_dirs(
+                    keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
+                    manifest_source=self._manifest_source_for_install_dirs(protected_install_dirs),
+                    protected_install_dirs=protected_install_dirs,
+                )
+                if removed:
+                    logger.info("Removed %d stale managed Show Runtime install(s)", len(removed))
             archives = self._clean_downloaded_archives()
-            if archives["removed_count"]:
+            if archives.get("removed_count"):
                 logger.info(
-                    "Removed %d stale managed Show Runtime archive(s), reclaimed %d byte(s)",
+                    "Removed %d stale Show Runtime archive(s), reclaimed %d byte(s)",
                     archives["removed_count"],
                     archives["removed_bytes"],
                 )
@@ -890,6 +870,20 @@ class ShowRuntimeManager:
             return None
         return None
 
+    def _preview_raced_busy(self) -> bool:
+        """True when an install started after a lock-absent preview probe."""
+        if getattr(self, "_preview_guard_fd", None) is not None:
+            return False
+        if self._staging_sentinel_reason():
+            return True
+        try:
+            self._install_guard_path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True
+
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         try:
             return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run)
@@ -938,15 +932,22 @@ class ShowRuntimeManager:
             # an install starting after staging enumeration cannot expose an
             # in-flight archive as reclaimable.
             skip_metadata_under = {Path(path) for path in removed} if dry_run else None
+            archives = self._clean_downloaded_archives(
+                dry_run=dry_run,
+                skip_metadata_under=skip_metadata_under,
+            )
+            if dry_run and self._preview_raced_busy():
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "removed": [],
+                    "archives": self._skipped_archive_report(_SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING),
+                }
             return {
                 "ok": True,
                 "dry_run": dry_run,
-                # Paths removed by this run (or that a real run would remove, when dry_run).
                 "removed": removed,
-                "archives": self._clean_downloaded_archives(
-                    dry_run=dry_run,
-                    skip_metadata_under=skip_metadata_under,
-                ),
+                "archives": archives,
             }
 
     def archive_cache_status(self, *, keep_previous: int = 1) -> dict[str, Any]:
@@ -1156,6 +1157,9 @@ class ShowRuntimeManager:
         # the stat above and iterdir/unlink below) cannot redirect operations.
         dir_fd = os.open(downloads_dir, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0))
         try:
+            opened = os.fstat(dir_fd)
+            if (opened.st_dev, opened.st_ino) != (downloads_stat.st_dev, downloads_stat.st_ino):
+                raise _ArchiveInspectionError("downloads directory was replaced before scan")
             with os.scandir(dir_fd) as entries:
                 names = [entry.name for entry in entries]
             for name in sorted(names):
@@ -1245,6 +1249,32 @@ class ShowRuntimeManager:
                 # path resolution that a concurrent swap could redirect); on
                 # Windows unlink by path. A fresh runtime with no candidates
                 # never opens the directory at all.
+                leftover_claims: list[Path] = []
+                downloads_dir = self.runtime_dir / "downloads"
+                try:
+                    for leftover in downloads_dir.iterdir():
+                        if leftover.name.endswith(".tgz.avibe-removing") and leftover.is_file():
+                            leftover_claims.append(leftover)
+                except FileNotFoundError:
+                    leftover_claims = []
+                downloads_identity = getattr(self, "_downloads_dir_identity", None)
+                for leftover in leftover_claims:
+                    try:
+                        if downloads_identity is not None:
+                            dir_stat = leftover.parent.lstat()
+                            if _is_reparse_point(dir_stat) or (
+                                dir_stat.st_dev,
+                                dir_stat.st_ino,
+                            ) != downloads_identity:
+                                raise OSError("downloads directory was replaced")
+                        leftover_size = leftover.stat().st_size
+                        os.unlink(leftover)
+                    except OSError:
+                        logger.warning("Failed to finish abandoned Show Runtime archive claim %s", leftover, exc_info=True)
+                        failed_count += 1
+                        continue
+                    removed_count += 1
+                    removed_bytes += leftover_size
                 if candidates:
                     if os.name == "nt":
                         downloads_identity = getattr(self, "_downloads_dir_identity", None)
@@ -1433,14 +1463,24 @@ class ShowRuntimeManager:
             pass
         return None
 
+    def _manifest_source_for_install_dirs(self, install_dirs: set[Path]) -> str | None:
+        for install_dir in install_dirs:
+            try:
+                metadata = json.loads(self._manifest_metadata_path(install_dir).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            source = metadata.get("manifest_source")
+            if isinstance(source, str) and source:
+                return source
+        if self.manifest_path is None and self.manifest_url is None:
+            return _PACKAGED_RUNTIME_MANIFEST_SOURCE
+        return None
+
     def _manifest_install_dirs_for_command(self, command: list[str]) -> set[Path]:
         versions_dir = self.runtime_dir / "versions"
         if not versions_dir.is_dir():
             return set()
-        install_dirs = self._manifest_install_dirs(
-            versions_dir,
-            manifest_source=_PACKAGED_RUNTIME_MANIFEST_SOURCE,
-        )
+        install_dirs = self._manifest_install_dirs(versions_dir)
         matching_install_dirs: set[Path] = set()
         for command_part in command:
             try:

@@ -358,7 +358,15 @@ class ManagedRuntimeManager:
                         "message": "an install is currently running",
                     }
                 try:
-                    return self._clean_locked(keep_previous=keep_previous, dry_run=True)
+                    result = self._clean_locked(keep_previous=keep_previous, dry_run=True)
+                    if self._preview_raced_busy():
+                        return {
+                            "ok": False,
+                            "removed": [],
+                            "reason": self._reason("install_already_running"),
+                            "message": "an install is currently running",
+                        }
+                    return result
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Managed %s runtime dry-run inspection failed",
@@ -471,6 +479,18 @@ class ManagedRuntimeManager:
         except BaseException:
             self._release_preview_guard()
             raise
+
+    def _preview_raced_busy(self) -> bool:
+        """True when an install started after a lock-absent preview probe."""
+        if getattr(self, "_preview_guard_fd", None) is not None:
+            return False
+        try:
+            self._install_file_lock_path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True
 
     def _rglob_install_metadata(self, versions_dir: Path) -> Iterator[Path]:
         """rglob metadata files with error-preserving traversal.
