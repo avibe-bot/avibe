@@ -526,6 +526,7 @@ class EverOSProcess:
         effective_home: Path | str | None = None,
         settings: EverOSProcessSettings | None = None,
         socket_path: Path | str | None = None,
+        provider_root_guard: Callable[[], None] | None = None,
         startup_timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
@@ -558,6 +559,7 @@ class EverOSProcess:
             or Path(os.path.abspath(os.fspath(socket_path_value)))
         )
         self._settings = settings or EverOSProcessSettings()
+        self._provider_root_guard = provider_root_guard
         self._host = _SystemProcessHost() if _host is None else _host
         self._ownership = SidecarOwnership(
             record_path=sidecar_record_path(self._memory_dir),
@@ -809,8 +811,9 @@ class EverOSProcess:
         self._last_error = None
         try:
             self._validate_launch_inputs()
-            self._prepare_owned_directories()
             await self._ownership.reap(discover_missing=True)
+            self._require_owned_provider_root()
+            self._prepare_owned_directories()
             self._write_generated_config()
             self._remove_owned_socket()
             child_env = self._child_environment(role=_MemoryChildRole.SIDECAR)
@@ -1178,6 +1181,12 @@ class EverOSProcess:
         if not _settings_complete(self._settings):
             raise RuntimeError("processing settings incomplete")
 
+    def _require_owned_provider_root(self) -> None:
+        guard = self._provider_root_guard
+        if guard is None:
+            raise RuntimeError("memory provider root is not claimed")
+        guard()
+
     def _prepare_owned_directories(self) -> None:
         _prepare_memory_child_directories(
             memory_dir=self._memory_dir,
@@ -1365,6 +1374,7 @@ class EverOSRebuildProcess:
         provider_root: Path | str | None = None,
         effective_home: Path | str | None = None,
         settings: EverOSProcessSettings | None = None,
+        provider_root_guard: Callable[[], None] | None = None,
         timeout_seconds: float = _REBUILD_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         _host: _ProcessHost | None = None,
@@ -1390,6 +1400,7 @@ class EverOSRebuildProcess:
         )
         self._socket_path = self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
+        self._provider_root_guard = provider_root_guard
         self._timeout_seconds = _positive_timeout(timeout_seconds, _REBUILD_TIMEOUT_SECONDS)
         self._stop_timeout_seconds = _positive_timeout(
             stop_timeout_seconds,
@@ -1461,15 +1472,6 @@ class EverOSRebuildProcess:
             logger.exception("EverOS cascade rebuild admission failed")
             return RebuildProcessResult.FAILED
         try:
-            try:
-                _prepare_memory_child_directories(
-                    memory_dir=self._memory_dir,
-                    provider_root=self._provider_root,
-                    settings=self._settings,
-                )
-            except Exception:
-                logger.exception("EverOS cascade rebuild admission failed")
-                return RebuildProcessResult.FAILED
             return await self._run_exclusive()
         finally:
             try:
@@ -1485,6 +1487,15 @@ class EverOSRebuildProcess:
         identities: dict[int, float] = {}
         try:
             await self._reconcile_orphan_exclusive()
+            guard = self._provider_root_guard
+            if guard is None:
+                raise RuntimeError("memory provider root is not claimed")
+            guard()
+            _prepare_memory_child_directories(
+                memory_dir=self._memory_dir,
+                provider_root=self._provider_root,
+                settings=self._settings,
+            )
             _write_memory_child_config(
                 memory_dir=self._memory_dir,
                 provider_root=self._provider_root,
@@ -2471,12 +2482,21 @@ def _prepare_memory_child_directories(
         directories.append(settings.call_log_db_path.parent)
     for directory in directories:
         _ensure_owner_directory(directory)
+    _require_private_provider_root(provider_root)
+
+
+def _require_private_provider_root(provider_root: Path) -> None:
     _require_provider_root_access_path(provider_root)
-    ensure_private_directory(
-        provider_root.parent,
-        provider_root,
-        harden_confinement_root=False,
-    )
+    try:
+        info = provider_root.lstat()
+    except OSError as error:
+        raise RuntimeError("memory provider root is not claimed") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError("memory provider root is unsafe")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise RuntimeError("memory provider root owner mismatch")
+    if stat.S_IMODE(info.st_mode) != _OWNER_DIR_MODE:
+        raise RuntimeError("memory provider root mode mismatch")
 
 
 def _write_memory_child_config(
@@ -4122,6 +4142,7 @@ class EverOSProcessFactory(Protocol):
         effective_home: Path | str | None = None,
         settings: EverOSProcessSettings | None = None,
         socket_path: Path | str | None = None,
+        provider_root_guard: Callable[[], None] | None = None,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
         on_reaped: Callable[[], Awaitable[None] | None] | None = None,
@@ -4149,6 +4170,7 @@ class FakeEverOSProcess:
     # Launch inputs the factory captured, for tests asserting on child settings.
     python: Path | None = None
     provider_root: Path | None = None
+    provider_root_guard: Callable[[], None] | None = None
     settings: EverOSProcessSettings | None = None
     starts: int = 0
     stops: int = 0
@@ -4272,6 +4294,7 @@ class FakeEverOSProcessFactory:
         effective_home: Path | str | None = None,
         settings: EverOSProcessSettings | None = None,
         socket_path: Path | str | None = None,
+        provider_root_guard: Callable[[], None] | None = None,
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
         on_reaped: Callable[[], Awaitable[None] | None] | None = None,
@@ -4283,6 +4306,7 @@ class FakeEverOSProcessFactory:
         process.on_reaped = on_reaped
         process.python = Path(python)
         process.provider_root = Path(provider_root) if provider_root is not None else None
+        process.provider_root_guard = provider_root_guard
         process.settings = settings
         self.created.append(process)
         if on_ready is not None:
