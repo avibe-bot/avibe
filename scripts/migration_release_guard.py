@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import sqlite3
 import subprocess
@@ -650,6 +651,11 @@ CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
 # searched for. Reached only on the tables that refuse the first row at all.
 SEED_ATTEMPTS = 60
 
+# Where `varied` records a row's step inside a JSON document. Nothing reads it back; it is
+# there so the document differs while staying a document, and it is namespaced so it cannot
+# collide with a path some CHECK constrains.
+JSON_VARIED_MEMBER = "__seed_step__"
+
 # A CHECK can also require a shape rather than a value. `json_extract(col,'$.p') = 1` and
 # `json_type(col,'$.p') = 'array'` both name the column, the path, and what belongs at it,
 # which is the same three things the plain literal form carries -- so both are read the
@@ -675,10 +681,11 @@ JSON_TYPE_MEMBERS: dict[str, object] = {
     "object": "{}",
 }
 
-# One row proves nothing about uniqueness, and rows that differ everywhere prove just as
-# little: a migration adding `UNIQUE(platform)` cannot fail against a fixture whose
-# platform was never allowed to repeat. So the rows differ only where the schema already
-# demands it, one member of each distinct-group at a time, and the floor is two.
+# The floor, not the target. One row proves nothing about uniqueness, and rows that differ
+# everywhere prove just as little: a migration adding `UNIQUE(platform)` cannot fail against
+# a fixture whose platform was never allowed to repeat. How many rows a table actually gets
+# is the database's answer -- one per column it accepts a repeat of -- so this is only what a
+# table it refuses every repeat of must still carry.
 SEED_ROWS = 2
 
 
@@ -782,50 +789,41 @@ def json_proposals(
     return proposals
 
 
-def distinct_column_groups(connection: sqlite3.Connection, table: str) -> list[tuple[str, ...]]:
-    """The column groups ``table``'s schema requires to be distinct across rows.
+def seeded_rows_prove_repetition(
+    connection: sqlite3.Connection, table: str, repeated: Iterable[str]
+) -> str:
+    """Why ``table``'s stored rows do not repeat every column in ``repeated``, or ``''``.
 
-    Primary key and unique indexes, read from the database rather than from the migration
-    that created them, and kept as groups because a group is what the schema constrains: a
-    composite index demands a distinct *tuple* and says nothing about its members. Union
-    the members into one set of columns and the fixture is built from a stronger rule than
-    the schema states, which costs exactly the case worth testing -- released rows sharing
-    a platform, a kind, a status -- and with it every migration that would add a unique
-    index over one of those columns and fail in the field.
+    Read back out of the database rather than inferred from the code that wrote it, because
+    ``insert_seed_row``'s repair rewrites values: a CHECK spanning two columns can reject a
+    row whose other columns moved, and the repair is free to answer by moving the one column
+    that row existed to hold still. The insert is then accepted having proved nothing, and
+    reading the column back is the only way to notice.
     """
-    groups: list[tuple[str, ...]] = []
-    key = sorted(
-        (int(row[5]), str(row[1])) for row in connection.execute(f'pragma table_info("{table}")') if row[5]
-    )
-    if key:
-        groups.append(tuple(column for _, column in key))
-    for index in connection.execute(f'pragma index_list("{table}")'):
-        if index[2]:
-            members = tuple(
-                str(row[2]) for row in connection.execute(f'pragma index_info("{index[1]}")') if row[2]
-            )
-            if members:
-                groups.append(members)
-    return groups
-
-
-def seed_row_count(groups: Iterable[tuple[str, ...]]) -> int:
-    """How many rows it takes for every member of every group in ``groups`` to repeat once.
-
-    One row per member of the widest group, each varying that member alone, plus the row
-    they all vary from. Every member is then equal in at least two rows -- the base and
-    every row that varied a different member -- while the tuples stay pairwise distinct,
-    which is exactly the distinction a composite unique index draws.
-    """
-    return max(SEED_ROWS, 1 + max((len(group) for group in groups), default=0))
+    for column in repeated:
+        seeded, distinct = connection.execute(
+            f'select count(*), count(distinct "{column}") from "{table}"'
+        ).fetchone()
+        if seeded == distinct:
+            return f"no two rows share a {column}, though a row repeating it was accepted"
+    return ""
 
 
 def varied(value: object, step: int) -> object:
-    """``value`` changed into something of the same type that differs from it and from other steps.
+    """``value`` changed into something of the same kind that differs from it and from other steps.
 
-    Indexed by the row rather than merely different, because a group narrower than the
-    widest one has its members varied on more than one row, and two rows carrying the same
-    replacement would collide on the constraint the variation exists to respect.
+    Indexed by the row rather than merely different, because every row but the base one moves
+    most of its columns, and two rows carrying the same replacement would collide on the
+    constraint the variation exists to respect.
+
+    Same *kind*, not merely same type, and a JSON document is the case that separates the two.
+    ``representative_value`` seeds a ``_json`` column with a document because that is what the
+    application writes there, and appending to the text would leave a string that is still a
+    string and no longer JSON. A migration reading it with ``json_extract`` then fails over
+    data no release ever held -- which is a false alarm, and worse than a missed one, because
+    it is indistinguishable from the failure this guard exists to catch. So a document varies
+    by carrying one more member than it did, and a JSON scalar by its own kind of variation
+    re-encoded, which keeps every branch valid JSON without a list of the shapes it can take.
     """
     if isinstance(value, bool):
         return not value
@@ -835,6 +833,16 @@ def varied(value: object, step: int) -> object:
         return value + float(step)
     if isinstance(value, bytes):
         return value + str(step).encode()
+    try:
+        document = json.loads(value) if isinstance(value, str) else None
+    except ValueError:
+        return f"{value}-{step}"
+    if isinstance(document, dict):
+        return json.dumps({**document, JSON_VARIED_MEMBER: step})
+    if isinstance(document, list):
+        return json.dumps([*document, step])
+    if document is not None:
+        return json.dumps(varied(document, step))
     return f"{value}-{step}"
 
 
@@ -886,8 +894,9 @@ def insert_seed_row(
             ]
             if not untried:
                 return objection
-            proposed.add(untried[0])
-            values[untried[0][0]] = untried[0][1]
+            column, literal = untried[0]
+            proposed.add((column, literal))
+            values[column] = literal
         else:
             return ""
     return objection or f"{SEED_ATTEMPTS} attempts did not produce a row the schema accepts"
@@ -912,14 +921,37 @@ def seed_representative_rows(db_path: Path) -> dict[str, str]:
     migration that later makes a nullable column NOT NULL has to survive the NULLs a real
     database has, and the NULL branch is the one a disjunctive CHECK admits.
 
-    More than one row, and the later ones repeat the first everywhere the schema does not
-    already demand otherwise -- one member of each distinct-group per row, so every other
-    member of that group goes on repeating. One row makes every unique index buildable,
-    which is the property most worth testing and the one a single row silently grants; a
-    row that differs everywhere grants it just as silently for every column a composite
-    index only constrains jointly. Where the schema leaves no room -- a group whose other
-    members a CHECK pins to a single literal -- the difference lands on the one member that
-    can hold it, which is as much repetition as that table is able to have.
+    More than one row, and what the extra rows are for is stated rather than constructed:
+    **a column the schema still lets two rows share has to be shared by two of them.** One
+    row makes every unique index buildable, which is the property most worth testing and the
+    one a single row silently grants; a row that differs everywhere grants it just as
+    silently.
+
+    Which columns those are is asked of the database instead of derived from its schema.
+    Each column gets a row that holds it still and moves every other one, and SQLite either
+    takes it or names the constraint it broke. Moving every other column is not a preference:
+    a differing column can only help a uniqueness constraint accept the row, and the one
+    thing that undoes a difference -- a CHECK holding a column to a list of literals, whose
+    repair puts an accepted one back -- does so whatever else the row does. So this is the
+    likeliest row to be accepted that still repeats the column, and there is no second choice
+    to tune.
+
+    Deriving the answer instead cost three review rounds, each spent on a model of the
+    constraint topology -- one row, unioned members, overlapping groups -- and each fix was
+    another argument that the model was now complete. A partial unique index, an index over
+    an expression, and a CHECK pinning one member of a group to a literal were all still
+    outside it, and this schema ships all three. Offering the row removes the model, and with
+    it the next topology.
+
+    What a refusal means is exactly what it says, and no more: the schema rejected *this*
+    row. For ``uq_constrained_slug`` that is also the schema forbidding the repeat outright,
+    but a partial unique index is conditional -- ``unique (session_id) where state in
+    ('starting', 'active')`` permits a repeated ``session_id`` on a terminal turn -- and
+    reaching the permitted side means giving ``state`` a value whose whole multi-column shape
+    another CHECK then dictates. That is constraint solving, which this deliberately is not,
+    so the column goes uncovered carrying SQLite's message as the reason. The floor below and
+    ``seeded_rows_prove_repetition`` bound what the fixture is allowed to prove instead of
+    the refusal being read as proof of anything.
 
     What this proves is that the upgrade runs over rows, not over meaningful ones --
     foreign keys are off, which is SQLite's default and is what lets each table be seeded
@@ -942,36 +974,42 @@ def seed_representative_rows(db_path: Path) -> dict[str, str]:
                 for row in connection.execute(f'pragma table_info("{table}")')
                 if row[3] or row[5]
             ]
-            groups = distinct_column_groups(connection, table)
-            wanted = seed_row_count(groups)
-            # The first row is where the repairs happen, so every later row varies the
-            # values the schema has already accepted rather than the ones it rejected.
+            # The first row is where the repairs happen, so every later row moves the values
+            # the schema has already accepted rather than the ones it rejected.
             base = {column: representative_value(column, declared) for column, declared in required}
             objection = insert_seed_row(connection, table, ddl, required, base)
-            for row in range(1, wanted):
-                if objection:
-                    break
-                # Which member can carry the difference is the schema's call, not this
-                # loop's: a member a CHECK pins to one literal cannot vary at all, and the
-                # repair inside `insert_seed_row` puts it back, so the row arrives as a
-                # duplicate. SQLite says so, and the next turn offers a different member.
-                for turn in range(max(len(group) for group in groups) if groups else 1):
-                    changing = {group[(row - 1 + turn) % len(group)] for group in groups}
-                    objection = insert_seed_row(
-                        connection,
-                        table,
-                        ddl,
-                        required,
-                        {
-                            column: varied(value, row) if column in changing else value
-                            for column, value in base.items()
-                        },
-                    )
-                    if not objection:
-                        break
+            excused: dict[str, str] = {}
+            repeated: list[str] = []
+            # One row per column, holding that column still and moving every other one. The
+            # step is the row's, so two of these rows differ from each other wherever they
+            # differ from the base row.
+            for step, column in enumerate(() if objection else base, start=1):
+                refusal = insert_seed_row(
+                    connection,
+                    table,
+                    ddl,
+                    required,
+                    {name: value if name == column else varied(value, step) for name, value in base.items()},
+                )
+                if refusal:
+                    excused[column] = refusal
+                else:
+                    repeated.append(column)
+            # Nothing this table holds may repeat, so the second row is the one that differs
+            # everywhere -- less than the table was asked for, and all a unique index needs to
+            # be buildable against.
+            if not objection and not repeated:
+                insert_seed_row(
+                    connection, table, ddl, required, {name: varied(value, 1) for name, value in base.items()}
+                )
             rows = connection.execute(f'select count(*) from "{table}"').fetchone()[0]
-            if rows < wanted:
-                short[table] = f"{rows} of {wanted} rows; {objection or 'the schema accepted no more'}"
+            if rows < SEED_ROWS:
+                reason = objection or next(iter(excused.values()), "") or "the schema accepted no more"
+                short[table] = f"{rows} of {SEED_ROWS} rows; {reason}"
+                continue
+            unproven = seeded_rows_prove_repetition(connection, table, repeated)
+            if unproven:
+                short[table] = unproven
         connection.commit()
     return short
 

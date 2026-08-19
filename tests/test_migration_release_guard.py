@@ -636,6 +636,11 @@ def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
         )
         connection.execute("create unique index ux_pinned_kind_ref on pinned (kind, ref)")
         connection.execute(
+            "create table overlapping (a text not null, b text not null, c text not null, note text)"
+        )
+        connection.execute("create unique index ux_overlapping_ab on overlapping (a, b)")
+        connection.execute("create unique index ux_overlapping_bc on overlapping (b, c)")
+        connection.execute(
             "create table impossible (id text primary key, shape text not null "
             "constraint ck_impossible_shape check (shape in ('a', 'b') and shape in ('c', 'd')))"
         )
@@ -657,6 +662,7 @@ def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
         names = [row[0] for row in connection.execute("select name from plain")]
         pairs = [tuple(row) for row in connection.execute("select platform, native_id from paired")]
         pins = [tuple(row) for row in connection.execute("select kind, ref from pinned")]
+        overlaps = [tuple(row) for row in connection.execute("select a, b, c from overlapping")]
     finally:
         connection.close()
 
@@ -666,20 +672,46 @@ def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
     # Every repair came from the constraint that rejected the row before it, not from a guess.
     assert state in {"waiting", "active"}
     assert json.loads(doc) == {"version": 1, "events": []}
-    # The rows differ exactly where the schema already demands it and nowhere else, so a
-    # migration adding a unique index over an unconstrained column meets the duplicates a
-    # released database is free to hold.
+    # A column repeats unless the schema refuses the row that repeats it, and which of the two
+    # it is stays the database's answer rather than this module's model of the schema. `slug`
+    # and `plain.id` are refused, so those tables fall back to rows differing everywhere;
+    # `plain.name` is free, and a migration adding `unique (name)` meets the duplicate.
     assert len(set(slugs)) == len(slugs) == guard.SEED_ROWS
     assert len(set(names)) == 1
-    # A composite key constrains the tuple, so each of its columns still has to repeat --
-    # which is only possible over more rows than the group is wide.
+    # A composite group constrains the tuple, so each of its members still repeats -- which
+    # takes more rows than the group is wide.
     assert len(set(pairs)) == len(pairs)
     assert len({platform for platform, _ in pairs}) < len(pairs)
     assert len({native_id for _, native_id in pairs}) < len(pairs)
-    # Which member of a group can carry the difference is the schema's call: a CHECK pins
-    # `kind` to one literal, so the rows have to differ on `ref` instead of giving up.
+    # Overlapping groups share a member, and the shared one is what a per-group choice gets
+    # wrong: varying one member of each group leaves `b` distinct in every row, so a later
+    # `unique (b)` migration passes here and fails on a release free to repeat it.
+    assert len({(a, b) for a, b, _ in overlaps}) == len(overlaps)
+    assert len({(b, c) for _, b, c in overlaps}) == len(overlaps)
+    assert all(len({row[member] for row in overlaps}) < len(overlaps) for member in range(3))
+    # A CHECK pinning one member of a group to a single literal is the schema declining the
+    # other's repeat: every row that holds `ref` still carries `kind = 'only'` and collides.
     assert len(set(pins)) == len(pins)
     assert len({kind for kind, _ in pins}) == 1
+
+
+def test_a_repeat_the_rows_do_not_carry_is_a_violation_however_it_got_there():
+    """The claim is read back out of the rows, never inferred from the code that wrote them.
+
+    ``insert_seed_row``'s repair rewrites values to satisfy whatever constraint a row tripped,
+    and it picks the column to rewrite out of that constraint's own text -- so it can pick the
+    one column the row existed to hold still. SQLite then accepts a row that proves nothing,
+    and an accepted insert looks exactly like a successful one until the column is read back.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("create table t (a text not null, b text not null)")
+        connection.executemany("insert into t (a, b) values (?, ?)", [("x", "x"), ("x-1", "x")])
+
+        assert guard.seeded_rows_prove_repetition(connection, "t", ["b"]) == ""
+        assert "a" in guard.seeded_rows_prove_repetition(connection, "t", ["a", "b"])
+    finally:
+        connection.close()
 
 
 @requires_release_history
@@ -690,20 +722,14 @@ def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch
     behaviour the property is about; counting afterwards would also accept a seeder that
     ran after it, or one whose rows the upgrade had already removed.
     """
-    observed: dict[str, tuple[int, int]] = {}
+    observed: dict[str, int] = {}
     upgrade = guard.run_migrations
 
     def counting(db_path):
         connection = sqlite3.connect(db_path)
         try:
             observed.update(
-                (
-                    str(name),
-                    (
-                        connection.execute(f'select count(*) from "{name}"').fetchone()[0],
-                        guard.seed_row_count(guard.distinct_column_groups(connection, str(name))),
-                    ),
-                )
+                (str(name), connection.execute(f'select count(*) from "{name}"').fetchone()[0])
                 for (name,) in connection.execute(
                     "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
                 )
@@ -717,7 +743,7 @@ def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch
     _, short = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
 
     assert observed
-    assert {table for table, (count, wanted) in observed.items() if count < wanted} == set(short)
+    assert all(count >= guard.SEED_ROWS for table, count in observed.items() if table not in short)
 
 
 @requires_release_history
