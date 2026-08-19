@@ -273,22 +273,73 @@ UNREADABLE_GRAPH = dict(SHIPPED_GRAPH) | {
 
 
 @pytest.mark.parametrize("sources", [SHIPPED_GRAPH, UNREADABLE_GRAPH], ids=["well-formed", "malformed"])
-def test_every_migration_is_either_compared_or_reported(sources):
+def test_every_migration_is_compared_or_reported(sources):
     """The invariant behind every key this guard invents, stated once.
 
     A key names exactly one migration or it names none. Whatever a file declares, it is
     either a node the comparison reaches or a reason the comparison refuses to run --
     never neither, because a file that is neither has been dropped silently and the
-    comparison then passes over a graph missing it. Both known ways to lose one were
-    review findings; asserting the partition instead of those two means the third way
-    fails a test rather than shipping as a hole.
+    comparison then passes over a graph missing it.
+
+    Coverage is the property; disjointness is not. Demanding the two halves never overlap
+    is what made ``revision_graph`` drop what it could not read, which is right for the
+    working tree -- the file is reported instead -- and silently wrong for a baseline,
+    where dropping a node discards the only surviving record of what that release
+    declared. An unreadable node stays in the graph carrying values that compare unequal
+    to everything, so it is reached *and* reported.
     """
     compared = {name for name, _ in guard.revision_graph(sources).values()}
     reported = set(guard.ungraphable_sources(sources))
     declares_a_revision = {name for name, source in sources.items() if "revision" in guard.declared_graph_fields(source)}
 
     assert compared | reported == declares_a_revision
-    assert compared & reported == set()
+
+
+# Every shape a *released* migration's metadata can take: the readable ones, plus an edge
+# no reader can resolve. A released revision the guard stops reading is not one it may
+# quietly skip -- it is one whose declared parent nothing records any more, which is
+# strictly worse than a parent that merely changed.
+RELEASED_SHAPES = SHIPPED_REVISIONS + (("20260105_0005", "computed", "SOME_CONSTANT", {}),)
+
+RELEASED_GRAPH = {
+    f"{revision}_{slug}.py": _revision_file(revision, down_revision, **edges)
+    for revision, slug, down_revision, edges in RELEASED_SHAPES
+}
+
+
+@pytest.mark.parametrize(("revision", "slug"), [(revision, slug) for revision, slug, _, _ in RELEASED_SHAPES])
+def test_no_released_revision_can_be_rewritten_without_a_report(monkeypatch, revision, slug):
+    """Whatever a release shipped, rewriting it in the working tree has to be visible.
+
+    Stated per released shape rather than per known bug: the hole this closes was a
+    released node with a computed edge, which the baseline graph dropped while the now
+    readable working-tree node produced no reason of its own, so the rewrite was compared
+    against nothing and reported by nobody. A shape whose baseline handling regresses
+    fails here whatever the mechanism, and a shape added to the table is covered without
+    editing an assertion.
+    """
+    name = f"{revision}_{slug}.py"
+    current = dict(RELEASED_GRAPH)
+    current[name] = _revision_file(revision, '"20269999_9999"')
+    _graphs(monkeypatch, RELEASED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert [problem for problem in problems if revision in problem or name in problem]
+
+
+def test_an_unreadable_graph_has_its_head_refused_rather_than_guessed():
+    """A head is one answer, and a partial graph corrupts it silently rather than loudly.
+
+    Dropping an unreadable node also drops the parent edge pointing past it, so its
+    ancestor is left looking like a head. The upgrade property asserts a released database
+    ends at a head, so an upgrade that stopped early at that ancestor would satisfy the
+    very assertion the property exists to make.
+    """
+    with pytest.raises(guard.MigrationGuardError):
+        guard.shipped_head_revisions(UNREADABLE_GRAPH)
+
+    assert guard.shipped_head_revisions(SHIPPED_GRAPH) == {"20260104_0004"}
 
 
 @requires_release_history

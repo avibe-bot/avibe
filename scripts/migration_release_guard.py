@@ -323,18 +323,17 @@ def revision_claims(sources: dict[str, str]) -> dict[str, list[tuple[str, dict[s
 
 
 def revision_graph(sources: dict[str, str]) -> dict[str, tuple[str, dict[str, object]]]:
-    """``{revision: (filename, {edge_field: value})}`` for identifiers naming one readable migration.
+    """``{revision: (filename, {edge_field: value})}`` for identifiers naming one migration.
 
-    A contested or computed identifier names nothing a comparison could be about, so it is
-    absent here and reported by ``ungraphable_sources`` instead. The two functions
-    partition the source tree, which is the whole point: a migration that fell out of both
-    would be one the guard neither checked nor admitted it could not check.
+    Only a contested identifier is absent, because it cannot be keyed to one migration at
+    all; ``ungraphable_sources`` reports it instead. Metadata that merely cannot be read
+    stays, carrying ``COMPUTED`` values that are unequal to everything -- a comparison
+    involving one reports drift rather than agreement, which is the honest answer where
+    nothing can be read. Dropping it here instead would be silently destructive on a
+    released tree, whose files are the only surviving record of what that release declared.
     """
-    unreadable = ungraphable_sources(sources)
     return {
-        revision: claims[0]
-        for revision, claims in revision_claims(sources).items()
-        if len(claims) == 1 and claims[0][0] not in unreadable
+        revision: claims[0] for revision, claims in revision_claims(sources).items() if len(claims) == 1
     }
 
 
@@ -344,9 +343,10 @@ def ungraphable_sources(sources: dict[str, str]) -> dict[str, str]:
     Both reasons are one defect wearing two faces: a key the guard invents has stopped
     naming exactly one migration. Metadata it cannot read as a literal names nothing, and
     an identifier two modules declare names two things. Either way the honest answer is
-    "cannot verify", and the one answer that must stay unreachable is "verified unchanged"
-    -- so this partitions the source tree with ``revision_graph``: every migration is a
-    node the comparison reaches or a reason it refuses to run, never neither.
+    "cannot verify", and the one answer that must stay unreachable is "verified unchanged".
+
+    Every caller reading a source tree owes this its output: a tree is compared only
+    alongside the reasons parts of it cannot be, or refused outright.
     """
     reasons: dict[str, str] = {}
     for revision, claims in revision_claims(sources).items():
@@ -365,7 +365,18 @@ def shipped_head_revisions(sources: dict[str, str]) -> set[str]:
 
     ``depends_on`` is an ordering constraint rather than a parent link, so only
     ``down_revision`` decides what is still a head -- the same rule Alembic applies.
+
+    Unreadable metadata is refused rather than worked around, because a head is one answer
+    and there is no partial version of it. A parent nobody can resolve leaves the real
+    ancestor looking like a head, so an upgrade that stopped early there would satisfy the
+    assertion this exists to make.
     """
+    unreadable = ungraphable_sources(sources)
+    if unreadable:
+        raise MigrationGuardError(
+            "cannot locate the head of a graph whose metadata is unreadable: "
+            + "; ".join(f"{name} {reason}" for name, reason in sorted(unreadable.items()))
+        )
     graph = revision_graph(sources)
     parents = {parent for _, edges in graph.values() for parent in edges["down_revision"]}
     return set(graph) - parents
@@ -382,19 +393,37 @@ def rechained_revisions(baseline: str | None = None) -> list[str]:
     """
     baseline = baseline or latest_released_tag()
     working_tree = working_tree_sources()
+    shipped_tree = released_sources(baseline)
     claimed = revision_claims(working_tree)
     current = revision_graph(working_tree)
+    # Both trees, because a comparison is only as trustworthy as its less readable side.
+    # A released declaration nobody can read is not one to pass over quietly: those files
+    # are the only surviving record of what the release shipped, so losing one loses the
+    # thing every later revision would have been held to.
+    unreadable_now = ungraphable_sources(working_tree)
+    unreadable_then = ungraphable_sources(shipped_tree)
     problems = [
         f"{name} {reason}, so the guard cannot hold it to {baseline}"
-        for name, reason in sorted(ungraphable_sources(working_tree).items())
+        for name, reason in sorted(unreadable_now.items())
     ]
-    for revision, (name, shipped) in sorted(revision_graph(released_sources(baseline)).items()):
+    problems += [
+        f"{baseline} shipped {name}, which {reason}, so nothing can be held to what it declared"
+        for name, reason in sorted(unreadable_then.items())
+        if name not in unreadable_now
+    ]
+    for revision, (name, shipped) in sorted(revision_graph(shipped_tree).items()):
+        if name in unreadable_then:
+            # The baseline's own declaration is what cannot be read, so there is nothing
+            # to compare against and the reason above is the whole report.
+            continue
         if revision not in current:
             if revision in claimed:
                 # Still claimed, just not readably: every claimant is named once in the
                 # reasons above, and repeating it here describes one defect as two.
                 continue
             problems.append(f"{revision} ({name}) shipped in {baseline} and is no longer in the graph")
+            continue
+        if current[revision][0] in unreadable_now:
             continue
         edges = current[revision][1]
         drift = "; ".join(
