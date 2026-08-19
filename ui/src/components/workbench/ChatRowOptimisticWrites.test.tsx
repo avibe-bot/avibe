@@ -1,13 +1,14 @@
 /** @vitest-environment jsdom */
 
 // The header's route edits apply within the click and persist behind them, which
-// is the point of the optimistic path. These tests pin what that means at the
-// boundary where it is observable — what reached the network, in which order:
-// Enter is never held behind an in-flight route PATCH (the resulting admission
-// gap is the server's to close; see the PR ledger), and the picks made during one
-// PATCH reach the row as a single merged follow-up.
+// is the point of the optimistic path. These tests pin what that means at the two
+// boundaries where it is observable — what reached the network, in which order
+// (Enter is never held behind an in-flight route PATCH, the resulting admission
+// gap being the server's to close; the picks made during one PATCH reach the row
+// as a single merged follow-up) — and what the user is left looking at when the
+// server refuses the burst.
 
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
@@ -129,9 +130,27 @@ vi.mock('./Composer', () => ({
 }));
 
 vi.mock('./AgentRoutePicker', () => ({
-  AgentRoutePicker: ({ onChange }: { onChange: (patch: AgentRoutePatch) => void }) => {
+  AgentRoutePicker: ({
+    onChange,
+    value,
+    saving,
+  }: {
+    onChange: (patch: AgentRoutePatch) => void;
+    value: { agent_name?: string | null; model?: string | null; reasoning_effort?: string | null } | null;
+    saving?: boolean;
+  }) => {
     mocks.onPatch = onChange;
-    return null;
+    // The picker holds no selection of its own — the highlight IS this value — so
+    // rendering it is how a test reads what the user is looking at.
+    return (
+      <div
+        data-testid="route"
+        data-agent={value?.agent_name ?? ''}
+        data-model={value?.model ?? ''}
+        data-effort={value?.reasoning_effort ?? ''}
+        data-saving={saving ? 'yes' : 'no'}
+      />
+    );
   },
 }));
 
@@ -185,6 +204,11 @@ function messagePosts() {
   return mocks.apiFetch.mock.calls.filter(([url]) => String(url).includes('/messages'));
 }
 
+// What the header's picker is showing right now.
+function shownRoute() {
+  return screen.getByTestId('route').dataset;
+}
+
 async function mountChat() {
   render(
     <MemoryRouter initialEntries={[`/chat/${SESSION_ID}`]}>
@@ -201,7 +225,7 @@ async function mountChat() {
   }
 }
 
-describe('sending while an optimistic route write is in flight', () => {
+describe('the chat row under an optimistic write', () => {
   beforeEach(() => {
     for (const name of ['ResizeObserver', 'IntersectionObserver']) {
       vi.stubGlobal(
@@ -329,5 +353,37 @@ describe('sending while an optimistic route write is in flight', () => {
     });
     await settle();
     expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('puts the row back when the write is refused and the re-read fails', async () => {
+    const patchGate = deferred<unknown>();
+    mocks.api.updateSession.mockReturnValue(patchGate.promise);
+    // The tab is offline for reads too — the case that decides whether the
+    // rollback may be delegated to the re-read.
+    mocks.api.getSession.mockRejectedValue(new Error('offline'));
+    await mountChat();
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', effort: '' });
+
+    act(() => {
+      mocks.onPatch!({ agent_name: 'codex', agent_variant: 'codex', model: 'gpt-5' });
+      mocks.onPatch!({ reasoning_effort: 'high' });
+    });
+    // Both picks are on screen at once, ahead of the single request carrying the
+    // first of them.
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: 'high', saving: 'yes' });
+
+    await act(async () => {
+      patchGate.reject(new Error('nope'));
+      await patchGate.promise.catch(() => undefined);
+    });
+    await settle();
+
+    // The whole burst goes back to what the row held before it — the pick that
+    // was refused AND the one dropped behind it, since neither is on the server.
+    // ``refreshSessionRow`` is best-effort by contract (it swallows its own
+    // failure), so a rollback delegated to it would leave this tab showing a
+    // route the server refused with the indicator already gone.
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', effort: '', saving: 'no' });
+    expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
   });
 });

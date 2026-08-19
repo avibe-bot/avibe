@@ -1,14 +1,20 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
 
 import { useLatestRef } from './useLatestRef';
+
+/** The surface a scope's writes belong to: one live view, whichever is mounted. */
+type Owner = {
+  send: (patch: unknown, key: string) => Promise<boolean>;
+  merge: (prev: unknown, next: unknown) => unknown;
+  onSettled: ((key: string, committed: boolean) => void | Promise<void>) | undefined;
+};
 
 /** One resource's writer: at most one request in flight, at most one patch waiting. */
 type Entry = {
   /** The write not yet sent, already merged with everything clicked before it. */
   pending: { patch: unknown } | undefined;
-  send: (patch: unknown, key: string) => Promise<boolean>;
-  merge: (prev: unknown, next: unknown) => unknown;
-  onSettled: ((key: string, committed: boolean) => void | Promise<void>) | undefined;
+  /** Who serves this burst — refreshed from `owners`, never fixed at creation. */
+  owner: Owner;
 };
 
 // MODULE scope on purpose: a resource outlives the view that edits it. ChatPage
@@ -17,6 +23,14 @@ type Entry = {
 // one commit last. Keys are namespaced per scope, so two owners writing
 // different resource kinds cannot collide on an id.
 const entries = new Map<string, Entry>();
+// A scope names ONE owning surface, and the burst is served by whichever mount
+// of it is up now. A burst outlives its view — the user navigates away
+// mid-request and comes back — and the answer has to land on the screen that is
+// there when it arrives: reconciling into an unmounted page leaves the live one
+// showing state nobody converged. Registered on mount and deliberately never
+// removed on unmount, because a request in flight still needs a `send`; the next
+// mount replaces it.
+const owners = new Map<string, Owner>();
 const listeners = new Set<() => void>();
 // A snapshot of which resources are mid-write, rebuilt only when that set
 // changes: `useSyncExternalStore` requires a stable reference between changes,
@@ -42,19 +56,24 @@ const getSavingSnapshot = () => savingSnapshot;
  *  hard document reset; never part of a normal write path. */
 export const resetCoalescedWrites = () => {
   entries.clear();
+  owners.clear();
   publish();
 };
 
-const drain = async (scopedKey: string, key: string) => {
+const drain = async (scope: string, scopedKey: string, key: string) => {
   let committed = true;
   for (;;) {
     const entry = entries.get(scopedKey);
     if (!entry) break;
+    // Re-read the owner on every step, never captured at burst start: each
+    // request and the settle after it belong to the view that is mounted when
+    // they happen.
+    entry.owner = owners.get(scope) ?? entry.owner;
     const next = committed ? entry.pending : undefined;
     if (next) {
       entry.pending = undefined;
       try {
-        committed = await entry.send(next.patch, key);
+        committed = await entry.owner.send(next.patch, key);
       } catch {
         committed = false;
       }
@@ -75,7 +94,7 @@ const drain = async (scopedKey: string, key: string) => {
     // coalesces into this writer instead of starting a fresh burst against state
     // the read is still rewriting.
     try {
-      await entry.onSettled?.(key, committed);
+      await entry.owner.onSettled?.(key, committed);
     } catch {
       // Reconciliation is the owner's business; it reports its own failures.
     }
@@ -91,8 +110,16 @@ const drain = async (scopedKey: string, key: string) => {
 };
 
 export type CoalescedWrite<P> = {
-  /** Record one write for `key`: sent now when that key is idle, else merged into the patch waiting behind the request in flight. */
-  write: (key: string, patch: P) => void;
+  /**
+   * Record one write for `key`: sent now when that key is idle, else merged into
+   * the patch waiting behind the request in flight.
+   *
+   * Returns whether this write OPENED a burst. That is the one moment at which
+   * the state the burst is about to replace is still what the owner holds, so an
+   * owner that has to revert a rejected burst captures its base on `true` and
+   * accumulates into it on `false`.
+   */
+  write: (key: string, patch: P) => boolean;
   /** True from the first write for `key` until that key has been reconciled. */
   isSaving: (key: string) => boolean;
 };
@@ -120,6 +147,11 @@ export type CoalescedWrite<P> = {
  * `onSettled` then runs once per burst, for the owner to reconcile its optimistic
  * state with the server (a re-read, or a revert), and the resource stays
  * `isSaving` until that reconciliation finishes.
+ *
+ * A burst is served by the LIVE owner of its scope, not by the mount that opened
+ * it: navigating away mid-request and back hands the remaining request and the
+ * settle to the view that is on screen when they happen. A scope therefore names
+ * one owning surface.
  */
 export function useCoalescedWrite<P>(
   /** Namespace for the keys, so two owners writing different resource kinds never share an entry. */
@@ -136,34 +168,44 @@ export function useCoalescedWrite<P>(
   const mergeRef = useLatestRef(options?.merge);
   const settledRef = useLatestRef(options?.onSettled);
 
+  // One owner object per mount, whose methods read THIS mount's newest closures.
+  // The refs are stable, so it is built once and its identity is what the
+  // registration below hands over.
+  const owner = useMemo<Owner>(
+    () => ({
+      send: (patch, key) => sendRef.current(patch as P, key),
+      merge: (prev, next) => (mergeRef.current ? mergeRef.current(prev as P, next as P) : next),
+      onSettled: (key, committed) => settledRef.current?.(key, committed),
+    }),
+    [sendRef, mergeRef, settledRef],
+  );
+
+  useEffect(() => {
+    owners.set(scope, owner);
+  }, [scope, owner]);
+
   const write = useCallback(
-    (key: string, patch: P) => {
+    (key: string, patch: P): boolean => {
       const scopedKey = `${scope}:${key}`;
-      const send: Entry['send'] = (p, k) => sendRef.current(p as P, k);
-      const merge: Entry['merge'] = (prev, next) =>
-        mergeRef.current ? mergeRef.current(prev as P, next as P) : next;
-      const onSettled: Entry['onSettled'] = (k, committed) => settledRef.current?.(k, committed);
       const existing = entries.get(scopedKey);
       if (existing) {
-        // Latest writer wins: after a remount, the live owner's closures are the
-        // ones that must send and reconcile — the unmounted one has no screen to
-        // put the answer on.
-        existing.send = send;
-        existing.merge = merge;
-        existing.onSettled = onSettled;
+        // The mount that is writing is by definition the one on screen, so it
+        // takes the burst over — including its `merge`.
+        existing.owner = owner;
         existing.pending = {
-          patch: existing.pending ? existing.merge(existing.pending.patch, patch) : patch,
+          patch: existing.pending ? owner.merge(existing.pending.patch, patch) : patch,
         };
-        return;
+        return false;
       }
-      entries.set(scopedKey, { pending: { patch }, send, merge, onSettled });
+      entries.set(scopedKey, { pending: { patch }, owner });
       publish();
       // Entered synchronously, so the first request is in flight within the click
       // that recorded it: owners open their read-ordering fence inside `send`,
       // and it must not miss a read that starts a microtask later.
-      void drain(scopedKey, key);
+      void drain(scope, scopedKey, key);
+      return true;
     },
-    [scope, sendRef, mergeRef, settledRef],
+    [scope, owner],
   );
 
   const isSaving = useCallback((key: string) => savingKeys.has(`${scope}:${key}`), [savingKeys, scope]);

@@ -427,4 +427,111 @@ describe('project default Agent route', () => {
     // That read began before the pick, so its snapshot is the pre-pick route.
     expect(tree()!.projects?.[0].default_agent).toEqual(route());
   });
+
+  it('keeps a read that starts after the pick from undoing it, while still installing the rest of that snapshot', async () => {
+    const later = deferred<unknown>();
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [project], sessions: {} })
+      .mockReturnValueOnce(later.promise)
+      .mockResolvedValueOnce({
+        projects: [{ ...project, default_agent: route({ model: 'opus' }) }],
+        sessions: {},
+      });
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route());
+    });
+    // A read issued AFTER the pick: its stamp is legitimately current, so the
+    // ordering fence cannot refuse it — yet the server had not committed the
+    // PATCH when it was answered.
+    act(() => {
+      void tree()!.refreshProjects();
+    });
+    await act(async () => {
+      later.resolve({
+        projects: [{ ...project, display_name: 'Renamed elsewhere', default_agent: null }],
+        sessions: {},
+      });
+      await later.promise;
+    });
+    await settle();
+
+    // The pick outranks the incoming row, and only on that one field: this
+    // snapshot is otherwise the newest truth there is, so discarding it whole
+    // would drop a rename the user is entitled to see.
+    expect(tree()!.projects?.[0].default_agent).toEqual(route());
+    expect(tree()!.projects?.[0].display_name).toBe('Renamed elsewhere');
+
+    await act(async () => {
+      gates[0].resolve({ ...project, display_name: 'Renamed elsewhere', default_agent: route() });
+      await gates[0].promise;
+    });
+    await settle();
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+
+    // And the precedence is not sticky: once the write has settled there is no
+    // pick to protect, so a later read is free to move the route again — which is
+    // how another surface's change reaches this one.
+    await act(async () => {
+      await tree()!.refreshProjects();
+    });
+    await settle();
+    expect(tree()!.projects?.[0].default_agent).toEqual(route({ model: 'opus' }));
+  });
+
+  it('reverts a rejected burst to the route it replaced, without waiting for a re-read', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stuck = deferred<unknown>();
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockResolvedValueOnce({ projects: [{ ...project, default_agent: route() }], sessions: {} })
+      .mockReturnValueOnce(stuck.promise);
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'opus' }));
+    });
+    expect(tree()!.projects?.[0].default_agent).toEqual(route({ model: 'opus' }));
+
+    await act(async () => {
+      gates[0].reject(new Error('boom'));
+      await gates[0].promise.catch(() => undefined);
+    });
+    await settle();
+
+    // The rollback is local and complete on its own: the pick lived only in this
+    // cache, so putting back the route it replaced needs no network. The re-read
+    // below may only be QUEUED — ``fetchProjects`` records a trailing intent when
+    // one is already in flight — so a rollback that waited for it would clear the
+    // indicator while leaving the refused route on screen.
+    expect(tree()!.projects?.[0].default_agent).toEqual(route());
+    expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+    // Still asked, unawaited: a compare-and-set conflict means someone else moved
+    // the route, and only a read can say to what.
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenNthCalledWith(2, { cache: false });
+
+    // The revert restores what the server CONFIRMED, so the next pick's token is
+    // coherent with it even though that read has not answered.
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route({ model: 'haiku' }));
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].payload).toMatchObject({ expected_agent_id: 'agt_claude', model: 'haiku' });
+  });
 });

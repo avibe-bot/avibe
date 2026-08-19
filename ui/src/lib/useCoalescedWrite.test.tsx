@@ -124,6 +124,77 @@ describe('useCoalescedWrite', () => {
     second.unmount();
   });
 
+  it('hands the burst to the owner that is on screen when it settles', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const settled: string[] = [];
+    const mount = (tag: string) =>
+      renderHook(() =>
+        useCoalescedWrite<string>('t', send, {
+          onSettled: (key, committed) => {
+            settled.push(`${tag}:${key}:${committed}`);
+          },
+        }),
+      );
+
+    const first = mount('gone');
+    act(() => {
+      first.result.current.write('s1', 'route');
+    });
+    await settle();
+    first.unmount();
+    const second = mount('live');
+    await settle();
+
+    await act(async () => {
+      pending.get('s1:route')!.resolve(true);
+      await pending.get('s1:route')!.promise;
+    });
+    await settle();
+    // The answer lands on the screen that is there when it arrives. Reconciling
+    // into the unmounted page would leave the live one showing an optimistic
+    // route nobody ever converged — and no `setState` there could fix it.
+    expect(settled).toEqual(['live:s1:true']);
+    // Handing the burst over is not a reason to re-send it.
+    expect(started).toEqual(['s1:route']);
+    expect(second.result.current.isSaving('s1')).toBe(false);
+    second.unmount();
+  });
+
+  it('reports which write opened the burst', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const opened: boolean[] = [];
+    const { result } = renderHook(() => useCoalescedWrite<string>('t', send, { merge: joinMerge }));
+
+    act(() => {
+      opened.push(result.current.write('s1', 'a'));
+      opened.push(result.current.write('s1', 'b'));
+      opened.push(result.current.write('s2', 'c'));
+    });
+    await settle();
+    // The opening write is the one moment at which the state the burst replaces
+    // is still what the owner holds, so an owner that must revert a rejected
+    // burst captures its base here and accumulates into it afterwards. Per
+    // resource, not per click: `s2` opens its own burst.
+    expect(opened).toEqual([true, false, true]);
+
+    await act(async () => {
+      pending.get('s2:c')!.resolve(true);
+      await pending.get('s2:c')!.promise;
+    });
+    await settle();
+    act(() => {
+      opened.push(result.current.write('s2', 'd'));
+    });
+    await settle();
+    // Settled means the base is spent: the next click opens a fresh burst and
+    // captures the state the server confirmed.
+    expect(opened).toEqual([true, false, true, true]);
+  });
+
   it('drops what is waiting when the request in flight fails', async () => {
     const started: string[] = [];
     const pending = new Map<string, Deferred>();
