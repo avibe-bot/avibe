@@ -159,7 +159,6 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
     assert "failed to spawn" in status["error"]
 
 
-@pytest.mark.parametrize("alive", [True, False], ids=["service-survived", "instance-down"])
 @pytest.mark.parametrize(
     "outcome",
     [
@@ -169,31 +168,32 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
     ],
     ids=["failed", "in-flight", "succeeded"],
 )
-def test_a_recorded_failure_carries_what_was_alive_when_it_was_written(monkeypatch, tmp_path, outcome, alive):
-    """Only a failure records liveness, and it records a lock-verified service.
+def test_a_recorded_outcome_reports_the_job_and_nothing_about_liveness(monkeypatch, tmp_path, outcome):
+    """The record says what the job did. It makes no claim about the machine.
 
-    Whether a failed restart left the instance down depends on which stage failed,
-    and only the moment of failure can tell -- a later reader sees the same empty
-    machine whether the restart killed the service or the user stopped it. The
-    other outcomes make no downtime claim, so they carry no such observation.
-
-    The down case is stated as the wreckage a failed restart actually leaves: a
-    stray process and no lock owner. Anything reading occupancy rather than the
-    lock would call that alive and erase the failure it just recorded.
+    Publishing the outcome must not depend on inspecting the service: the probe
+    can fail on its own -- an unopenable lock file is enough -- and a diagnostic
+    detail is never worth losing the actual restart result over, least of all on
+    the spawn-error path where losing it also strands the `ok: null` marker that
+    makes status report a restart still in flight. So the probes raise here, and
+    every outcome still lands.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
-    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 4321 if alive else None)
-    monkeypatch.setattr(runtime, "extra_service_process_pids", lambda *_a, **_kw: [] if alive else [7777])
+
+    def fail_probe(*_args, **_kwargs):
+        raise OSError("service.lock cannot be opened")
+
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(runtime, "extra_service_process_pids", fail_probe)
 
     restart_supervisor._write_status({"job_id": "job-1", **outcome})
 
     status = runtime.read_json(runtime.get_restart_status_path())
-    if outcome["ok"] is False:
-        assert status["service_alive"] is alive
-    else:
-        assert "service_alive" not in status
+    assert status["ok"] is outcome["ok"]
+    assert status["state"] == outcome["state"]
+    assert "service_alive" not in status
 
 
 def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):

@@ -1210,32 +1210,43 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
         return items
 
-    # A recorded failure explains the current downtime only when no working
-    # service has existed since it was written, which takes an observation at both
-    # ends. At the near end the supervisor records `service_alive`, because a
-    # failed restart can leave the old service untouched and serving -- the spawn
-    # path never stops anything -- and only that moment can tell. At the far end a
-    # service seen running retires the record outright (see
-    # `runtime._retire_failed_restart_status`), so a surviving record means nothing
-    # has come up since: the instance never recovered, rather than having been
-    # stopped deliberately some time later. Records written before `service_alive`
-    # existed carry no such claim and keep the old reading.
+    # Both clauses are read now, from what is on disk and what is running now.
+    # Nothing here asks what was true at some earlier moment, which is the whole
+    # design: an earlier version of this decided downtime from a liveness snapshot
+    # the supervisor had stamped into the record, and every interleaving between
+    # taking that snapshot and acting on it was a way to get the answer wrong. A
+    # rule with no remembered observation in it has no such window.
+    #
+    # The cost is bounded and in the safe direction. A restart that failed without
+    # stopping the old service -- the spawn path never stops anything -- leaves a
+    # record that outlives its relevance, so after that service is later stopped on
+    # purpose this reports a failure that is history. Both halves of the sentence
+    # are still true, and `vibe start` ends it. Suppressing it instead would mean
+    # trusting a remembered snapshot to stay true, and for a diagnostic the
+    # asymmetry decides it: a stale `fail` is a true statement with a self-clearing
+    # next step, while a wrong `pass` is the eight-day silent outage in #1567
+    # sitting behind a green health check.
+    #
+    # Note what the action must not say, which is the original defect: never offer
+    # the marker-deleting repair here. The reader may be genuinely down, and that
+    # command both destroys the only record of why and makes doctor pass again --
+    # an operator following it would silence their own health check.
     #
     # This has to be read before the staleness branch below, because terminal
     # metadata goes stale after DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that
     # branch offers a repair that deletes the marker -- on a still-down instance,
     # the reason it is down.
     #
-    # All three of those observations ask `verified_service_running`, never the
-    # broader `service_process_running`. The broad one reports whatever occupies
-    # this data dir, which is the right question for refusing a second start and
-    # the wrong one here: a pid reserved by a process that never acquired the lock
-    # is the wreckage of a failed start, not a recovery, and reading it as one
-    # would suppress the very failure it came from. What that leaves is a stray
-    # process the user is told to `vibe start` past; `_service_lifecycle_items`
-    # owns detecting it and already reports it with its own repair, so the action
-    # below points there rather than reassembling the scan here.
-    if payload.get("ok") is False and payload.get("service_alive") is not True and not runtime.verified_service_running():
+    # Liveness asks `verified_service_running`, never the broader
+    # `service_process_running`. The broad one reports whatever occupies this data
+    # dir, which is the right question for refusing a second start and the wrong
+    # one here: a pid reserved by a process that never acquired the lock is the
+    # wreckage of a failed start, not a recovery, and reading it as one would
+    # suppress the very failure it came from. What that leaves is a stray process
+    # the user is told to `vibe start` past; `_service_lifecycle_items` owns
+    # detecting it and already reports it with its own repair, so the action below
+    # points there rather than reassembling the scan here.
+    if payload.get("ok") is False and not runtime.verified_service_running():
         _add_doctor_item(
             items,
             "fail",

@@ -276,20 +276,6 @@ def acquire_service_instance_lock() -> None:
         logger.debug("Failed to fsync service instance lock", exc_info=True)
     paths.get_runtime_pid_path().write_text(str(os.getpid()), encoding="utf-8")
     _SERVICE_INSTANCE_LOCK_HANDLE = lock_file
-    # This line is the moment a working service exists, so it is where a recorded
-    # restart failure stops describing the present. Every other observation of
-    # that fact is second-hand: a supervisor writes `running` because it believes
-    # the child came up, and it can be wrong in both directions. It can also
-    # simply never run -- a start that outlives `wait_for_service_ready` leaves
-    # the child alive and unwatched, and the service it becomes is one nobody
-    # reports. Retiring here needs no reporter and no reader.
-    #
-    # Best-effort, for the same reason as in `write_status`: an unremovable or
-    # unreadable marker must not stop the service that just acquired the lock.
-    try:
-        _retire_failed_restart_status()
-    except OSError:
-        logger.warning("Could not retire the recorded restart failure", exc_info=True)
 
 
 def release_service_instance_lock() -> None:
@@ -1142,60 +1128,6 @@ def stop_process(pid_path, timeout=5):
     return stopped
 
 
-def _retire_failed_restart_status() -> None:
-    """Drop a recorded restart failure once a service is observed running again.
-
-    The record exists to say why this instance is down, and nothing else ends
-    that claim: neither ``vibe start`` nor ``vibe stop`` touches the file, so a
-    failure recorded months ago would otherwise become a fresh diagnosis the
-    next time the instance is stopped on purpose. A service actually being alive
-    is the observation that retires it, whoever started it.
-
-    Two callers reach this, and they are the two ways that fact becomes known.
-    ``acquire_service_instance_lock`` is the authoritative one: it runs inside the
-    service itself, at the instant it becomes the lock owner, so it covers every
-    way a service can come up including the ones no supervisor is still watching.
-    ``write_status`` is opportunistic and covers the other direction -- a service
-    that was already running long before this code shipped, observed by whatever
-    start or refresh path writes its status next, without waiting for a restart.
-    One function owns the decision; those are only the moments worth asking it.
-
-    The ``running`` state that brought us here is not that observation. It is a
-    string, and callers copy it: ``/api/ui/reload`` carries the previous state
-    forward while it replaces the UI process, so a service that died between the
-    supervisor's status write and its liveness check would have its failure
-    record erased by a UI restart. Ask instead -- the state is only the cheap
-    filter that decides whether asking is worth it.
-
-    Only a recorded failure is retired. A restart in progress carries
-    ``ok: None`` and is left alone, because it has not reported an outcome yet
-    and the supervisor writes the running status before it decides the job
-    succeeded; anything else -- absent, succeeded, or too corrupt to read as a
-    record -- was never the claim being ended.
-
-    What is deleted is the record this call decided about, not whatever occupies
-    the path by the time it deletes. ``schedule_restart`` seeds a new job by
-    replacing this file atomically, and UI control requests can reach it while a
-    ``running`` status write is in flight, so an unconditional unlink could drop a
-    marker that a restart scheduled in the meantime still needs:
-    ``_restart_in_flight`` reads it, and its absence reads as "no restart running"
-    -- which would let a second supervisor start alongside the first.
-    """
-
-    path = get_restart_status_path()
-    payload = read_json(path)
-    if not (isinstance(payload, dict) and payload.get("ok") is False):
-        return
-    if not verified_service_running():
-        return
-    current = read_json(path)
-    if not isinstance(current, dict) or current.get("ok") is not False:
-        return
-    if current.get("job_id") != payload.get("job_id"):
-        return
-    path.unlink(missing_ok=True)
-
-
 def write_status(state, detail=None, service_pid=None, ui_pid=None):
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     # Preserve started_at across consecutive "running" writes so the UI can
@@ -1223,17 +1155,6 @@ def write_status(state, detail=None, service_pid=None, ui_pid=None):
     if started_at:
         payload["started_at"] = started_at
     write_json(paths.get_runtime_status_path(), payload)
-    if state == "running":
-        # Retiring the marker is cleanup, and this is the write every start path
-        # reaches. An unreadable record, or one that cannot be unlinked because of
-        # ownership, a file attribute, or a Windows lock, must not report the
-        # service that just came up as having failed to start. Leaving the marker
-        # is survivable -- doctor keeps reporting it, and the next successful start
-        # tries again -- so log it and let the status write stand.
-        try:
-            _retire_failed_restart_status()
-        except OSError:
-            logger.warning("Could not retire the recorded restart failure", exc_info=True)
 
 
 def read_status():
