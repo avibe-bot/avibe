@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from storage.backups import create_sqlite_migration_backup, prune_state_backups
+from storage.backups import (
+    SQLITE_BACKUP_RETENTION,
+    _JSON_BACKUP_RE,
+    create_sqlite_migration_backup,
+    prune_state_backups,
+)
 from storage.background import SQLiteBackgroundTaskStore
 from storage.importer import _backup_json_state, ensure_sqlite_state
 from storage.migrations import run_migrations
@@ -29,6 +34,21 @@ def _legacy_sqlite_backup(backups_dir: Path, name: str) -> Path:
     path.with_name(path.name + "-wal").write_bytes(b"wal")
     path.with_name(path.name + "-shm").write_bytes(b"shm")
     return path
+
+
+def _sqlite_backup_roots(backups_dir: Path) -> list[str]:
+    """Names in the sqlite rollback window.
+
+    Legacy copies keep -wal/-shm companions beside them, and JSON snapshots are
+    a separate window with its own bound despite the similar name. Derive that
+    exclusion from the module's own pattern rather than restating it here.
+    """
+
+    return sorted(
+        path.name
+        for path in backups_dir.iterdir()
+        if not path.name.endswith(("-wal", "-shm")) and not _JSON_BACKUP_RE.fullmatch(path.name)
+    )
 
 
 def test_prune_state_backups_keeps_bounded_rollbacks_and_unknown_files(tmp_path: Path) -> None:
@@ -114,7 +134,11 @@ def test_create_sqlite_migration_backup_is_consistent_without_copying_live_sidec
         assert manifest["kind"] == "sqlite-migration"
         assert manifest["from_revisions"] == ["old"]
         assert manifest["to_revisions"] == ["new"]
-        assert oldest.exists()
+        # Legacy repair copies are part of the same sqlite window, so adding a
+        # backup prunes them to the same bound instead of accumulating beside
+        # them -- companions included.
+        assert not oldest.exists()
+        assert not oldest.with_name(oldest.name + "-wal").exists()
         assert previous.exists()
         assert not (backup_dir / "vibe.sqlite-wal").exists()
         assert not (backup_dir / "vibe.sqlite-shm").exists()
@@ -195,6 +219,38 @@ def test_startup_prunes_only_after_migration_backup_succeeds(monkeypatch, tmp_pa
     assert all(path.exists() for path in existing)
 
 
+def test_repeated_migration_failures_keep_the_rollback_window_bounded(monkeypatch, tmp_path: Path) -> None:
+    # A migration that fails is retried, and the OAuth callback retries it once
+    # per unauthenticated request. Every attempt copies the whole database, and
+    # pruning used to be gated on the upgrade and the import that follow -- so
+    # the one situation that produces attempts without end was also the one
+    # where nothing ever reclaimed them. Assert the bound itself rather than a
+    # count of attempts: whatever the retry storm does, the window it leaves
+    # behind is the retention bound, and what survives is the newest copies.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+    monkeypatch.setattr(
+        "storage.migrations.command.upgrade",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("migration boom")),
+    )
+
+    created: list[Path] = []
+    for _ in range(SQLITE_BACKUP_RETENTION + 3):
+        with pytest.raises(RuntimeError, match="migration boom"):
+            ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
+        created.append(_sqlite_backup_roots(state_dir / "backups")[-1])
+
+    surviving = _sqlite_backup_roots(state_dir / "backups")
+    assert len(surviving) == SQLITE_BACKUP_RETENTION
+    assert surviving == sorted(created[-SQLITE_BACKUP_RETENTION:])
+    # A bounded window is only worth keeping if it is still restorable.
+    for name in surviving:
+        with sqlite3.connect(state_dir / "backups" / name / "vibe.sqlite") as backup:
+            assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+
 def test_startup_keeps_json_rollbacks_when_new_snapshot_fails(monkeypatch, tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     backups_dir = state_dir / "backups"
@@ -252,7 +308,15 @@ def test_startup_keeps_sqlite_rollbacks_when_import_after_upgrade_fails(monkeypa
     with pytest.raises(ValueError, match="invalid import"):
         ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
 
-    assert all(path.exists() for path in existing)
+    # What has to survive a failure is the ability to roll back, not every copy
+    # ever made. Asserting the latter reads as the stronger guarantee and is
+    # what let a repeated failure accumulate one full database per attempt.
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert len(surviving) == SQLITE_BACKUP_RETENTION
+    assert existing[-1].exists(), "the newest pre-existing rollback must be kept"
+    assert any(name.startswith("avibe-sqlite-migration-") for name in surviving), (
+        "the backup taken for this attempt is the rollback point for it"
+    )
 
 
 def test_failed_schema_upgrade_keeps_existing_sqlite_rollbacks(monkeypatch, tmp_path: Path) -> None:
@@ -273,7 +337,14 @@ def test_failed_schema_upgrade_keeps_existing_sqlite_rollbacks(monkeypatch, tmp_
     with pytest.raises(RuntimeError, match="upgrade failed"):
         run_migrations(db_path)
 
-    assert all(path.exists() for path in existing)
+    # Same property as the import-failure case: a rollback point survives the
+    # failure, bounded rather than accumulated.
+    surviving = _sqlite_backup_roots(backups_dir)
+    assert len(surviving) == SQLITE_BACKUP_RETENTION
+    assert existing[-1].exists(), "the newest pre-existing rollback must be kept"
+    assert any(name.startswith("avibe-sqlite-migration-") for name in surviving), (
+        "the backup taken for this attempt is the rollback point for it"
+    )
 
 
 def test_run_migrations_backs_up_only_when_existing_schema_advances(tmp_path: Path) -> None:

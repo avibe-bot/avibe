@@ -212,7 +212,17 @@ def create_sqlite_migration_backup(
     to_revisions: Iterable[str] = (),
     now: datetime | None = None,
 ) -> Path:
-    """Create a consistent, self-identifying SQLite backup before migration."""
+    """Add a consistent, self-identifying SQLite backup to a bounded rollback window.
+
+    Bounding the window belongs here rather than at the call sites. A backup is
+    a rollback point the moment it is durable, so whether the migration that
+    follows it succeeds says nothing about how many older copies are still
+    worth keeping -- and every caller that pruned on that outcome instead left
+    a failing migration adding one full copy of the database per attempt,
+    forever. Owning it at the one function that grows the window is what makes
+    the bound true for callers not yet written, including the ones that opt out
+    of their own pruning.
+    """
 
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
@@ -247,4 +257,11 @@ def create_sqlite_migration_backup(
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
 
+    # After the try, deliberately: the new backup is durable and complete here,
+    # so a failure while pruning can never reach the cleanup path above and
+    # delete the rollback point this call just made. Pruning also has to follow
+    # the manifest write, because a directory without one is not yet a
+    # recognized candidate and would not count itself against the retention
+    # bound.
+    prune_state_backups(target_root, json_retention=None)
     return backup_dir
