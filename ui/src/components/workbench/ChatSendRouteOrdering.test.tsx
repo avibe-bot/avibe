@@ -2,9 +2,9 @@
 
 // The header's route edits apply within the click and persist behind them, which
 // is the point of the optimistic path — but it means a prompt sent right after a
-// model pick could be admitted while that PATCH is still queued, and the turn
-// would run on the PREVIOUS route while the header already shows the new one.
-// These tests pin the ordering at the boundary where it is observable: what
+// model pick could be admitted while that PATCH is still waiting to flush, and
+// the turn would run on the PREVIOUS route while the header already shows the new
+// one. These tests pin the ordering at the boundary where it is observable: what
 // reached the network, in which order.
 
 import { act, cleanup, render } from '@testing-library/react';
@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
     listSessionQueue: vi.fn(),
     onSessionArchived: vi.fn(),
     updateSession: vi.fn(),
+    cancelSession: vi.fn(),
     recoverSessionDraftAfterRejectedSend: vi.fn(),
     reconcileSessionDraftAfterSend: vi.fn(),
     convergeSessionArchived: vi.fn(),
@@ -34,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   // both props ChatPage hands down, so driving them needs no DOM choreography.
   onPatch: null as null | ((patch: AgentRoutePatch) => void),
   onSend: null as null | ((text: string) => void | Promise<unknown>),
+  onStop: null as null | (() => void | Promise<unknown>),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -113,8 +115,15 @@ vi.mock('./useShowPageAnnotation', () => ({
 }));
 
 vi.mock('./Composer', () => ({
-  Composer: ({ onSend }: { onSend: (text: string) => void | Promise<unknown> }) => {
+  Composer: ({
+    onSend,
+    onStop,
+  }: {
+    onSend: (text: string) => void | Promise<unknown>;
+    onStop: () => void | Promise<unknown>;
+  }) => {
     mocks.onSend = onSend;
+    mocks.onStop = onStop;
     return null;
   },
 }));
@@ -127,6 +136,7 @@ vi.mock('./AgentRoutePicker', () => ({
 }));
 
 import { ChatPage } from './ChatPage';
+import { resetCoalescedWrites } from '../../lib/useCoalescedWrite';
 
 const SESSION_ID = 'session-route';
 
@@ -186,7 +196,9 @@ async function mountChat() {
   await settle();
   // The live header only renders once the row is loaded, and the picker is where
   // a route pick comes from.
-  if (!mocks.onPatch || !mocks.onSend) throw new Error('ChatPage did not mount its header/composer');
+  if (!mocks.onPatch || !mocks.onSend || !mocks.onStop) {
+    throw new Error('ChatPage did not mount its header/composer');
+  }
 }
 
 describe('sending after an optimistic route pick', () => {
@@ -203,7 +215,11 @@ describe('sending after an optimistic route pick', () => {
     }
     mocks.onPatch = null;
     mocks.onSend = null;
+    mocks.onStop = null;
     vi.clearAllMocks();
+    // The writer's store is module state (a session row outlives the page that
+    // edits it), so each case starts from an empty one.
+    resetCoalescedWrites();
 
     mocks.api.connectWorkbenchEvents.mockImplementation(() => () => {});
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
@@ -231,10 +247,11 @@ describe('sending after an optimistic route pick', () => {
 
   afterEach(() => {
     cleanup();
+    resetCoalescedWrites();
     vi.unstubAllGlobals();
   });
 
-  it('holds the prompt until the queued route write lands', async () => {
+  it('holds the prompt until the route write lands', async () => {
     const patchGate = deferred<unknown>();
     mocks.api.updateSession.mockReturnValue(patchGate.promise);
     await mountChat();
@@ -259,7 +276,7 @@ describe('sending after an optimistic route pick', () => {
     expect(String(messagePosts()[0][0])).toContain(`/api/sessions/${SESSION_ID}/messages`);
   });
 
-  it('waits behind every write of a burst, not just the one in flight', async () => {
+  it('waits behind every write of a burst, and folds the picks made during one into a single PATCH', async () => {
     const gates = [deferred<unknown>(), deferred<unknown>()];
     let call = 0;
     mocks.api.updateSession.mockImplementation(() => gates[call++].promise);
@@ -268,10 +285,16 @@ describe('sending after an optimistic route pick', () => {
     act(() => {
       mocks.onPatch!({ agent_name: 'codex', agent_variant: 'codex', model: 'gpt-5' });
       mocks.onPatch!({ reasoning_effort: 'high' });
+      mocks.onPatch!({ model: 'gpt-5-codex' });
     });
-    // Serialized: the effort write is queued behind the agent write, so only one
-    // request is out.
+    // One request per row: a second PATCH beside this one could land first and
+    // undo it.
     expect(mocks.api.updateSession).toHaveBeenCalledTimes(1);
+    expect(mocks.api.updateSession).toHaveBeenCalledWith(SESSION_ID, {
+      agent_name: 'codex',
+      agent_variant: 'codex',
+      model: 'gpt-5',
+    });
 
     act(() => {
       void mocks.onSend!('and now with high effort');
@@ -281,13 +304,25 @@ describe('sending after an optimistic route pick', () => {
       await gates[0].promise;
     });
     await settle();
-    // The effort write is only now in flight; admitting the turn here would run
-    // it at the previous effort.
+    // Two picks, ONE follow-up PATCH carrying the union of their fields: they are
+    // independent fields of one row, so neither takes the other hostage and
+    // neither is dropped as "superseded".
     expect(mocks.api.updateSession).toHaveBeenCalledTimes(2);
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, {
+      reasoning_effort: 'high',
+      model: 'gpt-5-codex',
+    });
+    // That follow-up is only now in flight; admitting the turn here would run it
+    // at the previous effort.
     expect(messagePosts()).toHaveLength(0);
 
     await act(async () => {
-      gates[1].resolve({ ...sessionRow, agent_name: 'codex', model: 'gpt-5', reasoning_effort: 'high' });
+      gates[1].resolve({
+        ...sessionRow,
+        agent_name: 'codex',
+        model: 'gpt-5-codex',
+        reasoning_effort: 'high',
+      });
       await gates[1].promise;
     });
     await settle();
@@ -314,5 +349,41 @@ describe('sending after an optimistic route pick', () => {
     });
     await settle();
     expect(messagePosts()).toHaveLength(1);
+  });
+
+  it('abandons a prompt the user stopped while the route write was still in flight', async () => {
+    const patchGate = deferred<unknown>();
+    mocks.api.updateSession.mockReturnValue(patchGate.promise);
+    // Nothing has been admitted yet, so the controller has no turn to interrupt —
+    // Stop is answered by clearing this tab's indicator.
+    mocks.api.cancelSession.mockResolvedValue({ ok: false, code: 'not_in_flight' });
+    await mountChat();
+
+    act(() => mocks.onPatch!({ model: 'opus' }));
+    let submission: unknown = 'pending';
+    act(() => {
+      void Promise.resolve(mocks.onSend!('never mind')).then((result) => {
+        submission = result;
+      });
+    });
+    await settle();
+    expect(messagePosts()).toHaveLength(0);
+
+    // Stop is live during the wait — the indicator went up on submit — and it is a
+    // real cancel, so the prompt must not be POSTed once the route finally lands.
+    await act(async () => {
+      await mocks.onStop!();
+    });
+    expect(mocks.api.cancelSession).toHaveBeenCalledWith(SESSION_ID);
+
+    await act(async () => {
+      patchGate.resolve({ ...sessionRow, model: 'opus' });
+      await patchGate.promise;
+    });
+    await settle();
+    expect(messagePosts()).toHaveLength(0);
+    // ``false`` hands the text back to the Composer as a retryable submission,
+    // rather than swallowing what the user typed.
+    expect(submission).toBe(false);
   });
 });

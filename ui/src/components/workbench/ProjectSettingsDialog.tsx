@@ -73,8 +73,10 @@ export const ProjectSettingsDialog: React.FC<{
         'reasoning_effort' in patch ? patch.reasoning_effort ?? null : current?.reasoning_effort ?? null,
     };
     // Applied to the shared cache within the click (which re-renders `current`
-    // here), persisted behind it: nothing to await, nothing to catch.
-    setProjectDefaultAgent(project.id, merged, current?.agent_id ?? null);
+    // here), persisted behind it: nothing to await, nothing to catch. The
+    // compare-and-set token is the provider's business — `current` is the
+    // optimistic route, which is exactly what it must not expect.
+    setProjectDefaultAgent(project.id, merged);
   };
 
   return (

@@ -10,7 +10,7 @@ import {
 } from './WorkbenchProjectsContext';
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
-import { useQueuedWrite } from '../lib/useQueuedWrite';
+import { useCoalescedWrite } from '../lib/useCoalescedWrite';
 import { errorMessage } from '@/lib/errorMessage';
 import { useConsumerActivation } from '@/lib/useConsumerActivation';
 import {
@@ -27,15 +27,6 @@ import {
 // size has to be one shared value (it can't differ per surface).
 const SESSIONS_PAGE_SIZE = 8;
 const RECONNECT_SESSIONS_PAGE_SIZE = 200;
-
-// One queued project default-Agent write. Order matters twice over: each payload
-// is a whole route that overwrites the last, and `expected_agent_id` is a
-// compare-and-set against the route the write before it installed — so a dropped
-// or reordered write would be rejected as a stale binding.
-type ProjectRouteWrite = {
-  route: ProjectDefaultAgent;
-  expectedAgentId: string | null;
-};
 
 const EMPTY_SESSIONS: ProjectSessionsState = {
   sessions: null,
@@ -156,9 +147,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const treeInitialFetched = useRef(false);
   const fetchProjectsPendingRef = useRef<{ cache?: boolean } | null>(null);
   const projectTreePendingRef = useRef(false);
-  // The newest queued default-Agent write per project, so an earlier one's
-  // response can be recognised as already outdated by the time it arrives.
-  const latestProjectRouteRef = useRef(new Map<string, ProjectRouteWrite>());
+  // The newest default-Agent pick per project, so an earlier write's response can
+  // be recognised as already outdated by the time it arrives.
+  const latestProjectRouteRef = useRef(new Map<string, ProjectDefaultAgent>());
+  // The Agent each project was last CONFIRMED to hold by the server — the token a
+  // compare-and-set route write has to expect. It cannot be read off the list
+  // below, because that list also carries picks the server has not accepted yet,
+  // and expecting one of those is what turns a rejected pick into a deterministic
+  // ``project_agent_conflict`` on the retry.
+  const confirmedProjectAgentRef = useRef(new Map<string, string | null>());
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
 
@@ -168,15 +165,34 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // their request and discard the response, and why asking beforehand would have
   // dropped the window a just-created project needs. A read cannot decline a request
   // on an answer it can only trust afterwards.
+  //
+  // ``confirmed`` names the rows THIS commit takes from the server, which is also
+  // where the compare-and-set token for a route write comes from. Declared per
+  // commit rather than inferred from the list, because a commit can install a
+  // server row into a list that still holds another project's optimistic pick —
+  // and recording that pick as confirmed is exactly the mistake the token exists
+  // to prevent. Omitting it records nothing, so the cost of a future commit
+  // forgetting is a stale token (one loud conflict, then a re-read) rather than a
+  // wrong one.
   const commitProjects = useCallback(
     (
       next:
         | WorkbenchProject[]
         | null
         | ((prev: WorkbenchProject[] | null) => WorkbenchProject[] | null),
+      options?: { confirmed?: WorkbenchProject[] | null },
     ) => {
       const resolved = typeof next === 'function' ? next(projectsRef.current) : next;
       projectsRef.current = resolved;
+      if (options && 'confirmed' in options) {
+        const confirmed = confirmedProjectAgentRef.current;
+        if (options.confirmed === null) confirmed.clear();
+        else {
+          for (const project of options.confirmed ?? []) {
+            confirmed.set(project.id, project.default_agent?.agent_id ?? null);
+          }
+        }
+      }
       setProjects(resolved);
     },
     [],
@@ -278,7 +294,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   const applyProjectsSnapshot = useCallback((nextProjects: WorkbenchProject[]) => {
     const accessibleIds = new Set(nextProjects.map((project) => project.id));
-    commitProjects(nextProjects);
+    commitProjects(nextProjects, { confirmed: nextProjects });
     setSessions((prev) =>
       Object.fromEntries(
         Object.entries(prev).filter(([projectId]) => accessibleIds.has(projectId)),
@@ -319,7 +335,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       ...[...cachedProjectIds].map((projectId) => `project:${projectId}`),
       ...[...sessionProjectRef.current.keys()].map((sessionId) => `project-session:${sessionId}`),
     ]);
-    commitProjects(null);
+    commitProjects(null, { confirmed: null });
     sessionsRef.current = {};
     expandedRef.current = new Set();
     sessionProjectRef.current.clear();
@@ -1025,7 +1041,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       try {
         const updated = await api.updateProject(projectId, { display_name: name });
         acceptProjectsMutation();
-        commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
+        commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev), {
+          confirmed: [updated],
+        });
       } catch (err) {
         console.error('[workbench] rename project failed', err);
       }
@@ -1075,8 +1093,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const sendProjectRoute = useCallback(
-    async (pending: ProjectRouteWrite, projectId: string): Promise<boolean> => {
-      const { route, expectedAgentId } = pending;
+    async (route: ProjectDefaultAgent, projectId: string): Promise<boolean> => {
+      // The compare-and-set token is derived HERE, at send time, from the last
+      // route the server confirmed — never from the cache, which is showing the
+      // pick this very request is trying to install. That is what keeps a
+      // rejected pick from poisoning the next one: expecting the route the server
+      // refused would make every retry a deterministic conflict.
+      const expectedAgentId = confirmedProjectAgentRef.current.get(projectId) ?? null;
       try {
         // Always send the full 5-field route: a complete set is coherent whether
         // the user picked an agent (all set) or cleared it (all null → default
@@ -1090,12 +1113,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           reasoning_effort: route.reasoning_effort,
         });
         acceptProjectsMutation();
-        // Only the newest queued write's response is still the truth. Installing
-        // an earlier one would drag the row back to the route the user has
-        // already clicked past — the lag this optimistic path exists to remove.
-        if (pending === latestProjectRouteRef.current.get(projectId)) {
-          commitProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
-        }
+        // Only the newest pick's response is still the truth: a pick made while
+        // this request was in flight is already on screen, and installing this
+        // answer would drag the row back to the route the user clicked past — the
+        // lag this optimistic path exists to remove. The response is still
+        // recorded as confirmed, because the server did take it: that is what the
+        // follow-up write must expect to find.
+        const superseded = route !== latestProjectRouteRef.current.get(projectId);
+        commitProjects(
+          (prev) =>
+            prev && !superseded ? prev.map((p) => (p.id === projectId ? updated : p)) : prev,
+          { confirmed: [updated] },
+        );
         return true;
       } catch (err) {
         // apiFetch already surfaced the toast; the settle re-read below is what
@@ -1107,21 +1136,27 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [acceptProjectsMutation, api, commitProjects],
   );
 
-  const { write: writeProjectRoute, isSaving: isSavingDefaultAgent } = useQueuedWrite(
+  const { write: writeProjectRoute, isSaving: isSavingDefaultAgent } = useCoalescedWrite<ProjectDefaultAgent>(
+    'project-route',
     sendProjectRoute,
-    useCallback(
-      (projectId: string, committed: boolean) => {
-        latestProjectRouteRef.current.delete(projectId);
-        // A rejected pick lives only in this cache, so the rollback is a re-read.
-        // Only on failure: a committed burst already installed the server row.
-        if (!committed) void fetchProjects({ cache: false });
-      },
-      [fetchProjects],
-    ),
+    {
+      onSettled: useCallback(
+        async (projectId: string, committed: boolean) => {
+          latestProjectRouteRef.current.delete(projectId);
+          // A rejected pick lives only in this cache, so the rollback is a
+          // re-read. Only on failure: a committed burst already installed the
+          // server row. Awaited, so the project stays mid-write until the
+          // authoritative route is back and a pick made meanwhile folds into this
+          // same writer instead of racing the rollback.
+          if (!committed) await fetchProjects({ cache: false });
+        },
+        [fetchProjects],
+      ),
+    },
   );
 
   const setProjectDefaultAgent = useCallback(
-    (projectId: string, route: ProjectDefaultAgent, expectedAgentId: string | null) => {
+    (projectId: string, route: ProjectDefaultAgent) => {
       // The picker highlight is CONTROLLED by this cache, so the pick lands here
       // within the click and the request follows behind it. `acceptProjectsMutation`
       // stops a projects read that is already in flight from re-installing the
@@ -1138,9 +1173,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: cleared ? null : route } : p))
           : prev,
       );
-      const pending: ProjectRouteWrite = { route, expectedAgentId };
-      latestProjectRouteRef.current.set(projectId, pending);
-      writeProjectRoute(projectId, pending);
+      latestProjectRouteRef.current.set(projectId, route);
+      writeProjectRoute(projectId, route);
     },
     [acceptProjectsMutation, commitProjects, writeProjectRoute],
   );
@@ -1227,7 +1261,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       acceptProjectsMutation();
       // create_project is find-or-create by path: opening a tracked folder returns
       // the existing project, refreshed. Drop any stale copy, hoist to top, expand.
-      commitProjects((prev) => (prev ? [project, ...prev.filter((p) => p.id !== project.id)] : [project]));
+      commitProjects((prev) => (prev ? [project, ...prev.filter((p) => p.id !== project.id)] : [project]), {
+        confirmed: [project],
+      });
       setExpanded((prev) => {
         const next = new Set(prev);
         next.add(project.id);

@@ -117,7 +117,7 @@ import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests
 import { VaultProvisionDialogProvider, VaultRequestCard } from '../ui/vault-request-card';
 import { StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
-import { useQueuedWrite } from '../../lib/useQueuedWrite';
+import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
@@ -190,8 +190,8 @@ const OLDER_TRIGGER_BAND_PX = 120;
 // row's hint so the shortcut is discoverable instead of folklore.
 const ARCHIVE_SHORTCUT_LABEL = archiveSessionShortcutLabel();
 
-// One queued session write. The header applies an edit optimistically, so the
-// request that follows carries the chat it was made for: it is queued under that
+// One session write. The header applies an edit optimistically, so the request
+// that follows carries the chat it was made for: it is recorded under that
 // session's id (the URL may already be on another chat by the time it flushes)
 // and carries that chat's read-ordering gate, which is replaced on navigation.
 type SessionPatchWrite = {
@@ -917,20 +917,34 @@ export const ChatPage: React.FC = () => {
     write: writeSessionPatch,
     isSaving: isPatchSaving,
     whenDrained: whenSessionPatchDrained,
-  } = useQueuedWrite(
-    sendSessionPatch,
+  } = useCoalescedWrite<SessionPatchWrite>('session-row', sendSessionPatch, {
+    // A title edit and a route pick are independent fields of one row, so the
+    // clicks made while a request is in flight fold into a single follow-up
+    // PATCH instead of waiting on each other — and neither can be lost because
+    // the other one failed. The newest gate wins: it belongs to the mount that
+    // is on screen now and whose reads the reconcile below has to fence.
+    merge: useCallback(
+      (prev: SessionPatchWrite, next: SessionPatchWrite): SessionPatchWrite => ({
+        changes: { ...prev.changes, ...next.changes },
+        gate: next.gate,
+      }),
+      [],
+    ),
     // Once per burst, not once per write: this read is what makes the optimistic
     // row authoritative again — and what rolls a rejected pick back, since the
-    // local row is the only place that ever held it. Only for the open chat: a
-    // burst for a session the user has navigated away from has nothing on screen
-    // to reconcile, and ``refreshSessionRow`` reads whatever IS open.
-    useCallback(
+    // local row is the only place that ever held it. Returned, not fired and
+    // forgotten, so the session counts as saving until it has reconciled. Only
+    // for the open chat: a burst for a session the user has navigated away from
+    // has nothing on screen to reconcile, and ``refreshSessionRow`` reads
+    // whatever IS open.
+    onSettled: useCallback(
       (patchedId: string) => {
-        if (patchedId === sessionIdRef.current) void refreshSessionRow();
+        if (patchedId !== sessionIdRef.current) return;
+        return refreshSessionRow();
       },
       [refreshSessionRow],
     ),
-  );
+  });
 
   // ── Converging on a terminal archive this tab missed ────────────────────────
   //
@@ -1616,6 +1630,7 @@ export const ChatPage: React.FC = () => {
       if (!sessionId || (!text.trim() && ready.length === 0)) return;
       const refs = references ?? [];
       markWorking();
+      const sendEpoch = turnEpochRef.current;
       setError(null);
       try {
         // Plain (non-streaming) POST: the turn runs fire-and-forget on the
@@ -1663,6 +1678,13 @@ export const ChatPage: React.FC = () => {
         // session's writes to settle first; settle means "landed or failed
         // loudly", so a rejected route cannot hold the send hostage.
         await whenSessionPatchDrained(sessionId);
+        // Stop pressed during that wait is a real cancel, and it has nothing to
+        // cancel yet: the turn was never admitted, so ``cancelSession`` answers
+        // ``not_in_flight`` and clears the indicator. Drop the prompt instead of
+        // POSTing a turn the user already stopped; ``false`` hands the text back
+        // to the Composer as a retryable submission. A moved epoch means a newer
+        // turn owns the indicator and this check is not about it.
+        if (turnEpochRef.current === sendEpoch && !workingRef.current) return false;
         const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2257,9 +2279,10 @@ export const ChatPage: React.FC = () => {
       const gate = sessionRowRefreshGateRef.current;
       gate.invalidate();
       setSession((prev) => (prev && prev.id === patchedId ? { ...prev, ...changes } : prev));
-      // Both the id and the gate travel with the write: a queued patch belongs to
-      // the chat that was open when it was clicked, and the gate is per-session
-      // (replaced on navigation), so it must never fence the new chat's reads.
+      // Both the id and the gate travel with the write: a patch waiting to flush
+      // belongs to the chat that was open when it was clicked, and the gate is
+      // per-session (replaced on navigation), so it must never fence the new
+      // chat's reads.
       writeSessionPatch(patchedId, { changes, gate });
     },
     [session, writeSessionPatch],

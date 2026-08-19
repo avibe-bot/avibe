@@ -46,17 +46,17 @@ export interface WorkbenchProjectsActions {
   /** Set the project's default Agent route (Project Settings): patches the shared
    *  cache FIRST, so the sidebar + Projects page + the picker's own highlight move
    *  within the click, then persists behind it. Pass an all-null route to clear
-   *  the default back to the global default. Never throws and never resolves —
-   *  concurrent picks are queued in click order, a failure is already toasted by
-   *  the apiFetch layer, and the cache is reconciled from the server on settle. */
-  setProjectDefaultAgent: (
-    projectId: string,
-    route: ProjectDefaultAgent,
-    expectedAgentId: string | null,
-  ) => void;
-  /** Whether this project's default-Agent write is still in flight. Per project:
-   *  the writes are queued per project too, so one project's slow save neither
-   *  blocks nor spins another's picker. */
+   *  the default back to the global default. Never throws and never resolves — a
+   *  pick made while the last one is in flight replaces it, a failure is already
+   *  toasted by the apiFetch layer, and the cache is reconciled from the server on
+   *  settle. The route's compare-and-set token is NOT a parameter: only the writer
+   *  knows which route the server last confirmed, and a caller reading it off this
+   *  optimistic cache would expect a route the server may have refused. */
+  setProjectDefaultAgent: (projectId: string, route: ProjectDefaultAgent) => void;
+  /** Whether this project's default Agent is mid-write — from the pick until the
+   *  server route is reconciled. Per project: the writes are partitioned per
+   *  project too, so one project's slow save neither blocks nor spins another's
+   *  picker. */
   isSavingDefaultAgent: (projectId: string) => boolean;
   archiveProject: (projectId: string) => Promise<void>;
   /** Throws on failure so the row's inline editor can fall back; patches title on success. */
