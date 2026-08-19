@@ -2336,20 +2336,34 @@ class Controller:
                 engine.dispose()
 
         async def archive_operation() -> dict[str, Any]:
-            return await run_blocking(archive_session)
+            loop = asyncio.get_running_loop()
+
+            def archive_and_schedule() -> dict[str, Any]:
+                session = archive_session()
+                # Schedule before run_blocking can re-raise a pending cancellation.
+                try:
+                    loop.call_soon_threadsafe(
+                        self._schedule_best_effort_archive_memory_flush,
+                        raw_session_id,
+                    )
+                except RuntimeError:
+                    logger.debug(
+                        "archive: Memory flush dropped; event loop closed for %s",
+                        raw_session_id,
+                    )
+                return session
+
+            return await run_blocking(archive_and_schedule)
 
         turn_manager = getattr(self, "session_turns", None)
         turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
         if callable(turn_lifecycle):
-            session = await turn_lifecycle(
+            return await turn_lifecycle(
                 raw_session_id,
                 archive_operation,
                 deadline_seconds=deadline_seconds,
             )
-        else:
-            session = await archive_operation()
-        self._schedule_best_effort_archive_memory_flush(raw_session_id)
-        return session
+        return await archive_operation()
 
     async def _final_flush_memory_scope(
         self,

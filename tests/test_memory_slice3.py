@@ -1170,6 +1170,88 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         engine.dispose()
 
 
+def test_archive_memory_cli_session_schedules_flush_when_commit_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from storage import workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive through cancellation",
+        )["id"]
+
+    principal_id = "u-" + ("2" * 32)
+    flush_entered = asyncio.Event()
+    release_flush = asyncio.Event()
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+
+    class LifecycleRuntime(_Runtime):
+        async def run_session_scopes_lifecycle(self, **kwargs):
+            operation = kwargs.pop("operation")
+            self.session_lifecycle_calls.append(kwargs)
+            flush_entered.set()
+            await release_flush.wait()
+            return await operation()
+
+    from core.services import sessions as sessions_service
+
+    original_archive = sessions_service.archive_session
+
+    def archive_under_test(conn, actual_session_id):
+        commit_entered.set()
+        assert release_commit.wait(timeout=2.0)
+        return original_archive(conn, actual_session_id)
+
+    monkeypatch.setattr(sessions_service, "archive_session", archive_under_test)
+
+    controller = _controller()
+    controller.memory_runtime = LifecycleRuntime(controller.memory_module)
+    controller._memory_scopes_by_session = {
+        session_id: (principal_id, PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+    controller.memory_runtime.recovered_scopes = ((principal_id, PROJECT),)
+
+    async def run() -> None:
+        archive = asyncio.create_task(controller.archive_memory_cli_session(session_id))
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while not commit_entered.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("archive commit did not start")
+            await asyncio.sleep(0.01)
+        archive.cancel()
+        await asyncio.sleep(0)
+        release_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await archive
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+        await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
+        release_flush.set()
+        pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
+        if pending:
+            await asyncio.gather(*pending)
+
+    try:
+        asyncio.run(run())
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize("state", ["missing", "reserved", "archived"])
 def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
