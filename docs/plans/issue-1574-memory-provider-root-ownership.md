@@ -26,9 +26,11 @@ fence every later Memory operation.
   create only Avibe child-home/generated directories; the root must already be
   a private directory claimed by `ProviderRoot`.
 - Add a Clear-only `ProviderRoot.recreate_empty_for_clear()` recovery path. An
-  unsentinelled root is recoverable only when its top-level shape is the pinned
-  EverOS first-start shape and both root TOMLs exactly match the private copies
-  in `memory/generated`. The method writes and verifies the sentinel before
+  unsentinelled root is recoverable only when its top-level shape is a bounded
+  EverOS first-start state. Complete root TOMLs must exactly match the private
+  copies in `memory/generated`; interrupted `.toml.tmp` writes must be byte
+  prefixes of those generated controls; provider data is accepted only after
+  both final controls exist. The method writes and verifies the sentinel before
   reusing the existing destructive primitive.
 - Keep ordinary `ProviderRoot.ensure()` strict so normal startup never adopts a
   non-empty root.
@@ -52,4 +54,3 @@ fence every later Memory operation.
 - [x] Add narrow released-shape recovery to durable Clear.
 - [x] Update scenario catalog and dependency observation.
 - [x] Run focused Memory tests and Ruff.
-- [ ] Complete PR review and CI gates.
