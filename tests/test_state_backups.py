@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from storage import backups
 from storage.backups import (
     SQLITE_BACKUP_RETENTION,
     _JSON_BACKUP_RE,
@@ -34,6 +35,13 @@ def _legacy_sqlite_backup(backups_dir: Path, name: str) -> Path:
     path.with_name(path.name + "-wal").write_bytes(b"wal")
     path.with_name(path.name + "-shm").write_bytes(b"shm")
     return path
+
+
+def _table_exists(db_path: Path, table: str) -> bool:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone() is not None
 
 
 def _sqlite_backup_roots(backups_dir: Path) -> list[str]:
@@ -236,19 +244,121 @@ def test_repeated_migration_failures_keep_the_rollback_window_bounded(monkeypatc
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("migration boom")),
     )
 
-    created: list[Path] = []
+    created: list[str] = []
     for _ in range(SQLITE_BACKUP_RETENTION + 3):
         with pytest.raises(RuntimeError, match="migration boom"):
             ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
-        created.append(_sqlite_backup_roots(state_dir / "backups")[-1])
+        created.append(max(_sqlite_backup_roots(state_dir / "backups")))
 
     surviving = _sqlite_backup_roots(state_dir / "backups")
     assert len(surviving) == SQLITE_BACKUP_RETENTION
-    assert surviving == sorted(created[-SQLITE_BACKUP_RETENTION:])
+    assert surviving == sorted({created[0], created[-1]})
     # A bounded window is only worth keeping if it is still restorable.
     for name in surviving:
         with sqlite3.connect(state_dir / "backups" / name / "vibe.sqlite") as backup:
             assert backup.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+
+def test_retry_window_keeps_the_snapshot_taken_before_a_partial_upgrade(monkeypatch, tmp_path: Path) -> None:
+    # An upgrade can commit part of its work and then raise -- a SQLite table
+    # rebuild inside an autocommit block that fails a later check is exactly
+    # that shape. From the next attempt on, every copy is of the half-migrated
+    # database, so keeping the newest copies fills the window with damage and
+    # discards the only snapshot that can undo it. What each attempt shares is
+    # the schema move it was taken for, since a failed upgrade leaves the
+    # recorded revisions alone; the window keeps the ends of that move.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+
+    def _partially_commit_then_fail(*args, **kwargs):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("create table if not exists half_migrated (value text)")
+        raise RuntimeError("upgrade failed after committing")
+
+    monkeypatch.setattr("storage.migrations.command.upgrade", _partially_commit_then_fail)
+
+    for _ in range(SQLITE_BACKUP_RETENTION + 2):
+        with pytest.raises(RuntimeError, match="upgrade failed after committing"):
+            run_migrations(db_path)
+
+    surviving = _sqlite_backup_roots(state_dir / "backups")
+    assert len(surviving) == SQLITE_BACKUP_RETENTION
+    intact = [
+        name
+        for name in surviving
+        if not _table_exists(state_dir / "backups" / name / "vibe.sqlite", "half_migrated")
+    ]
+    assert intact, "the snapshot taken before the first partial upgrade must survive the retries"
+
+
+def test_new_backup_survives_future_dated_copies_and_outlives_them(tmp_path: Path) -> None:
+    # A clock corrected backwards, or state carried from a machine running
+    # ahead, leaves copies dated after the one being taken right now. Ranking by
+    # timestamp alone would call the fresh backup the oldest and delete it, and
+    # create_sqlite_migration_backup would hand back a path to nothing.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    with sqlite3.connect(db_path) as writer:
+        writer.execute("create table records (value text not null)")
+        writer.execute("insert into records values ('written today')")
+    backups_dir = state_dir / "backups"
+    backups_dir.mkdir()
+    from_the_future = [
+        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-20990{day}01T020000Z.sqlite")
+        for day in (1, 2, 3)
+    ]
+
+    backup_dir = create_sqlite_migration_backup(
+        db_path,
+        from_revisions={"old"},
+        to_revisions={"new"},
+        now=datetime(2026, 7, 10, 3, 0, tzinfo=timezone.utc),
+    )
+
+    assert (backup_dir / "vibe.sqlite").is_file()
+    with sqlite3.connect(backup_dir / "vibe.sqlite") as backup:
+        assert backup.execute("select value from records").fetchone() == ("written today",)
+    # Protection takes a slot in the window rather than an extra one.
+    assert len(_sqlite_backup_roots(backups_dir)) == SQLITE_BACKUP_RETENTION
+    assert sum(path.exists() for path in from_the_future) == SQLITE_BACKUP_RETENTION - 1
+
+
+def test_new_backup_reaches_stable_storage_before_older_ones_are_deleted(monkeypatch, tmp_path: Path) -> None:
+    # A backup that replaces durable copies has to be durable first. If the
+    # filesystem is free to persist the deletions while still holding the new
+    # rename and manifest in cache, a power loss here leaves no rollback point
+    # at all -- the one outcome this whole window exists to prevent.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+    with sqlite3.connect(db_path) as writer:
+        writer.execute("create table records (value text not null)")
+    backups_dir = state_dir / "backups"
+    backups_dir.mkdir()
+    for day in (7, 8, 9):
+        _legacy_sqlite_backup(backups_dir, f"vibe-pre-0026-repair-2026070{day}T020000Z.sqlite")
+
+    journal: list[tuple[str, Path]] = []
+    real_fsync = backups._fsync
+    real_remove = backups._remove_candidate
+    monkeypatch.setattr(backups, "_fsync", lambda path: (journal.append(("fsync", path)), real_fsync(path))[1])
+    monkeypatch.setattr(
+        backups,
+        "_remove_candidate",
+        lambda candidate: (journal.append(("remove", candidate.root)), real_remove(candidate))[1],
+    )
+
+    backup_dir = create_sqlite_migration_backup(db_path, now=datetime(2026, 7, 10, 3, 0, tzinfo=timezone.utc))
+
+    removals = [index for index, (action, _) in enumerate(journal) if action == "remove"]
+    assert removals, "the prune must have had something to delete for this ordering to mean anything"
+    synced = {path for action, path in journal[: removals[0]] if action == "fsync"}
+    assert backup_dir / "manifest.json" in synced
+    assert backup_dir in synced
+    assert backup_dir.parent in synced
 
 
 def test_startup_keeps_json_rollbacks_when_new_snapshot_fails(monkeypatch, tmp_path: Path) -> None:
