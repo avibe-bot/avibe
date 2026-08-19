@@ -18,13 +18,17 @@ during autogenerate, so today's runtime can drive an older ``version_locations``
     rechained_revisions()         a released revision keeps its identity and every edge
                                   Alembic orders the graph by
     edited_released_bodies()      a released revision still does what the release ran
-    unrepairable_releases()       a database built by a released graph still comes out
-                                  ready when the upgrade users run upgrades it
+    unrepairable_releases()       a database built by a released graph, carrying rows,
+                                  still comes out ready when the upgrade users run
+                                  upgrades it
 
 Readiness is not this module's opinion. The last property drives ``run_migrations`` and
 asks ``background_tables_ready``, so it covers the repair and stamping that run before
 Alembic does, and it means by "ready" exactly what production means -- required columns
-included, not merely a full set of table names.
+included, not merely a full set of table names. It seeds the released schema first,
+because an empty database is the one case no user is in and is the case under which
+adding a NOT NULL column, tightening a nullable one, and building a unique index all
+succeed unconditionally.
 
 A release here is any installable tag, ``gh-vX.Y.ZrcN`` prereleases included, because a
 database in the field can have been built by one. The first three properties are metadata
@@ -56,7 +60,9 @@ from alembic import command
 from alembic.config import Config
 from alembic.script.base import _only_source_rev_file
 from alembic.util import to_tuple
+from packaging.version import InvalidVersion, Version
 
+from scripts.release_package_version import package_version_from_release_tag
 from storage.migrations import (
     HEAD_ONLY_REQUIRED_COLUMNS,
     HEAD_REQUIRED_COLUMNS,
@@ -101,23 +107,38 @@ def _git(*args: str) -> str:
     return result.stdout
 
 
-RELEASE_TAG = re.compile(r"^(?:gh-)?v(\d+)\.(\d+)\.(\d+)(?:rc(\d+))?$")
+def release_version(tag: str) -> Version | None:
+    """``tag``'s package version, or ``None`` if it is not a release tag.
 
-
-def version_key(tag: str) -> tuple[int, ...]:
-    """Sort key for a release tag, prereleases ordered before the version they lead to.
+    Borrowed rather than restated, the same way ``is_migration_source`` is. The publish
+    workflow turns a tag into a wheel by asking ``package_version_from_release_tag``, so a
+    tag it accepts is a tag that shipped -- and a rule stated separately here could only
+    ever come to disagree with the one that actually decides. Disagreeing in the direction
+    that drops tags is the expensive one: a release the filter does not recognise is
+    absent from every property below, so a migration first shipped in it can be rechained
+    or edited afterwards with nothing to compare against.
 
     ``gh-vX.Y.ZrcN`` prereleases are installable -- AGENTS.md §9 requires a wheel and an
     sdist in their release assets -- so a database in the field can have been built by
-    one, and a graph edited between the prerelease and the release is edited behind those
-    databases. Empty for anything that is not a release tag.
+    one, and PEP 440 already orders them before the release they lead to.
     """
-    match = RELEASE_TAG.match(tag)
-    if match is None:
-        return ()
-    major, minor, patch, candidate = match.groups()
-    ordinal = (0, int(candidate)) if candidate else (1, 0)
-    return (int(major), int(minor), int(patch), *ordinal)
+    try:
+        return Version(package_version_from_release_tag(tag))
+    except (ValueError, InvalidVersion):
+        return None
+
+
+def version_key(tag: str) -> tuple[Version, str]:
+    """Sort key ordering release tags by PEP 440, with the tag itself breaking ties.
+
+    ``vX.Y.Z`` and ``gh-vX.Y.Z`` carry one version between them, so something has to make
+    the order total; the tag string does it, and puts ``v`` last, which is what makes the
+    newest baseline the real release rather than its prerelease.
+    """
+    version = release_version(tag)
+    if version is None:
+        raise MigrationGuardError(f"{tag!r} is not a release tag")
+    return (version, tag)
 
 
 def versions_tree(tag: str) -> str | None:
@@ -145,7 +166,7 @@ def released_tags() -> list[str]:
     anyone is still running it.
     """
     names = _git("tag", "-l", "v*", "-l", "gh-v*").split()
-    candidates = sorted((tag for tag in names if version_key(tag)), key=version_key)
+    candidates = sorted((tag for tag in names if release_version(tag)), key=version_key)
     tags = [tag for tag in candidates if versions_tree(tag)]
     if not tags:
         # A guard that reads "no baseline" as "nothing to compare, therefore fine" passes
@@ -586,8 +607,159 @@ def describe_schema_gap(db_path: Path) -> str:
     return "; ".join(parts) or "the schema is incomplete in a way HEAD_TABLES and the required columns do not name"
 
 
-def schema_gap_after_upgrade(tag: str) -> str | None:
-    """Why a database built by ``tag``'s graph is not ready after today's upgrade, or ``None``.
+# SQLite names the one constraint an insert tripped, which is what makes the repair below
+# a guided search rather than a guess: the database says what it objected to, and the
+# objection itself carries the values it would have accepted.
+CHECK_FAILURE = re.compile(r"CHECK constraint failed: (\w+)")
+
+# Enough attempts to satisfy every constraint a row trips one at a time, and few enough
+# that a table whose constraints cannot be satisfied this way is given up on rather than
+# searched for. Reached only on the tables that refuse the first row at all.
+SEED_ATTEMPTS = 60
+
+
+def representative_value(column: str, declared_type: str) -> object:
+    """A value of ``declared_type`` that SQLite will store in ``column``.
+
+    Typed off the declaration rather than off the column's meaning, because meaning is
+    what no generic seeder can have and what a per-release fixture would have to restate
+    once per shipped graph. The name is consulted only where the declared type leaves the
+    choice open -- every TEXT column would otherwise get the same opaque string -- so a
+    migration that parses a timestamp, an address, or a JSON document gets something
+    parseable rather than ``'x'``.
+    """
+    kind = declared_type.upper()
+    if any(marker in kind for marker in ("INT", "REAL", "NUM", "DOUB", "FLOA", "BOOL")):
+        return 0
+    if "BLOB" in kind:
+        return b""
+    if column.endswith(("_at", "_time")):
+        return "1970-01-01T00:00:00+00:00"
+    if column.endswith("_json"):
+        return "{}"
+    if "email" in column:
+        return "seed@example.invalid"
+    return "x"
+
+
+def check_expression(ddl: str, name: str) -> str:
+    """Constraint ``name``'s expression as ``ddl`` declares it, or ``''`` if it has none."""
+    # SQLite stores the DDL as it was written, so the keywords are whatever case the
+    # migration that created the table happened to use.
+    marker = re.search(rf'CONSTRAINT\s+"?{re.escape(name)}"?\s+CHECK\s*\(', ddl, re.IGNORECASE)
+    if marker is None:
+        return ""
+    depth = 1
+    index = marker.end()
+    for offset in range(index, len(ddl)):
+        if ddl[offset] == "(":
+            depth += 1
+        elif ddl[offset] == ")":
+            depth -= 1
+            if depth == 0:
+                return ddl[index:offset]
+    return ""
+
+
+def check_proposals(expression: str, columns: Iterable[str]) -> list[tuple[str, str]]:
+    """``(column, value)`` pairs ``expression`` itself suggests, for the columns it names.
+
+    A check the row tripped is a check that says what it wants: ``state in ('waiting',
+    ...)`` carries both the column to change and the values it would have accepted. Only
+    columns the expression names are proposed for, because a literal from one constraint
+    written into a column that constraint never mentions is not a repair.
+
+    Reading the expression is a heuristic and is allowed to be wrong. SQLite decides
+    whether the resulting row is admissible, so a bad proposal costs an attempt rather
+    than producing a row the schema would have refused.
+    """
+    literals = re.findall(r"'([^']*)'", expression)
+    named = [column for column in columns if re.search(rf"\b{re.escape(column)}\b", expression)]
+    return [(column, literal) for column in named for literal in literals]
+
+
+def seed_representative_rows(db_path: Path) -> set[str]:
+    """Put one row in every table of the schema ``db_path`` holds; return the ones that refused.
+
+    A migration is only as safe as the data it runs over. On an empty database, adding a
+    NOT NULL column with no default, tightening a nullable one, backfilling from a column
+    being dropped, and building a unique index all succeed unconditionally -- so an
+    upgrade proved on an empty database is proved against the one case no user is in.
+    Seeding first is what makes the property below about the databases users carry.
+
+    The rows are derived from the schema, because the schema is what differs in every
+    release and ``pragma table_info`` already knows it; a fixture written per release
+    would cover the graphs that existed when it was written and quietly stop at the next
+    one. Only what the schema requires is filled -- NOT NULL or primary key, no default.
+    Leaving the rest NULL is deliberate and the more adversarial choice: a migration that
+    later makes a nullable column NOT NULL has to survive the NULLs a real database has.
+
+    Where a CHECK rejects that row, SQLite names the constraint and the constraint names
+    its own accepted values, so the repair proposes those and asks again. SQLite is the
+    judge throughout: a table is seeded only if the schema accepted the row.
+
+    What this proves is that the upgrade runs over rows, not that it runs over meaningful
+    ones -- foreign keys are off, which is SQLite's default and is what lets each table be
+    seeded on its own, so the rows are individually well-formed and collectively
+    inconsistent. Tables whose constraints encode a shape only the writing code knows are
+    returned rather than skipped quietly, so the coverage this leaves out is a number the
+    caller can print instead of an assumption.
+    """
+    refused = set()
+    with sqlite3.connect(db_path) as connection:
+        schema = [
+            (str(name), str(ddl))
+            for name, ddl in connection.execute(
+                "select name, sql from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+            )
+            if name != ALEMBIC_BOOKKEEPING_TABLE
+        ]
+        for table, ddl in schema:
+            required = [
+                (str(row[1]), str(row[2]))
+                for row in connection.execute(f'pragma table_info("{table}")')
+                if (row[3] or row[5]) and row[4] is None
+            ]
+            if not required:
+                connection.execute(f'insert into "{table}" default values')
+                continue
+            columns = ", ".join(f'"{column}"' for column, _ in required)
+            placeholders = ", ".join("?" for _ in required)
+            statement = f'insert into "{table}" ({columns}) values ({placeholders})'
+            values = {column: representative_value(column, declared) for column, declared in required}
+            proposed: set[tuple[str, str]] = set()
+            for _ in range(SEED_ATTEMPTS):
+                try:
+                    connection.execute(statement, [values[column] for column, _ in required])
+                    break
+                except sqlite3.Error as exc:
+                    # However SQLite refuses the row, the table is simply one this cannot
+                    # seed. Only a named CHECK carries a repair, so anything else ends here.
+                    failure = CHECK_FAILURE.search(str(exc))
+                    if failure is None:
+                        break
+                    expression = check_expression(ddl, failure.group(1))
+                    untried = [
+                        pair
+                        for pair in check_proposals(expression, [column for column, _ in required])
+                        if pair not in proposed
+                    ]
+                    if not untried:
+                        break
+                    proposed.add(untried[0])
+                    values[untried[0][0]] = untried[0][1]
+            if connection.execute(f'select count(*) from "{table}"').fetchone()[0] == 0:
+                refused.add(table)
+        connection.commit()
+    return refused
+
+
+def schema_gap_after_upgrade(tag: str) -> tuple[str | None, set[str]]:
+    """``(gap, unseeded)`` -- why a database built by ``tag``'s graph is not ready, and what carried no row.
+
+    ``gap`` is ``None`` when the database comes out ready. ``unseeded`` is the tables the
+    upgrade therefore ran over empty, reported rather than dropped so the coverage this
+    property does not have is a number someone can read.
 
     The second stage runs ``storage.migrations.run_migrations`` rather than Alembic
     directly, and the verdict comes from ``background_tables_ready``. Both are deliberate:
@@ -619,33 +791,49 @@ def schema_gap_after_upgrade(tag: str) -> str | None:
                 f"its head {sorted(shipped_heads)!r}; the released graph was not applied in full"
             )
 
+        unseeded = seed_representative_rows(db_path)
         run_migrations(db_path)
-        return None if background_tables_ready(db_path) else describe_schema_gap(db_path)
+        gap = None if background_tables_ready(db_path) else describe_schema_gap(db_path)
+        return gap, unseeded
 
 
-def unrepairable_releases() -> dict[str, str]:
-    """``{tag: reason}`` for every release whose databases today's graph cannot bring to head."""
+def unrepairable_releases() -> tuple[dict[str, str], set[str]]:
+    """``({tag: reason}, unseeded)`` for every release today's graph cannot bring to head.
+
+    ``unseeded`` is the union across releases: a table no shipped schema would accept a
+    generic row for, and therefore one no release proved its upgrade over rows of.
+    """
     failures = {}
+    unseeded: set[str] = set()
     for tag in released_graphs():
         try:
-            gap = schema_gap_after_upgrade(tag)
+            gap, refused = schema_gap_after_upgrade(tag)
         except Exception as exc:  # noqa: BLE001 - however the upgrade fails, the verdict is the same
             failures[tag] = f"upgrade aborted with {type(exc).__name__}: {str(exc).splitlines()[0]}"
         else:
+            unseeded |= refused
             if gap is not None:
                 failures[tag] = f"upgrade left the database not ready: {gap}"
-    return failures
+    return failures, unseeded
 
 
-def collect_problems(baseline: str | None = None, *, include_upgrade: bool = True) -> tuple[str, list[str]]:
-    """``(baseline, problems)`` -- every property checked, every violation reported at once.
+def collect_problems(
+    baseline: str | None = None, *, include_upgrade: bool = True
+) -> tuple[str, list[str], list[str]]:
+    """``(baseline, problems, notes)`` -- every property checked, every violation reported at once.
 
     Reporting all of them together rather than stopping at the first is deliberate: a
     graph defect usually shows up in more than one property, and seeing which ones fire
     is most of the diagnosis.
+
+    ``notes`` carries what the run could not cover. It is separate from ``problems``
+    because a coverage limit is not a violation, and it is printed rather than dropped
+    because a guard that passes while quietly skipping part of its subject reads as
+    stronger than it is.
     """
     baseline = baseline or latest_released_tag()
     problems: list[str] = []
+    notes: list[str] = []
 
     disagreement = fresh_install_tables() ^ HEAD_TABLES
     if disagreement:
@@ -661,10 +849,16 @@ def collect_problems(baseline: str | None = None, *, include_upgrade: bool = Tru
     problems.extend(edited_released_bodies(baseline))
 
     if include_upgrade:
-        for tag, reason in sorted(unrepairable_releases().items(), key=lambda item: version_key(item[0])):
+        failures, unseeded = unrepairable_releases()
+        for tag, reason in sorted(failures.items(), key=lambda item: version_key(item[0])):
             problems.append(f"{tag}: {reason}")
+        if unseeded:
+            notes.append(
+                "no shipped schema accepted a generic row for these tables, so the upgrade ran "
+                f"over them empty: {', '.join(sorted(unseeded))}"
+            )
 
-    return baseline, problems
+    return baseline, problems, notes
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -684,10 +878,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        baseline, problems = collect_problems(args.baseline, include_upgrade=not args.skip_upgrade)
+        baseline, problems, notes = collect_problems(args.baseline, include_upgrade=not args.skip_upgrade)
     except MigrationGuardError as exc:
         print(f"migration release guard could not run: {exc}", file=sys.stderr)
         return 2
+
+    for note in notes:
+        print(f"note: {note}", file=sys.stderr)
 
     if problems:
         print(f"migration release guard failed (baseline {baseline}):", file=sys.stderr)

@@ -21,6 +21,7 @@ import pytest
 from alembic.script.revision import Revision
 
 from scripts import migration_release_guard as guard
+from scripts.release_package_version import package_version_from_release_tag
 from storage.migrations import background_tables_ready
 
 pytestmark = pytest.mark.no_sqlite_template
@@ -456,7 +457,7 @@ def test_the_real_graph_is_wholly_comparable():
 @pytest.mark.parametrize(("problems", "expected_exit"), [([], 0), (["a released revision was rechained"], 1)])
 def test_the_command_line_exit_code_follows_the_verdict(monkeypatch, capsys, problems, expected_exit):
     """The CLI is how a developer runs this outside CI, so its wiring is part of the guard."""
-    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems))
+    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems, []))
 
     assert guard.main([]) == expected_exit
     for problem in problems:
@@ -517,6 +518,111 @@ def test_a_prerelease_sorts_between_the_releases_it_falls_between():
         < guard.version_key("gh-v3.0.9rc10")
         < guard.version_key("v3.0.9")
     )
+    # The publisher writes the same version several ways and builds the same wheel from
+    # each, so the guard has to read them as the same release rather than as one release
+    # and some strings it does not recognise.
+    assert guard.release_version("gh-v3.0.9-rc2") == guard.release_version("gh-v3.0.9rc2")
+
+
+@requires_release_history
+def test_no_tag_the_publisher_can_build_falls_outside_the_guard():
+    """The release universe is the publish path's, because that is the one that decides.
+
+    A tag the guard does not recognise is absent from every property here, so a migration
+    first shipped in it can be rechained or edited afterwards with nothing to compare
+    against -- the guard would pass, quietly, over the release it was pointed at.
+
+    The denominator is the repository's own tags run through the publish path's parser,
+    not a list of the forms in use today. Every tag shipped so far happens to be plain
+    ``vX.Y.Z`` or ``gh-vX.Y.ZrcN``, so a filter narrowed back to those would satisfy any
+    test written from today's tags and drop the first release that used another form.
+    """
+    covered = set(guard.released_tags())
+    for tag in guard._git("tag", "-l", "v*", "-l", "gh-v*").split():
+        try:
+            package_version_from_release_tag(tag)
+        except ValueError:
+            continue
+        assert tag in covered or guard.versions_tree(tag) is None, tag
+
+
+def test_every_table_the_schema_accepts_a_row_for_gets_one(tmp_path):
+    """An upgrade proved on an empty database is proved against the one case no user is in.
+
+    Empty is where adding a NOT NULL column, tightening a nullable one, and building a
+    unique index all succeed unconditionally, so it is the state under which a migration
+    that cannot survive real data still passes.
+
+    The claim is a pair, the way the released-revision checks are: a table either carries
+    a row or is named in what the seeder returns. Asserting only that some tables were
+    seeded would pass a seeder that gave up on the awkward ones quietly, and quietly
+    giving up on the awkward ones is the failure that reads most like success.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute('create table plain (id text primary key, name text not null)')
+        connection.execute(
+            "create table enumerated (id text primary key, state text not null "
+            "constraint ck_enumerated_state check (state in ('waiting', 'active')))"
+        )
+        connection.execute("create table defaulted (id integer primary key, note text default 'n')")
+        connection.execute(
+            "create table impossible (id text primary key, shape text not null "
+            "constraint ck_impossible_shape check (shape in ('a', 'b') and shape in ('c', 'd')))"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    refused = guard.seed_representative_rows(db_path)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        counted = {
+            str(name): connection.execute(f'select count(*) from "{name}"').fetchone()[0]
+            for (name,) in connection.execute("select name from sqlite_master where type = 'table'")
+        }
+        state = connection.execute("select state from enumerated").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert refused == {table for table, count in counted.items() if count == 0}
+    assert refused == {"impossible"}
+    # The value came from the constraint that rejected the first one, not from a guess.
+    assert state in {"waiting", "active"}
+
+
+@requires_release_history
+def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch):
+    """The seeding is only worth anything if the upgrade under test is the thing it precedes.
+
+    Read at the moment ``run_migrations`` is called, because that is the upgrade whose
+    behaviour the property is about; counting afterwards would also accept a seeder that
+    ran after it, or one whose rows the upgrade had already removed.
+    """
+    observed: dict[str, int] = {}
+    upgrade = guard.run_migrations
+
+    def counting(db_path):
+        connection = sqlite3.connect(db_path)
+        try:
+            observed.update(
+                (str(name), connection.execute(f'select count(*) from "{name}"').fetchone()[0])
+                for (name,) in connection.execute(
+                    "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+                )
+                if name != guard.ALEMBIC_BOOKKEEPING_TABLE
+            )
+        finally:
+            connection.close()
+        return upgrade(db_path)
+
+    monkeypatch.setattr(guard, "run_migrations", counting)
+    _, unseeded = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
+
+    assert observed
+    assert {table for table, count in observed.items() if count == 0} == unseeded
 
 
 @requires_release_history
@@ -552,7 +658,7 @@ def test_every_released_database_still_reaches_head():
     replaying the current chain from empty, which produces the schema the current graph
     intends rather than the schema a release actually left behind.
     """
-    assert guard.unrepairable_releases() == {}
+    assert guard.unrepairable_releases()[0] == {}
 
 
 @requires_release_history
