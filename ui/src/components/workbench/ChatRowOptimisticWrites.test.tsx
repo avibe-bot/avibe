@@ -157,6 +157,7 @@ vi.mock('./AgentRoutePicker', () => ({
 
 import { ChatPage } from './ChatPage';
 import { resetCoalescedWrites } from '../../lib/useCoalescedWrite';
+import { resetOpenSessionRowWrites } from './sessionRowRefresh';
 
 const SESSION_ID = 'session-route';
 const OTHER_SESSION_ID = 'session-other';
@@ -266,9 +267,11 @@ describe('the chat row under an optimistic write', () => {
     mocks.onStop = null;
     navigate = null;
     vi.clearAllMocks();
-    // The writer's store is module state (a session row outlives the page that
-    // edits it), so each case starts from an empty one.
+    // The writer's store and the record of what an open write is holding are both
+    // module state (a session row outlives the page that edits it), so each case
+    // starts from an empty one.
     resetCoalescedWrites();
+    resetOpenSessionRowWrites();
 
     mocks.api.connectWorkbenchEvents.mockImplementation(() => () => {});
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
@@ -297,6 +300,7 @@ describe('the chat row under an optimistic write', () => {
   afterEach(() => {
     cleanup();
     resetCoalescedWrites();
+    resetOpenSessionRowWrites();
     vi.unstubAllGlobals();
   });
 
@@ -443,6 +447,50 @@ describe('the chat row under an optimistic write', () => {
     // the row it started from would undo an Agent switch the server is holding —
     // leaving the header showing a route that exists nowhere.
     expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: '', saving: 'no' });
+  });
+
+  it('keeps a pick the server has not answered on the row the user comes back to', async () => {
+    const patchGate = deferred<unknown>();
+    mocks.api.updateSession.mockReturnValue(patchGate.promise);
+    await mountChat();
+
+    act(() => mocks.onPatch!({ agent_name: 'codex', agent_variant: 'codex', model: 'gpt-5' }));
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5' });
+
+    // Away and back while that PATCH is still deciding. The chat reloads, and the
+    // row it loads is the one the server still holds — legitimately, since the write
+    // has not answered.
+    await act(async () => {
+      navigate!(`/chat/${OTHER_SESSION_ID}`);
+    });
+    await settle();
+    await act(async () => {
+      navigate!(`/chat/${SESSION_ID}`);
+    });
+    await settle();
+
+    // The pick is still what the user is looking at. The read that reopened this
+    // chat is older than the write in flight, and the per-session read fence was
+    // replaced by the navigation, so the record of the open write is what defends it.
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', saving: 'yes' });
+
+    // Which is what makes the next click safe: the picker emits an effort change as
+    // ``{reasoning_effort}`` alone, so composing it against the reopened row would
+    // fold an effort chosen for claude in behind the switch to codex — and persist
+    // it on top of that switch.
+    act(() => mocks.onPatch!({ reasoning_effort: 'high' }));
+    expect(shownRoute()).toMatchObject({ agent: 'codex', model: 'gpt-5', effort: 'high' });
+
+    await act(async () => {
+      patchGate.resolve({ ...sessionRow, agent_name: 'codex', model: 'gpt-5' });
+      await patchGate.promise;
+    });
+    await settle();
+    expect(mocks.api.updateSession).toHaveBeenLastCalledWith(SESSION_ID, { reasoning_effort: 'high' });
+    // And the defence ends with the write. This harness's row read still answers
+    // with the route the chat started on, so the settle re-read is visible: an
+    // overlay left standing would pin a pick nothing is writing any more.
+    expect(shownRoute()).toMatchObject({ agent: 'claude', model: 'sonnet', effort: '', saving: 'no' });
   });
 
   it('keeps each chat rollback to itself when two rows have a write in flight', async () => {

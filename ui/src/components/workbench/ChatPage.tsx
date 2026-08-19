@@ -97,8 +97,12 @@ import {
   type SessionReadOnlyReason,
 } from './sessionArchived';
 import {
+  commitSessionRowWrite,
   createSessionRowRefreshGate,
+  recordSessionRowWrite,
+  releaseSessionRowWrite,
   sessionRowWithBootstrapFallback,
+  withOpenSessionRowWrite,
   type SessionRowRefreshGate,
 } from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
@@ -871,7 +875,7 @@ export const ChatPage: React.FC = () => {
         // what the callers are trying to escape.
         const row = await api.getSession(id, { cache: false });
         setSession((prev) =>
-          isCurrent() && row.id === sessionIdRef.current ? row : prev,
+          isCurrent() && row.id === sessionIdRef.current ? withOpenSessionRowWrite(row) : prev,
         );
       } catch {
         // If this was still the newest read, one bounded retry prevents a
@@ -885,17 +889,6 @@ export const ChatPage: React.FC = () => {
     await read(true);
   }, [api]);
 
-  // Where a rejected burst puts each field back — the values that row held before
-  // the burst replaced them, advanced past every field a request in the burst has
-  // since committed. Recorded in ``patch`` below, because the click is the last
-  // moment the row still holds them.
-  //
-  // Keyed by session id, one entry per row with a burst open. The writer serializes
-  // per key, not globally: renaming one session while another's route write is in
-  // flight is two live bursts, and a single slot would let whichever settles first
-  // take the other's base with it — leaving a rejected write nothing to revert to.
-  const rollbackBaseRef = useRef(new Map<string, Partial<WorkbenchSession>>());
-
   // Persistence for the header's optimistic edits.
   const sendSessionPatch = useCallback(
     async ({ changes, gate }: SessionPatchWrite, patchedId: string): Promise<boolean> => {
@@ -906,13 +899,12 @@ export const ChatPage: React.FC = () => {
         // can be older than another committed write. The authoritative refresh
         // on settle is guarded by session id and runs after every active write.
         //
-        // The server now holds these fields, so the rollback base moves PAST them:
-        // a burst commits in parts (the Agent pick lands, the effort pick folded in
-        // behind it is refused), and reverting to where the burst started would
-        // undo a change the server took. Only the fields this request carried —
-        // the rest of the base is still the pre-burst row.
-        const base = rollbackBaseRef.current.get(patchedId);
-        if (base) Object.assign(base, changes);
+        // The server now holds these fields, so the rollback target moves PAST
+        // them: a burst commits in parts (the Agent pick lands, the effort pick
+        // folded in behind it is refused), and reverting to where the burst started
+        // would undo a change the server took. Only the fields this request
+        // carried — the rest of the target is still the pre-burst row.
+        commitSessionRowWrite<WorkbenchSession>(patchedId, changes);
         return true;
       } catch (err) {
         if (patchedId !== sessionIdRef.current) return false;
@@ -954,8 +946,9 @@ export const ChatPage: React.FC = () => {
     // open.
     onSettled: useCallback(
       (patchedId: string, committed: boolean) => {
-        const base = rollbackBaseRef.current.get(patchedId);
-        rollbackBaseRef.current.delete(patchedId);
+        // Ends the open write — including its overlay, so the re-read below is what
+        // the row shows from here on — and hands back what a rejection must restore.
+        const base = releaseSessionRowWrite<WorkbenchSession>(patchedId);
         if (patchedId !== sessionIdRef.current) return;
         if (committed) return refreshSessionRow();
         // A rejected burst lives only in this row, and the re-read is best-effort
@@ -1302,8 +1295,12 @@ export const ChatPage: React.FC = () => {
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
       if (!requestIsCurrent()) return;
+      // A write still in flight for this session outranks the row the bootstrap
+      // answers with: opening this chat again is not a reason to show the route the
+      // user has already clicked past (see ``withOpenSessionRowWrite``).
+      const bootstrapRow = withOpenSessionRowWrite(bootstrap.session);
       if (bootstrapIsCurrent()) {
-        setSession(bootstrap.session);
+        setSession(bootstrapRow);
       } else {
         // A newer turn-end/activity read won the row race. Preserve its row if
         // it landed, but keep this successful bootstrap as the fallback while a
@@ -1311,7 +1308,7 @@ export const ChatPage: React.FC = () => {
         setSession((current) => sessionRowWithBootstrapFallback(
           current,
           sessionId,
-          bootstrap.session,
+          bootstrapRow,
         ));
         void refreshSessionRow();
       }
@@ -1580,7 +1577,7 @@ export const ChatPage: React.FC = () => {
         setSessionCanChat(false);
         void api.getSession(currentSessionId, { cache: false })
           .then((nextSession) => {
-            setSession(nextSession);
+            setSession(withOpenSessionRowWrite(nextSession));
             void refresh();
           })
           .catch(() => goBack());
@@ -2308,16 +2305,11 @@ export const ChatPage: React.FC = () => {
       // per-session (replaced on navigation), so it must never fence the new
       // chat's reads.
       const opened = writeSessionPatch(patchedId, { changes, gate });
-      // Record what this burst is replacing. ``write`` reports which call OPENED
-      // the burst, and that call starts this row's base over; the picks folded into
-      // it are already looking at optimistic state, so a field already recorded
-      // keeps the value it has — the pre-burst one, or the newer one a committed
-      // request in this same burst moved it to.
-      const base = (opened ? undefined : rollbackBaseRef.current.get(patchedId)) ?? {};
-      for (const field of Object.keys(changes) as (keyof WorkbenchSession)[]) {
-        if (!(field in base)) Object.assign(base, { [field]: session[field] });
-      }
-      rollbackBaseRef.current.set(patchedId, base);
+      // Record the write against the row it is replacing: what a rejection restores,
+      // and what every row arriving from the server has to yield to until this write
+      // is answered. ``write`` reports which call OPENED the burst, which is the one
+      // that starts the record over.
+      recordSessionRowWrite(session, changes, opened);
     },
     [session, writeSessionPatch],
   );

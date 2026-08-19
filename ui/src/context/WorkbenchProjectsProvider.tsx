@@ -36,6 +36,12 @@ const EMPTY_SESSIONS: ProjectSessionsState = {
   error: false,
 };
 
+// What a commit learned about a project's route straight from the server. Only
+// the route, because that is all a confirmation is for: it is the compare-and-set
+// token the next write must expect to find, so a whole row would invite a caller
+// to pass one it has not actually had confirmed.
+type ProjectRouteConfirmation = { id: string; default_agent?: ProjectDefaultAgent | null };
+
 // What a route pick means for the cached row: an all-null route is the user
 // CLEARING the default, which the row carries as no default agent at all. One
 // helper because two places have to agree — the optimistic write and the overlay
@@ -199,7 +205,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         | WorkbenchProject[]
         | null
         | ((prev: WorkbenchProject[] | null) => WorkbenchProject[] | null),
-      options?: { confirmed?: WorkbenchProject[] | null },
+      options?: { confirmed?: ProjectRouteConfirmation[] | null },
     ) => {
       const requested = typeof next === 'function' ? next(projectsRef.current) : next;
       // ── The in-flight pick outranks every incoming row ────────────────────
@@ -234,6 +240,35 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       setProjects(resolved);
     },
     [],
+  );
+
+  // ── A mutation commits the fields it wrote, never the row it saw ─────────────
+  // Every project mutation answers with a snapshot of the row as that request
+  // found it, so its authority is scoped to the fields that request changed: a
+  // rename's copy of the route can be older than a pick still in flight, and a
+  // route response's copy of the name can be older than a rename that has already
+  // committed. Installing either whole reinstates state the server has since
+  // replaced, with no read scheduled to correct it. Mutations therefore hand over
+  // FIELDS — and pass ``fields: null`` when their answer has been superseded and
+  // only its confirmation is still worth keeping.
+  //
+  // ``confirmedRoute`` is the route the server just said it holds, which is where
+  // the next write's compare-and-set token comes from. Passed explicitly rather
+  // than read out of ``fields``, because an optimistic pick writes that same field
+  // with a value the server has not accepted yet.
+  const commitProjectFields = useCallback(
+    (
+      projectId: string,
+      fields: Partial<WorkbenchProject> | null,
+      options?: { confirmedRoute: ProjectDefaultAgent | null },
+    ) => {
+      commitProjects(
+        (prev) =>
+          prev && fields ? prev.map((p) => (p.id === projectId ? { ...p, ...fields } : p)) : prev,
+        options ? { confirmed: [{ id: projectId, default_agent: options.confirmedRoute }] } : undefined,
+      );
+    },
+    [commitProjects],
   );
 
   // ── One question, asked immediately before every read request ────────────────
@@ -1079,23 +1114,17 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       try {
         const updated = await api.updateProject(projectId, { display_name: name });
         acceptProjectsMutation();
-        // Take ONLY the field this request changed. A mutation response is a
-        // snapshot of the row as that request found it, so installing it whole
-        // would drag an unrelated in-flight route pick back to the route the
-        // rename saw — and recording it as ``confirmed`` would hand the
-        // compare-and-set token a route the server has since replaced, making the
-        // user's next pick a deterministic ``project_agent_conflict``. A rename is
-        // not route truth, so it records none.
-        commitProjects((prev) =>
-          prev
-            ? prev.map((p) => (p.id === projectId ? { ...p, display_name: updated.display_name } : p))
-            : prev,
-        );
+        // Only the field this request changed (see ``commitProjectFields``), and no
+        // confirmation: a rename is not route truth, and recording its copy of the
+        // route would hand the compare-and-set token a route the server may have
+        // replaced since — making the user's next pick a deterministic
+        // ``project_agent_conflict``.
+        commitProjectFields(projectId, { display_name: updated.display_name });
       } catch (err) {
         console.error('[workbench] rename project failed', err);
       }
     },
-    [acceptProjectsMutation, api, commitProjects],
+    [acceptProjectsMutation, api, commitProjectFields],
   );
 
   const forkSession = useCallback(
@@ -1167,19 +1196,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         // recorded as confirmed, because the server did take it: that is what the
         // follow-up write must expect to find.
         const superseded = route !== latestProjectRouteRef.current.get(projectId);
+        // The route the server derived — the picker composes a pick with no backend,
+        // because only the server knows which backend an Agent belongs to.
+        const serverRoute = updated.default_agent ?? null;
         // Nothing is left for the overlay to protect once THIS pick is the newest
-        // one, and leaving it up would re-apply the optimistic route on top of the
-        // row the server just derived — the picker composes a route with no
-        // backend (only the server knows which backend an Agent belongs to), so
-        // the cache would keep a route the server never sent until an unrelated
-        // refresh, and a picker that has lost the Agent list could no longer tell
-        // which model or effort options to offer.
+        // one, and leaving it up would re-apply the backend-less optimistic route on
+        // top of the route the server derived: the cache would keep a route the
+        // server never sent until an unrelated refresh, and a picker that has lost
+        // the Agent list could no longer tell which model or effort options to offer.
         if (!superseded) latestProjectRouteRef.current.delete(projectId);
-        commitProjects(
-          (prev) =>
-            prev && !superseded ? prev.map((p) => (p.id === projectId ? updated : p)) : prev,
-          { confirmed: [updated] },
-        );
+        commitProjectFields(projectId, superseded ? null : { default_agent: serverRoute }, {
+          confirmedRoute: serverRoute,
+        });
         return true;
       } catch (err) {
         // apiFetch already surfaced the toast; the settle re-read below is what
@@ -1188,7 +1216,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         return false;
       }
     },
-    [acceptProjectsMutation, api, commitProjects],
+    [acceptProjectsMutation, api, commitProjectFields],
   );
 
   const { write: writeProjectRoute, isSaving: isSavingDefaultAgent } = useCoalescedWrite<ProjectDefaultAgent>(
@@ -1210,10 +1238,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           // must keep the Agent the server took.
           const confirmed = confirmedProjectRouteRef.current;
           if (confirmed.has(projectId)) {
-            const restored = confirmed.get(projectId) ?? null;
-            commitProjects((prev) =>
-              prev ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: restored } : p)) : prev,
-            );
+            commitProjectFields(projectId, { default_agent: confirmed.get(projectId) ?? null });
           }
           // Still re-read, unawaited: the confirmation is what the server told THIS
           // document, and a compare-and-set conflict means someone else has moved
@@ -1222,7 +1247,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           // fences it through ``acceptProjectsMutation``.
           void fetchProjects({ cache: false });
         },
-        [commitProjects, fetchProjects],
+        [commitProjectFields, fetchProjects],
       ),
     },
   );
@@ -1235,17 +1260,15 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // pre-pick route on top of it.
       acceptProjectsMutation();
       latestProjectRouteRef.current.set(projectId, route);
-      // ``commitProjects``, not ``setProjects``: the ref it keeps in step is what
-      // every read and reconcile of this cache addresses, so an optimistic row
+      // Through the commit path, not ``setProjects``: the ref it keeps in step is
+      // what every read and reconcile of this cache addresses, so an optimistic row
       // written past it would be invisible to them and lost on the next commit.
-      commitProjects((prev) =>
-        prev ? prev.map((p) => (p.id === projectId ? { ...p, default_agent: appliedRoute(route) } : p)) : prev,
-      );
+      commitProjectFields(projectId, { default_agent: appliedRoute(route) });
       // Nothing to record for a rollback: the settle above restores the last
       // CONFIRMED route, which every commit and read already maintains.
       writeProjectRoute(projectId, route);
     },
-    [acceptProjectsMutation, commitProjects, writeProjectRoute],
+    [acceptProjectsMutation, commitProjectFields, writeProjectRoute],
   );
 
   const archiveProject = useCallback(

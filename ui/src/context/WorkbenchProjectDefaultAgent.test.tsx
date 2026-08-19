@@ -157,19 +157,69 @@ describe('project default Agent route', () => {
     // the row back to the model the user has clicked past.
     expect(tree()!.projects?.[0].default_agent).toEqual(route({ model: 'haiku' }));
 
-    const serverRow = {
-      ...project,
-      display_name: 'Renamed by the server',
-      default_agent: route({ model: 'haiku' }),
-    };
     await act(async () => {
-      gates[1].resolve(serverRow);
+      gates[1].resolve({
+        ...project,
+        display_name: 'Renamed by the server',
+        default_agent: route({ model: 'haiku' }),
+      });
       await gates[1].promise;
     });
     await settle();
-    // The last write's response IS the truth, including fields the client never sent.
-    expect(tree()!.projects?.[0]).toEqual(serverRow);
+    // The last write's response is the truth about the ROUTE it wrote. Its copy of
+    // every other field is only as fresh as the moment the server handled this
+    // request, so the rest of the row is left as the cache holds it.
+    expect(tree()!.projects?.[0]).toEqual({ ...project, default_agent: route({ model: 'haiku' }) });
     expect(tree()!.isSavingDefaultAgent(project.id)).toBe(false);
+  });
+
+  it('keeps a name a rename committed while the route write was in flight', async () => {
+    const calls: UpdateCall[] = [];
+    const gates: Deferred<unknown>[] = [];
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap: vi.fn().mockResolvedValue({ projects: [project], sessions: {} }),
+      updateProject: gatedUpdateProject(calls, gates),
+      connectWorkbenchEvents: connectWorkbenchEvents(),
+    };
+    const tree = renderTree();
+    await settle();
+
+    act(() => {
+      tree()!.setProjectDefaultAgent(project.id, route());
+    });
+    // A rename issued while the route PATCH is still deciding. It is not serialized
+    // against that write — they are different fields of one row — so both are live.
+    act(() => {
+      void tree()!.renameProject(project.id, 'Renamed by the user');
+    });
+    expect(calls).toHaveLength(2);
+
+    await act(async () => {
+      // The rename commits first, and its response carries the route as the server
+      // held it BEFORE the pick — which the commit path drops on the floor.
+      gates[1].resolve({ ...project, display_name: 'Renamed by the user', default_agent: null });
+      await gates[1].promise;
+    });
+    await settle();
+    expect(tree()!.projects?.[0]).toMatchObject({
+      display_name: 'Renamed by the user',
+      default_agent: route(),
+    });
+
+    await act(async () => {
+      // And the route response carries the name as the server held it before the
+      // rename. Symmetry is the whole point: neither response may install the row
+      // it saw, because nothing re-reads the tree after a write that succeeded.
+      gates[0].resolve({ ...project, default_agent: route({ agent_backend: 'claude' }) });
+      await gates[0].promise;
+    });
+    await settle();
+
+    expect(tree()!.projects?.[0]).toEqual({
+      ...project,
+      display_name: 'Renamed by the user',
+      default_agent: route({ agent_backend: 'claude' }),
+    });
   });
 
   it('takes the route the server derived once the pick is no longer superseded', async () => {
