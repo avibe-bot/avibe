@@ -1140,7 +1140,7 @@ def test_clean_keeps_completed_staging_removals_on_later_failure(tmp_path: Path,
     staging.mkdir(parents=True)
     _write_current_pointer(manager, _sha(1))
 
-    def _boom(*, keep_previous, dry_run=False):
+    def _boom(*, keep_previous, dry_run=False, removed=None, **kwargs):
         raise OSError("versions unreadable")
 
     monkeypatch.setattr(manager, "_clean_manifest_install_dirs", _boom)
@@ -1148,6 +1148,24 @@ def test_clean_keeps_completed_staging_removals_on_later_failure(tmp_path: Path,
     assert result["ok"] is False
     assert str(staging) in result["removed"]
     assert not staging.exists()
+
+
+def test_clean_keeps_completed_install_removals_when_prune_fails(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    current_install = _write_install_metadata(manager, version="v2", sha256=_sha(1), mtime=0)
+    _write_current_pointer(manager, _sha(1), install_dir=current_install)
+    _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
+    stale_install = _write_install_metadata(manager, version="v0", sha256=_sha(9), mtime=-999999)
+    _write_archive(manager, _sha(1), b"current")
+
+    def _boom(self, versions_dir):
+        raise OSError("parent became nonempty")
+
+    monkeypatch.setattr(ShowRuntimeManager, "_prune_empty_manifest_version_dirs", _boom)
+    result = manager.clean()
+    assert result["ok"] is False
+    assert str(stale_install) in result["removed"]
+    assert not stale_install.exists()
 
 
 def test_configured_prebuilt_archive_is_protected(tmp_path: Path) -> None:

@@ -960,7 +960,11 @@ class ShowRuntimeManager:
                         if not dry_run:
                             shutil.rmtree(path, ignore_errors=True)
                         removed.append(str(path))
-            removed.extend(self._clean_manifest_install_dirs(keep_previous=keep_previous, dry_run=dry_run))
+            self._clean_manifest_install_dirs(
+                keep_previous=keep_previous,
+                dry_run=dry_run,
+                removed=removed,
+            )
             # A dry run leaves stale install dirs in place, so their metadata
             # would still read as "protected" below. Skip metadata under the
             # dirs a real run would remove, so the archive preview matches
@@ -1386,10 +1390,13 @@ class ShowRuntimeManager:
         manifest_source: str | None = None,
         protected_install_dirs: set[Path] | None = None,
         dry_run: bool = False,
+        removed: list[str] | None = None,
     ) -> list[str]:
+        if removed is None:
+            removed = []
         versions_dir = self.runtime_dir / "versions"
         if not versions_dir.is_dir():
-            return []
+            return removed
         protected = set(protected_install_dirs or ())
         current_install_dir = self._current_manifest_install_dir(versions_dir)
         if current_install_dir is not None:
@@ -1416,7 +1423,6 @@ class ShowRuntimeManager:
             if kept_previous < keep_previous:
                 kept_previous += 1
                 protected.add(path_resolved)
-        removed: list[str] = []
         removable_install_dirs = [
             path
             for path, path_resolved in resolved_install_dirs.items()
