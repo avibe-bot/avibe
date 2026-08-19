@@ -75,20 +75,37 @@ def _native_session_is_live(
     return status.get("type") in {"busy", "retry"}
 
 
+def _has_post_boundary_assistant(
+    messages: list[Dict[str, Any]],
+    boundary_ids: set[str],
+) -> bool:
+    return any(
+        (info := _message_info(message)).get("id")
+        and info.get("id") not in boundary_ids
+        and info.get("role") == "assistant"
+        for message in messages
+    )
+
+
 def _settlement_assistant_message(
     messages: list[Dict[str, Any]],
     baseline_message_ids: set[str],
     *,
     native_live: bool,
+    awaiting_after_ids: Optional[set[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """The assistant message that owns this poll's settlement.
 
     Trailing user injects are not the turn. While the native session is live,
-    a trailing user or an in-flight assistant — even with no parts yet — means
-    a steer or auto-retry is still running. When the native session is idle, an
-    empty leftover generation is skipped and the completed assistant behind it
-    can settle.
+    or an awaiting inject boundary has no post-boundary assistant yet, keep
+    the previous completed assistant pending. When idle and the inject has
+    produced no new assistant, settle the completed owner behind it.
     """
+
+    if awaiting_after_ids and not _has_post_boundary_assistant(
+        messages, awaiting_after_ids
+    ):
+        return None
 
     skipped_user = False
     for message in reversed(messages):
@@ -610,6 +627,11 @@ class OpenCodePollLoop:
                         remaining=remaining,
                         pending_inject_until=pending_inject_until,
                     ),
+                    awaiting_after_ids=getattr(
+                        getattr(server, "_state", None),
+                        "awaiting_after_message_ids",
+                        None,
+                    ),
                 )
                 last_info = _message_info(last_message) if last_message else {}
                 last_id = last_info.get("id")
@@ -919,6 +941,11 @@ class OpenCodePollLoop:
                             poll_info.working_path,
                             remaining=remaining,
                             pending_inject_until=pending_inject_until,
+                        ),
+                        awaiting_after_ids=getattr(
+                            getattr(server, "_state", None),
+                            "awaiting_after_message_ids",
+                            None,
                         ),
                     )
                     last_info = _message_info(last_message) if last_message else {}

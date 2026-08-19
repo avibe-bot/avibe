@@ -1563,6 +1563,28 @@ def test_settlement_assistant_message_walks_back_to_the_owning_turn():
         actual_id = None if owner is None else owner["info"]["id"]
         assert actual_id == expected_id, (native_live, expected_id, actual_id)
 
+    owner = _settlement_assistant_message(
+        [error_assistant],
+        set(),
+        native_live=False,
+        awaiting_after_ids={"msg-err"},
+    )
+    assert owner is None
+    owner = _settlement_assistant_message(
+        [error_assistant, trailing_user],
+        set(),
+        native_live=False,
+        awaiting_after_ids={"msg-err"},
+    )
+    assert owner is None
+    owner = _settlement_assistant_message(
+        [error_assistant, trailing_user, completed_ok],
+        set(),
+        native_live=False,
+        awaiting_after_ids={"msg-err"},
+    )
+    assert owner is not None and owner["info"]["id"] == "msg-ok"
+
 
 def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     # A completed assistant message carrying an error, with retries exhausted
@@ -2219,6 +2241,121 @@ def test_opencode_poll_keeps_continue_pending_through_idle_visibility_gap(monkey
     assert (final_text, should_emit) == ("recovered", True)
     assert polls["n"] >= 3
     assert not any(item[0] == "result" for item in emitted)
+
+
+def test_opencode_poll_keeps_retry_pending_before_continue_user_appears(monkeypatch):
+    """Awaiting boundary holds the old error until post-inject evidence exists."""
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0.01
+    )
+    emitted = []
+    polls = {"n": 0}
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(
+            self, context, backend, message, *, output=None, terminal_error=None
+        ):
+            return False
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def _t(self, key, **kwargs):
+            if key == "error.opencodeBackendError":
+                return f"OpenCode error: {kwargs['error']}"
+            return f"translated:{key}"
+
+        async def emit_agent_message(self, *args, **kwargs):
+            emitted.append((args, kwargs))
+
+    class _State:
+        awaiting_after_message_ids = {"msg-err"}
+        awaiting_user_text = "continue"
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
+        controller = _Controller()
+
+        def _extract_response_text(self, message):
+            return "recovered"
+
+        async def record_model_hub_native_failure(self, context, diagnostic):
+            raise AssertionError("must not settle the prior error before continue appears")
+
+    class _Server:
+        def __init__(self):
+            self._state = _State()
+
+        async def list_messages(self, session_id, directory):
+            polls["n"] += 1
+            error = {
+                "info": {
+                    "id": "msg-err",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "error": {"name": "UnknownError", "data": {"message": "tls"}},
+                },
+                "parts": [],
+            }
+            if polls["n"] == 1:
+                return [error]
+            if polls["n"] == 2:
+                return [
+                    error,
+                    {
+                        "info": {"id": "msg-continue", "role": "user", "time": {}},
+                        "parts": [{"type": "text", "text": "continue"}],
+                    },
+                ]
+            return [
+                error,
+                {
+                    "info": {"id": "msg-continue", "role": "user", "time": {}},
+                    "parts": [{"type": "text", "text": "continue"}],
+                },
+                {
+                    "info": {
+                        "id": "msg-new",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "finish": "stop",
+                    },
+                    "parts": [{"type": "text", "text": "recovered"}],
+                },
+            ]
+
+        async def get_session_status(self, session_id, directory):
+            return None
+
+        async def prompt_async(self, **kwargs):
+            return None
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    final_text, should_emit = asyncio.run(
+        OpenCodePollLoop(_Agent()).run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict=None,
+            reasoning_effort=None,
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert (final_text, should_emit) == ("recovered", True)
+    assert polls["n"] >= 3
+    assert not any(item[0][1] == "result" for item in emitted)
 
 
 def test_opencode_poll_does_not_settle_error_while_followup_has_parts():

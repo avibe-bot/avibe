@@ -567,6 +567,22 @@ class _SteeringAwareOpenCodeServer:
                     {**failure, "info": info},
                 ]
                 return
+            kwargs_map = dict(kwargs)
+            session_id = str(kwargs_map.get("session_id") or "")
+            directory = str(kwargs_map.get("directory") or "")
+            prompt_text = str(kwargs_map.get("text") or "")
+            if session_id and directory:
+                try:
+                    current = await self._server.list_messages(session_id, directory)
+                except Exception:
+                    current = []
+                self._state.awaiting_after_message_ids = self._message_ids(current)
+                self._state.awaiting_user_text = prompt_text or None
+                self._state.awaiting_start_confirmation_deadline = (
+                    time.monotonic() + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._state.awaiting_active_status_observed = False
+                self._state.awaiting_result_confirmation_deadline = None
             await self._server.prompt_async(*args, **kwargs)
 
     async def abort_session(self, *args, **kwargs) -> bool:

@@ -25,4 +25,7 @@ successful omission (``None``) is idle. An unread or failed status is live. Afte
 ``continue``, the inject stays pending for a short confirmation window
 even if status already reports idle. Restored polls do not take the
 empty-success finish path until the error retry budget is exhausted.
-The status probe is bounded by the remaining turn budget.
+The status probe is bounded by the remaining turn budget. Auto-retry
+``continue`` now arms the same awaiting-after boundary steer already uses,
+so settlement will not close the previous error until a post-boundary
+assistant exists.
