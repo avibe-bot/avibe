@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useSyncExternalStore } from 'react';
 
 import { useLatestRef } from './useLatestRef';
 
@@ -210,7 +210,9 @@ export type CoalescedWrite<P> = {
  * A burst is served by the LIVE owner of its scope, not by the mount that opened
  * it: navigating away mid-request and back hands the remaining request and the
  * settle to the view that is on screen when they happen. A scope therefore names
- * one owning surface.
+ * one owning surface. "Live" is decided at the moment the answer arrives — the
+ * entry re-reads the registry per step — and a mount claims the scope in its
+ * COMMIT, so being on screen and owning the writes cannot come apart in between.
  */
 export function useCoalescedWrite<P>(
   /** Namespace for the keys, so two owners writing different resource kinds never share an entry. */
@@ -259,7 +261,12 @@ export function useCoalescedWrite<P>(
     [sendRef, mergeRef, standsAloneRef, settledRef],
   );
 
-  useEffect(() => {
+  // Claimed in the COMMIT, so "on screen" and "owns the scope" are one event.
+  // React schedules passive effects after paint, so a passive claim would leave a
+  // window in which a mount is already rendered while an answer arriving in it is
+  // still routed to the page it replaced — reconciling through a dead component,
+  // with no live settlement left to correct what the new one is showing.
+  useLayoutEffect(() => {
     owners.set(scope, owner);
   }, [scope, owner]);
 

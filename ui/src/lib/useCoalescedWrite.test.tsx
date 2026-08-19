@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
+import { useEffect, useLayoutEffect } from 'react';
 import { act, cleanup, renderHook } from '@testing-library/react';
+import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetCoalescedWrites, useCoalescedWrite } from './useCoalescedWrite';
@@ -160,6 +162,69 @@ describe('useCoalescedWrite', () => {
     expect(started).toEqual(['s1:route']);
     expect(second.result.current.isSaving('s1')).toBe(false);
     second.unmount();
+  });
+
+  it('claims the scope in the commit, so an answer landing before passive effects still finds the live owner', async () => {
+    const started: string[] = [];
+    const pending = new Map<string, Deferred>();
+    const send = gatedSend(started, pending);
+    const settled: string[] = [];
+    // Whether the replacement page's own passive effects had run by the time the
+    // answer was handled — recorded WITH the settlement, so a React that stopped
+    // leaving this window open fails the case instead of passing it vacuously.
+    let passiveEffectsRan = false;
+    const record = (tag: string) => (key: string, committed: boolean) => {
+      settled.push(`${tag}:${key}:${committed}:${passiveEffectsRan ? 'late' : 'in-window'}`);
+    };
+    const Live = () => {
+      useCoalescedWrite<string>('t', send, { onSettled: record('live') });
+      // Answers the request from inside the commit that puts this page on screen.
+      // Both markers are declared AFTER the hook, so each runs behind whatever the
+      // hook registered in its own phase.
+      useLayoutEffect(() => {
+        pending.get('s1:route')!.resolve(true);
+      }, []);
+      useEffect(() => {
+        passiveEffectsRan = true;
+      }, []);
+      return null;
+    };
+
+    const gone = renderHook(() => useCoalescedWrite<string>('t', send, { onSettled: record('gone') }));
+    act(() => {
+      gone.result.current.write('s1', 'route');
+    });
+    await settle();
+    gone.unmount();
+
+    // React runs passive effects in a LATER task than the commit, so a
+    // replacement page is on screen for a while with none of them run yet. `act`
+    // and `flushSync` both close that window by flushing them before they return,
+    // and this case is about what happens inside it — so it drives React directly.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const wasActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      root.render(<Live />);
+      // Let the scheduler commit the mount, hand the answer to whoever owns the
+      // scope by then, and finally run the queued passive effects.
+      while (!settled.length) await new Promise((r) => setTimeout(r, 0));
+      // Being rendered is what makes a page the live owner. Answering into the
+      // page it replaced releases the optimistic overlay through a dead component
+      // — the row the user is looking at keeps whatever it was showing, and no
+      // settlement is left to converge it.
+      expect(settled).toEqual(['live:s1:true:in-window']);
+      expect(started).toEqual(['s1:route']);
+    } finally {
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = wasActEnvironment;
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
   });
 
   it('reports which write opened the burst', async () => {
