@@ -455,13 +455,17 @@ class ManagedRuntimeManager:
             try:
                 import fcntl
             except ImportError:
+                self._preview_lock_was_absent = self._preview_lock_missing()
                 return None
             try:
                 self._install_file_lock_path.stat()
             except FileNotFoundError:
+                self._preview_lock_was_absent = True
                 return None
             except OSError:
+                self._preview_lock_was_absent = False
                 return self._reason("install_already_running")
+            self._preview_lock_was_absent = False
             try:
                 fd = os.open(self._install_file_lock_path, os.O_RDONLY)
             except OSError:
@@ -480,17 +484,22 @@ class ManagedRuntimeManager:
             self._release_preview_guard()
             raise
 
+    def _preview_lock_missing(self) -> bool:
+        try:
+            self._install_file_lock_path.stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
     def _preview_raced_busy(self) -> bool:
         """True when an install started after a lock-absent preview probe."""
         if getattr(self, "_preview_guard_fd", None) is not None:
             return False
-        try:
-            self._install_file_lock_path.stat()
-        except FileNotFoundError:
+        if not getattr(self, "_preview_lock_was_absent", False):
             return False
-        except OSError:
-            return True
-        return True
+        return not self._preview_lock_missing()
 
     def _rglob_install_metadata(self, versions_dir: Path) -> Iterator[Path]:
         """rglob metadata files with error-preserving traversal.

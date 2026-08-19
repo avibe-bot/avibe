@@ -1079,3 +1079,21 @@ def test_archive_cache_status_uses_preview_guard(tmp_path: Path) -> None:
     if os.name != "nt":
         assert seen["fd"] is not None
     assert getattr(manager, "_preview_guard_fd", None) is None
+
+
+def test_windows_preview_ignores_persistent_lock_file(tmp_path: Path, monkeypatch) -> None:
+    manager = _make_manager(tmp_path)
+    manager.runtime_dir.mkdir(parents=True, exist_ok=True)
+    (manager.runtime_dir / ".install.lock").write_text("", encoding="utf-8")
+    _write_current_pointer(manager, _sha(1))
+    stale = _write_archive(manager, _sha(2), b"stale")
+
+    def _windows_probe():
+        manager._preview_lock_was_absent = False
+        return manager._staging_sentinel_reason()
+
+    monkeypatch.setattr(manager, "_preview_busy_reason", _windows_probe)
+    result = manager.clean(dry_run=True)
+    assert result["ok"] is True
+    assert result["archives"]["candidate_count"] == 1
+    assert stale.exists()

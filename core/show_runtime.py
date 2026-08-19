@@ -53,6 +53,7 @@ _RUNTIME_SOURCE_GITHUB = "github"
 _RUNTIME_SOURCE_NPM = "npm"
 _RUNTIME_MANIFEST_RESOURCE = "show_runtime_manifest.json"
 _PACKAGED_RUNTIME_MANIFEST_SOURCE = f"package:{_RUNTIME_MANIFEST_RESOURCE}"
+_CUSTOM_MANIFEST_LINEAGE = "*custom*"
 _MANAGED_RUNTIME_ROLLBACK_INSTALLS = 1
 _CONTENT_ADDRESSED_ARCHIVE_RE = re.compile(r"^[0-9a-f]{64}\.tgz$")
 _ABANDONED_ARCHIVE_CLAIM_RE = re.compile(r"^[0-9a-f]{64}\.tgz\.avibe-removing$")
@@ -644,8 +645,12 @@ class ShowRuntimeManager:
         try:
             if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
                 protected_install_dirs = self._manifest_install_dirs_for_command(command)
+                packaged = self.manifest_path is None and self.manifest_url is None
                 removed = self._clean_manifest_install_dirs(
                     keep_previous=_MANAGED_RUNTIME_ROLLBACK_INSTALLS,
+                    manifest_source=(
+                        _PACKAGED_RUNTIME_MANIFEST_SOURCE if packaged else _CUSTOM_MANIFEST_LINEAGE
+                    ),
                     protected_install_dirs=protected_install_dirs,
                 )
                 if removed:
@@ -834,13 +839,17 @@ class ShowRuntimeManager:
             import fcntl
         except ImportError:
             # Windows: no flock probe; fall back to the staging sentinel.
+            self._preview_lock_was_absent = self._preview_lock_missing()
             return self._staging_sentinel_reason()
         try:
             self._install_guard_path.stat()
         except FileNotFoundError:
+            self._preview_lock_was_absent = True
             return None
         except OSError:
+            self._preview_lock_was_absent = False
             return "runtime_install_guard_unavailable"
+        self._preview_lock_was_absent = False
         try:
             fd = os.open(self._install_guard_path, os.O_RDONLY)
         except OSError:
@@ -870,19 +879,24 @@ class ShowRuntimeManager:
             return None
         return None
 
+    def _preview_lock_missing(self) -> bool:
+        try:
+            self._install_guard_path.stat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
     def _preview_raced_busy(self) -> bool:
         """True when an install started after a lock-absent preview probe."""
         if getattr(self, "_preview_guard_fd", None) is not None:
             return False
         if self._staging_sentinel_reason():
             return True
-        try:
-            self._install_guard_path.stat()
-        except FileNotFoundError:
+        if not getattr(self, "_preview_lock_was_absent", False):
             return False
-        except OSError:
-            return True
-        return True
+        return not self._preview_lock_missing()
 
     def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
         try:
@@ -1416,10 +1430,13 @@ class ShowRuntimeManager:
                         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                     except Exception:
                         continue
-                    if (
-                        metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST
-                        or metadata.get("manifest_source") != manifest_source
-                    ):
+                    if metadata.get("provider") != _RUNTIME_SOURCE_MANIFEST:
+                        continue
+                    source = metadata.get("manifest_source")
+                    if manifest_source == _CUSTOM_MANIFEST_LINEAGE:
+                        if source == _PACKAGED_RUNTIME_MANIFEST_SOURCE:
+                            continue
+                    elif source != manifest_source:
                         continue
                 install_dirs.add(metadata_path.parent)
         return install_dirs
