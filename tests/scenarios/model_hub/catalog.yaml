@@ -15,6 +15,9 @@ capability:
     # properties can be observed, so the catalog checker resolves both shapes.
     - ui/src/components/settings/models/UsageTab.test.tsx
     - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+    # The gate that resolves those rows against vitest's own collection, and
+    # its own evidence.
+    - ui/scripts/scenarioCatalog.test.mjs
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
@@ -49,7 +52,7 @@ scenarios:
     status: covered
     kind: contract
     layer: unit
-    test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_002_ui_evidence_resolves_only_to_an_executable_declaration
+    test: ui/scripts/scenarioCatalog.test.mjs::MH-CATALOG-002
   - id: MH-S1-001
     name: Live conditions never change the exact configured hop identity
     status: covered
@@ -261,6 +264,12 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-022
+  - id: MH-USAGE-023
+    name: Every day of the window states its figures in text, not only in a pointer tooltip
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-023
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

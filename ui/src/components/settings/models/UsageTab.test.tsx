@@ -157,6 +157,19 @@ describe('UsageTab', () => {
     ]);
   });
 
+  it('MH-USAGE-023: states every day of the window in text, not only in a pointer tooltip', () => {
+    const { container } = draw(readyRegion(summary()));
+    const chart = screen.getByRole('img', { name: /Metered tokens per day/ });
+    const tooltips = [...container.querySelectorAll('.model-hub-usage-track')].map((track) => track.getAttribute('title'));
+
+    // A `title` opens on hover alone, and the chart is one image whose columns
+    // assistive tech never enumerates — so the same readouts have to exist as
+    // text outside it. Asserted against the tooltips rather than against a list
+    // of days: the two readings cannot disagree, whatever the window holds.
+    const items = [...container.querySelectorAll('li')].filter((item) => !chart.contains(item));
+    expect(items.map((item) => item.textContent)).toEqual(tooltips);
+  });
+
   it('keeps the last report on screen while a new one is read, and claims no failure', () => {
     const { container } = draw(degradedRegion(summary(), 'refreshing', false));
     expect(container.textContent).toContain('Contract source');

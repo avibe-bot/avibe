@@ -1151,3 +1151,60 @@ reads empty for drawn and undrawn columns alike. The decision behind the floor i
 assertable part and it is asserted where it lives — `usageDayIsMetered` over columns in
 `usageProjection.test.ts` — leaving only the pixel to the residual visual check that this
 tab already carries.
+
+### Stage 2, round 3 (head `d22cb479`) — breaker tripped
+
+Two P2 findings. **F1 repeats head 1's class on a second reviewed head**, so the breaker
+is mechanical: stop patching, diagnose at orchestrator level, record the scope decision.
+
+**The class: a text scan deciding which vitest declarations execute.** Head 1 flagged that
+the catalog accepted a non-executable case; the round-2 fix answered with a hand-written
+JS lexer in `test_model_hub_catalog.py` — comments, string and template literals, a regex
+heuristic. Head 3 then flagged a regex opening after `return`, which the heuristic reads as
+division because it only inspects the previous *character*.
+
+Naming the remaining members is what ends this. Measured against the fixture, the lexer
+accepted a fake declaration in **five** shapes — a regex after a keyword, JSX text, a
+`describe.skip` body, an `if (false)` body, and its own division heuristic — and the
+reviewer had reached one. Two of the four it never reached (`describe.skip`, `if (false)`)
+are ordinary code, not adversarial constructions. The class has no last member by
+construction: telling a regex from division needs the parser's state, and telling a skipped
+or unreachable declaration from a live one needs the run. Every future round buys one more
+patch and leaves the property unproved.
+
+**Scope decision (orchestrator, no owner escalation needed): delete the lexer and ask the
+collector.** `vitest list` answers "does this case run" definitively, and `npm test` — which
+is `vitest run` — already executes in CI's `build-linux-artifacts` job on the same commit,
+so the real collector costs no new job and no new dependency beyond a declared `js-yaml`.
+The action is reversible, contract-preserving (row shape and `path::ID` syntax unchanged),
+and smaller than what it replaces: 219 lines of scanner deleted for 126 lines of resolver
+plus gate.
+
+Duties split so neither side overclaims:
+
+| Question | Owner | Why there |
+| --- | --- | --- |
+| Row shape, cited file exists, ID greppable in it, no `expected_fail` on a UI row | `test_model_hub_catalog.py` | `ast`/text answers these exactly |
+| Does the cited ID name exactly one case vitest **runs** | `ui/scripts/validate-scenario-catalog.mjs` | only the collector knows |
+
+`scenarioCatalog.mjs` holds the resolution rules with no subprocess in them, so they stay
+unit-testable; the gate discovers `tests/scenarios/*/catalog.yaml` rather than listing
+them, reads each catalog's own `status_legend` so the two sides cannot drift into
+disagreeing policies, and throws if `tests/scenarios` is absent — this gate must never
+report "nothing to check" for the one input it exists to read. It collects only the cited
+files (9 rows, 3 files, ~0.3 s), not the whole 231-file suite.
+
+MH-CATALOG-002 moves to `ui/scripts/scenarioCatalog.test.mjs`, seeds one declaration of
+every shape, and asserts the set that resolves *equals* the set the fixture names as
+running — derived from the fixture text, so a shape added later is covered without editing
+the assertion. `it.each` is no longer disqualified on principle: the surviving property is
+"exactly one collected case named for the row", and a 2-row `it.each` fails it by count.
+
+**F2: every non-peak day's figures existed only in a hover `title`.** Keyboard,
+screen-reader, and touch users could reach the endpoints and the peak from the axis and
+nothing else — and `role="img"` on the chart hides the columns from assistive tech by
+design. One `readout(column)` helper now feeds both the tooltip and an `sr-only` list
+rendered as a *sibling* of the image (inside it, it would be hidden with everything else).
+No new i18n key: `byDay.column` is the same wording, so the two readings cannot disagree —
+which is how MH-USAGE-023 asserts it, tooltips against list items rather than against a
+list of days.

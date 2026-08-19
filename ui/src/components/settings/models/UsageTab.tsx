@@ -203,6 +203,14 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
   const peak = columns.reduce<UsageDayColumn | null>((best, column) => (column.tokens > (best?.tokens ?? 0) ? column : best), null);
   const metered = columns.some(usageDayIsMetered);
   const day = (value: string) => formatLocalDay(value, i18n.language);
+  // One day's figures, in the one wording both the pointer tooltip and the list
+  // below read from — a second phrasing would be a second answer to drift from.
+  const readout = (column: UsageDayColumn) =>
+    t('settings.models.usage.byDay.column', {
+      day: day(column.day),
+      tokens: count(column.tokens),
+      requests: count(column.requests),
+    }) as string;
   return (
     <section className="model-hub-usage-card overflow-hidden rounded-xl border border-border bg-background">
       <h3 className="model-hub-usage-card-head model-hub-usage-section-title border-b border-border font-semibold text-foreground">
@@ -218,7 +226,7 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
             <div
               key={column.day}
               className="model-hub-usage-track flex flex-1 items-end"
-              title={t('settings.models.usage.byDay.column', { day: day(column.day), tokens: count(column.tokens), requests: count(column.requests) }) as string}
+              title={readout(column)}
             >
               {/* A metered day is floored to a visible sliver so the quietest one
                   still reads as activity — including one whose tokens never came
@@ -229,6 +237,17 @@ const ByDayPanel: React.FC<{ summary: UsageSummary }> = ({ summary }) => {
             </div>
           ))}
         </div>
+        {/* Every day's figures, in text. A pointer tooltip is the one readout a
+            keyboard or screen-reader user cannot open, and `role="img"` above
+            hides the columns from assistive tech by design — so the series is
+            also a list, and the axis stops being the only reachable reading of
+            it. Sibling rather than child: inside the image it would be hidden
+            with everything else. */}
+        <ul className="sr-only">
+          {columns.map((column) => (
+            <li key={column.day}>{readout(column)}</li>
+          ))}
+        </ul>
         <div className="model-hub-usage-axis flex items-baseline justify-between gap-3">
           <span className="truncate">{day(summary.from_day)}</span>
           <span className="model-hub-usage-peak truncate">
