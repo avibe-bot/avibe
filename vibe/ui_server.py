@@ -2151,7 +2151,7 @@ _oauth_diag_log_lock = threading.Lock()
 _oauth_diag_log_state: dict[str, list[float]] = {}
 
 
-def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
+def _log_oauth_diag(key: str, message: str, *args: Any, exc_info: BaseException | None = None) -> None:
     """Emit an unauthenticated-reachable OAuth diagnostic at WARNING, rate-limited
     per ``key`` (~once / ``_OAUTH_DIAG_LOG_INTERVAL_SECONDS``).
 
@@ -2167,7 +2167,34 @@ def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
             return
         _oauth_diag_log_state[key] = [now, 0]
     extra = f" [+{int(suppressed)} suppressed in {int(_OAUTH_DIAG_LOG_INTERVAL_SECONDS)}s]" if suppressed else ""
-    logger.warning(message + extra, *args)
+    logger.warning(message + extra, *args, exc_info=exc_info)
+
+
+def _log_oauth_callback_failure(stage: str, exc: BaseException) -> None:
+    """Log one failed OAuth callback stage so the cause stays attributable.
+
+    ``OAuthCodeExchangeError`` is the expected shape: it carries its own reason
+    and detail, and any unauthenticated caller can produce one at will. Anything
+    else is a bug or an environment fault (a locked, full, or read-only database
+    all arrive as a bare ``OperationalError``) whose only remaining description
+    is the traceback. Those get one — in the service log, never in the response,
+    which still exposes just the exception class name — plus a rate-limit budget
+    of their own, so a flood of bad codes cannot suppress the line that matters.
+    """
+
+    from vibe import remote_access
+
+    expected = isinstance(exc, remote_access.OAuthCodeExchangeError)
+    reason = exc.reason if expected else exc.__class__.__name__
+    _log_oauth_diag(
+        f"{stage}_{'rejected' if expected else 'error'}",
+        "vibe cloud oauth %s failed: reason=%s",
+        stage,
+        reason,
+        # The exception object, not ``True``: ``True`` reads ambient
+        # ``sys.exc_info()`` and silently logs nothing outside a live handler.
+        exc_info=None if expected else exc,
+    )
 
 
 def _oauth_callback_error_response(
@@ -6876,8 +6903,7 @@ def remote_access_auth_callback():
             next_target = _strip_show_page_reauth_param(next_target)
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
-        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
-        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: reason=%s", reason)
+        _log_oauth_callback_failure("code_exchange", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
@@ -6890,8 +6916,7 @@ def remote_access_auth_callback():
             session_claims=session_claims,
         )
     except Exception as exc:
-        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
-        _log_oauth_diag("exchange_failed", "vibe cloud session cookie creation failed: reason=%s", reason)
+        _log_oauth_callback_failure("session_cookie", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     response = Response(status=302)

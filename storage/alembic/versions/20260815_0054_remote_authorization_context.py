@@ -25,6 +25,18 @@ def _columns() -> set[str]:
     }
 
 
+def _table_exists() -> bool:
+    return (
+        op.get_bind()
+        .exec_driver_sql(
+            "select 1 from sqlite_master "
+            "where type = 'table' and name = 'remote_access_authorizations'"
+        )
+        .first()
+        is not None
+    )
+
+
 def _indexes() -> set[str]:
     return {
         str(row[1])
@@ -35,6 +47,15 @@ def _indexes() -> set[str]:
 
 
 def upgrade() -> None:
+    if not _table_exists():
+        # The creating revision, 20260725_0038, sits on one side of the fork at
+        # 20260724_0034. A database that reached the 20260804_0047 merge along the
+        # other side crossed it with that side marked applied and its tables never
+        # created, so this revision arrives with nothing to alter. Aborting here
+        # strands such a database below head forever and takes every caller of
+        # ensure_sqlite_state down with it; 20260819_0056 restores the table.
+        return
+
     columns = _columns()
     additions = (
         ("email", sa.String()),
@@ -82,6 +103,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not _table_exists():
+        return
     if "ux_remote_access_authorizations_scope" in _indexes():
         op.drop_index(
             "ux_remote_access_authorizations_scope",

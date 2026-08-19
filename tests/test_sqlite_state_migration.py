@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260817_0055"
+HEAD_REVISION = "20260819_0056"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -606,6 +606,251 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
 
     assert len(heads) == 1
     assert heads[0] == HEAD_REVISION
+
+
+# v3.0.11 added a branch under 20260724_0034 plus the 20260804_0047 merge, and
+# repointed 20260806_0047 from 20260804_0046 onto that merge. 20260806_0047 shipped
+# in v3.0.9, so every database already live had passed it. Alembic only walks
+# forward from the revision a database is on and never applies an ancestor
+# inserted behind it, so the whole branch was recorded as applied and none of its
+# tables were ever created.
+_SPLICE_POINT_REVISION = "20260806_0047"
+_SPLICED_MERGE_REVISION = "20260804_0047"
+_REPAIR_REVISION = "20260819_0056"
+# Created by 20260725_0038 on the spliced branch and widened by 20260815_0054, so a
+# replay interrupted between the two leaves it present and short of head.
+_INTERRUPTED_TABLE = "remote_access_authorizations"
+
+
+def _schema_of(db_path: Path) -> set[tuple[str, str, str]]:
+    with sqlite3.connect(db_path) as conn:
+        return {
+            (str(kind), str(name), re.sub(r"\s+", " ", str(sql or "")).strip())
+            for kind, name, sql in conn.execute(
+                "select type, name, sql from sqlite_master "
+                "where name not like 'sqlite_%' and name != 'alembic_version'"
+            )
+        }
+
+
+def _upgraded_db(db_path: Path, revision: str) -> Path:
+    command.upgrade(migrations.alembic_config(db_path), revision)
+    return db_path
+
+
+def _revisions_the_repair_must_cover() -> list[str]:
+    """Every released revision a database can still be sitting on below the repair.
+
+    Read from the script directory rather than written down, so a revision added
+    after this one is covered without editing the test.
+    """
+
+    script = ScriptDirectory.from_config(migrations.alembic_config())
+    return [
+        revision.revision
+        for revision in script.iterate_revisions(
+            _REPAIR_REVISION, _SPLICE_POINT_REVISION, inclusive=True
+        )
+        if revision.revision != _REPAIR_REVISION
+    ]
+
+
+def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
+    tmp_path: Path,
+) -> None:
+    # Every branch table being present does not mean the branch was applied. A repair
+    # interrupted after 20260725_0038 recreated the table but before 20260815_0054
+    # replayed leaves all six tables there, that one short of head, and Alembic still
+    # stamped below the repair. Skipping the replay on a table-presence check would
+    # stamp the repair over the short table, and a stamped revision never runs again:
+    # the columns would then be missing for the life of the database.
+    expected = {obj for obj in _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head")) if obj[1] == _INTERRUPTED_TABLE}
+    assert expected, "the interrupted table must exist at head"
+
+    # Take the interrupted shape from the revision that creates it instead of writing
+    # its DDL down here, so this stays the real pre-20260815_0054 table.
+    scratch = _upgraded_db(tmp_path / "scratch.sqlite", _SPLICED_MERGE_REVISION)
+    with sqlite3.connect(scratch) as conn:
+        interrupted_ddl = [
+            str(sql)
+            for (sql,) in conn.execute(
+                "select sql from sqlite_master where tbl_name = ? and sql is not null",
+                (_INTERRUPTED_TABLE,),
+            )
+        ]
+    assert interrupted_ddl
+
+    db_path = _upgraded_db(tmp_path / "interrupted.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = off")
+        conn.execute(f'drop table "{_INTERRUPTED_TABLE}"')
+        for statement in interrupted_ddl:
+            conn.execute(statement)
+        conn.commit()
+    assert not expected <= _schema_of(db_path), "the seeded database must really be short of head"
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    missing = expected - _schema_of(db_path)
+    assert not missing, f"the repair left an interrupted table short of head: {sorted(missing)}"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
+def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path) -> None:
+    # A table is not the unit of interruption; a schema object is. Each branch
+    # revision creates its table and then its index as two statements, so a run
+    # interrupted between them leaves the table present and the index missing --
+    # and a guard covering both reads the table as proof that neither is needed.
+    # That state is exactly the one the repair exists to fix, and it is also the
+    # one where skipping is permanent: the repair stamps, and a stamped revision
+    # never runs again. Derive the objects from the two sides of the merge rather
+    # than naming them, so an index added to the branch later is covered here
+    # without editing the test.
+    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
+    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
+    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+    branch_names = {name for _, name, _ in with_branch} - {name for _, name, _ in without_branch}
+    branch_indexes = {name for kind, name, _ in with_branch if kind == "index"} & branch_names
+    assert branch_indexes, "the spliced branch must own at least one index"
+    expected = {obj for obj in reference if obj[1] in branch_names}
+
+    db_path = _upgraded_db(tmp_path / "indexless.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        for name in sorted(branch_indexes):
+            conn.execute(f'drop index "{name}"')
+        conn.commit()
+    surviving = {name for _, name, _ in _schema_of(db_path)}
+    assert not branch_indexes & surviving, "the seeded database must really be missing the indexes"
+    assert {name for kind, name, _ in with_branch if kind == "table"} & branch_names <= surviving, (
+        "only the indexes may be missing -- a dropped table would let the table guard "
+        "recreate the index and the test would pass without proving anything"
+    )
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    missing = expected - _schema_of(db_path)
+    assert not missing, f"the repair left branch objects short of a fresh install: {sorted(missing)}"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
+def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: Path) -> None:
+    # The repair replays unconditionally, so every database that reaches head replays
+    # the branch over a schema that already has it -- including the backfill in
+    # 20260725_0037, which writes rows rather than DDL. That is only safe while every
+    # replayed revision is a no-op against what it finds, so pin exactly that: same
+    # schema, and a row the backfill would otherwise duplicate or overwrite left alone.
+    db_path = _upgraded_db(tmp_path / "healthy.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "insert into media_objects (token, session_id, kind, source, local_path, created_at) "
+            "values ('tok', 'ses', 'image', 'agent', '/tmp/tok.png', 'created')"
+        )
+        conn.execute(
+            "insert into media_object_references (token, session_id, created_at) "
+            "values ('tok', 'ses', 'original')"
+        )
+        conn.commit()
+    before = _schema_of(db_path)
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    assert _schema_of(db_path) == before
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select token, session_id, created_at from media_object_references"
+        ).fetchall() == [("tok", "ses", "original")]
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
+def test_repair_refuses_to_stamp_a_schema_it_could_not_restore(tmp_path: Path) -> None:
+    # Two of the replayed revisions return silently when a table they reference is
+    # absent, so "the replay ran" does not mean "the schema is repaired". The repair
+    # must fail rather than record itself as applied over a schema that is still
+    # short: a stamped half-repair can never re-run, and resurfaces later as an
+    # unattributable error at whichever call site touches the missing table.
+    db_path = _upgraded_db(tmp_path / "short.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = off")
+        for table in ("media_object_references", "media_objects"):
+            conn.execute(f'drop table if exists "{table}"')
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="left these tables missing: media_object_references"):
+        command.upgrade(migrations.alembic_config(db_path), "head")
+
+    with sqlite3.connect(db_path) as conn:
+        # Still below head, so the next upgrade retries the repair instead of
+        # skipping it forever.
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            ("20260817_0055",)
+        ]
+
+
+def test_spliced_branch_schema_is_restored_from_every_released_revision(tmp_path: Path) -> None:
+    # The property: whatever released revision a database is on, upgrading to head
+    # leaves every schema object the spliced branch owns in the shape a fresh install
+    # has. Deriving that set from the two sides of the merge, instead of sharing a
+    # hand-written list with the migration, means a table added to the branch later
+    # cannot fall out of both at once.
+    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
+    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
+    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+
+    # Compare by name: an object's recorded DDL text also varies with the rebuild
+    # path a table took, which says nothing about who created it.
+    branch_names = {name for _, name, _ in with_branch} - {name for _, name, _ in without_branch}
+    branch_tables = {name for kind, name, _ in with_branch if kind == "table"} & branch_names
+    expected = {obj for obj in reference if obj[1] in branch_names}
+    assert branch_tables, "the spliced branch must own at least one table"
+    assert expected, "the branch's objects must survive to head"
+
+    # The repair's postcondition reads a literal tuple, because a migration cannot
+    # learn what its replayed revisions create without running them. Pin that tuple to
+    # two derivations it does not share: the merge boundary above, and the head table
+    # set the rest of the codebase maintains. A table added to the branch later then
+    # fails here, instead of slipping past the postcondition meant to catch it.
+    script = ScriptDirectory.from_config(migrations.alembic_config())
+    declared = set(script.get_revision(_REPAIR_REVISION).module._BRANCH_TABLES)
+    assert declared == branch_tables
+    assert declared <= migrations.HEAD_TABLES
+
+    revisions = _revisions_the_repair_must_cover()
+    assert _SPLICE_POINT_REVISION in revisions
+
+    for seeded in revisions:
+        db_path = tmp_path / f"stuck-{seeded}.sqlite"
+        _upgraded_db(db_path, seeded)
+        # Reproduce the splice rather than the fork: this database reached its
+        # revision under a release where the branch did not exist at all.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("pragma foreign_keys = off")
+            for table in branch_tables:
+                conn.execute(f'drop table if exists "{table}"')
+            conn.execute(
+                "insert into state_meta (key, value_json, updated_at) "
+                "values ('default_agent_name', '\"kept\"', 'before-upgrade')"
+            )
+            conn.commit()
+
+        command.upgrade(migrations.alembic_config(db_path), "head")
+
+        missing = expected - _schema_of(db_path)
+        assert not missing, f"repair left {seeded} short of a fresh install: {sorted(missing)}"
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "select value_json from state_meta where key = 'default_agent_name'"
+            ).fetchone() == ('"kept"',)
+            assert conn.execute("select version_num from alembic_version").fetchall() == [
+                (HEAD_REVISION,)
+            ]
 
 
 def test_message_transcript_order_upgrade_normalizes_and_indexes_exact_time(
