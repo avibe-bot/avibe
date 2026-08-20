@@ -169,6 +169,22 @@ def incus(*args: str, project: str | None = None) -> list[str]:
     return command
 
 
+def normalized_remote(value: str) -> str | None:
+    """One spelling of "the local daemon" past argv.
+
+    `remote_ref` has always read an empty name as this machine's daemon, and the
+    metadata accessor reads `--remote` itself, so an unexpanded
+    `--remote "$INCUS_REMOTE"` was two authorities at once: the environment was
+    created locally while the accessor bound to some other daemon and recorded
+    nothing, leaving the host port allocated with no row naming it. Either reader
+    could be written to agree with the other, which is why agreement is not the
+    fix -- normalizing at the parser leaves one value to read, for every reader
+    that exists now and every one added later.
+    """
+    name = value.strip()
+    return name or None
+
+
 def remote_ref(remote: str | None, name: str = "") -> str:
     if not remote:
         return name
@@ -498,6 +514,24 @@ class WorktreeMetadata:
         """Whether the daemon in question is the one this file describes."""
         return self.remote is None
 
+    @contextmanager
+    def locked(self, *, dry_run: bool):
+        """Hold the mapping lock across a decision that reads and then writes.
+
+        Taken here rather than by each command, because a lock on this file is a
+        claim about one authority too, and the commands had learned that about
+        the rows without learning it about the lock. `reconcile --remote` held it
+        across two listings of another daemon, where this accessor exposes no
+        rows and writes none: a slow or unreachable remote blocked every local
+        `up` from reserving a port for as long as the listing took, protecting
+        nothing, since nothing of this file's was in the span.
+        """
+        if not self.owned:
+            yield
+            return
+        with worktree_mapping_lock(self.repo_root, dry_run=dry_run):
+            yield
+
     def rows(self) -> dict:
         """The recorded rows, or none at all when another daemon is the subject."""
         if not self.owned:
@@ -521,7 +555,7 @@ class WorktreeMetadata:
         """
         if not self.owned:
             return
-        with worktree_mapping_lock(self.repo_root, dry_run=False):
+        with self.locked(dry_run=False):
             payload = _load_worktree_mapping(self.repo_root)
             mutate(payload.setdefault("worktrees", {}))
             _write_worktree_mapping(self.repo_root, payload)
@@ -543,15 +577,19 @@ class WorktreeMetadata:
         """Record the slug and its port before the environment is built.
 
         The row carries an opaque claim minted here and the reservation handed
-        back carries the same value, so giving the row up later can compare
+        back carries the same value, so ending the reservation later can compare
         instead of remember. It has to: `reserve` merges over whatever row it
         finds, which is exactly how a second `up` on this slug takes a row this
         run wrote, and the claim is what makes that takeover observable
-        afterwards. A remote accessor writes nothing, so its reservation holds no
-        claim and has nothing to give back.
+        afterwards.
+
+        A claim is minted only when this run actually wrote a row, which is the
+        one condition the reservation then needs: no claim covers a dry run, a
+        target that owns no row, and a remote accessor that writes nothing --
+        each of which used to be re-derived at every end of the reservation.
         """
         reservation = WorktreeReservation(metadata=self, target=target, dry_run=dry_run)
-        if dry_run or target.target != WORKTREE_TARGET:
+        if dry_run or not self.owned or target.target != WORKTREE_TARGET:
             return reservation
         reservation.claim = os.urandom(8).hex()
         row = {
@@ -566,20 +604,54 @@ class WorktreeMetadata:
         self.mutate(lambda worktrees: worktrees.setdefault(target.slug, {}).update(row))
         return reservation
 
-    def complete(self, target: RegressionTarget) -> None:
+    def apply_claimed(self, target: RegressionTarget, claim: str, row: dict | None) -> None:
+        """Replace or drop a slug's row while it is still the one `claim` wrote.
+
+        Both ends of a reservation write through here, because "this row is still
+        mine" is one property, and a second implementation of it is how the first
+        one gets forgotten. It was: the comparison was added to the release while
+        completion kept writing unconditionally, so an `up` that finished first
+        replaced a newer run's row -- and with it that run's port and its claim,
+        leaving the port allocated to a slug whose row no longer records it while
+        the newer `up` was still building against it.
+
+        The comparison happens inside the write's own load-modify-save, under the
+        lock, because it is a claim about the row as it is now: between reserving
+        and writing, another `up` on this slug may have merged its own row over
+        this one. Read the row first and this becomes the accident it exists to
+        prevent.
+        """
+
+        def guarded(worktrees: dict) -> None:
+            current = worktrees.get(target.slug)
+            if not isinstance(current, dict) or current.get("claim") != claim:
+                return
+            if row is None:
+                del worktrees[target.slug]
+            else:
+                worktrees[target.slug] = row
+
+        self.mutate(guarded)
+
+    def complete(self, target: RegressionTarget, claim: str) -> None:
         """Stamp the environment as built, replacing the row and its `reserved_at`."""
-        if target.target != WORKTREE_TARGET:
-            return
-        row = {
-            "path": str(self.repo_root),
-            "project": target.project,
-            "instance": target.instance,
-            "host_port": target.host_port,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "branch": branch_name(self.repo_root),
-            "commit": commit_sha(self.repo_root),
-        }
-        self.mutate(lambda worktrees: worktrees.update({target.slug: row}))
+        self.apply_claimed(
+            target,
+            claim,
+            {
+                "path": str(self.repo_root),
+                "project": target.project,
+                "instance": target.instance,
+                "host_port": target.host_port,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "branch": branch_name(self.repo_root),
+                "commit": commit_sha(self.repo_root),
+            },
+        )
+
+    def release(self, target: RegressionTarget, claim: str) -> None:
+        """Drop a reservation row while it is still the one that claim wrote."""
+        self.apply_claimed(target, claim, None)
 
     def forget(self, slugs: Iterable[str]) -> None:
         """Drop rows for environments the owning daemon no longer has."""
@@ -588,24 +660,6 @@ class WorktreeMetadata:
         def prune(worktrees: dict) -> None:
             for slug in wanted:
                 worktrees.pop(slug, None)
-
-        self.mutate(prune)
-
-    def release(self, target: RegressionTarget, claim: str) -> None:
-        """Drop a reservation row while it is still the one that claim wrote.
-
-        The comparison happens inside the removal's own load-modify-save, under
-        the lock, because it is a claim about the row as it is now: between
-        reserving and releasing, another `up` on this slug may have merged its
-        own row over this one and be building against it. Read the row before
-        taking the lock and this becomes the accident it exists to prevent --
-        a failing run freeing a port a live run has already reserved.
-        """
-
-        def prune(worktrees: dict) -> None:
-            row = worktrees.get(target.slug)
-            if isinstance(row, dict) and row.get("claim") == claim:
-                del worktrees[target.slug]
 
         self.mutate(prune)
 
@@ -634,10 +688,16 @@ class WorktreeReservation:
     remember to ask is how a defect gets in.
 
     - The row must still be the one this reservation wrote, compared under the
-      mapping lock in the same write that removes it.
+      mapping lock in the same write that changes it. This is a condition on
+      every end of the reservation, not just this one, so both go through the
+      one writer that enforces it.
     - The daemon must say the project is absent. Present means something may
       already bind this port, and a listing that cannot answer is a "cannot
       tell" resolved the way this runner resolves every other one: keep the row.
+
+    Holding a claim is itself the answer to "is there a row of mine here at all":
+    a dry run, a target that owns no row, and a remote accessor all reserve
+    without one, so neither end has to re-derive that from the run's arguments.
     """
 
     metadata: WorktreeMetadata
@@ -647,8 +707,9 @@ class WorktreeReservation:
 
     def complete(self) -> None:
         """Stamp the environment as built, ending the reservation."""
-        if not self.dry_run:
-            self.metadata.complete(self.target)
+        if self.claim is None:
+            return
+        self.metadata.complete(self.target, self.claim)
 
     def release(self, runner: Runner) -> None:
         """Give the row back if nothing came of it and nobody else has taken it."""
@@ -2256,9 +2317,9 @@ def cmd_up(args: argparse.Namespace) -> int:
     loaded_env_file = load_env_file(repo_root, args.env_file)
     if not args.dry_run:
         require_incus()
-    with worktree_mapping_lock(repo_root, dry_run=args.dry_run):
+    metadata = WorktreeMetadata(repo_root, args.remote)
+    with metadata.locked(dry_run=args.dry_run):
         target = resolve_target(args, repo_root, dry_run=args.dry_run)
-        metadata = WorktreeMetadata(repo_root, args.remote)
         reservation = metadata.reserve(target, dry_run=args.dry_run)
     # Built before the attempt, not inside it: releasing the reservation asks the
     # daemon what it holds, and a failure while acquiring the update lock would
@@ -2461,14 +2522,15 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     metadata = WorktreeMetadata(repo_root, args.remote)
     authority = f"remote {args.remote}" if args.remote else "the local Incus daemon"
     remote_suffix = f" --remote {shlex.quote(args.remote)}" if args.remote else ""
-    # The mapping is read, classified, and written under one lock, so no row can
-    # be added or completed midway through the decision. The lock alone cannot
-    # close the race, though: `up` reserves a slug and its port under this same
-    # lock and then releases it before creating the project and instance, so a
+    # The mapping is read, classified, and written under one lock -- taken through
+    # the accessor, so it is held only when this file is what the decision is
+    # about -- and no row can be added or completed midway through. The lock alone
+    # cannot close the race, though: `up` reserves a slug and its port under this
+    # same lock and then releases it before creating the project and instance, so a
     # reconcile running in that window legitimately sees a row with no footprint
     # yet. Such a row identifies itself by its own stamps and is never pruned --
     # see `WorktreeEnvironment.pending`.
-    with worktree_mapping_lock(repo_root, dry_run=False):
+    with metadata.locked(dry_run=False):
         environments = worktree_environments(runner, metadata)
         if not environments:
             print(f"No worktree regression environments exist in {authority}.")
@@ -2562,11 +2624,16 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         print(f"{len(forgotten)} metadata entr(ies) describe environments {authority} no longer has:")
         for env in forgotten:
             print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
-        if args.dry_run:
-            print("Re-run with --yes to drop them and release their reserved host ports.")
+        # Reporting is what this command is for, so having found something to
+        # report is not a failure: it exits 0 whether or not any row was stale.
+        # Raising here made the documented plain `reconcile` exit non-zero for
+        # exactly the case it exists to show, which reads as a broken command to
+        # a `&&` chain, a CI step, or anyone who checks `$?` -- while the report
+        # it just printed says the run went fine. `--yes` is what asks for the
+        # write, and `--dry-run` withholds it even then.
+        if args.dry_run or not args.yes:
+            print("Nothing was changed. Dropping them and releasing their reserved host ports needs --yes and no --dry-run.")
             return 0
-        if not args.yes:
-            raise RegressionError("Dropping stale metadata entries requires --yes.")
         metadata.forget(env.slug for env in forgotten)
         print(f"Dropped {len(forgotten)} stale metadata entr(ies). No instance was deleted.")
         return 0
@@ -2578,8 +2645,10 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     # docs call out. Local dev defaults to None (no remote), and it is what names
     # the daemon every command acts on: `remote_ref` addresses it, and
     # `WorktreeMetadata` uses it to decide whether this machine's metadata is
-    # evidence about that daemon at all.
-    parser.add_argument("--remote", help="Optional Incus remote name.")
+    # evidence about that daemon at all. Both read the same value, which is why
+    # it is normalized here -- the one place every command's --remote is defined
+    # -- rather than at each reader.
+    parser.add_argument("--remote", type=normalized_remote, help="Optional Incus remote name.")
 
 
 def add_target_args(parser: argparse.ArgumentParser) -> None:

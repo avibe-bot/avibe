@@ -162,7 +162,14 @@ long after that worktree is gone; the slug is chosen by the caller; and an
 environment may sit on a detached HEAD with no branch whose merge status could
 be checked. `reconcile --yes` therefore changes exactly one thing — it drops
 metadata rows for environments Incus no longer has, releasing their reserved
-host ports. Without `--yes` it only reports.
+host ports. Without `--yes` it only reports, and `--dry-run` withholds the write
+even with it.
+
+Reporting is what the command is for, so having something to report is not a
+failure: `reconcile` exits 0 whether or not any row was stale. A non-zero exit
+for the case the command exists to show cannot be told apart from a command that
+broke, by a `&&` chain, a CI step, or anyone reading `$?` — while the report it
+just printed says the run went fine.
 
 "No longer has" is read strictly, because releasing a port that is still in use
 is worse than keeping a row nobody needs:
@@ -196,7 +203,16 @@ is worse than keeping a row nobody needs:
   requires `--host-port`, because allocating from this machine's reservations is
   no evidence about which of another daemon's ports are free. The `delete`
   commands `reconcile --remote` prints carry `--remote`, or they would name the
-  same slug on the wrong daemon.
+  same slug on the wrong daemon. The lock over that file belongs to the same
+  accessor, for the same reason: a `--remote` command holds nothing of this
+  file's inside its listings, so it does not keep local runs out of the file
+  while it waits on another daemon.
+- An empty `--remote` names this machine's daemon, normalized once where the
+  flag is defined rather than at each reader. An unexpanded
+  `--remote "$INCUS_REMOTE"` would otherwise be two authorities at once: the
+  environment created here, while the accessor bound to some other daemon and
+  recorded nothing about it — leaving the host port allocated with no row naming
+  it.
 
 Useful flags:
 

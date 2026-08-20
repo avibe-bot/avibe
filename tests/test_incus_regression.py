@@ -1776,14 +1776,29 @@ def test_reconcile_dry_run_keeps_metadata(
     out = capsys.readouterr().out
 
     assert exit_code == 0
-    assert "Re-run with --yes" in out
+    assert "needs --yes" in out
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert set(payload["worktrees"]) == {"gone"}
 
 
-def test_reconcile_requires_yes_before_dropping_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("yes", "dry_run"),
+    [(yes, dry_run) for yes in (False, True) for dry_run in (False, True) if not (yes and not dry_run)],
+    ids=lambda value: f"{value}",
+)
+def test_reconcile_reports_stale_metadata_without_writing_or_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], yes: bool, dry_run: bool
 ) -> None:
+    """Having something to report is what this command is for, not a failure.
+
+    Asserted over every combination that withholds the write -- the whole product
+    of the two flags minus the one that asks for it, so a mode cannot be left out
+    of the enumeration. `reconcile` used to raise here, which made the documented
+    plain command exit non-zero for exactly the case it exists to show: a `&&`
+    chain, a CI step, or anyone reading `$?` cannot tell that from the command
+    breaking, while the report it just printed says the run went fine. The one
+    writing combination is `test_reconcile_forgets_metadata_for_environments…`.
+    """
     mapping_path, _ = reconcile_fixture(
         tmp_path,
         monkeypatch,
@@ -1791,12 +1806,15 @@ def test_reconcile_requires_yes_before_dropping_metadata(
         projects=(),
         instances=(),
     )
+    before = mapping_path.read_bytes()
 
-    with pytest.raises(incus_regression.RegressionError):
-        incus_regression.cmd_reconcile(argparse.Namespace(yes=False, dry_run=False, remote=None))
+    exit_code = incus_regression.cmd_reconcile(
+        argparse.Namespace(yes=yes, dry_run=dry_run, remote=None)
+    )
 
-    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
-    assert set(payload["worktrees"]) == {"gone"}
+    assert exit_code == 0
+    assert "gone  port 52904" in capsys.readouterr().out
+    assert mapping_path.read_bytes() == before
 
 
 def test_reconcile_enumerates_through_a_real_listing_under_dry_run(
@@ -2079,6 +2097,45 @@ def test_reconcile_decides_under_the_mapping_lock_even_when_writing_nothing(
     assert set(json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]) == {"gone"}
 
 
+def test_a_command_takes_the_mapping_lock_only_for_the_daemon_it_describes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock on `worktrees.json` is a claim about one authority, like its rows.
+
+    The commands had learned that about the rows without learning it about the
+    lock. `reconcile --remote` held it across two listings of another daemon,
+    where this file exposes no rows and writes none, so a slow or unreachable
+    remote blocked every local `up` from reserving a port for as long as the
+    listing took -- protecting nothing, since nothing of this file's was in the
+    span. `up --remote` holds the same span for the same reason.
+
+    Asserted for both commands, in both authorities, and from inside the span
+    rather than at the call that opens it: what matters is whether the lock is
+    really held while the command is waiting on a daemon.
+    """
+    held: list[bool] = []
+    reconcile_fixture(tmp_path, monkeypatch, entries={}, projects=(), instances=())
+
+    def record_and_report_nothing(runner, metadata):
+        held.append(bool(incus_regression._held_mapping_locks))
+        return []
+
+    def record_and_stop(*call_args, **kwargs):
+        held.append(bool(incus_regression._held_mapping_locks))
+        raise RuntimeError("far enough")
+
+    monkeypatch.setattr(incus_regression, "worktree_environments", record_and_report_nothing)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "resolve_target", record_and_stop)
+
+    for remote in (None, "lab"):
+        incus_regression.cmd_reconcile(argparse.Namespace(yes=False, dry_run=False, remote=remote))
+        with pytest.raises(RuntimeError):
+            incus_regression.cmd_up(argparse.Namespace(env_file=None, dry_run=False, remote=remote))
+
+    assert held == [True, True, False, False]
+
+
 def test_reconcile_against_a_remote_reports_one_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2260,7 +2317,10 @@ def test_metadata_about_another_daemon_neither_reads_nor_writes_the_local_file(
     runtime = repo / ".runtime" / "incus-regression"
     runtime.mkdir(parents=True)
     mapping_path = runtime / "worktrees.json"
-    recorded = {"schema_version": 1, "worktrees": {"demo": {"host_port": 15234, "branch": "local/work"}}}
+    recorded = {
+        "schema_version": 1,
+        "worktrees": {"demo": {"host_port": 15234, "branch": "local/work", "claim": "seeded"}},
+    }
     mapping_path.write_text(json.dumps(recorded), encoding="utf-8")
     monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
     before = mapping_path.read_bytes()
@@ -2281,8 +2341,12 @@ def test_metadata_about_another_daemon_neither_reads_nor_writes_the_local_file(
     assert metadata.allocated_ports() == set()
     assert metadata.port_for("demo") is None
 
+    # The seeded row carries the claim these writes name, so each of them would
+    # land if authority were ignored -- the file is unchanged because of who the
+    # accessor is bound to, not because the writes had nothing to match.
     metadata.reserve(target)
-    metadata.complete(target)
+    metadata.complete(target, "seeded")
+    metadata.release(target, "seeded")
     metadata.forget(["demo"])
     metadata.mutate(lambda worktrees: worktrees.clear())
 
@@ -3413,6 +3477,95 @@ def test_up_leaves_behind_a_row_another_run_has_taken_over(
     )["worktrees"]
     assert mapping["demo-branch"]["claim"] == claims[0]
     assert mapping["demo-branch"]["host_port"] == 15200
+
+
+def test_no_end_of_a_reservation_writes_over_a_row_another_run_took(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every write a reservation performs stops at a row that is not its own.
+
+    Enumerated from the class rather than listed, because listing is how this got
+    in: the comparison was added to the release while completion kept writing
+    unconditionally, so an `up` that finished first replaced a newer run's row --
+    and with it that run's port and its claim, leaving the port allocated to a
+    row that no longer records it. A write added to the class later is covered
+    here without editing this test, and one needing an argument this test cannot
+    supply fails it instead of being skipped in silence.
+    """
+    import inspect
+
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    mapping_path = tmp_path / ".runtime" / "incus-regression" / "worktrees.json"
+    mapping_path.parent.mkdir(parents=True)
+
+    def target_on(port: int) -> incus_regression.RegressionTarget:
+        return incus_regression.RegressionTarget(
+            target="worktree",
+            slug="demo",
+            project="avr-wt-demo",
+            instance="avibe-wt-demo",
+            host_port=port,
+            ui_host="127.0.0.1",
+            ui_port=5123,
+        )
+
+    class NewRunner:
+        # The daemon holds nothing, so nothing but the claim can stop a write.
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names = daemon_listing()
+
+    mine = incus_regression.WorktreeMetadata(tmp_path, None).reserve(target_on(15200))
+    theirs = incus_regression.WorktreeMetadata(tmp_path, None).reserve(target_on(15201))
+    assert mine.claim and theirs.claim and mine.claim != theirs.claim
+
+    writes = sorted(
+        name
+        for name, value in vars(incus_regression.WorktreeReservation).items()
+        if callable(value) and not name.startswith("_")
+    )
+    assert writes, "the reservation performs no writes, so this test proves nothing"
+    for name in writes:
+        method = getattr(mine, name)
+        parameters = set(inspect.signature(method).parameters)
+        unknown = parameters - {"runner"}
+        assert not unknown, f"{name} takes {sorted(unknown)}: teach this test how to call it"
+        method(**({"runner": NewRunner()} if "runner" in parameters else {}))
+
+    rows = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
+    assert rows["demo"]["claim"] == theirs.claim
+    assert rows["demo"]["host_port"] == 15201
+
+
+def test_an_empty_remote_names_the_local_daemon_for_every_command() -> None:
+    """`--remote ""` is this machine's daemon everywhere, not two authorities at once.
+
+    `remote_ref` has always read an empty name as local, while the metadata
+    accessor read the argument itself and called it another daemon, so an
+    unexpanded `--remote "$INCUS_REMOTE"` created the environment here and
+    recorded nothing about it: the host port allocated with no row naming it.
+    Either reader could have been taught the other's rule, which is why the value
+    is normalized once where it is defined, and why the property is asserted over
+    every command discovered from the parser rather than over a list written here.
+    """
+    parser = incus_regression.build_parser()
+    subcommands = parser._subparsers._group_actions[0].choices
+    checked = [
+        name
+        for name, sub in subcommands.items()
+        if any("--remote" in action.option_strings for action in sub._actions)
+    ]
+    assert checked, "no subcommand accepts --remote"
+
+    for name in checked:
+        for spelling in ("", "   "):
+            assert parser.parse_args([name, "--remote", spelling]).remote is None, name
+        assert parser.parse_args([name, "--remote", " lab "]).remote == "lab", name
+
+    # The consequence, at the reader that used to disagree with `remote_ref`.
+    empty = parser.parse_args(["up", "--remote", ""])
+    assert incus_regression.WorktreeMetadata(Path("/nonexistent"), empty.remote).owned is True
 
 
 def test_up_releases_its_reservation_when_the_run_is_interrupted(
