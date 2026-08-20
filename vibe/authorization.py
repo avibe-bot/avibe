@@ -162,7 +162,7 @@ class AuthorizationContext:
             "can_use_agents": self.can_use_resource("agent"),
             "can_use_skills": self.can_use_resource("skill"),
             "can_use_vault_secrets": self.can_use_resource("vault_secret"),
-            "can_use_show_pages": self.has_role("viewer"),
+            "can_use_show_pages": self.can_read_instance,
             "can_use_terminal_files": self.can_use_terminal_files,
             "can_use_terminal": self.can_use_terminal,
             "can_use_files": self.can_use_files,
