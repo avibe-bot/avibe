@@ -823,6 +823,121 @@ def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
     assert out == {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
 
 
+def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeypatch):
+    # The askill.sh installer re-downloads the CLI whenever it runs, so the
+    # shared currency owner must answer "already current" without invoking it.
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.14",
+            "status": "ready",
+            "path": "/x/askill",
+            "latest_version": "0.1.14",
+            "has_update": False,
+        },
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+
+    out = api.refresh_askill_if_stale()
+
+    assert out["ok"] is True
+    assert out["reason"] == "up_to_date"
+    assert "action" not in out
+
+
+def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):
+    # ``VIBE_ASKILL_AUTO_UPDATE`` disables the update-checker cadence, not the
+    # lifecycle refresh that ``vibe runtime prepare`` performs; keeping the gate
+    # in the cadence wrapper is what lets both callers share one decision.
+    monkeypatch.setenv("VIBE_ASKILL_AUTO_UPDATE", "0")
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.13",
+            "status": "ready",
+            "latest_version": "0.1.14",
+            "has_update": True,
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True]
+    assert out["action"] == "update"
+
+
+def test_refresh_avault_if_stale_does_not_force_when_the_pin_is_satisfied(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not reinstall the pinned release"))
+
+    out = api.refresh_avault_if_stale()
+
+    assert out["ok"] is True
+    assert out["changed"] is False
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def test_refresh_avault_if_stale_upgrades_a_binary_below_the_pin(monkeypatch):
+    # Skipping the install is conditional on the pin, not unconditional: prepare
+    # still has to raise a stale managed binary on upgrade.
+    stale = api.AVAULT_P2_MIN_VERSION
+    assert api._version_at_least(api.AVAULT_VERSION, stale)
+    state = {"version": stale}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: state["version"])
+    calls = []
+
+    def _install(force=False):
+        calls.append(force)
+        state["version"] = api.AVAULT_VERSION
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+
+    out = api.refresh_avault_if_stale()
+
+    assert calls == [True]
+    assert out["ok"] is True
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def test_refresh_avault_if_stale_installs_when_missing(monkeypatch):
+    state = {"path": None}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: state["path"])
+    monkeypatch.setattr(api, "_probe_avault_version", lambda path: api.AVAULT_VERSION if path else None)
+    calls = []
+
+    def _install(force=False):
+        calls.append(force)
+        state["path"] = "/usr/local/bin/avault"
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+
+    out = api.refresh_avault_if_stale()
+
+    assert calls == [True]
+    assert out["ok"] is True
+    assert out["installed"] is True
+    assert out["version"] == api.AVAULT_VERSION
+
+
 def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,

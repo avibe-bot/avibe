@@ -7504,6 +7504,24 @@ def _probe_avault_version(path: str | None) -> str | None:
     return None
 
 
+def refresh_avault_if_stale() -> dict:
+    """Bring avault to the managed pin, installing only when that changes it.
+
+    Sibling of ``refresh_askill_if_stale`` for the version-pinned dependency, so
+    both managed local deps answer "am I current?" before paying for an install.
+    The wanted version is ``AVAULT_VERSION`` rather than an upstream latest, so
+    the staleness question is answered locally with no download at all.
+
+    ``force`` on ``ensure_avault_installed`` stays a repair verb — it reinstalls
+    an equal or older managed release on purpose — so callers that only want the
+    pin satisfied come here instead of charging every call a ~20s reinstall of
+    the release that is already on disk.
+    """
+    status = avault_status()
+    pin_satisfied = bool(status.get("installed")) and _version_at_least(status.get("version"), AVAULT_VERSION)
+    return ensure_avault_installed(force=not pin_satisfied)
+
+
 def avault_status() -> dict:
     """Report whether avault is installed and its version (best-effort)."""
     path = _resolve_avault_cli_path()
@@ -8159,18 +8177,20 @@ def askill_update_status(*, include_latest: bool = True) -> dict:
     return out
 
 
-def reconcile_askill_auto_update() -> dict:
-    """Install or refresh askill as a required managed dependency.
+def refresh_askill_if_stale() -> dict:
+    """Bring askill to the published version, installing only when that changes it.
 
-    This runs from the shared update checker cadence but is intentionally
-    independent of ``update.auto_update``. Avibe owns askill as a local runtime
-    dependency for Skills; disabling product self-upgrades must not strand that
-    dependency on an incompatible CLI contract. Operators can still disable this
-    reconcile loop with ``VIBE_ASKILL_AUTO_UPDATE=0`` or ``VIBE_INSTALL_SKIP_ASKILL``.
+    The single owner of "is the managed askill current, and make it so". Every
+    caller that wants currency asks this instead of forcing an install, because
+    the askill.sh installer re-downloads the CLI on every run: answering the
+    question costs one cached version probe, answering it by reinstalling costs
+    ~30s of network even when the local binary is already the published version.
+    ``refresh_avault_if_stale`` is the same rule for the version-pinned sibling.
+
+    Callers own their own policy gate; this function only decides staleness. An
+    install attempt is reported by ``action``, so its absence means the
+    dependency was already current.
     """
-    if _askill_auto_update_disabled():
-        return {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
-
     status = askill_update_status()
     if not status.get("installed"):
         result = ensure_askill_installed(force=False)
@@ -8199,6 +8219,20 @@ def reconcile_askill_auto_update() -> dict:
     with _BACKEND_CACHE_LOCK:
         _BACKEND_LATEST_CACHE.pop("askill", None)
     return result
+
+
+def reconcile_askill_auto_update() -> dict:
+    """Install or refresh askill as a required managed dependency.
+
+    This runs from the shared update checker cadence but is intentionally
+    independent of ``update.auto_update``. Avibe owns askill as a local runtime
+    dependency for Skills; disabling product self-upgrades must not strand that
+    dependency on an incompatible CLI contract. Operators can still disable this
+    reconcile loop with ``VIBE_ASKILL_AUTO_UPDATE=0`` or ``VIBE_INSTALL_SKIP_ASKILL``.
+    """
+    if _askill_auto_update_disabled():
+        return {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
+    return refresh_askill_if_stale()
 
 
 # =============================================================================

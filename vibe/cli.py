@@ -14324,18 +14324,34 @@ def _ensure_askill_during_prepare(offline: bool = False) -> dict:
     same lifecycle points as the Show Page runtime (post install / upgrade),
     with a ``VIBE_INSTALL_SKIP_ASKILL`` escape hatch mirroring the Show Runtime
     one. Skipped under ``--offline`` (the askill installer needs the network).
-    Refreshes askill to latest even when a binary already exists — prepare is
-    the chokepoint that keeps required local deps current on upgrade. An askill
-    hiccup never fails the prepare; the Dependencies page offers a manual retry.
+    Refreshes askill to latest so prepare stays the chokepoint that keeps
+    required local deps current on upgrade, but asks whether that refresh would
+    change anything before running the installer: askill.sh re-downloads the CLI
+    on every run, so an unconditional refresh charged every prepare ~30s to
+    install the version already on disk. An askill hiccup never fails the
+    prepare; the Dependencies page offers a manual retry.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
-        return api.ensure_askill_installed(force=True)
+        result = api.refresh_askill_if_stale()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
+    if result.get("ok") and not result.get("action"):
+        # No install was attempted, so askill was already current. Report that as
+        # ready rather than skipped, so prepare's dependency lines read the same
+        # way as the pinned providers when nothing needed doing.
+        status = result.get("status") or {}
+        return {
+            "ok": True,
+            "installed": True,
+            "changed": False,
+            "path": status.get("path"),
+            "version": status.get("version"),
+        }
+    return result
 
 
 def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> dict:
@@ -14389,13 +14405,18 @@ def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
 
 
 def _ensure_avault_during_prepare(offline: bool = False) -> dict:
-    """Ensure avault (the Vault custody core) alongside other local deps."""
+    """Ensure avault (the Vault custody core) alongside other local deps.
+
+    Raises avault to the managed pin on upgrade, but only downloads when the pin
+    is not already satisfied: the reinstall it used to force on every prepare
+    took ~20s to put back the release that was already installed.
+    """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
-        return api.ensure_avault_installed(force=True)
+        return api.refresh_avault_if_stale()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 

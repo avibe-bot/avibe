@@ -29,7 +29,7 @@ from core.show_pages import (
     show_public_event_write_token,
 )
 from storage.pagination import PageRequest
-from vibe import cli
+from vibe import api, cli
 
 
 @dataclass(frozen=True)
@@ -370,6 +370,41 @@ def test_runtime_prepare_tmux_runs_when_terminal_enabled(monkeypatch):
 
     assert cli._ensure_tmux_during_prepare(force=True) == {"ok": True}
     assert calls == [True]
+
+
+def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeypatch):
+    # Prepare is the chokepoint that keeps managed local deps current, which is
+    # not the same as reinstalling them: every install here is a network download
+    # (askill ~30s, avault ~20s), so a prepare with nothing to change must reach
+    # none of them. Stubbing the installers rather than the decision keeps this
+    # honest whichever way the wrappers ask the question.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_AVAULT", raising=False)
+    monkeypatch.setattr(api, "install_askill", lambda: pytest.fail("askill must not reinstall when current"))
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("avault must not reinstall when current"))
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+
+    askill = cli._ensure_askill_during_prepare()
+    avault = cli._ensure_avault_during_prepare()
+
+    assert askill == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/x/askill",
+        "version": "0.1.14",
+    }
+    assert avault["ok"] is True
+    assert avault["changed"] is False
+    assert avault["version"] == api.AVAULT_VERSION
 
 
 def _save_config() -> V2Config:
