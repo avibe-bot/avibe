@@ -381,19 +381,28 @@ def resource_user_context_from_metadata(
         return None
     if context.instance_kind is not None or raw_snapshot_kind is not None:
         return context
+    if context.organization_id or context.instance_access_source == "organization_group":
+        # Organization membership identity does not depend on the local pairing
+        # being ready; an unpaired install must not retire Org deferred work.
+        return context
 
     # Released snapshots predate the instance-kind field. Recover their kind
     # only when the snapshot still names the current server-owned instance. An
     # unbound legacy snapshot cannot be attributed to a re-paired Personal
     # instance, because doing so would turn old Organization work into a
     # Personal ACL bypass.
-    paired_kind = (
-        configured[1]
-        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-        and configured is not None
-        else None
-    )
+    pairing_state = _configured_resource_state()
+    if pairing_state.status in {
+        RESOURCE_BINDING_STATE_UNAVAILABLE,
+        RESOURCE_BINDING_STATE_UNPAIRED,
+    }:
+        # Kindless snapshots cannot keep executing as a bare Editor when the
+        # current pairing is unreadable or explicitly unpaired.
+        return None
+    paired_kind = pairing_state.instance_kind
     if paired_kind not in {"personal", "organization"}:
+        # Preserve the valid legacy no-kind PAIRING path (runtime-ready
+        # credentials, kind not yet backfilled — PARTIAL).
         return context
     if not context.instance_id:
         return None

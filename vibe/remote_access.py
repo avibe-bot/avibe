@@ -97,17 +97,17 @@ _AUTHORIZATION_REVISION_SYNC_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_STARTED = False
 _AUTHORIZATION_REFRESH_LOCK = threading.Lock()
-_AUTHORIZATION_REFRESH_FAILURES: dict[tuple[str, str, str, str], float] = {}
+_AUTHORIZATION_REFRESH_FAILURES: dict[tuple[str, str, str, str, int], float] = {}
 _AUTHORIZATION_REFRESH_RESULTS: dict[
-    tuple[str, str, str, str],
+    tuple[str, str, str, str, int],
     tuple[float, str, str | None, int | None],
 ] = {}
 _AUTHORIZATION_REFRESH_FLIGHTS: dict[
-    tuple[str, str, str, str],
+    tuple[str, str, str, str, int],
     tuple[threading.Lock, int],
 ] = {}
 _AUTHORIZATION_BACKGROUND_REFRESH_LOCK = threading.Lock()
-_AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str]] = set()
+_AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str, int]] = set()
 AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS = 5.0
 _REVOKED_BROWSER_SESSIONS_LOCK = threading.Lock()
 _REVOKED_BROWSER_SESSIONS: dict[str, int] = {}
@@ -5321,7 +5321,8 @@ def _fetch_authorization_context(
     request_id = str(identity.get("instance_id") or "")
     if live_id and request_id and live_id != request_id:
         return AuthorizationResolution("unavailable", reason="instance_binding_changed")
-    if live_generation > int(request_binding_generation) and live_id != request_id:
+    if live_generation > int(request_binding_generation):
+        # Same-instance kind reclassification is still a binding change.
         return AuthorizationResolution("unavailable", reason="instance_binding_changed")
     try:
         persisted = _persist_instance_kind(
@@ -5341,7 +5342,7 @@ def _fetch_authorization_context(
         request_id = str(identity.get("instance_id") or "")
         if live_id and request_id and live_id != request_id:
             return AuthorizationResolution("unavailable", reason="instance_binding_changed")
-        if live_generation > int(request_binding_generation) and live_id != request_id:
+        if live_generation > int(request_binding_generation):
             return AuthorizationResolution("unavailable", reason="instance_binding_changed")
         return AuthorizationResolution("unavailable", reason="instance_kind_persistence_failed")
     try:
@@ -5436,7 +5437,10 @@ def _refresh_authorization_context(
             if current_record is not None:
                 if current_record.get("authorization_state") == "revoked":
                     return AuthorizationResolution("revoked", reason="access_denied")
-                if recent_result[1] == "current":
+                if (
+                    recent_result[1] == "current"
+                    and current_record.get("authorization_state") == "current"
+                ):
                     current_payload = _validated_authorization_payload(
                         config,
                         identity,
@@ -5520,18 +5524,27 @@ def _refresh_authorization_context(
 def _authorization_refresh_key(
     identity: Mapping[str, Any],
     record: Mapping[str, Any] | None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, int]:
     scope_kind = str(record.get("scope_kind") or "instance") if record else "instance"
     scope_ref = (
         str(record.get("scope_ref") or identity.get("instance_id") or "")
         if record
         else str(identity.get("instance_id") or "")
     )
+    try:
+        from storage import remote_access_authorization_service
+
+        generation = remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    except Exception:
+        generation = 0
     return (
         str(identity.get("instance_id") or ""),
         str(identity.get("sub") or ""),
         scope_kind,
         scope_ref,
+        int(generation),
     )
 
 

@@ -97,7 +97,46 @@ def _load_notification_config() -> tuple[Any, bool]:
         return None, True
 
 
-def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> str:
+def _binding_snapshot(config: Any) -> tuple[bool, str, int]:
+    """One evaluation, one snapshot of (ready, kind, generation).
+
+    Policy selection and the later gate MUST use this same snapshot. Mixing
+    a reconciling-inferred Personal policy with a later-ready Organization
+    binding is the class this closes.
+    """
+
+    from vibe import remote_access
+    from storage import remote_access_authorization_service
+
+    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
+    kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    try:
+        generation = remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    except Exception:
+        generation = 0
+    ready = False
+    if kind in {"personal", "organization"} and config is not None:
+        try:
+            ready = bool(remote_access.binding_is_ready(config))
+        except Exception:
+            ready = False
+    if not ready:
+        # A known configured kind that is not ready (reconciling / pending /
+        # mismatched) must not leak into policy selection as if it were live.
+        # Mixing a reconciling-inferred Personal policy with a later-ready
+        # Organization binding is the class this snapshot closes.
+        kind = ""
+    return ready, kind, int(generation)
+
+
+def _notification_policy_for_record(
+    config: Any,
+    record: Mapping[str, Any],
+    *,
+    snapshot_kind: str = "",
+) -> str:
     """Select the notification authorization policy for one persisted record.
 
     Policy selection follows the paired Instance kind (#1433): Personal and
@@ -105,17 +144,12 @@ def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> s
     pairings with an unknown kind fall back to the record's own claim shape —
     claims issued through Organization membership follow the Organization
     policy, everything else follows the Personal policy.
+
+    ``snapshot_kind`` is the kind captured once for this evaluation; do not
+    re-read the live binding here.
     """
 
-    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
-    instance_kind = str(getattr(cloud, "instance_kind", "") or "")
-    if instance_kind in {"personal", "organization"}:
-        # C3: the consumer gate (which bootstraps a validated durable binding
-        # on the upgrade path), never a raw config read.
-        from vibe import remote_access
-
-        if not remote_access.binding_is_ready(config):
-            instance_kind = ""
+    instance_kind = snapshot_kind
     if instance_kind == "organization":
         return "organization"
     if instance_kind == "personal":
@@ -195,8 +229,12 @@ def _evaluate_record_authorization(
     """
 
     from vibe import remote_access
+    from storage import remote_access_authorization_service
 
-    policy = _notification_policy_for_record(config, record)
+    snapshot_ready, snapshot_kind, snapshot_generation = _binding_snapshot(config)
+    policy = _notification_policy_for_record(
+        config, record, snapshot_kind=snapshot_kind
+    )
     if config is None:
         reason = (
             "paired configuration could not be read; instance binding cannot be validated"
@@ -237,21 +275,53 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
             reason="paired configuration could not be read; instance binding cannot be validated",
         )
-    paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
-    if paired_kind in {"personal", "organization"}:
-        # C3: the consumer gate (which bootstraps a validated durable binding
-        # on the upgrade path), never a raw config read.
-        from vibe import remote_access
+    from vibe.authorization import instance_kind_is_unsupported
 
-        if not remote_access.binding_is_ready(config):
-            return OwnerAuthorizationDecision(
-                user_key=user_key,
-                policy=policy,
-                context=None,
-                authorized=False,
-                disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
-                reason="durable instance binding is not ready",
-            )
+    record_kind = record.get("vibe_instance_kind")
+    if instance_kind_is_unsupported(record_kind):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_REVOKED,
+            reason="persisted snapshot instance kind is unrecognized",
+        )
+    paired_kind = snapshot_kind
+    try:
+        live_generation = remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    except Exception:
+        live_generation = snapshot_generation
+    configured_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    generation_moved = int(live_generation) != int(snapshot_generation)
+    if configured_kind in {"personal", "organization"} and not snapshot_ready:
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="durable instance binding is not ready",
+        )
+    if (
+        configured_kind in {"personal", "organization"}
+        and snapshot_ready
+        and generation_moved
+        and int(snapshot_generation) > 0
+    ):
+        # The binding advanced under us after we captured a real (non-zero)
+        # generation. Mixing the original policy with the new binding is the
+        # class this snapshot closes. Generation 0 → N is bootstrap, not TOCTOU.
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="durable instance binding is not ready",
+        )
     if (
         paired_kind in {"personal", "organization"}
         and cloud is not None
@@ -299,21 +369,7 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_REVOKED,
             reason="persisted snapshot was issued for a different paired instance",
         )
-    from vibe.authorization import instance_kind_is_unsupported
-
     record_kind = record.get("vibe_instance_kind")
-    if instance_kind_is_unsupported(record_kind):
-        # A present-but-unrecognized kind is corruption or a future version,
-        # never a no-kind legacy snapshot. Fail closed instead of falling
-        # through to the currently-paired Personal policy.
-        return OwnerAuthorizationDecision(
-            user_key=user_key,
-            policy=policy,
-            context=None,
-            authorized=False,
-            disposition=WEB_PUSH_DISPOSITION_REVOKED,
-            reason="persisted snapshot instance kind is unrecognized",
-        )
     if (
         record_kind in {"personal", "organization"}
         and paired_kind not in {"personal", "organization"}
@@ -447,11 +503,17 @@ def _resolve_owner_authorization_decisions(
     if not records:
         return {}
     config, config_load_failed = _load_notification_config()
+    snapshot_ready, snapshot_kind, _snapshot_generation = (
+        _binding_snapshot(config) if config is not None else (False, "", 0)
+    )
     if (
         allow_sync_retry
         and not config_load_failed
         and any(
-            _notification_policy_for_record(config, record) == "organization"
+            _notification_policy_for_record(
+                config, record, snapshot_kind=snapshot_kind
+            )
+            == "organization"
             for _user_key, record in records
         )
     ):
