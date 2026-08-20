@@ -109,9 +109,9 @@
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
         "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。",
         "backendRefresh": "[Avibe Harness] 本次 run 执行途中，它所用的 Agent 运行时被刷新，因此被中断，通常发生在刚保存 Agent 设置之后。这次 run 本身没有问题，请重新触发。",
-        "restarted": "[Avibe Harness] 本次 run 执行途中服务已关闭，因此被中断。该次执行已被记录，服务重启后不会重放。如果这项工作仍需完成，请重新触发。",
+        "restarted": "[Avibe Harness] 本次 run 执行途中被中断。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
         "interrupted": "[Avibe Harness] 本次 run 在执行途中被中断。该次执行已被记录，不会重新排队。如果这项工作仍需完成，请重新触发。",
-        "orphaned": "[Avibe Harness] 本次 run 一直标记为 running，但已经没有任何执行在推进它，通常是服务在它执行途中重启导致的。它此前已经发出的输出仍会保留在这次 run 上。如果这项工作仍需完成，请重新运行。",
+        "orphaned": "[Avibe Harness] 本次 run 没有任何执行在推进它，通常是服务在它执行途中重启导致的。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
         "transportUnavailable": "[Avibe Harness] 本次 run 一直排队等待，因为它对应的聊天平台始终没有重新连接，消息也就无法送达。请在设置中检查该平台连接，然后重新触发。",
         "queueHoldExpired": "[Avibe Harness] 本次 run 在所属 session 的 turn 队列后面排队过久，始终没有开始执行。请检查该 session 是否有卡住的 turn，然后重新触发这次 run。"
       },
@@ -902,7 +902,7 @@
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f \u672c\u8f6e\u6267\u884c\u88ab\u4e2d\u65ad\u2014\u2014Avibe \u670d\u52a1\u5728\u5b83\u8fd0\u884c\u671f\u95f4\u91cd\u542f\uff0c\u5176 Agent \u8fd0\u884c\u65f6\u65e0\u6cd5\u6062\u590d\u3002\u8fd9\u4e00\u8f6e\u4e0d\u4f1a\u518d\u6709\u4efb\u4f55\u540e\u7eed\u7ed3\u679c\u3002\u5982\u679c\u8fd9\u9879\u5de5\u4f5c\u4ecd\u7136\u9700\u8981\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u8bf7\u6c42\u3002"
+      "serviceRestart": "\u26a0\ufe0f \u672c\u8f6e\u6267\u884c\u88ab\u4e2d\u65ad\u2014\u2014Avibe \u670d\u52a1\u5728\u5b83\u8fd0\u884c\u671f\u95f4\u91cd\u542f\u3002\u5982\u679c\u8fd9\u9879\u5de5\u4f5c\u4ecd\u7136\u9700\u8981\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u8bf7\u6c42\u3002"
     }
   },
   "runtime": {

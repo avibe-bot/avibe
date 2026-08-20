@@ -109,9 +109,9 @@
         "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
         "refusedConcurrentTurn": "[Avibe Harness] This run was skipped because another turn was already in flight for the same session. A session runs one turn at a time; trigger it again once the current turn finishes.",
         "backendRefresh": "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed while the run was in flight, usually right after an Agent setting was saved. Nothing is wrong with the run itself — trigger it again.",
-        "restarted": "[Avibe Harness] This run was interrupted because the service shut down while it was in flight. The interrupted attempt was recorded and will not be replayed after restart. Trigger it again if the work still needs doing.",
+        "restarted": "[Avibe Harness] This run was interrupted during execution. Completed work is preserved. Trigger it again if the work still needs doing.",
         "interrupted": "[Avibe Harness] This run was interrupted while it was in flight. The interrupted attempt was recorded and was not requeued. Trigger it again if the work still needs doing.",
-        "orphaned": "[Avibe Harness] This run was left marked as running with nothing executing it, most likely because the service restarted while it was in flight. Any output it had already sent is still kept on the run. Run it again if the work still needs doing.",
+        "orphaned": "[Avibe Harness] Nothing is executing this run, most likely because the service restarted during execution. Completed work is preserved. Trigger it again if the work still needs doing.",
         "transportUnavailable": "[Avibe Harness] This run stayed queued because its chat platform never reconnected, so it was never delivered. Check the platform connection in Settings, then trigger it again.",
         "queueHoldExpired": "[Avibe Harness] This run stayed queued behind its session's turn queue for too long and was never started. Check whether that session has a stuck turn, then trigger this run again."
       },
@@ -902,7 +902,7 @@
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running, and its agent runtime could not be resumed. Nothing further will arrive for it. Send the request again if the work still needs doing."
+      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
     }
   },
   "runtime": {

@@ -210,7 +210,7 @@
     "icon": {
       "upload": "上传",
       "replace": "更换",
-      "hint": "SVG、PNG、ICO、JPEG 或 WebP，最大 2 MiB。显示在 Dock 与应用库中。",
+      "hint": "SVG、PNG、ICO、JPEG 或 WebP，最大 2 MiB。显示在应用栏与应用库中。",
       "toast": {
         "updated": "应用图标已更新"
       }
@@ -257,7 +257,7 @@
     },
     "apps": {
       "system": "系统",
-      "dock": "固定到 Dock",
+      "dock": "固定到应用栏",
       "undock": "取消固定",
       "remove": "移出 App",
       "reorder": "重新排序",
@@ -1835,9 +1835,9 @@
       "newWindow": "新建窗口",
       "showAllWindows": "显示所有窗口",
       "openInNewTab": "在新标签页打开",
-      "unpin": "从 Dock 取消固定",
-      "syncedCaption": "与桌面 Dock 同步",
-      "emptyHint": "Dock 为空 · 打开应用库"
+      "unpin": "从应用栏取消固定",
+      "syncedCaption": "与桌面应用栏同步",
+      "emptyHint": "应用栏为空 · 打开应用库"
     },
     "launcher": {
       "openLibrary": "打开应用库"
@@ -1858,7 +1858,7 @@
       "label": "Show Page",
       "missingTitle": "无法打开此应用",
       "missingBody": "这个会话的 Show Page 已丢失或被归档，若会话恢复它可能会重新出现。",
-      "unpin": "从 Dock 取消固定"
+      "unpin": "从应用栏取消固定"
     },
     "fileBrowser": {
       "label": "文件",
@@ -3655,9 +3655,9 @@
       "availabilityOnline": "当前页面在线，关闭可下线页面不再提供访问。",
       "availabilityOffline": "当前页面已下线，开启可恢复访问。",
       "loadError": "无法加载这个 Show Page。",
-      "pinToDock": "固定到 Dock",
-      "pinToDockCaption": "作为应用从 Dock 打开",
-      "pinnedConfirm": "已固定 —「{{title}}」已在你的 Dock 中",
+      "pinToDock": "固定到应用栏",
+      "pinToDockCaption": "作为应用从应用栏打开",
+      "pinnedConfirm": "已固定 —「{{title}}」已在你的应用栏中",
       "addToHomeTitle": "添加到主屏幕",
       "addToHomeBodySafari": "点此处在新页面中打开，再点「分享」 →「添加到主屏幕」。",
       "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。"
