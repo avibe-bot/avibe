@@ -7516,10 +7516,21 @@ def refresh_avault_if_stale() -> dict:
     an equal or older managed release on purpose — so callers that only want the
     pin satisfied come here instead of charging every call a ~20s reinstall of
     the release that is already on disk.
+
+    Skipping the install may never report a healthier state than forcing it
+    would. Being at the pin is not the whole of being current: when the
+    readiness floor is raised ahead of the published pin, a binary equal to
+    ``AVAULT_VERSION`` is still ``upgrade_required``, and only the forced path
+    surfaces that release gap. So the question is asked of the status as a
+    whole, not of the version alone.
     """
     status = avault_status()
-    pin_satisfied = bool(status.get("installed")) and _version_at_least(status.get("version"), AVAULT_VERSION)
-    return ensure_avault_installed(force=not pin_satisfied)
+    current = (
+        bool(status.get("installed"))
+        and status.get("status") == "ready"
+        and _version_at_least(status.get("version"), AVAULT_VERSION)
+    )
+    return ensure_avault_installed(force=not current)
 
 
 def avault_status() -> dict:
@@ -8198,15 +8209,21 @@ def refresh_askill_if_stale() -> dict:
         return result
 
     latest = status.get("latest_version")
-    if latest is None:
-        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
-
     if status.get("version") is None:
+        # A binary that cannot report its version is not current, it is broken —
+        # whether or not the upstream probe answered. Deciding that before the
+        # ``latest_unavailable`` exit keeps the repair from being gated on
+        # network reachability: callers that used to force this install
+        # unconditionally would otherwise be told a broken askill is ready
+        # whenever the latest lookup failed too.
         logger.info("askill local version is unknown; refreshing managed dependency")
         result = ensure_askill_installed(force=True)
         result["action"] = "refresh_unknown_version"
         result["latest_version"] = latest
         return result
+
+    if latest is None:
+        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
 
     if not status.get("has_update"):
         return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}

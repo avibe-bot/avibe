@@ -14162,10 +14162,11 @@ def cmd_runtime(args) -> int:
     if command == "prepare":
         offline = True if getattr(args, "offline", False) else None
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
-        askill = _ensure_askill_during_prepare(offline=bool(offline))
-        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
-        git = _ensure_git_during_prepare(offline=offline, force=getattr(args, "force", False))
-        avault = _ensure_avault_during_prepare(offline=bool(offline))
+        force = bool(getattr(args, "force", False))
+        askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
+        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
+        git = _ensure_git_during_prepare(offline=offline, force=force)
+        avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         payload["askill"] = askill
         payload["avault"] = avault
         payload["tmux"] = tmux
@@ -14317,7 +14318,7 @@ def _prepare_show_runtime_after_install(vibe_path: str | None) -> None:
         print(detail)
 
 
-def _ensure_askill_during_prepare(offline: bool = False) -> dict:
+def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) -> dict:
     """Ensure askill (a required local dependency) alongside the Show Runtime.
 
     Folded into ``vibe runtime prepare`` so askill auto-installs at exactly the
@@ -14330,12 +14331,20 @@ def _ensure_askill_during_prepare(offline: bool = False) -> dict:
     on every run, so an unconditional refresh charged every prepare ~30s to
     install the version already on disk. An askill hiccup never fails the
     prepare; the Dependencies page offers a manual retry.
+
+    ``force`` is prepare's ``--force``, and it means repair, not currency: a
+    corrupted binary can still report the current version, so an explicit
+    ``vibe runtime prepare --force`` must reinstall rather than ask. Currency is
+    the default; repair stays available on request, exactly as it is for the
+    Show Runtime, tmux, and git phases.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
+        if force:
+            return api.ensure_askill_installed(force=True)
         result = api.refresh_askill_if_stale()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
@@ -14404,18 +14413,22 @@ def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
         return {"ok": False, "removed": [], "message": str(exc)}
 
 
-def _ensure_avault_during_prepare(offline: bool = False) -> dict:
+def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) -> dict:
     """Ensure avault (the Vault custody core) alongside other local deps.
 
     Raises avault to the managed pin on upgrade, but only downloads when the pin
     is not already satisfied: the reinstall it used to force on every prepare
-    took ~20s to put back the release that was already installed.
+    took ~20s to put back the release that was already installed. ``force`` is
+    prepare's ``--force`` repair request and still reinstalls the managed
+    release, since a corrupted binary can report the pinned version.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
+        if force:
+            return api.ensure_avault_installed(force=True)
         return api.refresh_avault_if_stale()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
