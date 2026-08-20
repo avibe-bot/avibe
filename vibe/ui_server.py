@@ -2681,6 +2681,8 @@ def _permissions_error_response(error: Exception):
         return jsonify({"ok": False, **error.payload}), error.status
     if isinstance(error, permissions.PermissionsInvalidResponseError):
         return jsonify({"ok": False, "error": str(error)}), 502
+    if isinstance(error, permissions.PermissionsInvalidRequestError):
+        return jsonify({"ok": False, "error": str(error)}), 422
     logger.warning("Permissions request failed: %s", error.__class__.__name__)
     return jsonify({"ok": False, "error": "permissions_unavailable"}), 503
 
@@ -2939,10 +2941,11 @@ def enforce_project_role_capabilities():
 
     kind, resource_id = resource
     if kind == "show_page":
-        # Show Page reads are governed by the page's own ACL. Project ACL is
-        # required by ShowPageStore for create/edit operations, but applying
-        # the generic project middleware here treats a session id as a project
-        # id and rejects valid pages (including pages without a live session).
+        # Show Page ``/show`` admission is the §3.2 Instance Viewer role alone.
+        # Project ACL is required by ShowPageStore for create/edit operations,
+        # but applying the generic project middleware here treats a session id
+        # as a project id and rejects valid pages (including pages without a
+        # live session).
         return None
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -3621,8 +3624,8 @@ def _websocket_context_authorized(
     if project_session_id is None or _has_runtime_owner_access(context):
         return True
     if minimum_role == "viewer":
-        # Show Page runtime reads use the independent Show Page ACL. Project
-        # ACL remains an edit/create requirement in ShowPageStore.
+        # §3.2: /show admission is the Instance Viewer role alone, independent of
+        # the Project ACL (which stays an edit/create requirement in ShowPageStore).
         return context.has_role("viewer") and _show_page_resource_access_allowed(context, project_session_id)
     return _project_session_access_allowed(context, project_session_id, minimum_role)
 
@@ -3684,20 +3687,19 @@ async def _wait_for_show_page_access_loss(
 
 
 def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
-    from storage import resource_access_service
+    """§3.2 ``/show`` admission: Instance Viewer role alone, never an email grant.
+
+    The Workbench is reachable by every Instance role (owner/editor/viewer) and
+    independent of the sharing list. A signed ``show_page_email`` session is a
+    ``/p``-only read visitor, so it never enters ``/show``. show_page has no
+    Resource ACL row anymore, so nothing is read from ``resource_access_service``.
+    ``session_id`` is retained for call-site symmetry but the decision does not
+    depend on it.
+    """
 
     if context is None:
         return False
-    if context.instance_access_source == "show_page_email":
-        return context.can_use_show_page(session_id)
-    try:
-        return resource_access_service.can_use_resource(
-            context,
-            "show_page",
-            session_id,
-        )
-    except resource_access_service.ResourceAccessError:
-        return False
+    return context.has_role("viewer") and context.instance_access_source != "show_page_email"
 
 
 async def _wait_for_remote_session_authorization_loss(
@@ -5670,7 +5672,6 @@ def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
 
 def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) -> dict:
     from storage import project_access_service
-    from storage import resource_access_service
 
     session_id = str(payload.get("session_id") or "")
     if not project_access_service.session_exists(conn, session_id):
@@ -5683,15 +5684,10 @@ def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) ->
     )
     if project_access_service.role_allows(effective_role, "editor"):
         return payload
-    # Legacy and IM-scoped pages have no project role. Their resource ACL
-    # remains the authority for the page owner/editor, but it must not override
-    # an effective project Viewer downgrade on project-attached sessions.
-    if project_id is None and resource_access_service.can_manage_resource_acl(
-        context,
-        "show_page",
-        session_id,
-        connection=conn,
-    ):
+    # Legacy and IM-scoped pages have no project role. §3.2 makes the Instance
+    # Editor role their authority for the page owner/editor, but it must not
+    # override an effective project Viewer downgrade on project-attached sessions.
+    if project_id is None and context.has_role("editor"):
         return payload
     return {key: value for key, value in payload.items() if key != "path"}
 
@@ -10394,12 +10390,12 @@ def _media_row_show_page_access_allowed(context: Any, row: dict[str, Any]) -> bo
     """Whether *context* may still read a Show annotation's screenshot bytes.
 
     A `show_annotation` screenshot is part of the page it was drawn on, so it
-    inherits that page's resource ACL rather than only the Project/session role
-    the rest of the media proxy checks. Without this the media token outlives
-    the access that produced it: a caller who saw a private page once keeps its
-    screenshot readable after the page policy stops naming them, and being the
-    Instance owner does not override the page ACL either -- a direct read of a
-    page owned by another subject is denied, so its screenshot must be too.
+    inherits the page's ``/show`` admission (the §3.2 Instance Viewer gate)
+    rather than only the Project/session role the rest of the media proxy
+    checks. Without this the media token outlives the access that produced it:
+    a caller who saw the Workbench once keeps its screenshot readable after
+    their Instance role is revoked, and an email-grant ``/p`` visitor never
+    reaches the annotation bytes at all.
 
     Media from any other source is unaffected and keeps the Project/session
     authorization below as its only gate.
@@ -11600,11 +11596,10 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     if context is None:
         return True
     if event_type == "show.event":
-        # A Show Page carries its own resource ACL, and being the Instance owner
-        # does not override it: a direct read of a page whose policy names
-        # another subject is denied, so the workbench stream must not hand the
-        # same page's annotation text and attachment metadata to that owner
-        # either. Fail closed when the frame has no session to check.
+        # A Show Page's Workbench stream follows §3.2 Instance Viewer admission,
+        # so any Instance role sees its page's live events while an email-grant
+        # ``/p`` visitor never receives annotation text or attachment metadata.
+        # Fail closed when the frame has no session to check.
         data = _workbench_event_data(payload)
         session_id = data.get("session_id") if data else None
         if not isinstance(session_id, str) or not session_id:
@@ -11612,8 +11607,8 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
         if not _show_page_resource_access_allowed(context, session_id):
             return False
         # Show Page event visibility is intentionally independent from Project
-        # ACL. Project ACL gates page creation/editing, while the page ACL gates
-        # Viewer reads and live event delivery.
+        # ACL. Project ACL gates page creation/editing, while §3.2 instance
+        # admission gates Viewer reads and live event delivery.
         return context.has_role("viewer")
     if _has_runtime_owner_access(context):
         return True

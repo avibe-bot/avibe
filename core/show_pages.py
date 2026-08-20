@@ -303,34 +303,6 @@ class ShowAccessApplyResult:
     show_access: ShowAccess
 
 
-def get_show_page_resource_metadata(connection: Connection, session_id: str) -> dict[str, str] | None:
-    """Return the Show Page title metadata allowed in the hosted index."""
-
-    row = connection.execute(
-        select(
-            show_pages.c.session_id,
-            show_pages.c.updated_at.label("page_updated_at"),
-            agent_sessions.c.title,
-            agent_sessions.c.updated_at.label("session_updated_at"),
-        )
-        .select_from(
-            show_pages.outerjoin(
-                agent_sessions,
-                agent_sessions.c.id == show_pages.c.session_id,
-            )
-        )
-        .where(show_pages.c.session_id == session_id)
-        .limit(1)
-    ).mappings().first()
-    if row is None:
-        return None
-    title = str(row["title"] or "").strip()
-    return {
-        "display_name": title or str(row["session_id"]),
-        "updated_at": str(row["session_updated_at"] or row["page_updated_at"]),
-    }
-
-
 def validate_session_id(session_id: str) -> str:
     value = (session_id or "").strip()
     if not value:
@@ -683,18 +655,11 @@ def require_show_page_management(
     *,
     user_context: Any = None,
 ) -> None:
-    """Require management access using the caller's active transaction."""
-
-    from storage import resource_access_service
+    """Require Instance Editor authority to change the page."""
 
     session_id = validate_session_id(session_id)
     context = _resolve_resource_access_context(user_context)
-    if not resource_access_service.can_manage_resource_acl(
-        context,
-        "show_page",
-        session_id,
-        connection=connection,
-    ):
+    if not _instance_editor_or_owner(context):
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
 
@@ -704,18 +669,11 @@ def require_show_page_sharing_control(
     *,
     user_context: Any = None,
 ) -> None:
-    """Require resource-owner authority for shared-audience changes."""
-
-    from storage import resource_access_service
+    """Require Instance Editor authority to widen anonymous sharing."""
 
     session_id = validate_session_id(session_id)
     context = _resolve_resource_access_context(user_context)
-    if not resource_access_service.can_control_resource_sharing(
-        context,
-        "show_page",
-        session_id,
-        connection=connection,
-    ):
+    if not _instance_editor_or_owner(context):
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
 
@@ -725,18 +683,22 @@ def require_show_page_access_management(
     *,
     user_context: Any = None,
 ) -> None:
-    """Require authority to manage the audience or make sharing more restrictive."""
-
-    from storage import resource_access_service
+    """Require Instance Editor authority to manage the audience or narrow sharing."""
 
     session_id = validate_session_id(session_id)
     context = _resolve_resource_access_context(user_context)
-    if not resource_access_service.can_manage_show_page_access(
-        context,
-        session_id,
-        connection=connection,
-    ):
+    if not _instance_editor_or_owner(context):
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
+def _instance_editor_or_owner(context: Any) -> bool:
+    """The /show Workbench management capability is the Instance Editor role.
+
+    ``show_page_email`` sessions are Viewer-only, so they can never satisfy an
+    Editor check. Instance Owner passes as the top of the role ladder.
+    """
+
+    return bool(context is not None and context.has_role("editor"))
 
 
 def private_url(session_id: str, *, config: V2Config | None = None) -> str | None:
@@ -1049,7 +1011,12 @@ class ShowPageStore:
             return _page_from_row(row) if row else None
 
     def require_access(self, session_id: str, *, user_context: Any = None) -> ShowPage:
-        """Return a Show Page only when the caller may use its ACL resource."""
+        """Return a Show Page only to an Instance Viewer (owner/editor/viewer).
+
+        ``/show`` admission is the Instance role alone, independent of the
+        sharing list and of Resource ACL (§3.2): any Viewer enters the Workbench,
+        while a signed ``show_page_email`` session never does.
+        """
 
         session_id = validate_session_id(session_id)
         context = _resolve_resource_access_context(user_context)
@@ -1061,7 +1028,7 @@ class ShowPageStore:
             )
             if row is None:
                 raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-            self._require_resource_access(conn, session_id, context)
+            self._require_resource_access(context)
             return _page_from_row(row)
 
     def require_management(self, session_id: str, *, user_context: Any = None) -> ShowPage:
@@ -1095,9 +1062,6 @@ class ShowPageStore:
         page_request: PageRequest | None,
         user_context: Any = None,
     ) -> PageResult[ShowPage]:
-        from storage import resource_access_service
-
-        context = _resolve_resource_access_context(user_context)
         if visibility is not None and visibility not in VISIBILITIES:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
         statement = select(show_pages)
@@ -1128,23 +1092,14 @@ class ShowPageStore:
         statement = statement.order_by(show_pages.c.updated_at.desc(), show_pages.c.session_id.asc())
         with self.engine.begin() as conn:
             rows = conn.execute(statement).mappings().all()
-            rows = resource_access_service.filter_accessible_resources(
-                context,
-                "show_page",
-                rows,
-                connection=conn,
-            )
         return page_sequence([_page_from_row(row) for row in rows], page_request)
 
     @staticmethod
-    def _require_resource_access(connection, session_id: str, user_context: Any) -> None:
-        from storage import resource_access_service
-
-        if not resource_access_service.can_use_resource(
-            user_context,
-            "show_page",
-            session_id,
-            connection=connection,
+    def _require_resource_access(user_context: Any) -> None:
+        if not (
+            user_context is not None
+            and user_context.has_role("viewer")
+            and user_context.instance_access_source != "show_page_email"
         ):
             raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
@@ -1208,44 +1163,25 @@ class ShowPageStore:
 
         return permissions.resolve_current_instance_ownership()
 
-    @classmethod
-    def _reconcile_resource_policy(
-        cls,
-        connection,
-        session_id: str,
-        user_context: Any,
-        ownership: dict[str, Any],
-    ) -> dict[str, Any]:
-        from storage import resource_access_service
+    @staticmethod
+    def _reconcile_resource_policy(ownership: dict[str, Any]) -> dict[str, Any]:
+        """Map the instance-ownership fence to a frontend ``ownership_status``.
 
-        current_policy = resource_access_service.get_resource_policy(
-            "show_page",
-            session_id,
-            connection=connection,
-        )
-        if current_policy is None:
-            try:
-                cls._require_project_edit_access(connection, session_id, user_context)
-            except ShowPageError:
-                if not user_context.can_use_show_page(session_id):
-                    raise
-                return {
-                    "status": "unchanged",
-                    "ownership": ownership,
-                    "policy": None,
-                }
-        owner_user_id = (
-            user_context.subject
-            if user_context.subject and user_context.has_role("editor")
-            else None
-        )
-        return resource_access_service.reconcile_show_page_resource_policy(
-            connection,
-            resource_id=session_id,
-            ownership=ownership,
-            owner_user_id=owner_user_id,
-            owner_email=user_context.email,
-        )
+        §3.2 removed show_page from the Resource ACL, so there is no policy row
+        to reconcile: the status is derived from the ownership fence alone and
+        ``policy`` is always ``None``. The ``conflict`` status is obsolete with
+        the Resource ACL gone — there is no ``policy_organization_id`` to diverge
+        from the instance organization.
+        """
+
+        status = {
+            "unmanaged": "unmanaged",
+            "personal": "unchanged",
+            "organization": "unchanged",
+            "organization_pending": "pending",
+            "configuration_unavailable": "configuration_unavailable",
+        }.get(ownership.get("mode"), "unmanaged")
+        return {"status": status, "ownership": ownership, "policy": None}
 
     @classmethod
     def _existing_page_for_use(
@@ -1269,9 +1205,8 @@ class ShowPageStore:
         )
         if existing is None:
             return None
-        cls._reconcile_resource_policy(connection, session_id, user_context, ownership)
         cls._require_project_edit_access(connection, session_id, user_context)
-        cls._require_resource_access(connection, session_id, user_context)
+        cls._require_resource_access(user_context)
         return _page_from_row(existing)
 
     def get_for_use(self, session_id: str, *, user_context: Any = None) -> ShowPage:
@@ -1314,7 +1249,6 @@ class ShowPageStore:
         """Resolve ownership outside SQLite, then reconcile one existing page."""
 
         session_id = validate_session_id(session_id)
-        context = _resolve_resource_access_context(user_context)
         ownership = self._resolve_instance_ownership()
         with config_file_lock():
             with self.engine.begin() as connection:
@@ -1328,12 +1262,7 @@ class ShowPageStore:
                         "This session has no Show Page.",
                         code="show_page_not_found",
                     )
-                return self._reconcile_resource_policy(
-                    connection,
-                    session_id,
-                    context,
-                    ownership,
-                )
+                return self._reconcile_resource_policy(ownership)
 
     def ensure(self, session_id: str, *, user_context: Any = None) -> ShowPage:
         session_id = validate_session_id(session_id)
@@ -1367,7 +1296,6 @@ class ShowPageStore:
                         updated_at=page.updated_at,
                     )
                 )
-                self._reconcile_resource_policy(conn, session_id, context, ownership)
         return page
 
     def ensure_active(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, bool]:
@@ -1440,14 +1368,6 @@ class ShowPageStore:
                         "Could not allocate a unique share ID.",
                         code="share_id_allocation_failed",
                     )
-                reconciliation = self._reconcile_resource_policy(
-                    conn,
-                    session_id,
-                    context,
-                    ownership,
-                )
-                if not (created and reconciliation["status"] == "pending"):
-                    self._require_resource_access(conn, session_id, context)
         return _page_from_row(row), created
 
     def is_archived(self, session_id: str) -> bool:

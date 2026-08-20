@@ -3,15 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import update
-
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.services.skills import skill_resource_id
 from storage import resource_access_service
 from storage.db import get_cached_sqlite_engine
 from storage.migrations import run_migrations
-from storage.models import agent_sessions, agents, show_pages, vault_secrets
+from storage.models import agents, vault_secrets
 from vibe import remote_access
 
 
@@ -88,7 +86,6 @@ def _seed_named_resources() -> dict[str, str]:
             project_dir=None,
             name="release-notes",
         ),
-        "show_page": "ses-safe-name",
     }
     with engine.begin() as connection:
         connection.execute(
@@ -127,34 +124,6 @@ def _seed_named_resources() -> dict[str, str]:
                 updated_at=created_at,
             )
         )
-        connection.execute(
-            agent_sessions.insert().values(
-                id=resource_ids["show_page"],
-                scope_id=None,
-                agent_backend="codex",
-                agent_variant="default",
-                session_anchor="private-show-anchor",
-                workdir="/private/show/workspace",
-                native_session_id="private-native-session",
-                title="Quarterly Results",
-                status="active",
-                metadata_json='{"execution_output":"private-show-output"}',
-                created_at=created_at,
-                updated_at=created_at,
-                last_active_at=created_at,
-            )
-        )
-        connection.execute(
-            show_pages.insert().values(
-                session_id=resource_ids["show_page"],
-                access_mode="private",
-                access_revision=0,
-                share_id=None,
-                offline_at=None,
-                created_at=created_at,
-                updated_at=created_at,
-            )
-        )
         for resource_kind, resource_id in resource_ids.items():
             resource_access_service.ensure_resource_policy(
                 connection,
@@ -175,11 +144,10 @@ def test_local_descriptors_resolve_all_resource_names_without_content() -> None:
     descriptors = remote_access._local_policy_resource_descriptors("org-1")
     by_kind = {descriptor["resource_kind"]: descriptor for descriptor in descriptors}
 
-    assert set(by_kind) == {"agent", "vault_secret", "skill", "show_page"}
+    assert set(by_kind) == {"agent", "vault_secret", "skill"}
     assert by_kind["agent"]["display_name"] == "Research Agent"
     assert by_kind["vault_secret"]["display_name"] == "PRODUCTION_API_KEY"
     assert by_kind["skill"]["display_name"] == "release-notes"
-    assert by_kind["show_page"]["display_name"] == "Quarterly Results"
     allowed_descriptor_fields = {
         "resource_id",
         "resource_kind",
@@ -209,70 +177,8 @@ def test_local_descriptors_resolve_all_resource_names_without_content() -> None:
         "private-vault-wrap",
         "private-vault-description",
         "private.example",
-        "private-show-anchor",
-        "/private/show/workspace",
-        "private-native-session",
-        "private-show-output",
     ):
         assert forbidden not in serialized
-
-
-def test_local_descriptor_title_revision_and_safe_fallback() -> None:
-    resource_ids = _seed_named_resources()
-    first = {
-        item["resource_kind"]: item
-        for item in remote_access._local_policy_resource_descriptors("org-1")
-    }["show_page"]
-    engine = get_cached_sqlite_engine()
-    with engine.begin() as connection:
-        connection.execute(
-            update(agent_sessions)
-            .where(agent_sessions.c.id == resource_ids["show_page"])
-            .values(
-                title="Executive Overview",
-                updated_at="2026-07-27T20:00:00.000002+00:00",
-            )
-        )
-
-    renamed = {
-        item["resource_kind"]: item
-        for item in remote_access._local_policy_resource_descriptors("org-1")
-    }["show_page"]
-    assert renamed["display_name"] == "Executive Overview"
-    assert renamed["metadata_revision"] > first["metadata_revision"]
-
-    with engine.begin() as connection:
-        connection.execute(
-            update(agent_sessions)
-            .where(agent_sessions.c.id == resource_ids["show_page"])
-            .values(
-                title="Q3 / Launch: Ops",
-                updated_at="2026-07-27T20:00:00.000003+00:00",
-            )
-        )
-    separated = {
-        item["resource_kind"]: item
-        for item in remote_access._local_policy_resource_descriptors("org-1")
-    }["show_page"]
-    assert separated["display_name"] == "Q3 / Launch: Ops"
-    assert separated["metadata_revision"] > renamed["metadata_revision"]
-
-    with engine.begin() as connection:
-        connection.execute(
-            update(agent_sessions)
-            .where(agent_sessions.c.id == resource_ids["show_page"])
-            .values(
-                title="Quarterly\nResults",
-                updated_at="2026-07-27T20:00:00.000004+00:00",
-            )
-        )
-    unsafe = {
-        item["resource_kind"]: item
-        for item in remote_access._local_policy_resource_descriptors("org-1")
-    }["show_page"]
-    assert unsafe["display_name"] == resource_ids["show_page"]
-    assert unsafe["metadata_revision"] > separated["metadata_revision"]
-    assert "Quarterly\nResults" not in repr(unsafe)
 
 
 def test_local_descriptors_omit_missing_source_rows() -> None:
@@ -284,7 +190,6 @@ def test_local_descriptors_omit_missing_source_rows() -> None:
             ("agent", "missing-agent"),
             ("vault_secret", "missing-vault"),
             ("skill", "missing-skill"),
-            ("show_page", "missing-show-page"),
         ):
             resource_access_service.ensure_resource_policy(
                 connection,
@@ -501,7 +406,6 @@ def test_applied_acl_changes_publish_one_authorization_change_for_all_resource_c
         "agent": "agent-cache-revocation",
         "skill": "skill-cache-revocation",
         "vault_secret": "vault-cache-revocation",
-        "show_page": "show-cache-revocation",
     }
     with engine.begin() as connection:
         for resource_kind, resource_id in resource_ids.items():
@@ -559,77 +463,14 @@ def test_applied_acl_changes_publish_one_authorization_change_for_all_resource_c
     )
 
     assert result["ok"] is True
-    assert result["applied"] == 4
+    assert result["applied"] == 3
     assert events == [
         (
             "authorization.changed",
             {
                 "project_ids": [],
-                "resource_kinds": ["agent", "show_page", "skill", "vault_secret"],
+                "resource_kinds": ["agent", "skill", "vault_secret"],
             },
-        )
-    ]
-
-
-def test_show_page_acl_widening_publishes_authorization_change(monkeypatch) -> None:
-    paths.ensure_data_dirs()
-    run_migrations()
-    engine = get_cached_sqlite_engine()
-    with engine.begin() as connection:
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id="show-page-widening",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="private",
-            policy_revision=1,
-            last_applied_control_plane_revision=1,
-        )
-    monkeypatch.setattr(
-        remote_access,
-        "publish_resource_index",
-        lambda *_args, **_kwargs: {"organization_id": "org-1", "resources": []},
-    )
-    monkeypatch.setattr(
-        remote_access,
-        "pull_resource_acl_intents",
-        lambda *_args, **_kwargs: {
-            "organization_id": "org-1",
-            "intents": [
-                {
-                    "resource_kind": "show_page",
-                    "resource_id": "show-page-widening",
-                    "revision": 2,
-                    "access_level": "public",
-                    "group_ids": [],
-                }
-            ],
-        },
-    )
-    monkeypatch.setattr(
-        remote_access,
-        "acknowledge_resource_acl_intent",
-        lambda *_args, **_kwargs: {},
-    )
-    events: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(
-        "vibe.sse_broker.broker.publish",
-        lambda event_type, data: events.append((event_type, data)),
-    )
-
-    result = remote_access._sync_one_organization(
-        _config(),
-        organization_id="org-1",
-        resources=[],
-    )
-
-    assert result["ok"] is True
-    assert result["applied"] == 1
-    assert events == [
-        (
-            "authorization.changed",
-            {"project_ids": [], "resource_kinds": ["show_page"]},
         )
     ]
 

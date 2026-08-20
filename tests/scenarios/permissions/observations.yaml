@@ -33,10 +33,11 @@ observations:
     source: issue_contract
     related_scenarios:
       - PERMISSIONS-011
-    summary: Show Page Workspace access is the exact-current-instance Resource ACL while link and Limited-email access remain local and independent.
-    previous_assumption: The Show Page access panel could derive Organization ownership from a browser claim or a hidden Cloud-management session.
-    observed_behavior: The local service resolves pairing ownership, proxies canonical Resource ACL reads and writes, and preserves stale drafts on revision conflict.
+      - PERMISSIONS-012
+    summary: Resource ACL is bound to the exact-current-instance credential and covers agent / vault_secret / skill only; Show Page sharing is the local single-axis /p model with no Resource ACL row.
+    previous_assumption: Show Page Workspace access was a show_page Resource ACL kind that the access panel could derive Organization ownership for from a browser claim.
+    observed_behavior: The local service resolves pairing ownership, proxies canonical Resource ACL reads and writes for the remaining kinds, preserves stale drafts on revision conflict, and rejects the retired show_page kind before Backend contact.
     required_updates:
       - bind every Resource ACL request to the paired instance and strip the browser match field before Backend contact
-      - preserve local link visibility and Limited-email grants as separate policy dimensions
-      - treat ownership uncertainty or mismatch as fail-closed without overwriting an existing policy
+      - keep Show Page link visibility and Limited-email grants as a separate local policy dimension with no show_page Resource ACL
+      - reject the retired show_page resource kind as invalid_request without any Backend contact

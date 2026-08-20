@@ -1562,24 +1562,12 @@ def list_show_pages(*, user_context: Any = None) -> dict:
     try:
         result = store.list_page(page_request=None, user_context=user_context)
         pages = [show_page_payload(page, config=config) for page in result.items]
-        with store.engine.connect() as connection:
-            for payload in pages:
-                session_id = payload["session_id"]
-                payload["can_manage"] = (
-                    resource_access_service.can_manage_show_page_access(
-                        context,
-                        session_id,
-                        connection=connection,
-                    )
-                )
-                payload["can_publish_public"] = (
-                    resource_access_service.can_control_resource_sharing(
-                        context,
-                        "show_page",
-                        session_id,
-                        connection=connection,
-                    )
-                )
+        # §3.2: management and sharing control follow the Instance Editor role
+        # alone — show_page no longer has a Resource ACL row to consult.
+        can_manage = context.has_role("editor")
+        for payload in pages:
+            payload["can_manage"] = can_manage
+            payload["can_publish_public"] = can_manage
     finally:
         store.close()
     _apply_session_meta(pages)
@@ -1604,13 +1592,10 @@ def _show_page_mutation_response(
     from storage import resource_access_service
 
     context = resource_access_service.resolve_resource_access_context(user_context)
-    with store.engine.connect() as connection:
-        can_use = resource_access_service.can_use_resource(
-            context,
-            "show_page",
-            page.session_id,
-            connection=connection,
-        )
+    can_use = (
+        context.has_role("viewer")
+        and context.instance_access_source != "show_page_email"
+    )
     if not can_use:
         # Access managers may take a page offline without page-use access. Do
         # not return page paths, URLs, share IDs, audience, or session metadata.
@@ -1700,7 +1685,12 @@ def get_show_page(session_id: str, *, user_context: Any = None) -> dict:
 
 
 def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
-    """Return the applied authenticated audience and sharing authority."""
+    """Return the applied authenticated audience and sharing authority.
+
+    §3.2 removed show_page from the Resource ACL, so there is no policy row:
+    the ownership fence drives ``mode``/``ownership_status`` and the Instance
+    role alone drives ``can_use``/``can_manage``/``can_publish_public``.
+    """
 
     from core.show_pages import ShowPageError, ShowPageStore
     from storage import resource_access_service
@@ -1711,50 +1701,31 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
         page = store.get(session_id)
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-        reconciliation = store.reconcile_resource_policy(
-            page.session_id,
-            user_context=context,
+        reconciliation = store.reconcile_resource_policy(page.session_id)
+        can_use = (
+            context.has_role("viewer")
+            and context.instance_access_source != "show_page_email"
         )
-        with store.engine.connect() as connection:
-            policy = reconciliation["policy"]
-            can_use = resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            can_manage = resource_access_service.can_manage_show_page_access(
-                context,
-                page.session_id,
-                connection=connection,
-            )
-            can_publish_public = resource_access_service.can_control_resource_sharing(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            if not (can_use or can_manage):
-                raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+        can_manage = context.has_role("editor")
+        can_publish_public = context.has_role("editor")
+        if not (can_use or can_manage):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
     finally:
         store.close()
 
     ownership = reconciliation["ownership"]
     organization_id = ownership.get("organization_id")
-    policy_organization_id = policy.get("organization_id") if policy else None
     return {
         "ok": True,
         "mode": ownership["mode"],
         "ownership_status": reconciliation["status"],
         "instance_id": ownership.get("instance_id"),
         "organization_id": organization_id,
-        "policy_organization_id": policy_organization_id,
-        "access_level": policy.get("access_level", "private") if policy else "private",
-        "group_ids": list(policy.get("group_ids") or []) if policy else [],
-        "policy_revision": policy.get("policy_revision") if policy else None,
-        "last_applied_control_plane_revision": (
-            policy.get("last_applied_control_plane_revision") if policy else None
-        ),
+        "policy_organization_id": None,
+        "access_level": "private",
+        "group_ids": [],
+        "policy_revision": None,
+        "last_applied_control_plane_revision": None,
         "can_use": can_use,
         "can_manage": can_manage,
         "can_publish_public": can_publish_public,
@@ -1775,17 +1746,11 @@ def require_show_access_settings_control(
         page = store.get(session_id)
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-        with store.engine.connect() as connection:
-            if not resource_access_service.can_control_resource_sharing(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            ):
-                raise ShowPageError(
-                    "Show Page access is not permitted.",
-                    code="resource_access_forbidden",
-                )
+        if not context.has_role("editor"):
+            raise ShowPageError(
+                "Show Page access is not permitted.",
+                code="resource_access_forbidden",
+            )
     finally:
         store.close()
 

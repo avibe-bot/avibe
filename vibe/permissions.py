@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -16,7 +17,13 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from config import paths
-from config.v2_config import V2Config
+from config.v2_config import V2Config, config_file_lock
+
+from sqlalchemy import select
+from sqlalchemy.engine import Connection
+
+from storage.db import get_cached_sqlite_engine
+from storage.models import state_meta
 
 
 CACHE_SCHEMA_VERSION = 1
@@ -33,7 +40,7 @@ _ACCESS_ROLES = frozenset({"viewer", "editor"})
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted"})
 _PROJECT_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
-_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
+_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill"})
 _RESOURCE_ACCESS_LEVELS = frozenset({"private", "public", "scope"})
 _RESOURCE_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error"})
 _POLICY_SYNC_STATUSES = frozenset({"none", "in_sync", "applying", "offline", "error"})
@@ -42,6 +49,17 @@ _PROJECT_ID_PATH_SEPARATORS = frozenset({"/", "\\"})
 _PROJECT_ID_DOT_SEGMENTS = frozenset({".", ".."})
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.RLock()
+
+# Show Page instance-ownership fence constants. These are pairing metadata, not
+# Resource ACL: they resolve whether the paired instance is personal or bound to
+# an organization so the `/p` sharing axis can stamp group/organization entries.
+SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY = "show_page_instance_ownership"
+SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE = "configuration_unavailable"
+_CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE = object()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class PermissionsError(RuntimeError):
@@ -62,6 +80,10 @@ class PermissionsUnavailableError(PermissionsError):
 
 class PermissionsInvalidResponseError(PermissionsError):
     pass
+
+
+class PermissionsInvalidRequestError(PermissionsError):
+    """The caller asked for something the current-instance API does not serve."""
 
 
 class PermissionsBackendError(PermissionsError):
@@ -182,7 +204,8 @@ def _require_project_id(value: Any) -> None:
 
 
 def _require_resource_identity(resource_kind: Any, resource_id: Any) -> tuple[str, str]:
-    _require_enum(resource_kind, _RESOURCE_KINDS)
+    if not isinstance(resource_kind, str) or resource_kind not in _RESOURCE_KINDS:
+        raise PermissionsInvalidRequestError("invalid_resource_kind")
     if (
         not isinstance(resource_id, str)
         or resource_id != resource_id.strip()
@@ -190,7 +213,7 @@ def _require_resource_identity(resource_kind: Any, resource_id: Any) -> tuple[st
         or len(resource_id) > 200
         or any(ord(char) < 32 or ord(char) == 127 for char in resource_id)
     ):
-        raise PermissionsInvalidResponseError("invalid_resource_id")
+        raise PermissionsInvalidRequestError("invalid_resource_id")
     return resource_kind, resource_id
 
 
@@ -1260,12 +1283,180 @@ def update_resource_access(
     )
 
 
+def _clean_show_page_identifier(value: Any, *, limit: int = 200) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > limit or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        return None
+    return cleaned
+
+
+def _configured_show_page_instance() -> tuple[str, str] | None | object:
+    try:
+        cloud = V2Config.load().remote_access.vibe_cloud
+        credentials = cloud.runtime_credentials()
+        if credentials is None:
+            return None
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        instance_id = _clean_show_page_identifier(credentials[1])
+        if instance_id is None or cloud.instance_kind not in {"personal", "organization"}:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    except (
+        AttributeError,
+        FileNotFoundError,
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    return instance_id, cloud.instance_kind
+
+
+def _show_page_configuration_unavailable_ownership() -> dict[str, Any]:
+    return {
+        "mode": SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+        "instance_id": None,
+        "organization_id": None,
+        "source": "config",
+    }
+
+
+def _stored_show_page_instance_ownership(connection: Connection) -> dict[str, Any] | None:
+    raw_value = connection.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY
+        )
+    ).scalar_one_or_none()
+    try:
+        payload = json.loads(raw_value) if raw_value else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        return None
+    instance_id = _clean_show_page_identifier(payload.get("instance_id"))
+    mode = payload.get("mode")
+    organization_id = _clean_show_page_identifier(payload.get("organization_id"))
+    if instance_id is None or mode not in {"personal", "organization"}:
+        return None
+    if mode == "organization" and organization_id is None:
+        return None
+    if mode == "personal" and organization_id is not None:
+        return None
+    return {
+        "mode": mode,
+        "instance_id": instance_id,
+        "organization_id": organization_id,
+        "source": "stored",
+    }
+
+
+def current_show_page_instance_ownership(
+    *,
+    connection: Connection | None = None,
+) -> dict[str, Any]:
+    """Return the persisted ownership fence for the exact current pairing."""
+
+    configured = _configured_show_page_instance()
+    if configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE:
+        return _show_page_configuration_unavailable_ownership()
+    if configured is None:
+        return {
+            "mode": "unmanaged",
+            "instance_id": None,
+            "organization_id": None,
+            "source": "config",
+        }
+    instance_id, instance_kind = configured
+    if connection is not None:
+        stored = _stored_show_page_instance_ownership(connection)
+    else:
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            stored = _stored_show_page_instance_ownership(conn)
+    exact_stored = stored if stored and stored["instance_id"] == instance_id else None
+    if instance_kind == "personal":
+        return {
+            "mode": "personal",
+            "instance_id": instance_id,
+            "organization_id": None,
+            "source": "config",
+        }
+    if instance_kind == "organization":
+        if exact_stored and exact_stored["mode"] == "organization":
+            return exact_stored
+        return {
+            "mode": "organization_pending",
+            "instance_id": instance_id,
+            "organization_id": None,
+            "source": "config",
+        }
+    if exact_stored is not None:
+        return exact_stored
+    return {
+        "mode": "unmanaged",
+        "instance_id": instance_id,
+        "organization_id": None,
+        "source": "config",
+    }
+
+
+def remember_show_page_instance_ownership(
+    connection: Connection,
+    ownership: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist an authoritative binding only while its exact pairing is current."""
+
+    with config_file_lock():
+        return _remember_show_page_instance_ownership_locked(connection, ownership)
+
+
+def _remember_show_page_instance_ownership_locked(
+    connection: Connection,
+    ownership: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Implement ownership persistence while the pairing lock is held."""
+
+    configured = _configured_show_page_instance()
+    instance_id = _clean_show_page_identifier(ownership.get("instance_id"))
+    mode = ownership.get("mode")
+    organization_id = _clean_show_page_identifier(ownership.get("organization_id"))
+    if (
+        configured is None
+        or configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        or instance_id is None
+        or instance_id != configured[0]
+        or mode not in {"personal", "organization"}
+        or configured[1] != mode
+        or (mode == "organization") != bool(organization_id)
+    ):
+        return current_show_page_instance_ownership(connection=connection)
+    payload = {
+        "schema_version": 1,
+        "instance_id": instance_id,
+        "mode": mode,
+        "organization_id": organization_id,
+    }
+    connection.execute(
+        state_meta.delete().where(state_meta.c.key == SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY)
+    )
+    connection.execute(
+        state_meta.insert().values(
+            key=SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY,
+            value_json=json.dumps(payload, separators=(",", ":")),
+            updated_at=_utc_now_iso(),
+        )
+    )
+    return {**payload, "source": str(ownership.get("source") or "live")}
+
+
 def resolve_current_instance_ownership(
     config: V2Config | None = None,
 ) -> dict[str, Any]:
     """Resolve exact-instance ownership without trusting browser claims."""
-
-    from storage import resource_access_service
 
     try:
         config = config or V2Config.load()
@@ -1280,7 +1471,7 @@ def resolve_current_instance_ownership(
         ValueError,
     ):
         return {
-            "mode": resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+            "mode": SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
             "instance_id": None,
             "organization_id": None,
             "source": "config",
@@ -1299,17 +1490,17 @@ def resolve_current_instance_ownership(
         or not credentials[1].strip()
     ):
         return {
-            "mode": resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+            "mode": SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
             "instance_id": None,
             "organization_id": None,
             "source": "config",
         }
 
-    current = resource_access_service.current_show_page_instance_ownership()
+    current = current_show_page_instance_ownership()
     if current["mode"] in {
         "personal",
         "organization",
-        resource_access_service.SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
+        SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE,
     }:
         return current
     try:
@@ -1319,20 +1510,26 @@ def resolve_current_instance_ownership(
     instance = result.projection["instance"]
     organization = instance.get("organization")
     if isinstance(organization, Mapping):
-        return {
+        ownership = {
             "mode": "organization",
             "instance_id": credentials[1],
             "organization_id": organization["id"],
             "source": result.source,
         }
-    if "organization" in instance or config.remote_access.vibe_cloud.instance_kind == "personal":
-        return {
+    elif "organization" in instance or config.remote_access.vibe_cloud.instance_kind == "personal":
+        ownership = {
             "mode": "personal",
             "instance_id": credentials[1],
             "organization_id": None,
             "source": result.source,
         }
-    return current
+    else:
+        return current
+    # Persist a definitive binding so a later offline resolution falls back to
+    # the exact-instance fence instead of re-querying the Permissions backend.
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        return remember_show_page_instance_ownership(conn, ownership)
 
 
 def _local_instance_display(

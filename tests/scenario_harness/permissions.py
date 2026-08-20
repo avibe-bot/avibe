@@ -153,9 +153,9 @@ class PermissionsScenarioHarness:
     def _resource() -> dict:
         return {
             "instance_id": "inst-current",
-            "resource_kind": "show_page",
+            "resource_kind": "agent",
             "resource_id": "ses-resource",
-            "display_name": "Scenario Show Page",
+            "display_name": "Scenario Agent",
             "owner_user_id": "subject-owner",
             "access": {
                 "access_level": "private",
@@ -189,7 +189,7 @@ class PermissionsScenarioHarness:
         if method == "GET" and path.endswith("/permissions"):
             return _BackendResponse(200, self.projection)
         if method == "GET" and path.endswith(
-            "/permissions/resources/show_page/ses-resource/access"
+            "/permissions/resources/agent/ses-resource/access"
         ):
             return _BackendResponse(200, {"resource": self.resource})
         if self.projection["instance"]["permission_authority"] == "cloud":
@@ -243,7 +243,7 @@ class PermissionsScenarioHarness:
                 },
             )
         if method == "PUT" and path.endswith(
-            "/permissions/resources/show_page/ses-resource/access"
+            "/permissions/resources/agent/ses-resource/access"
         ):
             current = self.resource["access"]["revision"]
             if payload.get("if_match_revision") != current:

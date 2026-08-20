@@ -192,15 +192,6 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     config, ids = _setup_state(tmp_path)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id=ids["session_a"],
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-    with engine.begin() as conn:
         conn.execute(
             scopes.update()
             .where(scopes.c.native_id == ids["project_a"])
@@ -984,7 +975,7 @@ def test_show_page_payload_preserves_path_for_non_project_page_owner(monkeypatch
     assert payload["path"] == "/private/page"
 
 
-def test_show_page_payload_does_not_bypass_project_viewer_with_resource_manager(monkeypatch) -> None:
+def test_show_page_payload_project_viewer_downgrade_wins_over_instance_editor(monkeypatch) -> None:
     context = AuthorizationContext(
         instance_role="editor",
         email="alice@example.com",
@@ -1015,11 +1006,6 @@ def test_show_page_payload_does_not_bypass_project_viewer_with_resource_manager(
         lambda _conn, _session_id: "project-1",
     )
     monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
-    monkeypatch.setattr(
-        resource_access_service,
-        "can_manage_resource_acl",
-        lambda _context, _kind, _resource_id, *, connection: True,
-    )
 
     payload = ui_server._show_page_response_for_request(
         {"ok": True, "session_id": "project-session", "path": "/private/page"},
@@ -1060,11 +1046,6 @@ def test_show_page_payload_does_not_treat_inaccessible_project_as_unscoped(monke
         lambda _conn, _session_id: "project-removed-binding",
     )
     monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
-    monkeypatch.setattr(
-        resource_access_service,
-        "can_manage_resource_acl",
-        lambda _context, _kind, _resource_id, *, connection: True,
-    )
 
     payload = ui_server._show_page_response_for_request(
         {"ok": True, "session_id": "project-session", "path": "/private/page"},
@@ -1095,11 +1076,6 @@ def test_show_page_payload_redacts_path_when_session_is_missing(monkeypatch) -> 
 
     monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
     monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: False)
-    monkeypatch.setattr(
-        resource_access_service,
-        "can_manage_resource_acl",
-        lambda _context, _kind, _resource_id, *, connection: True,
-    )
 
     payload = ui_server._show_page_response_for_request(
         {"ok": True, "session_id": "deleted-session", "path": "/private/page"},
@@ -1122,16 +1098,6 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         organization_role="member",
         is_remote=True,
     )
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id=ids["session_a"],
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
     visible_payload = json.dumps({"type": "session.status", "data": {"session_id": ids["session_a"]}})
     hidden_payload = json.dumps({"type": "session.status", "data": {"session_id": ids["session_b"]}})
     assert ui_server._workbench_event_visible_to_context(context, "session.status", visible_payload) is True
@@ -1164,11 +1130,14 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         minimum_role="viewer",
         project_session_id=ids["session_a"],
     ) is True
+    # §3.2: /show admission follows the Instance role alone, independent of the
+    # Project ACL, so the show websocket authorizes a page outside the caller's
+    # Project access exactly like an in-Project one (a Viewer enters every page).
     assert ui_server._show_runtime_websocket_authorized(
         websocket,
         minimum_role="viewer",
         project_session_id=ids["session_b"],
-    ) is False
+    ) is True
 
 
 def test_terminal_websocket_requires_editor_role_without_a_project(monkeypatch, tmp_path) -> None:
