@@ -3493,3 +3493,47 @@ def test_send_to_enabled_subscriptions_skips_ambiguous_legacy_owner(monkeypatch,
     )
 
     assert sends == []
+
+
+def test_web_push_does_not_mix_reconciling_personal_policy_with_ready_org_binding(
+    tmp_path,
+) -> None:
+    """Class 2: one evaluation, one snapshot of (ready, kind, generation)."""
+
+    config = _paired_revision_config(41, instance_kind="organization")
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_id="inst-push",
+    )
+    # Kindless released snapshot: policy would infer Personal if the first
+    # gate saw reconciling. Evaluation must not mix that with a later-ready
+    # Org binding.
+    from storage import remote_access_authorization_service
+
+    started = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst-push",
+        instance_kind="organization",
+    )
+    remote_access_authorization_service.complete_instance_binding_transition(
+        instance_id="inst-push",
+        instance_kind="organization",
+        generation=started["generation"],
+    )
+    remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst-push",
+        instance_kind="organization",
+    )
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+    # Evaluation captured reconciling: must not authorize under Personal
+    # against an Org-configured pairing.
+    assert not decision.authorized
+    assert decision.policy != "personal" or not decision.authorized
+    assert decision.disposition in {
+        web_push_notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+        web_push_notifications.WEB_PUSH_DISPOSITION_AUTHORIZATION_REFRESH_REQUIRED,
+        web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED,
+    }

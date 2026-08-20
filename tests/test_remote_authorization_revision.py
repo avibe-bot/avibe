@@ -2640,3 +2640,99 @@ def test_binding_decoder_rejects_explicit_non_v1_schema_versions(tmp_path):
             instance_kind="personal",
             ensure=False,
         ) is False
+
+
+def test_refresh_cache_does_not_serve_personal_payload_after_org_reclassification(
+    monkeypatch,
+    tmp_path,
+):
+    """Class 1: in-memory refresh cache is bound to generation.
+
+    After a successful Personal refresh, a Personal→Org reclassification
+    within the 5s window must not return the cached Personal payload.
+    """
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        kind = V2Config.load().remote_access.vibe_cloud.instance_kind or "personal"
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind=kind if kind in {"personal", "organization"} else "personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+    first = remote_access.resolve_current_authorization(config, identity)
+    assert first.current is True
+    assert first.policy == "personal"
+    first_calls = len(calls)
+
+    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True) is True
+    reclassified = V2Config.load()
+    second = remote_access.resolve_current_authorization(reclassified, identity)
+    assert second.policy != "personal" or second.current is False or second.refreshed is True
+    if second.current:
+        assert second.policy == "organization"
+        assert len(calls) > first_calls
+
+
+def test_in_flight_auth_during_same_instance_kind_transition_is_binding_changed(
+    monkeypatch,
+    tmp_path,
+):
+    """Class 3: same-instance generation advance IS instance_binding_changed."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    captured = remote_access_authorization_service.current_instance_binding_generation()
+
+    def flip_then_respond(_config, _method, _suffix, payload, **kwargs):
+        remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
+        return _authorization_context_response(
+            config, payload, revision=41, instance_kind="organization"
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", flip_then_respond)
+    result = remote_access._fetch_authorization_context(
+        config, identity, record, now=now, observed_revision=41
+    )
+    assert result.reason == "instance_binding_changed"
+    assert result.reason != "instance_kind_persistence_failed"
+    # A subsequent request for the new binding is not 5s-denied by the old failure.
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda _c, _m, _s, payload, **k: _authorization_context_response(
+            config, payload, revision=41, instance_kind="personal"
+        ),
+    )
+    later = remote_access.resolve_current_authorization(V2Config.load(), identity)
+    assert later.reason != "authorization_refresh_backoff"
+    assert remote_access_authorization_service.current_instance_binding_generation() > captured

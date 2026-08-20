@@ -2158,3 +2158,41 @@ def test_unrelated_section_load_warning_does_not_make_pairing_unavailable(
     assert state.status == "ready"
     assert state.instance_id == "same-instance"
     assert state.instance_kind == "personal"
+
+
+def test_kindless_deferred_snapshot_fails_closed_when_pairing_is_unpaired(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """P2 a0D_l: kindless snapshot + unpaired/unavailable config → no Editor context.
+
+    The valid legacy no-kind PAIRING path (PARTIAL, runtime-ready, kind not
+    yet backfilled) still returns the original context.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.instance_id = ""
+    config.save()
+    metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+
+    # Valid legacy no-kind pairing: runtime-ready, kind not yet backfilled.
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "same-instance"
+    config.remote_access.vibe_cloud.instance_kind = ""
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.remote_access.vibe_cloud.backend_url = "https://backend.test"
+    config.save()
+    restored = resource_access_service.resource_user_context_from_metadata(metadata)
+    assert restored is not None
+    assert restored.instance_role == "editor"
+    assert restored.instance_kind is None
