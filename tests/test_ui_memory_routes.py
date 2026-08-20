@@ -490,13 +490,17 @@ def _save_remote_config(tmp_path) -> V2Config:
     config = V2Config.load()
     cloud = config.remote_access.vibe_cloud
     cloud.enabled = True
+    cloud.backend_url = "https://backend.test"
     cloud.public_url = "https://alex.avibe.bot"
     cloud.client_id = "vr_client_123"
     cloud.instance_id = "inst_123"
+    cloud.instance_kind = "organization"
+    cloud.instance_secret = "instance-secret"
     cloud.session_secret = "session-secret"
     cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
     cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
     config.save()
+    remote_access._replace_authorization_revision(config, 0)
     return config
 
 

@@ -97,17 +97,17 @@ _AUTHORIZATION_REVISION_SYNC_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_LOCK = threading.Lock()
 _AUTHORIZATION_REVISION_POLL_STARTED = False
 _AUTHORIZATION_REFRESH_LOCK = threading.Lock()
-_AUTHORIZATION_REFRESH_FAILURES: dict[tuple[str, str, str, str], float] = {}
+_AUTHORIZATION_REFRESH_FAILURES: dict[tuple[str, str, str, str, int], float] = {}
 _AUTHORIZATION_REFRESH_RESULTS: dict[
-    tuple[str, str, str, str],
+    tuple[str, str, str, str, int],
     tuple[float, str, str | None, int | None],
 ] = {}
 _AUTHORIZATION_REFRESH_FLIGHTS: dict[
-    tuple[str, str, str, str],
+    tuple[str, str, str, str, int],
     tuple[threading.Lock, int],
 ] = {}
 _AUTHORIZATION_BACKGROUND_REFRESH_LOCK = threading.Lock()
-_AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str]] = set()
+_AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str, int]] = set()
 AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS = 5.0
 _REVOKED_BROWSER_SESSIONS_LOCK = threading.Lock()
 _REVOKED_BROWSER_SESSIONS: dict[str, int] = {}
@@ -1591,17 +1591,35 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
             return {"ok": False, "error": "remote_status_not_configured"}
         if urllib.parse.urlsplit(cloud.backend_url).scheme.lower() != "https":
             return {"ok": False, "error": "remote_status_backend_url_invalid"}
+        from storage import remote_access_authorization_service
+
+        request_instance_id = str(cloud.instance_id)
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         payload = {
             "instance_secret": cloud.instance_secret,
             **runtime_status_payload(config, event=event, last_error=last_error),
         }
         result = _json_request(
-            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{cloud.instance_id}/runtime-status",
+            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
             payload,
             timeout=5.0,
         )
         _replace_active_hostnames(config, result.get("active_hostnames"))
-        _persist_instance_kind(cloud.instance_id, result.get("instance_kind"))
+        reported_kind = _normalized_instance_kind(result.get("instance_kind"))
+        if reported_kind is not None:
+            # Capture-before-IO: overlapping heartbeats can arrive out of
+            # order. A late Personal response must CAS-fail against a newer
+            # Organization generation rather than rewrite the live binding.
+            _persist_instance_kind(
+                request_instance_id,
+                reported_kind,
+                reconcile=True,
+                expected_binding_generation=request_binding_generation,
+            )
         return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "error": "remote_status_report_failed", "detail": str(exc)}
@@ -1611,20 +1629,232 @@ def _normalized_instance_kind(value: object) -> str | None:
     return value if isinstance(value, str) and value in _INSTANCE_KINDS else None
 
 
-def _persist_instance_kind(instance_id: str, value: object) -> bool:
+def _run_pending_deferred_context_migration() -> dict[str, int | str]:
+    """Bind or seal released snapshots against the current pairing."""
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.resource_access_service import (
+        RESOURCE_BINDING_STATE_UNAVAILABLE,
+        RESOURCE_BINDING_STATUS_KEY,
+        migrate_legacy_deferred_resource_contexts,
+    )
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        result = migrate_legacy_deferred_resource_contexts(connection)
+    if result.get(RESOURCE_BINDING_STATUS_KEY) == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        raise RuntimeError("legacy_deferred_context_provenance_unavailable")
+    return result
+
+
+def _runtime_pairing_available(config: V2Config) -> bool:
+    try:
+        return config.remote_access.vibe_cloud.runtime_credentials() is not None
+    except Exception:
+        return False
+
+
+def _known_kind_requires_runtime_pairing(config: V2Config) -> bool:
+    """Require complete device credentials once the server-owned kind is known.
+
+    Legacy pre-kind pairings still use the existing authorization path while
+    they await backfill. They cannot take either Personal or Organization
+    kind-specific bypass; an explicit server-owned kind, however, must never
+    be projected from a degraded pairing.
+    """
+
+    return _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) is not None
+
+
+def _is_exact_show_page_grant(
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None = None,
+) -> bool:
+    candidates: list[Mapping[str, Any]] = [identity]
+    if isinstance(record, Mapping):
+        claims = record.get("claims")
+        if isinstance(claims, Mapping):
+            candidates.append(claims)
+    return any(
+        candidate.get("vibe_instance_access_source") == "show_page_email"
+        and isinstance(candidate.get("vibe_show_page_id"), str)
+        and bool(candidate["vibe_show_page_id"].strip())
+        for candidate in candidates
+    )
+
+
+def binding_is_ready(config: V2Config, identity: Mapping[str, Any] | None = None) -> bool:
+    """C3: single gate for every authorization consumer.
+
+    A missing durable row is the fail-open legacy no-kind path. Once a row
+    exists, only ``ready`` for the current pairing admits kind-specific
+    bypass. Exact show_page_email grants are independent of instance kind.
+    """
+
+    if identity is not None:
+        if _is_exact_show_page_grant(identity):
+            return True
+        from storage import remote_access_authorization_service
+
+        instance_id = str(identity.get("instance_id") or config.remote_access.vibe_cloud.instance_id or "")
+        subject = str(identity.get("sub") or "")
+        try:
+            if subject and instance_id:
+                record = remote_access_authorization_service.load_reference_record(
+                    reference=str(identity.get("authorization_ref") or ""),
+                    instance_id=instance_id,
+                    subject=subject,
+                    now=int(time.time()),
+                )
+                if record is not None and _is_exact_show_page_grant(identity, record):
+                    return True
+        except Exception:
+            pass
+    try:
+        from storage import remote_access_authorization_service
+
+        cloud = config.remote_access.vibe_cloud
+        # bootstrap=True: on the upgrade path a known configured kind with no
+        # durable row earns a validated binding through one real transition
+        # (C2) before any kind-specific bypass is granted.
+        return remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=str(cloud.instance_id or ""),
+            instance_kind=_normalized_instance_kind(cloud.instance_kind),
+            ensure=False,
+            bootstrap=True,
+        )
+    except Exception:
+        return False
+
+
+def _transition_instance_binding(
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+    previous_instance_id: str | None = None,
+    hold_config_lock: bool = True,
+) -> dict[str, Any]:
+    """One cross-process identity transition (C2). SQLite is initialized first."""
+
+    from storage import remote_access_authorization_service
+
+    return remote_access_authorization_service.reconcile_instance_binding(
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+        previous_instance_id=previous_instance_id,
+        reconcile=_run_pending_deferred_context_migration,
+        hold_config_lock=hold_config_lock,
+    )
+
+
+def _authorization_binding_epoch() -> int:
+    """Compatibility no-op: durable generation is the only fencing token."""
+
+    return 0
+
+
+def _persist_instance_kind(
+    instance_id: str,
+    value: object,
+    *,
+    reconcile: bool = False,
+    expected_binding_generation: int | None = None,
+    expected_binding_epoch: int | None = None,
+) -> bool | int:
+    """Persist kind + reconcile under one cross-process critical section (C2).
+
+    Lock order is owned by reconcile_instance_binding: SQLite init, then
+    config_file_lock. This function never takes CONFIG_LOCK. The unused
+    ``expected_binding_epoch`` argument exists only so older in-process tests
+    that still pass it keep exercising the durable generation CAS.
+    """
+
+    del expected_binding_epoch
     instance_kind = _normalized_instance_kind(value)
     if instance_kind is None:
         return False
-    with CONFIG_LOCK:
+    from storage import remote_access_authorization_service
+    from storage.importer import ensure_sqlite_state
+
+    # C2 lock order: initialize SQLite before taking the config lock, then
+    # keep compare + config-write + transition in one critical section.
+    ensure_sqlite_state()
+    with config_file_lock():
         live_config = V2Config.load()
         live_cloud = live_config.remote_access.vibe_cloud
-        if live_cloud.instance_id != instance_id or live_cloud.instance_kind == instance_kind:
+        if str(live_cloud.instance_id or "") != instance_id:
             return False
-        api.save_config(
-            {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
-            validate_remote_access_network=False,
+        previous_kind = _normalized_instance_kind(live_cloud.instance_kind)
+        current_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
         )
-    return True
+        if (
+            expected_binding_generation is not None
+            and current_generation > int(expected_binding_generation)
+        ):
+            return False
+        already_ready = remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+            ensure=False,
+        )
+        if previous_kind == instance_kind and already_ready:
+            return current_generation
+        if previous_kind != instance_kind:
+            live_generation = (
+                remote_access_authorization_service.current_instance_binding_generation(
+                    ensure=False
+                )
+            )
+            if (
+                expected_binding_generation is not None
+                and live_generation > int(expected_binding_generation)
+            ):
+                return False
+            api.save_config(
+                {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
+                validate_remote_access_network=False,
+            )
+        # Whether the kind was already persisted by a prior attempt or just
+        # saved above, reconcile it now. The transition is what moves the
+        # durable binding to ready.
+        try:
+            transition = _transition_instance_binding(
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+                hold_config_lock=False,
+            )
+        except Exception:
+            logger.warning("Remote instance binding reconciliation failed", exc_info=True)
+            return False
+        if expected_binding_generation is not None:
+            live_generation = (
+                remote_access_authorization_service.current_instance_binding_generation(
+                    ensure=False
+                )
+            )
+            try:
+                persisted_generation = int(transition.get("generation"))
+            except (TypeError, ValueError):
+                persisted_generation = live_generation
+            # Our own transition advancing the generation is success; only a
+            # FOREIGN writer moving past our transition is a lost race.
+            if live_generation > persisted_generation:
+                return False
+            if persisted_generation < int(expected_binding_generation):
+                return False
+        if not (transition.get("ok") and (transition.get("ready") or instance_kind is None)):
+            return False
+        try:
+            return int(transition.get("generation"))
+        except (TypeError, ValueError):
+            return remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
 
 
 def mint_cloud_token(
@@ -4345,6 +4575,31 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
     except Exception:
         origin_service = "http://127.0.0.1:5123"
     try:
+        previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
+    except FileNotFoundError:
+        previous_instance_id = ""
+    except Exception as exc:
+        logger.warning("pre-pair config read failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": "pairing_provenance_unavailable",
+            "detail": str(exc),
+            "pairing": {"ok": False},
+        }
+    # Provenance must be validated BEFORE the one-time redeem. An unavailable
+    # read or failing migration aborts without consuming the key; a genuine
+    # unpaired install seals unattributed snapshots so they cannot be adopted.
+    try:
+        _run_pending_deferred_context_migration()
+    except Exception as exc:
+        logger.warning("legacy deferred context migration before pairing failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": "pairing_provenance_unavailable",
+            "detail": str(exc),
+            "pairing": {"ok": False},
+        }
+    try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
             {
@@ -4371,40 +4626,85 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         }
-    try:
-        previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
-    except Exception:
-        previous_instance_id = ""
-    config = api.save_config(
-        {
-            "remote_access": {
-                "provider": "vibe_cloud",
-                "vibe_cloud": {
-                    "enabled": True,
-                    "backend_url": backend.base_url,
-                    "instance_id": result["instance_id"],
-                    "instance_kind": instance_kind or "",
-                    "client_id": result["client_id"],
-                    "issuer": result["issuer"],
-                    "authorization_endpoint": result["authorization_endpoint"],
-                    "token_endpoint": result["token_endpoint"],
-                    "jwks_uri": result["jwks_uri"],
-                    "public_url": result["public_url"],
-                    "redirect_uri": result["redirect_uri"],
-                    "tunnel_token": result["tunnel_token"],
-                    "instance_secret": result["instance_secret"],
-                    "session_secret": secrets.token_urlsafe(32),
-                },
-            }
-        }
-    )
-    if previous_instance_id and previous_instance_id != str(result["instance_id"]):
-        try:
-            from storage import remote_access_authorization_service
+    # C2: the pairing save and its binding transition form ONE cross-process
+    # critical section, so two concurrent pair() calls cannot interleave
+    # save A / save B / transition B / transition A. SQLite initializes
+    # before the config lock per the canonical lock order.
+    from storage.importer import ensure_sqlite_state
 
-            remote_access_authorization_service.delete_for_instance(previous_instance_id)
+    ensure_sqlite_state()
+    with config_file_lock():
+        try:
+            previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
         except Exception:
-            logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
+            previous_instance_id = ""
+        config = api.save_config(
+            {
+                "remote_access": {
+                    "provider": "vibe_cloud",
+                    "vibe_cloud": {
+                        "enabled": True,
+                        "backend_url": backend.base_url,
+                        "instance_id": result["instance_id"],
+                        "instance_kind": instance_kind or "",
+                        "client_id": result["client_id"],
+                        "issuer": result["issuer"],
+                        "authorization_endpoint": result["authorization_endpoint"],
+                        "token_endpoint": result["token_endpoint"],
+                        "jwks_uri": result["jwks_uri"],
+                        "public_url": result["public_url"],
+                        "redirect_uri": result["redirect_uri"],
+                        "tunnel_token": result["tunnel_token"],
+                        "instance_secret": result["instance_secret"],
+                        "session_secret": secrets.token_urlsafe(32),
+                    },
+                }
+            }
+        )
+        if previous_instance_id and previous_instance_id != str(result["instance_id"]):
+            try:
+                from storage import remote_access_authorization_service
+
+                remote_access_authorization_service.delete_for_instance(previous_instance_id)
+            except Exception:
+                logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
+        # Under the held cross-process lock, save_config's returned config IS
+        # the persisted config; verify it still names the instance this call
+        # redeemed before publishing a binding for it.
+        persisted_instance_id = str(config.remote_access.vibe_cloud.instance_id or "")
+        if persisted_instance_id != str(result["instance_id"]):
+            # The persisted pairing is no longer the one this call redeemed;
+            # do not publish a binding for it.
+            return {
+                **status(config),
+                "ok": False,
+                "error": "pairing_reconciliation_failed",
+                "detail": "persisted_instance_mismatch",
+                "pairing": {"ok": False, "reconciling": True},
+            }
+        try:
+            transition = _transition_instance_binding(
+                instance_id=str(result["instance_id"]),
+                instance_kind=instance_kind,
+                previous_instance_id=previous_instance_id or None,
+                hold_config_lock=False,
+            )
+        except Exception:
+            logger.warning("Remote instance binding transition failed after pairing", exc_info=True)
+            return {
+                **status(config),
+                "ok": False,
+                "error": "pairing_reconciliation_failed",
+                "pairing": {"ok": False, "reconciling": True},
+            }
+    if not transition.get("ok"):
+        return {
+            **status(config),
+            "ok": False,
+            "error": "pairing_reconciliation_failed",
+            "detail": transition.get("error"),
+            "pairing": {"ok": False, "reconciling": True},
+        }
     start_result = start(config)
     _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return {**status(config), "ok": True, "pairing": {"ok": True}, "start": start_result}
@@ -4631,10 +4931,28 @@ def _store_scoped_authorization(
     claims: Mapping[str, Any],
     authorization_state: str,
     checked_at: int,
+    instance_kind: str | None = None,
+    expected_binding_generation: int | None = None,
 ) -> str:
     from storage import remote_access_authorization_service
 
-    scope_kind, scope_ref = _authorization_scope(config, claims)
+    stored_claims = dict(claims)
+    persisted_kind = _normalized_instance_kind(instance_kind) or _normalized_instance_kind(
+        config.remote_access.vibe_cloud.instance_kind
+    )
+    if persisted_kind is not None:
+        stored_claims["vibe_instance_kind"] = persisted_kind
+    scope_kind, scope_ref = _authorization_scope(config, stored_claims)
+    if expected_binding_generation is None and scope_kind != "show_page":
+        # Recapturing live generation here is the TOCTOU: a transition can
+        # complete between the caller's persist-kind CAS and this write, and
+        # the recaptured gen would let a stale response resurrect a current
+        # row. Callers that produced claims via network/IO must pass the
+        # generation they captured BEFORE that IO. Local cookie/legacy paths
+        # capture immediately before this call.
+        raise remote_access_authorization_service.InstanceBindingChangedError(
+            "expected_binding_generation_required"
+        )
     return remote_access_authorization_service.upsert_scoped(
         reference=reference,
         instance_id=str(config.remote_access.vibe_cloud.instance_id),
@@ -4643,9 +4961,10 @@ def _store_scoped_authorization(
         scope_kind=scope_kind,
         scope_ref=scope_ref,
         authorization_state=authorization_state,
-        claims=claims,
+        claims=stored_claims,
         last_checked_at=checked_at,
         updated_at=checked_at,
+        expected_binding_generation=expected_binding_generation,
     )
 
 
@@ -4668,6 +4987,13 @@ def make_session_cookie(
         except ValueError as exc:
             raise OAuthCodeExchangeError("stale_authorization_revision") from exc
     stored_claims = {**validated_claims, "claims_issued_at": issued_at}
+    from storage import remote_access_authorization_service
+
+    request_binding_generation = (
+        remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    )
     reference = _store_scoped_authorization(
         config,
         reference=None,
@@ -4676,6 +5002,7 @@ def make_session_cookie(
         claims=stored_claims,
         authorization_state="current",
         checked_at=issued_at,
+        expected_binding_generation=request_binding_generation,
     )
     payload = {
         "email": email,
@@ -4849,6 +5176,11 @@ def _load_authorization_record(
     if existing is not None:
         return existing
     try:
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         stored_reference = _store_scoped_authorization(
             config,
             reference=None,
@@ -4857,6 +5189,7 @@ def _load_authorization_record(
             claims=claims,
             authorization_state="current",
             checked_at=checked_at,
+            expected_binding_generation=request_binding_generation,
         )
         return remote_access_authorization_service.load_reference_record(
             reference=stored_reference,
@@ -4886,9 +5219,32 @@ def _validated_authorization_payload(
     config: V2Config,
     identity: Mapping[str, Any],
     record: Mapping[str, Any],
+    *,
+    binding_gate: bool | None = None,
 ) -> dict[str, Any] | None:
+    # Class 2: one (ready, kind, generation) consultation per evaluation.
+    # Callers that already captured the gate pass it in; this function must
+    # not trigger a second live read inside the same evaluation.
+    gate = binding_is_ready(config, identity) if binding_gate is None else binding_gate
+    if not gate and not _is_exact_show_page_grant(identity, record):
+        return None
+    if (
+        _known_kind_requires_runtime_pairing(config)
+        and not _runtime_pairing_available(config)
+        and not _is_exact_show_page_grant(identity, record)
+    ):
+        return None
     claims = record.get("claims")
     if not isinstance(claims, Mapping):
+        return None
+    from vibe.authorization import instance_kind_is_unsupported
+
+    if instance_kind_is_unsupported(
+        claims.get("vibe_instance_kind")
+    ) and not _is_exact_show_page_grant(identity, record):
+        # A present-but-unrecognized persisted kind (corruption or a newer
+        # release's artifact) is not a legacy no-kind row. Fail closed so the
+        # row revalidates instead of falling through to legacy-current.
         return None
     payload = dict(identity)
     payload.update(claims)
@@ -4896,7 +5252,7 @@ def _validated_authorization_payload(
     if isinstance(reference, str):
         payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
     try:
-        session_claims_from_oidc(config, payload)
+        session_claims_from_oidc(config, claims)
     except OAuthCodeExchangeError:
         return None
     return payload
@@ -4931,6 +5287,11 @@ def _fetch_authorization_context(
     now: int,
     observed_revision: int | None,
 ) -> AuthorizationResolution:
+    from storage import remote_access_authorization_service
+
+    request_binding_generation = (
+        remote_access_authorization_service.current_instance_binding_generation()
+    )
     subject = str(identity.get("sub") or "").strip()
     email = str(identity.get("email") or "").strip()
     request_payload: dict[str, Any] = {"sub": subject, "email": email}
@@ -4965,6 +5326,12 @@ def _fetch_authorization_context(
                     claims=revoked_claims,
                     authorization_state="revoked",
                     checked_at=now,
+                    expected_binding_generation=request_binding_generation,
+                )
+            except remote_access_authorization_service.InstanceBindingChangedError:
+                return AuthorizationResolution(
+                    "unavailable",
+                    reason="instance_binding_changed",
                 )
             except Exception:
                 logger.warning("remote authorization revocation persistence failed", exc_info=True)
@@ -4980,6 +5347,42 @@ def _fetch_authorization_context(
         return AuthorizationResolution("unavailable", reason="instance_kind_unavailable")
     try:
         claims = session_claims_from_oidc(config, response)
+    except Exception:
+        logger.warning("remote authorization context validation failed", exc_info=True)
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    live_state = remote_access_authorization_service.load_instance_binding_state(
+        ensure=False
+    )
+    live_generation = int((live_state or {}).get("generation") or 0)
+    live_id = str((live_state or {}).get("instance_id") or "")
+    request_id = str(identity.get("instance_id") or "")
+    if live_id and request_id and live_id != request_id:
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+    if live_generation > int(request_binding_generation):
+        # Same-instance kind reclassification is still a binding change.
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+    try:
+        persisted = _persist_instance_kind(
+            str(identity.get("instance_id") or ""),
+            instance_kind,
+            expected_binding_generation=request_binding_generation,
+        )
+    except Exception:
+        logger.warning("remote instance kind persistence failed", exc_info=True)
+        persisted = False
+    if persisted is False:
+        live_state = remote_access_authorization_service.load_instance_binding_state(
+            ensure=False
+        )
+        live_generation = int((live_state or {}).get("generation") or 0)
+        live_id = str((live_state or {}).get("instance_id") or "")
+        request_id = str(identity.get("instance_id") or "")
+        if live_id and request_id and live_id != request_id:
+            return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+        if live_generation > int(request_binding_generation):
+            return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+        return AuthorizationResolution("unavailable", reason="instance_kind_persistence_failed")
+    try:
         revision = _authorization_revision_from_claims(claims)
         if revision is not None:
             _replace_authorization_revision(config, revision)
@@ -4996,27 +5399,25 @@ def _fetch_authorization_context(
             claims=stored_claims,
             authorization_state="current",
             checked_at=now,
+            instance_kind=instance_kind,
+            expected_binding_generation=(
+                int(persisted)
+                if not isinstance(persisted, bool)
+                else request_binding_generation
+            ),
         )
-        from storage import remote_access_authorization_service
-
         refreshed_record = remote_access_authorization_service.load_reference_record(
             reference=reference,
             instance_id=str(identity.get("instance_id") or ""),
             subject=subject,
             now=now,
         )
+    except remote_access_authorization_service.InstanceBindingChangedError:
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
     except Exception:
-        logger.warning("remote authorization context validation failed", exc_info=True)
+        logger.warning("remote authorization context persistence failed", exc_info=True)
         return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
     config.remote_access.vibe_cloud.instance_kind = instance_kind
-    try:
-        _persist_instance_kind(str(identity.get("instance_id") or ""), instance_kind)
-    except Exception:
-        # The authoritative response and durable context are already valid.
-        # A config write failure must not turn accepted access into an outage;
-        # this in-memory config immediately follows the discovered policy and a
-        # later runtime status/auth refresh can retry the persistent backfill.
-        logger.warning("Remote instance kind backfill failed", exc_info=True)
     if refreshed_record is None:
         return AuthorizationResolution("unavailable", reason="authorization_context_persistence_failed")
     payload = _validated_authorization_payload(config, identity, refreshed_record)
@@ -5080,7 +5481,10 @@ def _refresh_authorization_context(
             if current_record is not None:
                 if current_record.get("authorization_state") == "revoked":
                     return AuthorizationResolution("revoked", reason="access_denied")
-                if recent_result[1] == "current":
+                if (
+                    recent_result[1] == "current"
+                    and current_record.get("authorization_state") == "current"
+                ):
                     current_payload = _validated_authorization_payload(
                         config,
                         identity,
@@ -5109,7 +5513,10 @@ def _refresh_authorization_context(
         completed_at = time.monotonic()
         with _AUTHORIZATION_REFRESH_LOCK:
             _AUTHORIZATION_REFRESH_RESULTS.pop(key, None)
-            if refreshed.state == "unavailable":
+            if (
+                refreshed.state == "unavailable"
+                and refreshed.reason != "instance_binding_changed"
+            ):
                 _AUTHORIZATION_REFRESH_FAILURES[key] = completed_at
                 if len(_AUTHORIZATION_REFRESH_FAILURES) > 1024:
                     cutoff = completed_at - AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
@@ -5161,18 +5568,27 @@ def _refresh_authorization_context(
 def _authorization_refresh_key(
     identity: Mapping[str, Any],
     record: Mapping[str, Any] | None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, int]:
     scope_kind = str(record.get("scope_kind") or "instance") if record else "instance"
     scope_ref = (
         str(record.get("scope_ref") or identity.get("instance_id") or "")
         if record
         else str(identity.get("instance_id") or "")
     )
+    try:
+        from storage import remote_access_authorization_service
+
+        generation = remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    except Exception:
+        generation = 0
     return (
         str(identity.get("instance_id") or ""),
         str(identity.get("sub") or ""),
         scope_kind,
         scope_ref,
+        int(generation),
     )
 
 
@@ -5263,11 +5679,26 @@ def resolve_current_authorization(
             if refreshed.state != "unavailable":
                 return refreshed
         return AuthorizationResolution("revoked", reason="access_denied")
+    # Class 2: capture the binding gate ONCE for this evaluation. Both the
+    # payload admission and the kind derivation below use this snapshot; a
+    # reconciling that begins mid-evaluation can no longer collapse a failed
+    # second read into the legacy no-kind branch.
+    binding_gate = binding_is_ready(config, identity)
     payload = (
-        _validated_authorization_payload(config, identity, record)
+        _validated_authorization_payload(
+            config, identity, record, binding_gate=binding_gate
+        )
         if record is not None
         else None
     )
+    if (
+        payload is None
+        and record is not None
+        and not _runtime_pairing_available(config)
+        and _known_kind_requires_runtime_pairing(config)
+        and not _is_exact_show_page_grant(identity, record)
+    ):
+        return AuthorizationResolution("unavailable", reason="pairing_unavailable")
     if payload is None:
         return (
             _refresh_authorization_context(config, identity, record, now=current)
@@ -5275,13 +5706,58 @@ def resolve_current_authorization(
             else AuthorizationResolution("unavailable", reason="authorization_context_missing")
         )
 
-    instance_kind = _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
+    instance_kind = (
+        _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
+        if binding_gate
+        else None
+    )
     signed_revision = _authorization_revision_from_claims(payload)
     current_revision = (
         current_authorization_revision(config, now=revision_now)
         if _authorization_revision_sync_configured(config)
         else None
     )
+    stored_kind = None
+    if record is not None:
+        stored_claims = record.get("claims")
+        if isinstance(stored_claims, Mapping):
+            stored_kind = _normalized_instance_kind(stored_claims.get("vibe_instance_kind"))
+    is_exact_show_page = _is_exact_show_page_grant(identity, record)
+    kindless_current_needs_refresh = (
+        not is_exact_show_page
+        and instance_kind is not None
+        and stored_kind is None
+        and record is not None
+        and record.get("authorization_state") == "current"
+    )
+    kind_mismatch = (
+        not is_exact_show_page
+        and (
+            (
+                instance_kind is not None
+                and stored_kind is not None
+                and stored_kind != instance_kind
+            )
+            or (
+                instance_kind is not None
+                and stored_kind is None
+                and record is not None
+                and record.get("authorization_state") == "stale"
+            )
+            or kindless_current_needs_refresh
+        )
+    )
+    if kind_mismatch:
+        # A row tagged with the previous kind (or invalidated by a
+        # reclassification) must revalidate before EITHER kind-specific
+        # policy runs — returning it as current under the new kind would let
+        # the old kind's claims outlive the reclassification.
+        if allow_refresh:
+            return _refresh_authorization_context(config, identity, record, now=current)
+        return AuthorizationResolution(
+            "unavailable",
+            reason="authorization_context_missing",
+        )
 
     if instance_kind == "personal":
         if (
@@ -5386,8 +5862,15 @@ def renew_session_cookie(
     current = int(time.time()) if now is None else now
     reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
     if not isinstance(reference, str):
+        from storage import remote_access_authorization_service
+
         claims = _authorization_claims_from_payload(payload)
         checked_at = int(payload.get("claims_issued_at", payload.get("iat", current)))
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         reference = _store_scoped_authorization(
             config,
             reference=None,
@@ -5396,6 +5879,7 @@ def renew_session_cookie(
             claims=claims,
             authorization_state="current",
             checked_at=checked_at,
+            expected_binding_generation=request_binding_generation,
         )
     browser_session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if not isinstance(browser_session_id, str):

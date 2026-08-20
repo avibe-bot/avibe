@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import itertools
+import json
 import threading
 import time
 from typing import Any
@@ -43,6 +45,9 @@ def _clear_authorization_refresh_process_state():
 
 
 def _paired_config(tmp_path, *, revision: int = 41) -> V2Config:
+    import os
+
+    os.environ["AVIBE_HOME"] = str(tmp_path)
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -69,6 +74,8 @@ def _paired_config(tmp_path, *, revision: int = 41) -> V2Config:
     remote_access._clear_authorization_revision_cache()
     remote_access._replace_authorization_revision(config, revision)
     return config
+    # Binding-row seeding is the CALLER's job: some tests need an absent
+    # row (upgrade path), others need a ready row (concurrent resolvers).
 
 
 def _organization_claims(
@@ -167,6 +174,620 @@ def test_personal_session_slides_past_claim_and_original_identity_deadlines(
     assert result.current is True
     assert result.policy == "personal"
     assert result.payload["claims_issued_at"] == base
+
+
+def test_validated_remote_payload_projects_paired_instance_kind(tmp_path):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    payload = remote_access._validated_authorization_payload(
+        config,
+        {
+            "sub": "personal-user",
+            "email": "personal@example.com",
+            "instance_id": "inst_123",
+        },
+        {
+            "id": "authorization-1",
+            "claims": {**_organization_claims(config), "vibe_instance_kind": "personal"},
+        },
+    )
+
+    assert payload is not None
+    assert context_from_session_payload(payload).is_personal_instance
+
+
+def test_cached_authorization_from_previous_instance_kind_refreshes_before_personal_bypass(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    cookie = _organization_cookie(config)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(config, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "personal"
+    assert len(calls) == 1
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=int(time.time()),
+    )
+    assert record is not None
+    assert record["claims"]["vibe_instance_kind"] == "personal"
+
+
+def test_partial_pairing_cannot_restore_cached_personal_authorization(tmp_path):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+
+    payload = remote_access._validated_authorization_payload(
+        config,
+        {
+            "sub": "personal-user",
+            "email": "personal@example.com",
+            "instance_id": "inst_123",
+        },
+        {
+            "id": "authorization-1",
+            "claims": {**_organization_claims(config), "vibe_instance_kind": "organization"},
+        },
+    )
+
+    assert payload is None
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    resolution = remote_access.resolve_current_authorization(
+        config,
+        identity,
+        allow_refresh=False,
+    )
+    assert resolution.state == "unavailable"
+    assert resolution.reason == "pairing_unavailable"
+
+
+def test_partial_pairing_preserves_exact_show_page_email_grant(tmp_path):
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+    cookie = remote_access.make_session_cookie(
+        config,
+        "viewer@example.com",
+        "viewer-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "show_page_email",
+            "vibe_show_page_id": "show-1",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+
+    resolution = remote_access.resolve_current_authorization(
+        config,
+        identity,
+        allow_refresh=False,
+    )
+
+    assert resolution.current is True
+    assert resolution.payload is not None
+    assert resolution.payload["vibe_show_page_id"] == "show-1"
+
+
+def test_organization_to_personal_reclassification_revalidates_before_the_bypass(
+    monkeypatch,
+    tmp_path,
+):
+    """A reclassified pairing must re-earn every instance-scoped authorization."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    reference = identity["authorization_ref"]
+    now = int(time.time())
+    admitted = remote_access_authorization_service.load_reference_record(
+        reference=reference,
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert admitted is not None
+    assert admitted["authorization_state"] == "current"
+
+    assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
+
+    reclassified = V2Config.load()
+    assert reclassified.remote_access.vibe_cloud.instance_kind == "personal"
+    invalidated = remote_access_authorization_service.load_reference_record(
+        reference=reference,
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert invalidated is not None
+    assert invalidated["authorization_state"] == "stale"
+
+    # The cached Organization claims must not be re-projected as Personal.
+    blocked = remote_access.resolve_current_authorization(
+        reclassified,
+        identity,
+        allow_refresh=False,
+    )
+    assert blocked.current is False
+    assert blocked.reason == "authorization_context_missing"
+
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(reclassified, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "personal"
+    # Synchronous revalidation, not a background hint that would let the
+    # Personal bypass answer this very request from the stale row.
+    assert len(calls) == 1
+    revalidated = remote_access_authorization_service.load_reference_record(
+        reference=reference,
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert revalidated is not None
+    assert revalidated["authorization_state"] == "current"
+    assert revalidated["claims"]["vibe_instance_kind"] == "personal"
+
+
+def test_instance_kind_persistence_failure_leaves_no_kind_tagged_current_row(
+    monkeypatch,
+    tmp_path,
+):
+    """A failed kind write must not leave a usable Personal projection behind."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = ""
+    config.save()
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    reference = identity["authorization_ref"]
+    now = int(time.time())
+    # Collapse the failure backoff so the retry below exercises the network
+    # path instead of the short-circuit that protects the backend.
+    monkeypatch.setattr(remote_access, "AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(
+        remote_access,
+        "current_authorization_revision",
+        lambda *args, **kwargs: 42,
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda _config, _method, _suffix, payload, **kwargs: _authorization_context_response(
+            config,
+            payload,
+            revision=42,
+            instance_kind="personal",
+        ),
+    )
+    real_save_config = remote_access.api.save_config
+    attempted: list[dict[str, Any]] = []
+
+    def failing_save_config(payload, **kwargs):
+        attempted.append(payload)
+        raise OSError("read-only config")
+
+    monkeypatch.setattr(remote_access.api, "save_config", failing_save_config)
+
+    blocked = remote_access.resolve_current_authorization(config, identity)
+
+    assert blocked.state == "unavailable"
+    assert blocked.reason == "instance_kind_persistence_failed"
+    assert attempted
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == ""
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=reference,
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert stored is not None
+    assert "vibe_instance_kind" not in stored["claims"]
+    kindless_payload = remote_access._validated_authorization_payload(
+        config,
+        identity,
+        stored,
+    )
+    assert kindless_payload is not None
+    assert context_from_session_payload(kindless_payload).is_personal_instance is False
+
+    monkeypatch.setattr(remote_access.api, "save_config", real_save_config)
+
+    retried = remote_access.resolve_current_authorization(config, identity)
+
+    assert retried.current is True
+    assert retried.policy == "personal"
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "personal"
+    repaired = remote_access_authorization_service.load_reference_record(
+        reference=reference,
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert repaired is not None
+    assert repaired["claims"]["vibe_instance_kind"] == "personal"
+
+
+def test_refresh_from_a_previous_binding_generation_is_discarded(monkeypatch, tmp_path):
+    """An in-flight response that outlived its binding must not be cached."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    binding_before = remote_access_authorization_service.load_instance_binding_state()
+    assert binding_before is not None
+
+    def repair_while_in_flight(_config, _method, _suffix, payload, **kwargs):
+        # A re-pair lands while this authorization response is in flight.
+        remote_access._transition_instance_binding(
+            instance_id="inst_repair",
+            instance_kind="personal",
+        )
+        return _authorization_context_response(config, payload, revision=41)
+
+    monkeypatch.setattr(remote_access, "_device_json_request", repair_while_in_flight)
+
+    result = remote_access._refresh_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        force=True,
+    )
+
+    assert result.state == "unavailable"
+    assert result.reason == "instance_binding_changed"
+    binding_after = remote_access_authorization_service.load_instance_binding_state()
+    assert binding_after is not None
+    assert binding_after["generation"] > binding_before["generation"]
+    assert binding_after["instance_id"] == "inst_repair"
+    with remote_access._AUTHORIZATION_REFRESH_LOCK:
+        assert remote_access._AUTHORIZATION_REFRESH_RESULTS == {}
+        assert remote_access._AUTHORIZATION_REFRESH_FAILURES == {}
+    # The discarded generation must not be answerable from cache either.
+    assert (
+        remote_access.resolve_current_authorization(
+            config,
+            identity,
+            allow_refresh=False,
+        ).current
+        is False
+    )
+
+
+def test_stale_cross_process_kind_response_cannot_reverse_durable_generation(
+    monkeypatch,
+    tmp_path,
+):
+    """A UI-process in-flight Personal response must not undo a controller reclass.
+
+    The controller and UI server are separate processes; the in-memory
+    binding epoch cannot fence this. The durable generation in state_meta
+    is the compare-and-swap token both processes share.
+    """
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    cookie = remote_access.make_session_cookie(
+        config,
+        "user-1@example.com",
+        "user-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    observed_generation = remote_access_authorization_service.current_instance_binding_generation()
+    # Controller heartbeat in another process: Personal -> Organization.
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.save()
+    newer = remote_access_authorization_service.load_instance_binding_state()
+    assert newer is not None
+    assert newer["generation"] > observed_generation
+    assert newer["instance_kind"] == "organization"
+
+    # Stale UI-process in-flight epoch is unchanged; durable generation is not.
+    monkeypatch.setattr(remote_access, "_authorization_binding_epoch", lambda: 0)
+    persisted = remote_access._persist_instance_kind(
+        "inst_123",
+        "personal",
+        expected_binding_generation=observed_generation,
+        expected_binding_epoch=0,
+    )
+
+    assert persisted is False
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    after = remote_access_authorization_service.load_instance_binding_state()
+    assert after is not None
+    assert after["generation"] == newer["generation"]
+    assert after["instance_kind"] == "organization"
+
+
+def test_stale_write_is_refused_under_cross_process_config_lock(tmp_path):
+    """Two threads contend on config_file_lock; the stale writer must abort.
+
+    This is the real cross-process lock boundary (the same lock V2Config.save
+    uses), not the in-process epoch.
+    """
+
+    from config.v2_config import config_file_lock
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    observed = remote_access_authorization_service.current_instance_binding_generation()
+    # flock is process-level, so two threads in one process cannot actually
+    # block each other on config_file_lock. Model the cross-process race as:
+    # snapshot generation, then a controller advance under that lock, then a
+    # stale persist that must CAS-fail against the durable generation.
+    with config_file_lock():
+        remote_access._transition_instance_binding(
+            instance_id="inst_123",
+            instance_kind="organization",
+        )
+        config.remote_access.vibe_cloud.instance_kind = "organization"
+        config.save()
+    controller_generation = (
+        remote_access_authorization_service.current_instance_binding_generation()
+    )
+    stale_ok = remote_access._persist_instance_kind(
+        "inst_123",
+        "personal",
+        expected_binding_generation=observed,
+    )
+
+    assert stale_ok is False
+    assert controller_generation > observed
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    after = remote_access_authorization_service.load_instance_binding_state()
+    assert after is not None
+    assert after["instance_kind"] == "organization"
+    assert after["generation"] == controller_generation
+
+
+def test_stale_denied_response_does_not_recreate_revoked_row(monkeypatch, tmp_path):
+    """A 403 captured before a transition must not recreate a revoked row."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _paired_config(tmp_path)
+    started = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    assert remote_access_authorization_service.complete_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="organization",
+        generation=started["generation"],
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    observed = remote_access_authorization_service.current_instance_binding_generation()
+    real_generation = remote_access_authorization_service.current_instance_binding_generation
+    calls = {"n": 0}
+
+    def deny_after_transition(_config, _method, _suffix, payload, **kwargs):
+        remote_access._transition_instance_binding(
+            instance_id="inst_123",
+            instance_kind="personal",
+        )
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    def generation(*, ensure: bool = True) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return observed
+        return real_generation(ensure=ensure)
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny_after_transition)
+    monkeypatch.setattr(
+        remote_access_authorization_service,
+        "current_instance_binding_generation",
+        generation,
+    )
+
+    result = remote_access._fetch_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        observed_revision=41,
+    )
+
+    assert result.state == "unavailable"
+    assert result.reason == "instance_binding_changed"
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    if stored is not None:
+        assert stored.get("authorization_state") != "revoked"
+
+
+def test_exact_show_page_grants_survive_a_kind_transition_but_not_a_repair(tmp_path):
+    """Show Page grants are their own scope, bound to the instance that issued them."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    now = int(time.time())
+    show_page_claims = {
+        "vibe_instance_id": "inst_123",
+        "vibe_instance_role": "viewer",
+        "vibe_instance_access_source": "show_page_email",
+        "vibe_show_page_id": "show-1",
+        "vibe_instance_authorization_revision": 41,
+    }
+    show_page_cookie = remote_access.make_session_cookie(
+        config,
+        "viewer@example.com",
+        "viewer-1",
+        session_claims=show_page_claims,
+    )
+    show_page_identity = remote_access.parse_session_identity(config, show_page_cookie)
+    assert show_page_identity is not None
+    instance_identity = remote_access.parse_session_identity(
+        config,
+        _organization_cookie(config),
+    )
+    assert instance_identity is not None
+
+    assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
+
+    reclassified = V2Config.load()
+    show_page = remote_access_authorization_service.load_scoped(
+        instance_id="inst_123",
+        subject="viewer-1",
+        scope_kind="show_page",
+        scope_ref="show-1",
+    )
+    instance = remote_access_authorization_service.load_scoped(
+        instance_id="inst_123",
+        subject="user-1",
+        scope_kind="instance",
+        scope_ref="inst_123",
+    )
+    assert show_page is not None
+    assert show_page["authorization_state"] == "current"
+    assert show_page["claims"]["vibe_show_page_id"] == "show-1"
+    assert instance is not None
+    assert instance["authorization_state"] == "stale"
+
+    resolved = remote_access.resolve_current_authorization(
+        reclassified,
+        show_page_identity,
+        allow_refresh=False,
+    )
+    assert resolved.current is True
+    assert resolved.payload is not None
+    assert resolved.payload["vibe_show_page_id"] == "show-1"
+
+    # Mid-transition the exact grant still reads, while the instance-scoped
+    # cache stays fail-closed.
+    reconciling = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst_repair",
+        instance_kind="personal",
+    )
+    assert (
+        reconciling["state"]
+        == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
+    )
+    assert (
+        remote_access.binding_is_ready(reclassified, show_page_identity)
+        is True
+    )
+    assert (
+        remote_access.binding_is_ready(reclassified, instance_identity)
+        is False
+    )
+
+    # Re-pairing to a different instance is not a reclassification: those
+    # grants were issued by the previous instance and must not survive it.
+    remote_access._transition_instance_binding(
+        instance_id="inst_repair",
+        instance_kind="personal",
+        previous_instance_id="inst_123",
+    )
+    repaired = remote_access_authorization_service.load_scoped(
+        instance_id="inst_123",
+        subject="viewer-1",
+        scope_kind="show_page",
+        scope_ref="show-1",
+    )
+    assert repaired is not None
+    assert repaired["authorization_state"] == "stale"
 
 
 def test_personal_revision_hint_refreshes_in_background_without_blocking(
@@ -303,7 +924,7 @@ def test_organization_refresh_grace_expiry_and_recovery(monkeypatch, tmp_path):
     assert recovered.payload["vibe_instance_authorization_revision"] == 42
 
 
-def test_unknown_instance_kind_backfills_without_failing_valid_access(
+def test_unknown_instance_kind_requires_durable_backfill_before_access(
     monkeypatch,
     tmp_path,
 ):
@@ -330,9 +951,9 @@ def test_unknown_instance_kind_backfills_without_failing_valid_access(
 
     result = remote_access.resolve_current_authorization(config, identity)
 
-    assert result.current is True
-    assert result.policy == "organization"
-    assert config.remote_access.vibe_cloud.instance_kind == "organization"
+    assert result.state == "unavailable"
+    assert result.reason == "instance_kind_persistence_failed"
+    assert config.remote_access.vibe_cloud.instance_kind == ""
 
 
 def test_scoped_authorization_promotes_legacy_rows_and_isolates_show_pages(tmp_path):
@@ -495,6 +1116,10 @@ def test_concurrent_resolvers_share_one_authorization_context_refresh(
     tmp_path,
 ):
     config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
     cookie = _organization_cookie(config)
     identity = remote_access.parse_session_identity(config, cookie)
     assert identity is not None
@@ -525,6 +1150,10 @@ def test_authorization_context_refreshes_for_different_subjects_run_concurrently
     tmp_path,
 ):
     config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
     identities = []
     for subject in ("user-1", "user-2"):
         identity = remote_access.parse_session_identity(
@@ -560,6 +1189,10 @@ def test_concurrent_revocation_refresh_is_reused_and_persisted(
     tmp_path,
 ):
     config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
     identity = remote_access.parse_session_identity(config, _organization_cookie(config))
     assert identity is not None
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *args, **kwargs: 42)
@@ -599,7 +1232,10 @@ def test_refresh_backoff_starts_when_the_network_request_finishes(
     identity = remote_access.parse_session_identity(config, _organization_cookie(config))
     assert identity is not None
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *args, **kwargs: 42)
-    monotonic_values = iter((100.0, 110.0, 110.1))
+    monotonic_values = itertools.chain(
+        (100.0, 110.0, 110.05, 110.1, 110.15),
+        itertools.repeat(110.2),
+    )
     monkeypatch.setattr(remote_access.time, "monotonic", lambda: next(monotonic_values))
     calls = 0
 
@@ -1656,3 +2292,620 @@ def test_trusted_local_access_ignores_hosted_revision_state(monkeypatch, tmp_pat
 
     assert response.status_code == 200
     assert response.get_json()["runtime"]["default_cwd"] == "."
+
+
+def test_denied_response_during_reconciliation_does_not_persist_revoked(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r1: a 403 racing a same-generation reconciliation
+    must not persist a revoked row the completed binding then trips over."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    # A reconciliation begins BEFORE the refresh starts: same generation is
+    # captured, and completing a transition does not increment it.
+    started = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    assert (
+        started["state"]
+        == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
+    )
+
+    def deny(*args, **kwargs):
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny)
+
+    result = remote_access._fetch_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        observed_revision=41,
+    )
+
+    assert result.state == "unavailable"
+    assert result.reason == "instance_binding_changed"
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    if stored is not None:
+        assert stored.get("authorization_state") != "revoked"
+
+
+def test_known_kind_without_binding_row_bootstraps_a_durable_transition(tmp_path):
+    """Regression PR #1606 r1: upgrade path — config carries a kind but the
+    state_meta binding row is absent; the gate must earn a validated row
+    through one real transition instead of trusting the config value."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    # Simulate an upgrade: config has a known kind, the new state_meta row
+    # has not been written yet.
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import state_meta
+    from sqlalchemy import delete as sa_delete
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            sa_delete(state_meta).where(
+                state_meta.c.key == remote_access_authorization_service.INSTANCE_BINDING_STATE_META_KEY
+            )
+        )
+    assert (
+        remote_access_authorization_service.load_instance_binding_state(ensure=False)
+        is None
+    )
+    # The storage gate alone fails closed for a known kind with no row.
+    assert remote_access_authorization_service.binding_is_ready_for_pairing(
+        instance_id="inst_123",
+        instance_kind="personal",
+        ensure=False,
+    ) is False
+
+    # The consumer gate bootstraps one durable transition, then admits.
+    assert remote_access.binding_is_ready(config) is True
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert state is not None
+    assert state["state"] == remote_access_authorization_service.INSTANCE_BINDING_STATE_READY
+    assert state["instance_id"] == "inst_123"
+    assert state["instance_kind"] == "personal"
+    assert state["generation"] >= 1
+
+
+def test_personal_to_organization_reclassification_rejects_stale_personal_row(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r2: the kind-mismatch refresh must run before the
+    Organization branch too — a stale personal-tagged row must not be served
+    as current under the reclassified Organization policy."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert stored is not None
+    assert stored["claims"]["vibe_instance_kind"] == "personal"
+
+    # Controller heartbeat reclassifies Personal -> Organization.
+    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True)
+    reclassified = V2Config.load()
+    assert reclassified.remote_access.vibe_cloud.instance_kind == "organization"
+
+    # The old personal-tagged row must not answer under the Organization policy.
+    blocked = remote_access.resolve_current_authorization(
+        reclassified,
+        identity,
+        allow_refresh=False,
+    )
+    assert blocked.current is False
+
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="organization",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(reclassified, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "organization"
+    assert len(calls) == 1
+    revalidated = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert revalidated is not None
+    assert revalidated["claims"]["vibe_instance_kind"] == "organization"
+
+
+def test_revoked_write_refused_when_transition_completes_between_check_and_write(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r3: the compare and the authorization-row write
+    are one atomic CAS under the binding lock. Completing a transition
+    between a TOCTOU-style check and the write must refuse the revoked upsert.
+    """
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    started = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    captured = remote_access_authorization_service.current_instance_binding_generation()
+
+    def deny(*args, **kwargs):
+        # Completes AFTER _fetch captured the reconciling generation and
+        # BEFORE the revoked upsert — the atomic CAS must refuse the write.
+        remote_access_authorization_service.complete_instance_binding_transition(
+            instance_id="inst_123",
+            instance_kind="personal",
+            generation=started["generation"],
+        )
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny)
+
+    result = remote_access._fetch_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        observed_revision=41,
+    )
+
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert result.reason == "instance_binding_changed" or (
+        stored is not None and stored.get("authorization_state") != "revoked"
+    )
+    if stored is not None:
+        assert stored.get("authorization_state") != "revoked"
+    # The captured generation is no longer current.
+    assert remote_access_authorization_service.current_instance_binding_generation() >= captured
+
+
+def test_kindless_current_row_revalidates_after_known_kind_bootstrap(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r4: a released current row with no vibe_instance_kind
+    must refresh on the first request after a known-kind Personal pairing
+    bootstraps, instead of returning a kindless payload.
+    """
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    claims = dict(record["claims"])
+    claims.pop("vibe_instance_kind", None)
+    remote_access_authorization_service.upsert_scoped(
+        reference=record["id"],
+        instance_id="inst_123",
+        subject="user-1",
+        email=record["email"],
+        scope_kind=record["scope_kind"],
+        scope_ref=record["scope_ref"],
+        authorization_state="current",
+        claims=claims,
+        last_checked_at=now,
+        updated_at=now,
+    )
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(config, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "personal"
+    assert len(calls) == 1
+    assert result.payload is not None
+    assert result.payload.get("vibe_instance_kind") == "personal"
+
+
+def test_binding_decoder_rejects_explicit_non_v1_schema_versions(tmp_path):
+    """Regression PR #1606 r5: only a genuinely absent schema_version defaults
+    to v1; explicit 0 or 2 must fail closed.
+    """
+
+    config = _paired_config(tmp_path)
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import state_meta
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    for version in (0, 2):
+        payload = json.dumps(
+            {
+                "schema_version": version,
+                "state": "ready",
+                "instance_id": "inst_123",
+                "instance_kind": "personal",
+                "generation": 1,
+                "updated_at": "1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with engine.begin() as conn:
+            statement = sqlite_insert(state_meta).values(
+                key=remote_access_authorization_service.INSTANCE_BINDING_STATE_META_KEY,
+                value_json=payload,
+                updated_at="1",
+            )
+            conn.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[state_meta.c.key],
+                    set_={"value_json": payload, "updated_at": "1"},
+                )
+            )
+        decoded = remote_access_authorization_service.load_instance_binding_state(
+            ensure=False
+        )
+        assert decoded is None or decoded.get("state") == remote_access_authorization_service.INSTANCE_BINDING_STATE_INVALID
+        assert remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id="inst_123",
+            instance_kind="personal",
+            ensure=False,
+        ) is False
+
+
+def test_refresh_cache_does_not_serve_personal_payload_after_org_reclassification(
+    monkeypatch,
+    tmp_path,
+):
+    """Class 1: in-memory refresh cache is bound to generation.
+
+    After a successful Personal refresh, a Personal→Org reclassification
+    within the 5s window must not return the cached Personal payload.
+    """
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        kind = V2Config.load().remote_access.vibe_cloud.instance_kind or "personal"
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind=kind if kind in {"personal", "organization"} else "personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+    first = remote_access.resolve_current_authorization(config, identity)
+    assert first.current is True
+    assert first.policy == "personal"
+    first_calls = len(calls)
+
+    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True)
+    reclassified = V2Config.load()
+    second = remote_access.resolve_current_authorization(reclassified, identity)
+    assert second.policy != "personal" or second.current is False or second.refreshed is True
+    if second.current:
+        assert second.policy == "organization"
+        assert len(calls) > first_calls
+
+
+def test_in_flight_auth_during_same_instance_kind_transition_is_binding_changed(
+    monkeypatch,
+    tmp_path,
+):
+    """Class 3: same-instance generation advance IS instance_binding_changed."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    captured = remote_access_authorization_service.current_instance_binding_generation()
+
+    def flip_then_respond(_config, _method, _suffix, payload, **kwargs):
+        remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
+        return _authorization_context_response(
+            config, payload, revision=41, instance_kind="organization"
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", flip_then_respond)
+    result = remote_access._fetch_authorization_context(
+        config, identity, record, now=now, observed_revision=41
+    )
+    assert result.reason == "instance_binding_changed"
+    assert result.reason != "instance_kind_persistence_failed"
+    # A subsequent request for the new binding is not 5s-denied by the old failure.
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda _c, _m, _s, payload, **k: _authorization_context_response(
+            config, payload, revision=41, instance_kind="personal"
+        ),
+    )
+    later = remote_access.resolve_current_authorization(V2Config.load(), identity)
+    assert later.reason != "authorization_refresh_backoff"
+    assert remote_access_authorization_service.current_instance_binding_generation() > captured
+
+
+def test_successful_context_store_refused_when_generation_advances_after_persist_kind(
+    monkeypatch,
+    tmp_path,
+):
+    """Class close: every authorization-row write carries the REQUEST generation.
+
+    persist-kind CAS succeeds at request gen; a peer then completes a
+    transition (gen advances) before store. Recapturing live generation
+    would let the stale 200 resurrect a current row. Store must refuse.
+    """
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    original_state = record.get("authorization_state")
+    captured = remote_access_authorization_service.current_instance_binding_generation()
+
+    original_store = remote_access._store_scoped_authorization
+    advanced = {"done": False}
+
+    def store_after_peer_transition(*args, **kwargs):
+        if not advanced["done"]:
+            advanced["done"] = True
+            remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
+        return original_store(*args, **kwargs)
+
+    monkeypatch.setattr(remote_access, "_store_scoped_authorization", store_after_peer_transition)
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda _c, _m, _s, payload, **k: _authorization_context_response(
+            config, payload, revision=41, instance_kind="organization"
+        ),
+    )
+    result = remote_access._fetch_authorization_context(
+        config, identity, record, now=now, observed_revision=41
+    )
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert result.reason == "instance_binding_changed"
+    assert result.current is False
+    if stored is not None:
+        # Must not resurrect a current Organization row under the new Personal binding.
+        if stored.get("authorization_state") == "current":
+            claims = stored.get("claims") or {}
+            assert claims.get("vibe_instance_kind") != "organization" or (
+                stored.get("authorization_state") == original_state
+            )
+    assert remote_access_authorization_service.current_instance_binding_generation() > captured
+
+
+def test_interactive_gate_is_read_once_and_failed_gate_never_collapses_to_legacy(
+    monkeypatch,
+    tmp_path,
+):
+    """Class 2 (interactive path): one binding-gate snapshot per evaluation.
+
+    A reconciling that begins between record admission and the former second
+    gate call must not collapse instance_kind to None and return the old
+    Personal payload through the legacy branch.
+    """
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    cookie = remote_access.make_session_cookie(
+        config,
+        "user-1@example.com",
+        "user-1",
+        session_claims={
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_instance_kind": "personal",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+
+    calls = {"n": 0}
+    real_gate = remote_access.binding_is_ready
+
+    def counting_gate(*args, **kwargs):
+        calls["n"] += 1
+        # Simulate a peer entering reconciling right after the first read:
+        # any SECOND read within one evaluation would observe False.
+        if calls["n"] == 1:
+            return real_gate(*args, **kwargs)
+        return False
+
+    monkeypatch.setattr(remote_access, "binding_is_ready", counting_gate)
+    result = remote_access.resolve_current_authorization(config, identity)
+    # One evaluation = one gate read; the flip value is never consumed.
+    assert calls["n"] == 1
+    # With the single ready snapshot the personal branch ran (not legacy).
+    assert result.current is True
+    assert result.policy == "personal"
+
+    # Failed gate at snapshot time: fail closed (refresh/unavailable), never
+    # legacy-current with the old Personal payload.
+    calls["n"] = 0
+    monkeypatch.setattr(remote_access, "binding_is_ready", lambda *a, **k: False)
+    blocked = remote_access.resolve_current_authorization(
+        config, identity, allow_refresh=False
+    )
+    assert blocked.current is False
+    assert blocked.state in {"unavailable", "invalid_identity"}
+
+
+def test_unsupported_stored_kind_fails_closed_on_the_interactive_path(
+    monkeypatch,
+    tmp_path,
+):
+    """A persisted scoped row with kind="enterprise" under a legacy no-kind
+    pairing must fail closed instead of falling through legacy-current."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = ""
+    config.save()
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    claims = dict(record.get("claims") or {})
+    claims["vibe_instance_kind"] = "enterprise"
+    remote_access_authorization_service.upsert_scoped(
+        reference=str(record["id"]),
+        instance_id="inst_123",
+        subject="user-1",
+        email="user-1@example.com",
+        scope_kind=str(record.get("scope_kind") or "instance"),
+        scope_ref=str(record.get("scope_ref") or "inst_123"),
+        authorization_state="current",
+        claims=claims,
+        last_checked_at=now,
+        updated_at=now,
+    )
+    blocked = remote_access.resolve_current_authorization(
+        config, identity, allow_refresh=False
+    )
+    assert blocked.current is False
+    assert blocked.state == "unavailable"

@@ -15,6 +15,7 @@ def _context(
     email: str = "member@example.com",
     organization_id: str | None = None,
     group_ids: tuple[str, ...] = (),
+    instance_kind: str | None = None,
 ) -> AuthorizationContext:
     return AuthorizationContext(
         instance_role=role,
@@ -22,6 +23,7 @@ def _context(
         organization_id=organization_id,
         group_ids=frozenset(group_ids),
         is_remote=True,
+        instance_kind=instance_kind,
     )
 
 
@@ -126,6 +128,44 @@ def test_restricted_policy_matches_email_domain_and_group(tmp_path) -> None:
             )
             is None
         )
+
+
+def test_personal_editor_ignores_project_organization_acl(tmp_path) -> None:
+    engine, project = _engine_with_project(tmp_path)
+    intent = _intent(
+        project["id"],
+        1,
+        bindings=[
+            {
+                "principal_kind": "email",
+                "principal_value": "other@example.com",
+                "access_role": "viewer",
+            }
+        ],
+    )
+    personal_editor = _context(
+        "editor",
+        email="personal@example.com",
+        instance_kind="personal",
+    )
+    personal_viewer = _context(
+        "viewer",
+        email="personal@example.com",
+        instance_kind="personal",
+    )
+    organization_editor = _context("editor", email="organization@example.com")
+
+    with engine.begin() as conn:
+        assert project_access_service.apply_project_access_intent(conn, intent).outcome == "applied"
+        assert project_access_service.get_effective_project_role(
+            conn, personal_editor, project["id"]
+        ) == "editor"
+        assert project_access_service.get_effective_project_role(
+            conn, personal_viewer, project["id"]
+        ) is None
+        assert project_access_service.get_effective_project_role(
+            conn, organization_editor, project["id"]
+        ) is None
 
 
 def test_highest_match_is_capped_by_instance_role(tmp_path) -> None:
