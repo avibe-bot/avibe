@@ -2027,19 +2027,41 @@ def create_app(
         from core.inbox_events import bus
 
         sub_id, queue = bus.subscribe()
+        # Baselined before the handshake below, because that yield reaches the
+        # bridge and a discard after it is a hole in what this feed promised.
+        last_dropped = bus.dropped_count(sub_id)
 
         async def _stream():
             try:
-                # A REAL ``connected`` event (not a ``:`` comment, which the
-                # internal_client parser swallows) so it flows bridge → broker →
-                # browser. The UI sidebar refetches on this, which reconciles
-                # agent-status dots after a CONTROLLER restart while the UI server
-                # + browser SSE stay up: only this bridge reconnects, so the
-                # browser's own ``connected`` never fires and the crash-recovery
-                # ``running → idle`` reset (broadcast to no subscriber) would
-                # otherwise be invisible until a manual reload (Codex P2).
+                # A REAL ``connected`` event, not a ``:`` comment, which the
+                # internal_client parser swallows: the bridge has to be able to
+                # observe this handshake. It consumes the frame rather than
+                # relaying it, and publishes the bridge-status transition that
+                # browsers actually key off. Either way the UI reconciles after a
+                # CONTROLLER restart that leaves the UI server + browser SSE up:
+                # only this bridge reconnects, so the browser's own ``connected``
+                # never fires and the crash-recovery ``running → idle`` reset
+                # (broadcast to no subscriber) would otherwise stay invisible
+                # until a manual reload (Codex P2).
                 yield _sse_event("connected", {})
                 while True:
+                    # Same rule as the UI server's browser feed: a subscriber
+                    # that lost an event is not a subscriber any more. Ending it
+                    # makes the bridge reconnect, and a reconnect flips the
+                    # bridge status, which is what tells browsers to reconcile.
+                    # Announcing the hole down this stream instead cannot work --
+                    # the queue is still full, so the next iteration finds
+                    # another discard and announces again. Checked before
+                    # ``get()`` so no event is relayed as if it followed the
+                    # previous one when it does not.
+                    dropped = bus.dropped_count(sub_id)
+                    if dropped > last_dropped:
+                        logger.warning(
+                            "internal events: ending subscriber %s after %s dropped event(s)",
+                            sub_id,
+                            dropped - last_dropped,
+                        )
+                        return
                     event_type, data = await queue.get()
                     yield _sse_event(event_type, data)
             finally:

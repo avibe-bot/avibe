@@ -252,6 +252,38 @@ describe('ShowPagesInventoryStore', () => {
     release();
   });
 
+  it('reconciles a gap declared before any handshake arrives', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi.fn().mockResolvedValue({ pages: [page()] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    // A reactivation that finds the stream unproven announces the gap itself
+    // rather than waiting on the replacement stream's handshake, so `null` can
+    // be the very first call this subscription ever sees. Swallowing it as "the
+    // initial connection" would spend the one free pass on a read activate()
+    // had already done and leave the real gap unreconciled.
+    handlers?.onConnected?.(null);
+    await Promise.resolve();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+
+    // The handshake that follows is still this subscription's first, and
+    // activate() plus the line above have both already read: nothing owed.
+    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+    await Promise.resolve();
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    release();
+  });
+
   it('withdraws a retained page immediately when access is lost', async () => {
     const store = new ShowPagesInventoryStore({
       getShowPages: vi.fn().mockResolvedValue({ pages: [page()] }),

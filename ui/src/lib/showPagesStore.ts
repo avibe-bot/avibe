@@ -258,13 +258,21 @@ export class ShowPagesInventoryStore {
 
   private connectEvents(): void {
     if (this.disconnectEvents) return;
-    let connected = false;
+    let handshook = false;
     this.disconnectEvents = this.api.connectWorkbenchEvents({
-      onConnected: () => {
-        // activate() already revalidates this subscription's initial connection.
-        // Only later callbacks are reconnects that may cover a missed event gap.
-        if (!connected) {
-          connected = true;
+      onConnected: (data) => {
+        // Keyed off what the signal says, not off how many times it has been
+        // called. `null` is a gap declared with no handshake behind it, so it is
+        // never this subscription's initial connection however early it arrives
+        // -- and it can arrive first, because a reactivation announces the gap
+        // itself rather than waiting on the stream it is replacing. Counting
+        // calls instead would spend that first announcement on a read
+        // activate() had already done, and leave the real gap unreconciled
+        // until a handshake that may never come.
+        if (data && !handshook) {
+          // activate() already revalidates this subscription's initial
+          // connection; only a later one is a reconnect covering a gap.
+          handshook = true;
           return;
         }
         // Revalidation, so it may wait for a consumer: activation re-reads

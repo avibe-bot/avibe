@@ -11780,6 +11780,14 @@ async def workbench_events():
 
     async def generate():
         sub_id, queue = broker.subscribe()
+        # Baselined here, before anything can suspend or reach the client. A
+        # fresh subscription is owed everything from this instant on, so the
+        # count is 0 by construction -- reading it late looked equivalent and is
+        # not: the authorization await and the handshake below are suspension
+        # points, and the client can finish its connect catch-up while this
+        # generator is parked between them. A burst discarded in that window
+        # would then become the baseline and never be reported.
+        last_dropped = broker.dropped_count(sub_id)
         try:
             state = await authorization_state()
             if state != "current":
@@ -11799,10 +11807,6 @@ async def workbench_events():
             )
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             last_heartbeat_at = time.monotonic()
-            # Anything discarded before this point is already covered by the
-            # handshake above: the client catches up on connect. From here on a
-            # discard means this subscription's view has a hole in it.
-            last_dropped = broker.dropped_count(sub_id)
             while True:
                 state = await authorization_state()
                 if state != "current":
