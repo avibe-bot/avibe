@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -1946,8 +1947,8 @@ def _normalized_rerank_provider(
     provider = _optional_string(value)
     if provider in {"deepinfra", "vllm", "dashscope"}:
         return provider
-    normalized_url = (_normalized_endpoint_url(base_url) or "").lower()
-    if normalized_url.endswith(".maas.aliyuncs.com"):
+    hostname = (urlsplit(_normalized_endpoint_url(base_url) or "").hostname or "").lower()
+    if hostname.endswith(".maas.aliyuncs.com"):
         return "dashscope"
     return DEFAULT_MEMORY_RERANK_PROVIDER
 

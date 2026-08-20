@@ -2247,10 +2247,10 @@ def _inferred_memory_rerank_provider(
     base_url: Optional[str],
     model: Optional[str] = None,
 ) -> MemoryRerankProvider:
-    normalized_url = (base_url or "").strip().rstrip("/").lower()
+    hostname = (urlsplit((base_url or "").strip()).hostname or "").lower()
     # Legacy omitted-provider configs meant DeepInfra. Only an unambiguous
     # Bailian workspace host may change that default on upgrade.
-    if normalized_url.endswith(".maas.aliyuncs.com"):
+    if hostname.endswith(".maas.aliyuncs.com"):
         return "dashscope"
     return DEFAULT_MEMORY_RERANK_PROVIDER
 
