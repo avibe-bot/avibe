@@ -128,8 +128,16 @@ class VibeAgentAccessError(PermissionError):
 # Default routing surfaces -- the instance-wide default Agent and a project's
 # default Agent -- are resolved on behalf of whoever starts an unpinned session,
 # never on behalf of whoever configured them. The invariant both surfaces share:
-# a default must reference an Agent usable by the audience it routes for.
-DEFAULT_ROUTING_AUDIENCE_ERROR_CODE = "agent_default_audience_private"
+# a default must be usable by its entire audience, so only an audience-wide
+# resource policy qualifies.
+DEFAULT_ROUTING_AUDIENCE_ERROR_CODE = "agent_default_audience_restricted"
+
+# Access levels that every principal of a routing surface's audience can resolve.
+# Membership is the whole rule: an access level that is not listed here narrows
+# the audience somehow, so it cannot back a default. Listing what qualifies
+# rather than what does not means a future access level is rejected until it is
+# deliberately declared audience-wide.
+AUDIENCE_WIDE_ACCESS_LEVELS = frozenset({"public"})
 
 
 class VibeAgentDefaultAudienceError(VibeAgentAccessError):
@@ -540,21 +548,33 @@ def default_routing_audience_error(
 ) -> str | None:
     """Return an error code when an Agent cannot serve as a default route.
 
+    A default must be usable by its entire audience; only audience-wide policies
+    qualify. Group-subset comparison is intentionally NOT implemented -- defaults
+    do not get narrower audiences.
+
     Shared by the instance-wide default and the per-project default so both
-    surfaces enforce one audience rule. A ``private`` ACL is single-subject by
-    construction: exactly one subject passes ``can_use_resource``, and every
-    other user of the surface fails ``ensure_agent_selection_access`` on the
-    unpinned path instead -- for a project that means it can no longer start
-    normal sessions at all.
+    surfaces enforce one audience rule. Whoever starts an unpinned session
+    resolves the default on their own behalf and then passes through
+    ``ensure_agent_selection_access``, so any policy narrower than the surface's
+    audience locks some of that audience out -- for a project that means it can
+    no longer start normal sessions at all. A ``private`` policy is
+    single-subject by construction; a ``scope`` policy admits only an
+    intersecting group, which is narrower than a project shared with any other
+    group and narrower than an instance-wide default by definition.
 
-    The check is deliberately caller-independent. The Instance Owner bypasses
-    ACL checks when *using* a resource, but that bypass describes the Owner, not
-    the audience the default has to serve, so an Owner assignment is validated
-    the same way; an Owner assigning any non-private Agent is unaffected.
+    Comparing a scoped policy's groups against each surface's audience is
+    deliberately out of the model: a project is not an ACL resource
+    (``resource_access_service.RESOURCE_KINDS``) and carries no group binding, so
+    a project audience is not representable, and an instance-wide default has no
+    bounded audience to compare against at all.
 
-    An Agent with no ACL row is not single-subject -- it is the local/builtin
-    shape that predates the resource catalog, and its use is fenced elsewhere.
-    Only the single-subject shape is rejected here.
+    The check is caller-independent. The Instance Owner bypasses ACL checks when
+    *using* a resource, but that bypass describes the Owner, not the audience the
+    default has to serve, so an Owner assignment is validated the same way; an
+    Owner assigning an audience-wide Agent is unaffected.
+
+    An Agent with no ACL row narrows nothing -- it is the local/builtin shape
+    that predates the resource catalog, and its use is fenced elsewhere.
     """
 
     from storage import resource_access_service
@@ -569,7 +589,7 @@ def default_routing_audience_error(
     )
     if policy is None:
         return None
-    if str(policy.get("access_level") or "") != "private":
+    if str(policy.get("access_level") or "") in AUDIENCE_WIDE_ACCESS_LEVELS:
         return None
     return DEFAULT_ROUTING_AUDIENCE_ERROR_CODE
 

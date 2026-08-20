@@ -141,16 +141,17 @@ class ProjectAgentUnavailableError(ValueError):
 
 
 class ProjectAgentAudienceError(ProjectAgentUnavailableError):
-    """The requested Agent is not usable by the project's audience.
+    """The requested Agent is not usable by the project's whole audience.
 
     A project default is a routing surface for everyone with access to the
-    project, so it cannot point at an Agent only one subject may use. Subclasses
-    ``ProjectAgentUnavailableError`` so the existing HTTP mapping answers with a
-    coded 400 rather than dropping the write silently, while the distinct
-    ``code`` keeps the two rejections machine-distinguishable.
+    project, so it can only point at an Agent whose resource policy is
+    audience-wide -- not one restricted to a single subject or to a group.
+    Subclasses ``ProjectAgentUnavailableError`` so the existing HTTP mapping
+    answers with a coded 400 rather than dropping the write silently, while the
+    distinct ``code`` keeps the two rejections machine-distinguishable.
     """
 
-    code = "project_agent_audience_private"
+    code = "project_agent_audience_restricted"
 
 
 # Single source of truth for the columns every project payload reads, so
@@ -417,9 +418,9 @@ def _require_project_audience_agent(
 
     Shares one predicate with the instance-wide default (see
     ``core.vibe_agents.default_routing_audience_error``) so both default routing
-    surfaces answer the same question: is this Agent usable by the audience the
-    default routes for? Only the error shape differs, so the project endpoint
-    keeps its coded 400 contract.
+    surfaces answer the same question: is this Agent's policy audience-wide? Only
+    the error shape differs, so the project endpoint keeps its coded 400
+    contract.
     """
 
     from core.vibe_agents import default_routing_audience_error
