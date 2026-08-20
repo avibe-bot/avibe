@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
 import json
 import logging
 import os
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -24,6 +26,7 @@ from config import paths
 from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
 from vibe.upgrade import (
+    LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
     RollbackTarget,
     _names_a_published_release,
@@ -121,8 +124,41 @@ def _running_ui_version() -> str | None:
     return version if isinstance(version, str) and _names_a_published_release(version) else None
 
 
-def _legacy_service_launcher(vibe_path: str | None) -> runtime.ServiceLauncher:
-    """Recover the launcher that existed before the package-manager replace."""
+def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher | None:
+    """Read the old launcher from the still-running service command line."""
+
+    if not pid:
+        return None
+    command = runtime.get_process_command(pid)
+    if not command:
+        return None
+    try:
+        argv = shlex.split(command, posix=(os.name != "nt"))
+        if Path(argv[0]).name.lower() == "systemd-run" and "--" in argv:
+            argv = argv[argv.index("--") + 1 :]
+        if not argv or not Path(argv[0]).name.lower().startswith("python"):
+            return None
+        entry = next(
+            (arg for arg in argv[1:] if not arg.startswith("-") and Path(arg).name in {"main.py", "service_main.py"}),
+            None,
+        )
+        if entry is None:
+            return None
+        return runtime.ServiceLauncher(python=argv[0], main=entry)
+    except (IndexError, ValueError):
+        return None
+
+
+def _legacy_service_launcher(vibe_path: str | None, *, service_pid: int | None = None) -> runtime.ServiceLauncher:
+    """Recover the launcher that existed before the package-manager replace.
+
+    The service command is authoritative: the normal ``~/.local/bin/vibe``
+    symlink may already point at the replacement by the time this process starts.
+    """
+
+    process_launcher = _service_launcher_from_process(service_pid)
+    if process_launcher is not None:
+        return process_launcher
 
     fallback = runtime.current_service_launcher()
     if not vibe_path:
@@ -144,16 +180,45 @@ def _legacy_service_launcher(vibe_path: str | None) -> runtime.ServiceLauncher:
         return fallback
 
 
+def _legacy_install_metadata(launcher: runtime.ServiceLauncher) -> tuple[str, str] | None:
+    """Read the old release metadata from the launcher-owned site-packages."""
+
+    main = Path(launcher.main).resolve()
+    site_packages = main.parent.parent
+    try:
+        from vibe import __version__ as replacement_version
+
+        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
+            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+            name = str(payload.get("Name") or "").strip()
+            version = str(payload.get("Version") or "").strip()
+            if (
+                name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME}
+                and version
+                and version != replacement_version
+                and _names_a_published_release(version)
+            ):
+                return version, name
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
 def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> RollbackTarget | None:
     """Build a rollback target for an upgrade initiated by an older release."""
 
     if trigger != "upgrade":
         return None
-    version = _running_ui_version()
-    if version is None:
-        return None
-    launcher = _legacy_service_launcher(vibe_path)
-    package = installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
+    service_pid = _read_recorded_pid()
+    launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid)
+    metadata = _legacy_install_metadata(launcher)
+    if metadata is not None:
+        version, package = metadata
+    else:
+        version = _running_ui_version()
+        if version is None:
+            return None
+        package = installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
     return RollbackTarget(version=version, package=package, launcher=launcher)
 
 

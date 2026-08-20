@@ -112,6 +112,8 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
 def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatch, tmp_path):
     """A pre-rollback release can still hand the new supervisor its target."""
 
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
     tool_root = tmp_path / "uv" / "tools" / "vibe-remote"
     python_path = tool_root / "bin" / "python"
     vibe_path = tool_root / "bin" / "vibe"
@@ -121,14 +123,24 @@ def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatc
     python_path.write_text("#!/bin/sh\n", encoding="utf-8")
     vibe_path.write_text(f"#!{python_path}\n", encoding="utf-8")
     service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_dir = service_main.parent.parent / "avibe_os-3.0.12.dist-info"
+    metadata_dir.mkdir()
+    (metadata_dir / "METADATA").write_text("Name: avibe-os\nVersion: 3.0.12\n", encoding="utf-8")
 
-    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.12")
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: f"{python_path} {service_main}",
+    )
 
-    target = restart_supervisor._discover_legacy_upgrade_target(trigger="upgrade", vibe_path=str(vibe_path))
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
 
     assert target == RollbackTarget(
         version="3.0.12",
-        package="vibe-remote",
+        package="avibe-os",
         launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
     )
 
@@ -430,6 +442,7 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "get_restart_command", lambda vibe_path=None: ["/bin/vibe"])
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
+    monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
 
     def fake_run(command, **kwargs):
         calls.append(("run", command))
