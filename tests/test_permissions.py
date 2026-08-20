@@ -205,8 +205,8 @@ def _complete_projection(instance_id: str = "inst-123") -> dict:
 
 def _resource(
     instance_id: str = "inst-123",
-    resource_kind: str = "show_page",
-    resource_id: str = "page-1",
+    resource_kind: str = "agent",
+    resource_id: str = "agent-1",
     *,
     revision: int = 4,
 ) -> dict:
@@ -214,7 +214,7 @@ def _resource(
         "instance_id": instance_id,
         "resource_kind": resource_kind,
         "resource_id": resource_id,
-        "display_name": "Page",
+        "display_name": "Agent",
         "owner_user_id": "owner-1",
         "access": {
             "access_level": "scope",
@@ -459,10 +459,10 @@ def test_resource_access_client_binds_identity_and_strips_local_pairing_precondi
 
     monkeypatch.setattr(permissions.requests, "request", request)
 
-    read = permissions.get_resource_access("show_page", "page-1", _config())
+    read = permissions.get_resource_access("agent", "agent-1", _config())
     written = permissions.update_resource_access(
-        "show_page",
-        "page-1",
+        "agent",
+        "agent-1",
         {
             "access_level": "scope",
             "group_ids": ["group-1"],
@@ -474,7 +474,7 @@ def test_resource_access_client_binds_identity_and_strips_local_pairing_precondi
 
     expected_url = (
         "https://backend.example/api/v1/instances/inst-123/permissions/"
-        "resources/show_page/page-1/access"
+        "resources/agent/agent-1/access"
     )
     assert read == {"resource": _resource(revision=4)}
     assert written == {"ok": True, "resource": _resource(revision=5)}
@@ -492,12 +492,50 @@ def test_resource_access_client_binds_identity_and_strips_local_pairing_precondi
     ]
 
 
+@pytest.mark.parametrize("operation", ["get", "put"])
+def test_resource_access_client_rejects_retired_kind_before_backend(
+    monkeypatch,
+    operation,
+) -> None:
+    """§3.2 retired show_page from the Resource ACL: the retired kind fails
+    client-side as an invalid resource before any Backend request is made."""
+    called = False
+
+    def request(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return _Response(200, {"resource": _resource()})
+
+    monkeypatch.setattr(permissions.requests, "request", request)
+
+    with pytest.raises(
+        permissions.PermissionsInvalidRequestError,
+        match="invalid_resource_kind",
+    ):
+        if operation == "get":
+            permissions.get_resource_access("show_page", "page-1", _config())
+        else:
+            permissions.update_resource_access(
+                "show_page",
+                "page-1",
+                {
+                    "access_level": "scope",
+                    "group_ids": ["group-1"],
+                    "if_match_revision": 4,
+                    "if_match_instance_id": "inst-123",
+                },
+                _config(),
+            )
+
+    assert called is False
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
         ("instance_id", "inst-other"),
-        ("resource_kind", "agent"),
-        ("resource_id", "page-other"),
+        ("resource_kind", "vault_secret"),
+        ("resource_id", "agent-other"),
     ],
 )
 def test_resource_access_client_rejects_response_identity_mismatch(
@@ -517,7 +555,7 @@ def test_resource_access_client_rejects_response_identity_mismatch(
         permissions.PermissionsInvalidResponseError,
         match="permissions_resource_mismatch",
     ):
-        permissions.get_resource_access("show_page", "page-1", _config())
+        permissions.get_resource_access("agent", "agent-1", _config())
 
 
 @pytest.mark.parametrize("operation", ["get", "put"])
@@ -553,11 +591,11 @@ def test_resource_access_rechecks_pairing_after_response_validation(
         match="permissions_pairing_changed",
     ):
         if operation == "get":
-            permissions.get_resource_access("show_page", "page-1", config)
+            permissions.get_resource_access("agent", "agent-1", config)
         else:
             permissions.update_resource_access(
-                "show_page",
-                "page-1",
+                "agent",
+                "agent-1",
                 {
                     "access_level": "scope",
                     "group_ids": ["group-1"],
@@ -2291,13 +2329,13 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
     )
     assert (
         http_authorization_policy(
-            "GET", "/api/permissions/resources/show_page/page-1/access"
+            "GET", "/api/permissions/resources/agent/agent-1/access"
         ).minimum_role
         == "viewer"
     )
     assert (
         http_authorization_policy(
-            "PUT", "/api/permissions/resources/show_page/page-1/access"
+            "PUT", "/api/permissions/resources/agent/agent-1/access"
         ).minimum_role
         == "owner"
     )
@@ -2488,9 +2526,9 @@ def test_resource_access_same_origin_routes_forward_exact_identity_and_conflict(
 
     monkeypatch.setattr(permissions, "get_resource_access", get_resource)
     monkeypatch.setattr(permissions, "update_resource_access", update_resource)
-    read = client.get("/api/permissions/resources/show_page/page-1/access")
+    read = client.get("/api/permissions/resources/agent/agent-1/access")
     write = client.put(
-        "/api/permissions/resources/show_page/page-1/access",
+        "/api/permissions/resources/agent/agent-1/access",
         json={
             "access_level": "scope",
             "group_ids": ["group-1"],
@@ -2502,7 +2540,7 @@ def test_resource_access_same_origin_routes_forward_exact_identity_and_conflict(
 
     assert read.status_code == 200
     assert read.headers["Cache-Control"] == "private, no-store"
-    assert read.get_json()["resource"]["resource_id"] == "page-1"
+    assert read.get_json()["resource"]["resource_id"] == "agent-1"
     assert write.status_code == 409
     assert write.get_json() == {
         "ok": False,
@@ -2510,11 +2548,11 @@ def test_resource_access_same_origin_routes_forward_exact_identity_and_conflict(
         "current_revision": 7,
     }
     assert captured == [
-        ("GET", "show_page", "page-1", None),
+        ("GET", "agent", "agent-1", None),
         (
             "PUT",
-            "show_page",
-            "page-1",
+            "agent",
+            "agent-1",
             {
                 "access_level": "scope",
                 "group_ids": ["group-1"],
@@ -2568,7 +2606,7 @@ def test_resource_access_same_origin_route_rejects_invalid_payload_before_backen
     monkeypatch.setattr(permissions, "update_resource_access", update_resource)
     client = app.test_client()
     response = client.put(
-        "/api/permissions/resources/show_page/page-1/access",
+        "/api/permissions/resources/agent/agent-1/access",
         json=payload,
         headers=csrf_headers(client),
     )
@@ -2603,14 +2641,14 @@ def test_resource_access_route_rejects_page_scoped_guest_before_backend(
                 "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
                 "vibe_instance_role": "viewer",
                 "vibe_instance_access_source": "show_page_email",
-                "vibe_show_page_id": "page-1",
+                "vibe_show_page_id": "agent-1",
             },
         ),
         domain="alex.avibe.bot",
     )
 
     response = client.get(
-        "/api/permissions/resources/show_page/page-1/access",
+        "/api/permissions/resources/agent/agent-1/access",
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
     )
@@ -2636,7 +2674,7 @@ def test_resource_access_route_surfaces_cloud_authority_failure(monkeypatch) -> 
     )
     client = app.test_client()
     response = client.put(
-        "/api/permissions/resources/show_page/page-1/access",
+        "/api/permissions/resources/agent/agent-1/access",
         json={
             "access_level": "private",
             "group_ids": [],

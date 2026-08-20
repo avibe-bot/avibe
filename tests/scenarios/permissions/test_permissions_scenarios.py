@@ -224,10 +224,10 @@ def test_permissions_010_legacy_management_surfaces_are_absent() -> None:
     assert "ShowPageSharingSettings" in source
 
 
-def test_permissions_011_show_page_resource_acl_round_trip_and_conflict(harness) -> None:
+def test_permissions_011_resource_acl_round_trip_and_conflict(harness) -> None:
     """Scenario: PERMISSIONS-011."""
     client = harness.local_client()
-    resource_path = "/api/permissions/resources/show_page/ses-resource/access"
+    resource_path = "/api/permissions/resources/agent/ses-resource/access"
 
     initial = client.get(resource_path)
     write = client.put(
@@ -286,3 +286,30 @@ def test_permissions_011_show_page_resource_acl_round_trip_and_conflict(harness)
         "current_revision": 1,
     }
     assert harness.resource == before_conflict
+
+
+def test_permissions_012_show_page_resource_kind_is_retired(harness) -> None:
+    """Scenario: PERMISSIONS-012."""
+    client = harness.local_client()
+    resource_path = "/api/permissions/resources/show_page/ses-resource/access"
+    before = len(harness.backend_requests)
+
+    read = client.get(resource_path)
+    write = client.put(
+        resource_path,
+        json={
+            "access_level": "scope",
+            "group_ids": ["group-1"],
+            "if_match_revision": 0,
+            "if_match_instance_id": "inst-current",
+        },
+        headers=harness.csrf(client),
+    )
+
+    # §3.2 retired show_page from the Resource ACL: the local boundary rejects
+    # the retired kind as an invalid resource before any Backend contact.
+    assert read.status_code == 422
+    assert read.get_json() == {"ok": False, "error": "invalid_resource_kind"}
+    assert write.status_code == 422
+    assert write.get_json() == {"ok": False, "error": "invalid_resource_kind"}
+    assert len(harness.backend_requests) == before

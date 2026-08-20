@@ -102,11 +102,20 @@ scenarios:
     when: Registered routes and frontend sources are inventoried
     then: No Management OAuth proxy or embedded Organization route remains
   - id: PERMISSIONS-011
-    name: Show Page Workspace access round-trips through exact-instance Resource ACL
+    name: Resource ACL round-trips through exact-instance boundary
     status: covered
     kind: mutation
     layer: scenario
-    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_011_show_page_resource_acl_round_trip_and_conflict
-    given: A paired Instance Owner has a canonical private Show Page Resource ACL
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_011_resource_acl_round_trip_and_conflict
+    given: A paired Instance Owner has a canonical private agent Resource ACL
     when: The owner saves Selected groups and then submits a stale revision
     then: The canonical policy round-trips without a browser target field and the stale write changes nothing
+  - id: PERMISSIONS-012
+    name: Show Page Resource ACL kind is retired
+    status: covered
+    kind: retirement
+    layer: scenario
+    test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_012_show_page_resource_kind_is_retired
+    given: A paired Instance Owner calls the retired show_page Resource ACL endpoint
+    when: The local boundary validates the resource kind before any Backend contact
+    then: Both read and write are rejected as invalid_resource_kind with no Backend request

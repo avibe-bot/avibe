@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import select
 
 from config import paths
 from config.v2_config import V2Config
@@ -11,7 +11,7 @@ from storage import media_service, project_access_service, projects_service, res
 from storage import workbench_sessions_service as sessions_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, show_pages
+from storage.models import agent_sessions
 from tests.ui_server_test_helpers import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api, internal_client, permissions, remote_access, ui_server
@@ -90,64 +90,34 @@ def _ownership(
     }
 
 
-def _seed_show_pages_with_policies() -> ShowPageStore:
+def _seed_show_pages() -> ShowPageStore:
     if not paths.get_config_path().exists():
         V2Config.default().save()
     store = ShowPageStore()
     for session_id in ("ses-private", "ses-public", "ses-scope"):
         store.ensure(session_id)
-    with store.engine.begin() as connection:
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id="ses-private",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="private",
-        )
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id="ses-public",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id="ses-scope",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="scope",
-            group_ids=["group-engineering"],
-        )
     return store
 
 
-def test_show_page_catalog_follows_instance_role_and_show_page_acl(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("instance_role", ["viewer", "editor", "owner"])
+def test_show_require_access_follows_instance_role_alone(
+    monkeypatch, tmp_path, instance_role
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     try:
-        owner_ids = {page.session_id for page in store.list(user_context=_organization_context("owner-1"))}
-        member_ids = {page.session_id for page in store.list(user_context=_organization_context("member-1"))}
-        no_group_ids = {
-            page.session_id
-            for page in store.list(user_context=_organization_context("member-2", group_ids=None))
-        }
+        page = store.require_access(
+            "ses-private",
+            user_context=_organization_context("member-1", instance_role=instance_role),
+        )
+        assert page.session_id == "ses-private"
     finally:
         store.close()
 
-    assert owner_ids == {"ses-private", "ses-public", "ses-scope"}
-    assert member_ids == {"ses-public", "ses-scope"}
-    assert no_group_ids == {"ses-public"}
 
-
-def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
-    monkeypatch, tmp_path
-) -> None:
+def test_show_require_access_denies_show_page_email_source(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     context = resource_access_service.ResourceUserContext(
         subject="guest-1",
         email="guest@example.com",
@@ -157,58 +127,8 @@ def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
         is_remote=True,
     )
     try:
-        with store.engine.connect() as connection:
-            assert resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                "ses-private",
-                connection=connection,
-            )
-            assert not resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                "ses-public",
-                connection=connection,
-            )
-            assert not resource_access_service.can_use_resource(
-                context,
-                "agent",
-                "ses-private",
-                connection=connection,
-            )
-    finally:
-        store.close()
-
-
-def test_non_org_email_context_keeps_exact_page_entitlement_separate_from_role_rank(
-    monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
-    context = resource_access_service.ResourceUserContext(
-        subject="member-1",
-        email="member@example.com",
-        instance_role="editor",
-        instance_access_source="email",
-        show_page_id="ses-private",
-        is_remote=True,
-    )
-    try:
-        with store.engine.connect() as connection:
-            assert resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                "ses-private",
-                connection=connection,
-            )
-            assert not resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                "ses-scope",
-                connection=connection,
-            )
-            assert context.can_chat
-            assert context.can_use_resource("agent")
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.require_access("ses-private", user_context=context)
     finally:
         store.close()
 
@@ -220,7 +140,7 @@ def test_non_org_email_context_keeps_exact_page_entitlement_separate_from_role_r
         ("member-1", "viewer", "member"),
     ],
 )
-def test_remote_show_page_access_does_not_bypass_acl(
+def test_remote_show_page_surfaces_follow_instance_role(
     monkeypatch,
     tmp_path,
     subject,
@@ -229,7 +149,7 @@ def test_remote_show_page_access_does_not_bypass_acl(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     store.close()
 
     async def _runtime_response(*args, **kwargs):
@@ -270,11 +190,10 @@ def test_remote_show_page_access_does_not_bypass_acl(
     )
 
     assert catalog.status_code == 200
-    expected = {"ses-private", "ses-public", "ses-scope"} if instance_role == "owner" else {
-        "ses-public", "ses-scope"
-    }
     pages = catalog.get_json()["pages"]
-    assert {item["session_id"] for item in pages} == expected
+    # §3.2: the catalog is the Instance role alone — no Resource ACL filter, so a
+    # plain Viewer still sees every page; only manage/publish flags follow Editor.
+    assert {item["session_id"] for item in pages} == {"ses-private", "ses-public", "ses-scope"}
     if instance_role == "owner":
         assert all(item.get("path") for item in pages)
         assert all(item["can_manage"] for item in pages)
@@ -284,7 +203,8 @@ def test_remote_show_page_access_does_not_bypass_acl(
         assert all(not item["can_manage"] for item in pages)
         assert all(not item["can_publish_public"] for item in pages)
     assert mutation.status_code == (200 if instance_role == "owner" else 403)
-    assert page.status_code == (200 if instance_role == "owner" else 302)
+    # §3.2: every Instance Viewer enters /show; only show_page_email is barred.
+    assert page.status_code == 200
 
 
 def test_show_page_creation_uses_exact_instance_organization_without_request_claims(
@@ -323,57 +243,42 @@ def test_show_page_creation_uses_exact_instance_organization_without_request_cla
             )
         created = store.ensure(session["id"])
         assert created.session_id == session["id"]
+        # §3.2: show_page no longer registers a Resource ACL row, so creation
+        # writes no policy and the fence is not consulted for admission.
         with store.engine.connect() as connection:
-            created_policy = resource_access_service.get_resource_policy(
-                "show_page", created.session_id, connection=connection
-            )
-        assert created_policy is not None
-        assert created_policy["organization_id"] == "org-1"
-        assert created_policy["owner_user_id"] is None
-        assert "is_trusted_local" not in created_policy
+            with pytest.raises(
+                resource_access_service.ResourceAccessError,
+                match="invalid_resource_kind",
+            ):
+                resource_access_service.get_resource_policy(
+                    "show_page", created.session_id, connection=connection
+                )
         page = store.ensure("ses-org-public", user_context=owner_context)
-        with store.engine.begin() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            assert policy is not None
-            assert policy["organization_id"] == "org-1"
-            assert policy["owner_user_id"] == "owner-1"
-            assert policy["access_level"] == "private"
-            resource_access_service.apply_control_plane_intent(
-                connection,
-                organization_id="org-1",
-                resource_kind="show_page",
-                resource_id=page.session_id,
-                revision=1,
-                access_level="public",
-                group_ids=[],
-            )
-            updated = store.get(page.session_id)
-            assert updated is not None
-            assert updated.visibility == "private"
-            assert updated.share_id
+        assert page.session_id == "ses-org-public"
+        assert page.visibility == "private"
+        assert page.share_id
     finally:
         store.close()
 
 
-def test_show_page_scope_without_group_context_is_denied(monkeypatch, tmp_path) -> None:
+def test_show_require_access_is_group_agnostic(monkeypatch, tmp_path) -> None:
+    """§3.2: /show admission ignores the group claims that only /p audience uses."""
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     try:
-        with pytest.raises(ShowPageError):
-            store.require_access("ses-scope", user_context=_organization_context("member-1", group_ids=None))
+        page = store.require_access(
+            "ses-scope",
+            user_context=_organization_context("member-1", group_ids=None),
+        )
+        assert page.session_id == "ses-scope"
     finally:
         store.close()
-
-    # Missing group claims fail closed for scoped pages.
 
 
 def test_organization_admin_without_instance_owner_role_cannot_manage_pages(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     admin = _organization_context(
         "admin-1",
         group_ids=frozenset({"group-sales"}),
@@ -383,8 +288,10 @@ def test_organization_admin_without_instance_owner_role_cannot_manage_pages(monk
     owner = _organization_context("owner-1", instance_role="owner")
     try:
         public_page = store.update_visibility("ses-private", "public", user_context=owner)
-        with pytest.raises(ShowPageError):
-            store.require_access("ses-private", user_context=admin)
+        # §3.2: /show admission is the Instance Viewer role alone, so an
+        # Organization admin that is still a plain Instance Viewer enters /show…
+        assert store.require_access("ses-private", user_context=admin).session_id == "ses-private"
+        # …but management stays reserved to Instance Editor/Owner.
         with pytest.raises(ShowPageError):
             store.update_visibility("ses-private", "private", user_context=admin)
 
@@ -398,69 +305,46 @@ def test_organization_admin_without_instance_owner_role_cannot_manage_pages(monk
         assert rotated_share_id == rotated.share_id
         assert custom.share_id == "owner-link"
 
-        with pytest.raises(ShowPageError):
-            store.require_access("ses-scope", user_context=admin)
+        assert store.require_access("ses-scope", user_context=admin).session_id == "ses-scope"
     finally:
         store.close()
 
 
-def test_access_only_manager_availability_response_does_not_expose_page_payload(monkeypatch, tmp_path) -> None:
+def test_availability_mutation_is_editor_gated_and_returns_payload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
-    admin = _organization_context(
-        "admin-1",
-        group_ids=frozenset({"group-sales"}),
-        organization_role="admin",
-        instance_role="viewer",
-    )
-    try:
-        store.update_visibility(
-            "ses-private",
-            "public",
-            user_context=_organization_context("owner-1", instance_role="viewer"),
-        )
-    finally:
-        store.close()
+    store = _seed_show_pages()
+    store.close()
+    viewer = _organization_context("member-1", instance_role="viewer")
+    editor = _organization_context("editor-1", instance_role="editor")
+
     monkeypatch.setattr(
         resource_access_service,
         "resolve_resource_access_context",
-        lambda _value=None: admin,
+        lambda _value=None: viewer,
     )
-
     with pytest.raises(ShowPageError):
         api.set_show_page_availability("ses-private", True)
 
-
-def test_excluded_scoped_owner_availability_mutations_do_not_expose_page_payload(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
-    excluded_owner = _organization_context(
-        "owner-1",
-        group_ids=frozenset({"group-sales"}),
-        instance_role="viewer",
-    )
-    try:
-        store.update_visibility("ses-scope", "public", user_context=excluded_owner)
-    finally:
-        store.close()
     monkeypatch.setattr(
         resource_access_service,
         "resolve_resource_access_context",
-        lambda _value=None: excluded_owner,
+        lambda _value=None: editor,
     )
+    offline = api.set_show_page_availability("ses-private", True)
+    online = api.set_show_page_availability("ses-private", False)
 
-    offline = api.set_show_page_availability("ses-scope", True)
-    online = api.set_show_page_availability("ses-scope", False)
-
+    # §3.2: an Instance Editor both manages and uses the page, so the mutation
+    # response carries the full payload (no use/management split to redact).
     assert offline["ok"] is True
+    assert offline["offline"] is True
     assert online["ok"] is True
+    assert online["offline"] is False
 
 
 def test_remote_show_page_editor_can_control_sharing_without_instance_owner_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     page_owner = _organization_context("owner-1", instance_role="editor")
     try:
         published = store.update_visibility("ses-private", "public", user_context=page_owner)
@@ -497,15 +381,6 @@ def test_remote_show_page_viewer_mutations_are_instance_role_denied(monkeypatch,
         )
         session_id = session["id"]
     store.ensure(session_id)
-    with store.engine.begin() as connection:
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id=session_id,
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="private",
-        )
     store.close()
     client = app.test_client()
     client.set_cookie(
@@ -552,10 +427,10 @@ def test_remote_show_page_viewer_mutations_are_instance_role_denied(monkeypatch,
     assert applied.status_code == 403
 
 
-def test_organization_admin_can_read_show_page_access_metadata_without_use_access(monkeypatch, tmp_path) -> None:
+def test_organization_admin_viewer_reads_access_metadata_but_cannot_manage(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     store.close()
     admin = _organization_context(
         "admin-1",
@@ -565,8 +440,12 @@ def test_organization_admin_can_read_show_page_access_metadata_without_use_acces
     )
     monkeypatch.setattr(resource_access_service, "resolve_resource_access_context", lambda _value=None: admin)
 
-    with pytest.raises(ShowPageError):
-        api.get_show_page_access("ses-scope")
+    # §3.2: an Organization admin that is still an Instance Viewer may read the
+    # access metadata (can_use follows the Instance role) but never manage it.
+    response = api.get_show_page_access("ses-scope")
+    assert response["can_use"] is True
+    assert response["can_manage"] is False
+    assert response["can_publish_public"] is False
 
 
 def test_existing_show_page_is_adopted_idempotently_without_changing_link_access(
@@ -596,114 +475,73 @@ def test_existing_show_page_is_adopted_idempotently_without_changing_link_access
         page = store.ensure("ses-legacy")
         store.ensure("ses-legacy")
         with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
+            with pytest.raises(
+                resource_access_service.ResourceAccessError,
+                match="invalid_resource_kind",
+            ):
+                resource_access_service.get_resource_policy(
+                    "show_page",
+                    page.session_id,
+                    connection=connection,
+                )
         after = store.get_access("ses-legacy")
-        assert policy is not None
-        assert policy["organization_id"] == "org-1"
-        assert policy["access_level"] == "private"
-        assert policy["policy_revision"] == 0
+        # §3.2: adoption is a no-op — no policy is written and the page's link
+        # access is untouched across repeated ensures.
         assert before == after
         assert page.offline
     finally:
         store.close()
 
 
-def test_legacy_show_page_policy_reconciliation_keeps_page_grants_read_only(
+def test_show_page_access_api_follows_instance_role_and_bars_email_guests(
     monkeypatch,
     tmp_path,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
-    project_path = tmp_path / "project"
-    project_path.mkdir()
-    instance_editor = _organization_context("editor-1", instance_role="editor")
-    project_editor = _organization_context("project-editor", instance_role="editor")
     try:
-        with store.engine.begin() as connection:
-            project = projects_service.create_project(connection, str(project_path))
-            session_id = sessions_service.create_session(
-                connection,
-                scope_id=project["scope_id"],
-                agent_backend="codex",
-            )["id"]
-        store.ensure(session_id)
+        store.ensure("ses-access-meta")
         _paired_config(tmp_path, instance_kind="organization")
         monkeypatch.setattr(
             permissions,
             "resolve_current_instance_ownership",
             lambda: _ownership("organization", organization_id="org-1"),
         )
-        with store.engine.begin() as connection:
-            project_access_service.apply_project_access_intent(
-                connection,
-                {
-                    "project_id": project["id"],
-                    "revision": 1,
-                    "mode": "restricted",
-                    "bindings": [],
-                },
-            )
 
         page_guest = resource_access_service.ResourceUserContext(
             subject="guest-1",
             email="guest@example.com",
             instance_role="viewer",
             instance_access_source="show_page_email",
-            show_page_id=session_id,
+            show_page_id="ses-access-meta",
             is_remote=True,
         )
-        guest_response = api.get_show_page_access(session_id, user_context=page_guest)
-        assert guest_response["ownership_status"] == "unchanged"
-        assert guest_response["can_use"] is True
-        assert guest_response["can_manage"] is False
-        with store.engine.connect() as connection:
-            assert resource_access_service.get_resource_policy(
-                "show_page",
-                session_id,
-                connection=connection,
-            ) is None
-
+        # §3.2: a signed show_page_email guest is a /p-only visitor — it never
+        # reads access metadata.
         with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            api.get_show_page_access(session_id, user_context=instance_editor)
-        with store.engine.connect() as connection:
-            assert resource_access_service.get_resource_policy(
-                "show_page",
-                session_id,
-                connection=connection,
-            ) is None
+            api.get_show_page_access("ses-access-meta", user_context=page_guest)
 
-        with store.engine.begin() as connection:
-            project_access_service.apply_project_access_intent(
-                connection,
-                {
-                    "project_id": project["id"],
-                    "revision": 2,
-                    "mode": "restricted",
-                    "bindings": [{
-                        "principal_kind": "email",
-                        "principal_value": "project-editor@example.com",
-                        "access_role": "editor",
-                    }],
-                },
-            )
-
-        response = api.get_show_page_access(session_id, user_context=project_editor)
-        with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                session_id,
-                connection=connection,
-            )
-        assert response["ownership_status"] == "created"
+        instance_editor = _organization_context("editor-1", instance_role="editor")
+        response = api.get_show_page_access(
+            "ses-access-meta",
+            user_context=instance_editor,
+        )
+        assert response["ownership_status"] == "unchanged"
         assert response["can_use"] is True
         assert response["can_manage"] is True
-        assert policy is not None
-        assert policy["owner_user_id"] == "project-editor"
-        assert policy["organization_id"] == "org-1"
+        assert response["can_publish_public"] is True
+
+        # §3.2: reading metadata never writes a show_page Resource ACL row.
+        with store.engine.connect() as connection:
+            with pytest.raises(
+                resource_access_service.ResourceAccessError,
+                match="invalid_resource_kind",
+            ):
+                resource_access_service.get_resource_policy(
+                    "show_page",
+                    "ses-access-meta",
+                    connection=connection,
+                )
     finally:
         store.close()
 
@@ -729,7 +567,7 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "policy_organization_id": None,
         "access_level": "private",
         "group_ids": [],
-        "policy_revision": 0,
+        "policy_revision": None,
         "last_applied_control_plane_revision": None,
         "can_use": True,
         "can_manage": True,
@@ -747,16 +585,6 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
     store = ShowPageStore()
     try:
         store.ensure("ses-organization")
-        with store.engine.begin() as connection:
-            resource_access_service.apply_control_plane_intent(
-                connection,
-                organization_id="org-1",
-                resource_kind="show_page",
-                resource_id="ses-organization",
-                revision=4,
-                access_level="scope",
-                group_ids=["group-engineering"],
-            )
     finally:
         store.close()
     local_organization = app.test_client().get(
@@ -784,18 +612,20 @@ def test_show_page_access_api_distinguishes_personal_and_organization_modes(monk
         "ownership_status": "unchanged",
         "instance_id": "inst_123",
         "organization_id": "org-1",
-        "policy_organization_id": "org-1",
-        "access_level": "scope",
-        "group_ids": ["group-engineering"],
-        "policy_revision": 4,
-        "last_applied_control_plane_revision": 4,
+        # §3.2: no show_page Resource ACL row exists, so the applied-audience
+        # fields are the private/empty/None baseline, never a scope policy.
+        "policy_organization_id": None,
+        "access_level": "private",
+        "group_ids": [],
+        "policy_revision": None,
+        "last_applied_control_plane_revision": None,
         "can_use": True,
         "can_manage": True,
         "can_publish_public": True,
     }
 
 
-def test_null_organization_adoption_preserves_policy_and_show_access(monkeypatch, tmp_path) -> None:
+def test_show_access_adoption_is_policy_free(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
     try:
@@ -807,18 +637,6 @@ def test_null_organization_adoption_preserves_policy_and_show_access(monkeypatch
             target_share_id="adopt-link",
             target_emails=["guest@example.com"],
         )
-        with store.engine.begin() as connection:
-            resource_access_service.ensure_resource_policy(
-                connection,
-                resource_kind="show_page",
-                resource_id="ses-adopt",
-                organization_id=None,
-                owner_user_id="owner-1",
-                owner_email="owner@example.com",
-                access_level="private",
-                policy_revision=4,
-                last_applied_control_plane_revision=3,
-            )
         before_access = store.get_access("ses-adopt")
         _paired_config(tmp_path, instance_kind="organization")
         monkeypatch.setattr(
@@ -830,127 +648,50 @@ def test_null_organization_adoption_preserves_policy_and_show_access(monkeypatch
         store.ensure("ses-adopt")
         store.ensure("ses-adopt")
 
+        # §3.2: adoption never writes a show_page Resource ACL row and never
+        # touches the page's link access, no matter how many times ensure runs.
         with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                "ses-adopt",
-                connection=connection,
-            )
+            with pytest.raises(
+                resource_access_service.ResourceAccessError,
+                match="invalid_resource_kind",
+            ):
+                resource_access_service.get_resource_policy(
+                    "show_page", "ses-adopt", connection=connection
+                )
         assert applied.status == "applied"
         assert store.get_access("ses-adopt") == before_access
-        assert policy is not None
-        assert policy["organization_id"] == "org-1"
-        assert policy["owner_user_id"] == "owner-1"
-        assert policy["owner_email"] == "owner@example.com"
-        assert policy["access_level"] == "private"
-        assert policy["group_ids"] == []
-        assert policy["policy_revision"] == 4
-        assert policy["last_applied_control_plane_revision"] == 3
     finally:
         store.close()
 
 
-def test_same_organization_retry_preserves_acl_revision_and_groups(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _paired_config(tmp_path, instance_kind="organization")
-    monkeypatch.setattr(
-        permissions,
-        "resolve_current_instance_ownership",
-        lambda: _ownership("organization", organization_id="org-1"),
-    )
-    store = ShowPageStore()
-    try:
-        store.ensure(
-            "ses-same-org",
-            user_context=_organization_context("owner-1", instance_role="owner"),
-        )
-        with store.engine.begin() as connection:
-            resource_access_service.apply_control_plane_intent(
-                connection,
-                organization_id="org-1",
-                resource_kind="show_page",
-                resource_id="ses-same-org",
-                revision=7,
-                access_level="scope",
-                group_ids=["group-engineering"],
-            )
-            before = resource_access_service.get_resource_policy(
-                "show_page", "ses-same-org", connection=connection
-            )
-
-        store.ensure(
-            "ses-same-org",
-            user_context=_organization_context("owner-1", instance_role="owner"),
-        )
-
-        with store.engine.connect() as connection:
-            after = resource_access_service.get_resource_policy(
-                "show_page", "ses-same-org", connection=connection
-            )
-        assert after == before
-    finally:
-        store.close()
-
-
-def test_cross_organization_policy_conflict_fails_closed_without_breaking_link_guest(
-    monkeypatch,
-    tmp_path,
-) -> None:
+def test_show_access_organization_mode_never_reports_policy_conflict(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
     try:
-        store.ensure("ses-conflict")
-        with store.engine.begin() as connection:
-            resource_access_service.ensure_resource_policy(
-                connection,
-                resource_kind="show_page",
-                resource_id="ses-conflict",
-                organization_id="org-other",
-                owner_user_id="owner-other",
-                access_level="public",
-                policy_revision=5,
-                last_applied_control_plane_revision=5,
-            )
+        store.ensure("ses-org")
         _paired_config(tmp_path, instance_kind="organization")
         monkeypatch.setattr(
             permissions,
             "resolve_current_instance_ownership",
             lambda: _ownership("organization", organization_id="org-1"),
         )
-        store.ensure("ses-conflict")
 
-        response = api.get_show_page_access("ses-conflict")
-        with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page", "ses-conflict", connection=connection
-            )
-            link_guest = resource_access_service.can_use_resource(
-                resource_access_service.ResourceUserContext(
-                    subject="guest-1",
-                    email="guest@example.com",
-                    instance_role="viewer",
-                    instance_access_source="show_page_email",
-                    show_page_id="ses-conflict",
-                    is_remote=True,
-                ),
-                "show_page",
-                "ses-conflict",
-                connection=connection,
-            )
-        with pytest.raises(ShowPageError):
-            store.require_access(
-                "ses-conflict",
-                user_context=_organization_context("member-1"),
-            )
-        assert store.list(user_context=_organization_context("member-1")) == []
-        assert response["ownership_status"] == "conflict"
+        response = api.get_show_page_access("ses-org")
+        # §3.2: with no policy row to diverge from the instance organization, the
+        # legacy "conflict" status is gone — every Instance Viewer may use the page.
+        assert response["ownership_status"] == "unchanged"
+        assert response["mode"] == "organization"
         assert response["organization_id"] == "org-1"
-        assert response["policy_organization_id"] == "org-other"
-        assert policy is not None
-        assert policy["organization_id"] == "org-other"
-        assert policy["access_level"] == "public"
-        assert policy["policy_revision"] == 5
-        assert link_guest is True
+        assert response["policy_organization_id"] is None
+        assert response["can_use"] is True
+        assert (
+            store.require_access(
+                "ses-org",
+                user_context=_organization_context("member-1"),
+            ).session_id
+            == "ses-org"
+        )
+        assert len(store.list(user_context=_organization_context("member-1"))) == 1
     finally:
         store.close()
 
@@ -983,12 +724,16 @@ def test_organization_pending_is_stable_private_and_does_not_block_local_creatio
     try:
         created = store.ensure("ses-pending")
         response = api.get_show_page_access("ses-pending")
+        # §3.2: a pending fence still never writes a show_page Resource ACL row.
         with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page", "ses-pending", connection=connection
-            )
+            with pytest.raises(
+                resource_access_service.ResourceAccessError,
+                match="invalid_resource_kind",
+            ):
+                resource_access_service.get_resource_policy(
+                    "show_page", "ses-pending", connection=connection
+                )
         assert created.session_id == "ses-pending"
-        assert policy is None
         assert response["mode"] == "organization_pending"
         assert response["ownership_status"] == "pending"
         assert response["access_level"] == "private"
@@ -1004,7 +749,7 @@ def test_last_known_organization_binding_is_exact_instance_scoped(monkeypatch, t
     store = ShowPageStore()
     try:
         with store.engine.begin() as connection:
-            resource_access_service.remember_show_page_instance_ownership(
+            permissions.remember_show_page_instance_ownership(
                 connection,
                 _ownership("organization", organization_id="org-1"),
             )
@@ -1032,59 +777,29 @@ def test_last_known_organization_binding_is_exact_instance_scoped(monkeypatch, t
         store.close()
 
 
-def test_reconciliation_rejects_a_pairing_switch_before_policy_write(monkeypatch, tmp_path) -> None:
-    """A stale ownership snapshot cannot create a policy for the old instance."""
+def test_ownership_fence_rejects_stale_pairing_before_persisting(monkeypatch, tmp_path) -> None:
+    """A stale ownership snapshot cannot bind the fence to a former pairing."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _paired_config(tmp_path, instance_kind="organization")
     store = ShowPageStore()
     try:
         with store.engine.begin() as connection:
-            connection.execute(
-                insert(show_pages).values(
-                    session_id="ses-pairing-race",
-                    access_mode="private",
-                    access_revision=0,
-                    share_id="share-pairing-race",
-                    offline_at=None,
-                    created_at="2026-01-01T00:00:00Z",
-                    updated_at="2026-01-01T00:00:00Z",
-                )
+            fence = permissions.remember_show_page_instance_ownership(
+                connection,
+                {
+                    "mode": "organization",
+                    "instance_id": "inst-other",
+                    "organization_id": "org-1",
+                    "source": "live",
+                },
             )
-
-        original_assert = resource_access_service._assert_show_page_pairing_current  # noqa: SLF001
-        switched = False
-
-        def switch_after_validation(ownership):
-            nonlocal switched
-            original_assert(ownership)
-            if not switched:
-                switched = True
-                current = V2Config.load()
-                current.remote_access.vibe_cloud.instance_id = "inst-new"
-                current.save()
-
-        monkeypatch.setattr(
-            resource_access_service,
-            "_assert_show_page_pairing_current",
-            switch_after_validation,
-        )
-        monkeypatch.setattr(
-            permissions,
-            "resolve_current_instance_ownership",
-            lambda: _ownership("organization", organization_id="org-1"),
-        )
-
-        reconciliation = store.reconcile_resource_policy("ses-pairing-race")
-        assert reconciliation["status"] == "pending"
-        assert reconciliation["ownership"]["instance_id"] == "inst-new"
-
-        with store.engine.connect() as connection:
-            assert resource_access_service.get_resource_policy(
-                "show_page",
-                "ses-pairing-race",
-                connection=connection,
-            ) is None
+        # The writer fails closed to the current pending fence instead of
+        # persisting an organization binding for the former instance.
+        assert fence["mode"] == "organization_pending"
+        assert fence["instance_id"] == "inst_123"
+        assert fence["organization_id"] is None
+        assert permissions.current_show_page_instance_ownership()["mode"] == "organization_pending"
     finally:
         store.close()
 
@@ -1276,7 +991,7 @@ def test_show_access_malformed_apply_is_rejected_before_ipc(monkeypatch, tmp_pat
 
 def test_show_access_non_owner_is_rejected_before_ipc(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     store.close()
     viewer = _organization_context("member-1", instance_role="viewer")
     monkeypatch.setattr(
@@ -1395,10 +1110,10 @@ def test_show_access_conflict_returns_current_snapshot(monkeypatch, tmp_path) ->
     assert response.get_json()["show_access"]["revision"] == 3
 
 
-def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> None:
+def test_remote_org_dock_requires_editor_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     store.close()
     owner = _organization_context("owner-1", instance_role="owner")
     member = _organization_context("member-1")
@@ -1408,8 +1123,8 @@ def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> Non
         organization_role="admin",
         instance_role="owner",
     )
-    # Show Page dock/pin stays reserved to owner/admin Organization roles
-    # under the Resource ACL boundary (see #1343); a plain member is denied.
+    # §3.2: dock pin/unpin/reorder stay reserved to Instance Editor/Owner; a
+    # plain Viewer is denied the mutation even when it is an Organization admin.
     with pytest.raises(ShowPageError):
         api.pin_dock_show_page("ses-public", user_context=member)
     api.pin_dock_show_page("ses-scope", user_context=admin)
@@ -1418,10 +1133,10 @@ def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> Non
 
     dock = api.get_dock(user_context=member)["dock"]
     visible_ids = {pin["session_id"] for pin in dock["pins"]}
-    assert visible_ids == {"ses-public", "ses-scope"}
-    assert "show:ses-private" not in dock["order"]
-    # Pinning additional pages (require_management) stays denied for a plain
-    # member; unpin and reorder are also dock mutations and stay denied.
+    # §3.2: read filtering follows the Instance Viewer role alone — every pinned
+    # page is visible, private included (no Resource ACL filter to hide it).
+    assert visible_ids == {"ses-private", "ses-public", "ses-scope"}
+    assert sum(1 for entry in dock["order"] if entry.startswith("show:")) == 3
     with pytest.raises(ShowPageError):
         api.pin_dock_show_page("ses-private", user_context=member)
     with pytest.raises(ShowPageError):
@@ -1446,15 +1161,13 @@ def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> Non
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    # A plain active Organization member is denied dock mutations under the
-    # Resource ACL boundary (see #1343).
     assert response.status_code == 403
 
 
-def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:
+def test_remote_owner_dock_order_persists(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     store.close()
     owner = _organization_context("owner-1", instance_role="owner")
     admin = _organization_context("admin-1", organization_role="admin", instance_role="owner")
@@ -1481,7 +1194,7 @@ def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_
 def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    store = _seed_show_pages_with_policies()
+    store = _seed_show_pages()
     store.close()
     owner = _organization_context("owner-1", instance_role="owner")
     api.pin_dock_show_page("ses-public", user_context=owner)
@@ -1500,7 +1213,7 @@ def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
         )
 
 
-def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_path) -> None:
+def test_remote_viewer_archive_is_denied_under_instance_role(monkeypatch, tmp_path) -> None:
     from unittest.mock import AsyncMock
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1517,19 +1230,23 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
                 scope_id=project["scope_id"],
                 agent_backend="claude",
             )["id"]
+            project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "bindings": [{
+                        "principal_kind": "email",
+                        "principal_value": "member-1@example.com",
+                        "access_role": "viewer",
+                    }],
+                },
+            )
 
         store = ShowPageStore()
         try:
             store.ensure(session_id)
-            with store.engine.begin() as connection:
-                resource_access_service.ensure_resource_policy(
-                    connection,
-                    resource_kind="show_page",
-                    resource_id=session_id,
-                    organization_id="org-1",
-                    owner_user_id="owner-1",
-                    access_level="private",
-                )
         finally:
             store.close()
 
@@ -1539,9 +1256,9 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
             archive_session,
         )
 
-        # Show Page archive of another owner's page stays reserved to
-        # owner/admin Organization roles under the Resource ACL boundary
-        # (see #1343); a plain active Organization member is denied.
+        # §3.2: archiving a session that has a Show Page stays reserved to the
+        # Instance Editor role; a plain Instance Viewer with project read access
+        # is still denied before any controller IPC.
         client = app.test_client()
         client.set_cookie(
             remote_access.SESSION_COOKIE_NAME,
@@ -1549,7 +1266,7 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
                 config,
                 subject="member-1",
                 groups=["group-engineering"],
-                instance_role="editor",
+                instance_role="viewer",
             ),
             domain="alex.avibe.bot",
         )
@@ -1560,7 +1277,7 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
             environ_base=_remote_peer(),
         )
 
-        assert response.status_code in {403, 404}
+        assert response.status_code == 403
         archive_session.assert_not_awaited()
         with engine.connect() as connection:
             assert connection.execute(
@@ -1570,7 +1287,7 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
         engine.dispose()
 
 
-def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
+def test_remote_org_show_annotation_media_follows_instance_role(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1584,37 +1301,28 @@ def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
     try:
         with engine.begin() as connection:
             project = projects_service.create_project(connection, str(project_dir))
-            sessions = {
-                access_level: sessions_service.create_session(
-                    connection,
-                    scope_id=project["scope_id"],
-                    agent_backend="claude",
-                )["id"]
-                for access_level in ("private", "public")
-            }
+            session_id = sessions_service.create_session(
+                connection,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
             project_access_service.apply_project_access_intent(
                 connection,
                 {
                     "project_id": project["id"],
                     "revision": 1,
                     "mode": "restricted",
-                    "bindings": [],
+                    "bindings": [{
+                        "principal_kind": "email",
+                        "principal_value": "member-1@example.com",
+                        "access_role": "viewer",
+                    }],
                 },
             )
 
         store = ShowPageStore()
         try:
-            for access_level, session_id in sessions.items():
-                store.ensure(session_id)
-                with store.engine.begin() as connection:
-                    resource_access_service.ensure_resource_policy(
-                        connection,
-                        resource_kind="show_page",
-                        resource_id=session_id,
-                        organization_id="org-1",
-                        owner_user_id="owner-1",
-                        access_level=access_level,
-                    )
+            store.ensure(session_id)
         finally:
             store.close()
 
@@ -1625,16 +1333,15 @@ def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
 
         with engine.begin() as connection:
             tokens = {
-                f"{source}:{access_level}": media_service.register(
+                source: media_service.register(
                     connection,
                     scope_id=project["scope_id"],
                     session_id=session_id,
                     kind="image",
                     source=source,
-                    local_path=_screenshot(f"{source}-{access_level}"),
+                    local_path=_screenshot(source),
                 )
                 for source in ("show_annotation", "agent_reply")
-                for access_level, session_id in sessions.items()
             }
             orphan_token = media_service.register(
                 connection,
@@ -1645,31 +1352,38 @@ def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
                 local_path=_screenshot("orphan"),
             )
 
-        client = app.test_client()
-        client.set_cookie(
-            remote_access.SESSION_COOKIE_NAME,
-            _organization_cookie(
-                config,
-                subject="member-1",
-                groups=["group-engineering"],
-                instance_role="viewer",
-            ),
-            domain="alex.avibe.bot",
-        )
+        def _client(subject: str):
+            client = app.test_client()
+            client.set_cookie(
+                remote_access.SESSION_COOKIE_NAME,
+                _organization_cookie(
+                    config,
+                    subject=subject,
+                    groups=["group-engineering"],
+                    instance_role="viewer",
+                ),
+                domain="alex.avibe.bot",
+            )
+            return client
 
-        def _media(token: str):
+        def _media(client, token: str):
             return client.get(
                 f"/api/media/{token}",
                 base_url="https://alex.avibe.bot",
                 environ_base=_remote_peer(),
             )
 
-        # Media access follows the associated Project and Show Page ACLs.
-        assert _media(tokens["show_annotation:private"]).status_code == 404
-        assert _media(tokens["show_annotation:public"]).status_code == 404
+        in_scope = _client("member-1")
+        # §3.2: a show_annotation screenshot inherits the page's /show admission
+        # (Instance Viewer role) alone — the Project/session role does NOT stack
+        # on top — so a viewer OUTSIDE the restricted Project still reads its own
+        # page's annotation bytes, while non-annotation media keeps the project gate.
+        out_of_scope = _client("member-2")
+        assert _media(out_of_scope, tokens["show_annotation"]).status_code == 200
+        assert _media(out_of_scope, tokens["agent_reply"]).status_code == 404
+        assert _media(in_scope, tokens["show_annotation"]).status_code == 200
+        assert _media(in_scope, tokens["agent_reply"]).status_code == 200
         # An annotation with no page to check against cannot be authorized.
-        assert _media(orphan_token).status_code == 404
-        assert _media(tokens["agent_reply:private"]).status_code == 404
-        assert _media(tokens["agent_reply:public"]).status_code == 404
+        assert _media(in_scope, orphan_token).status_code == 404
     finally:
         engine.dispose()

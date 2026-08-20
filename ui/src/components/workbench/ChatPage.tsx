@@ -1640,7 +1640,11 @@ export const ChatPage: React.FC = () => {
       onAuthorizationChanged: (data) => {
         const currentSessionId = sessionIdRef.current;
         if (!currentSessionId) return;
-        if (data.resource_kinds?.includes('show_page')) {
+        // §3.2: /show admission follows the Instance Viewer role, so it is the
+        // instance authorization revision (role ladder), not a per-resource ACL,
+        // that can flip this session's page access. show_page no longer appears
+        // in resource_kinds, so probe on the revision change instead.
+        if (data.instance_authorization_revision != null) {
           void probeShowPageAccess(currentSessionId);
         }
         setSessionCanChat(false);

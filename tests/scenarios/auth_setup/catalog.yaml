@@ -170,7 +170,7 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_web_oauth_cold_launch_retry_is_single_owner
   - id: AUTH-SETUP-401
-    name: Exact-email Show Page login stays confined to its signed page
+    name: Exact-email Show Page login stays a /p-only reader and never enters /show
     status: covered
     kind: authorization
     layer: scenario

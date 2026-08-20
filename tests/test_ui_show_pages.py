@@ -197,18 +197,9 @@ def _create_show_page(session_id: str, visibility: str) -> str | None:
             assert page is not None
         else:
             page = store.update_visibility(session_id, visibility)
-        # The factory represents a page that has been published to this test
-        # Organization. Runtime access still requires the caller's Instance role;
-        # this ACL only supplies the independent Show Page entitlement.
-        with store.engine.begin() as connection:
-            resource_access_service.ensure_resource_policy(
-                connection,
-                resource_kind="show_page",
-                resource_id=session_id,
-                organization_id="org-1",
-                owner_user_id="owner-1",
-                access_level="public",
-            )
+        # §3.2 removed show_page from the Resource ACL: there is no page policy
+        # to seed. Runtime access follows the caller's Instance role alone, and
+        # `/p` admission follows the sharing axis set above.
         return page.share_id
     finally:
         store.close()
@@ -234,15 +225,6 @@ def _create_show_page_record(session_id: str, visibility: str) -> str | None:
     store = ShowPageStore()
     try:
         page = store.update_visibility(session_id, visibility)
-        with store.engine.begin() as connection:
-            resource_access_service.ensure_resource_policy(
-                connection,
-                resource_kind="show_page",
-                resource_id=session_id,
-                organization_id="org-1",
-                owner_user_id="owner-1",
-                access_level="public",
-            )
         return page.share_id
     finally:
         store.close()
@@ -3617,24 +3599,11 @@ def test_private_show_me_is_always_available(monkeypatch, tmp_path):
     assert response.headers["cache-control"] == "no-store, private"
 
 
-def test_private_show_page_treats_show_page_email_viewer_as_read_only(monkeypatch, tmp_path):
+def test_private_show_page_bars_show_page_email_viewer_from_show_surface(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
-    store = ShowPageStore()
-    try:
-        with store.engine.begin() as connection:
-            resource_access_service.ensure_resource_policy(
-                connection,
-                resource_kind="show_page",
-                resource_id="ses123",
-                organization_id=None,
-                owner_user_id="user-viewer",
-                access_level="private",
-            )
-    finally:
-        store.close()
     manager = _FakeShowRuntimeManager(
         body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
     )
@@ -3659,15 +3628,10 @@ def test_private_show_page_treats_show_page_email_viewer_as_read_only(monkeypatc
     finally:
         set_show_runtime_manager_for_tests(None)
 
-    assert me_response.status_code == 200
-    assert me_response.get_json() == {"authenticated": False, "canAnnotate": False}
-    assert page_response.status_code == 200
-    body = page_response.content.decode("utf-8")
-    assert '"authenticated":false' in body
-    assert '"writeToken"' not in body
-    cookies = "\n".join(page_response.headers.getlist("set-cookie"))
-    assert "vibe_show_event_token=" in cookies
-    assert "Max-Age=0" in cookies
+    # §3.2: a signed show_page_email grant is a /p-only visitor — it never
+    # enters the private /show surface, even for its own signed page.
+    assert me_response.status_code == 403
+    assert page_response.status_code == 403
 
 
 def test_public_show_me_is_anonymous_without_oauth_session(monkeypatch, tmp_path):
@@ -4877,7 +4841,7 @@ def test_private_show_events_stream_ends_at_authorization_refresh_deadline(monke
     assert len(asyncio.run(_collect_until_expired())) == 1
 
 
-def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypatch, tmp_path):
+def test_private_show_events_stream_ignores_project_access_revocation(monkeypatch, tmp_path):
     from storage import project_access_service
     from storage.db import create_sqlite_engine
     from vibe.authorization import AuthorizationContext
@@ -4895,19 +4859,8 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
         instance_access_source="email",
         is_remote=True,
     )
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id="ses123",
-            organization_id=None,
-            owner_user_id="remote-editor",
-            access_level="private",
-        )
-    engine.dispose()
 
-    async def _collect_until_revoked() -> list[str | bytes]:
+    async def _collect_after_project_revocation() -> str:
         response = await _show_events_stream(
             "ses123",
             authorization_context=context,
@@ -4928,20 +4881,25 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
                 )
             assert result.changed is True
             broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
-            with pytest.raises(StopAsyncIteration):
-                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            # §3.2: /show admission is the Instance role alone, so a Project ACL
+            # revocation must NOT close the stream — the residual Project gate is
+            # gone. The stream ends only when the Instance role itself is lost.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
         finally:
             await iterator.aclose()
-        return chunks
+        return "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in chunks
+        )
 
-    assert len(asyncio.run(_collect_until_revoked())) == 1
+    assert asyncio.run(_collect_after_project_revocation()) == ": show events connected\n\n"
 
 
-def test_remote_org_show_events_stream_closes_when_resource_access_is_revoked(
+def test_remote_org_show_events_stream_ignores_resource_acl_changes(
     monkeypatch,
     tmp_path,
 ):
-    from storage.db import create_sqlite_engine
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
     from vibe.ui_server import _show_events_stream
@@ -4961,19 +4919,8 @@ def test_remote_org_show_events_stream_closes_when_resource_access_is_revoked(
         instance_access_source="organization_group",
         is_remote=True,
     )
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id="ses123",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-    engine.dispose()
 
-    async def _collect_after_revocation() -> str:
+    async def _collect_after_acl_change() -> str:
         response = await _show_events_stream(
             "ses123",
             authorization_context=context,
@@ -4981,24 +4928,15 @@ def test_remote_org_show_events_stream_closes_when_resource_access_is_revoked(
         iterator = response.body_iterator.__aiter__()
         try:
             chunks = [await iterator.__anext__()]
-            revoke_engine = create_sqlite_engine()
-            with revoke_engine.begin() as conn:
-                resource_access_service.apply_control_plane_intent(
-                    conn,
-                    organization_id="org-1",
-                    resource_kind="show_page",
-                    resource_id="ses123",
-                    revision=1,
-                    access_level="private",
-                    group_ids=[],
-                )
-            revoke_engine.dispose()
+            # A Resource ACL change must not close the /show events stream:
+            # /show admission is instance-role only and no longer reads a
+            # resource_access_policies row for the page.
             broker.publish(
                 "authorization.changed",
-                {"project_ids": [], "resource_kinds": ["show_page"]},
+                {"project_ids": [], "resource_kinds": ["agent"]},
             )
-            with pytest.raises(StopAsyncIteration):
-                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
         finally:
             await iterator.aclose()
         return "".join(
@@ -5006,7 +4944,7 @@ def test_remote_org_show_events_stream_closes_when_resource_access_is_revoked(
             for chunk in chunks
         )
 
-    body = asyncio.run(_collect_after_revocation())
+    body = asyncio.run(_collect_after_acl_change())
     assert body == ": show events connected\n\n"
 
 
@@ -7407,6 +7345,91 @@ def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tm
     assert exc.value.code == ui_server._AUTHORIZATION_LOGIN_REQUIRED_WEBSOCKET_CLOSE_CODE
 
 
+def test_private_show_page_hmr_websocket_requires_editor(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager()
+    set_show_runtime_manager_for_tests(manager)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _active_org_cookie(config, "viewer@example.com", "viewer-1", role="viewer"),
+        domain="alex.avibe.bot",
+    )
+    try:
+        with client.websocket_connect(
+            "wss://alex.avibe.bot/show/ses123/__vite_hmr",
+            headers={"host": "alex.avibe.bot"},
+            subprotocols=["vite-hmr"],
+        ) as websocket:
+            websocket.receive_text()
+            raise AssertionError("viewer HMR should not connect")
+    except WebSocketDisconnect as exc:
+        assert exc.code == 1008
+    finally:
+        set_show_runtime_manager_for_tests(None)
+    assert manager.calls == []
+
+
+def test_show_page_viewer_is_read_only_but_editor_can_mutate(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+
+    def _client(role: str):
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _active_org_cookie(config, f"{role}@example.com", f"{role}-1", role=role),
+            domain="alex.avibe.bot",
+        )
+        return client
+
+    manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        viewer = _client("viewer")
+        read = viewer.get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert read.status_code == 200
+        manager.calls.clear()
+        for method in ("post", "put", "patch", "delete"):
+            response = getattr(viewer, method)(
+                "/show/ses123/api/health",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+                headers={
+                    "Origin": "https://alex.avibe.bot",
+                    "Content-Type": "application/json",
+                },
+                content=b'{"ping":true}',
+            )
+            assert response.status_code == 403
+        assert manager.calls == []
+
+        editor = _client("editor")
+        mutation = editor.post(
+            "/show/ses123/api/health",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={
+                "Origin": "https://alex.avibe.bot",
+                "Content-Type": "application/json",
+            },
+            content=b'{"ping":true}',
+        )
+        assert mutation.status_code == 200
+        assert [call[0] for call in manager.calls] == ["POST"]
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+
 def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -7461,19 +7484,6 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
-    from storage.db import create_sqlite_engine
-
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id="ses123",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-    engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
     monkeypatch.setattr(ui_server, "_websocket_is_local_request", lambda *args: False)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
@@ -7482,7 +7492,7 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
         ui_server,
         "_show_runtime_websocket_resource_context",
         lambda websocket, **kwargs: resource_access_service.ResourceUserContext(
-            instance_role="viewer",
+            instance_role="editor",
             subject="remote-member",
             instance_access_source="organization_group",
             organization_id="org-1",
@@ -7493,7 +7503,7 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
     )
     remote_payload = {
         "sub": "remote-member",
-        "vibe_instance_role": "viewer",
+        "vibe_instance_role": "editor",
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": "membership-1",
@@ -7527,11 +7537,10 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
-def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
+def test_remote_org_show_page_hmr_ignores_resource_acl_changes(
     monkeypatch,
     tmp_path,
 ):
-    from storage.db import create_sqlite_engine
     from vibe.sse_broker import broker
 
     class RecordingWebSocket:
@@ -7562,17 +7571,6 @@ def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id="ses123",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-    engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
     monkeypatch.setattr(ui_server, "_websocket_is_local_request", lambda *args: False)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
@@ -7620,34 +7618,23 @@ def test_remote_org_show_page_hmr_closes_when_resource_access_is_revoked(
     monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
     websocket = RecordingWebSocket()
 
-    async def _run_after_revocation() -> None:
+    async def _run_after_acl_change() -> None:
         task = asyncio.create_task(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
         await asyncio.wait_for(proxy_started.wait(), timeout=1)
-        revoke_engine = create_sqlite_engine()
-        with revoke_engine.begin() as conn:
-            result = resource_access_service.apply_control_plane_intent(
-                conn,
-                organization_id="org-1",
-                resource_kind="show_page",
-                resource_id="ses123",
-                revision=1,
-                access_level="private",
-                group_ids=[],
-            )
-        revoke_engine.dispose()
-        assert result["status"] == "applied"
+        # A Resource ACL change must not close the /show HMR socket: /show
+        # admission is instance-role only and no longer reads a page policy.
         broker.publish(
             "authorization.changed",
-            {"project_ids": [], "resource_kinds": ["show_page"]},
+            {"project_ids": [], "resource_kinds": ["agent"]},
         )
-        await asyncio.wait_for(task, timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(task, timeout=0.2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
-    asyncio.run(_run_after_revocation())
+    asyncio.run(_run_after_acl_change())
 
-    assert websocket.calls == [
-        ("accept", "vite-hmr"),
-        ("close", ui_server._AUTHORIZATION_REVOKED_WEBSOCKET_CLOSE_CODE),
-    ]
+    assert websocket.calls == [("accept", "vite-hmr")]
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
