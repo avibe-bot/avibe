@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
-import os
 from pathlib import Path
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Mapping, NoReturn
@@ -17,6 +15,7 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import V2Config, config_file_lock
 
 from sqlalchemy import select
@@ -573,26 +572,10 @@ def _cache_file_lock(path: Path):
 
 
 def _atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-    )
-    try:
-        # mkstemp creates the file owner-private without relying on Unix-only APIs.
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd = -1
-            json.dump(value, handle, ensure_ascii=True, separators=(",", ":"))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
+    # Compact and ASCII-only: nothing reads these projections by eye, and the
+    # cache is re-read on every permission check, so bytes matter more than
+    # legibility. The swap itself belongs to ``write_atomic``.
+    write_atomic(path, json.dumps(value, ensure_ascii=True, separators=(",", ":")))
 
 
 def _write_cache(

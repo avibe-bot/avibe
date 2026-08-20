@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config.atomic_io import write_atomic
 from config.v2_settings import SettingsStore, UserSettings
 from core.auth import AuthResult
 from modules.im import InlineButton, InlineKeyboard, MessageContext
@@ -659,6 +660,63 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                 restored = self._make_bot()
                 restored._load_context_tokens()
                 self.assertEqual(restored._get_context_token_for_user("user-1"), "ctx-persisted")
+
+    async def test_an_unchanged_token_costs_no_write(self):
+        """A message writes to disk only when it changes what is on disk.
+
+        ``_remember_context_token`` is reached from the WeChat polling loop for
+        every inbound message carrying a token, and a user's token is the same
+        message after message. That was merely wasteful while the write was a
+        bare temp-file rename; through ``write_atomic`` each redundant one is an
+        fsync of the payload and of the state directory, sitting between a batch
+        of messages and their replies.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
+                bot = self._make_bot()
+                with patch("modules.im.wechat.write_atomic", wraps=write_atomic) as writes:
+                    for _ in range(3):
+                        bot._remember_context_token("user-1", "ctx-1")
+                    self.assertEqual(writes.call_count, 1)
+
+                    # A rotated token and a second user each change the document.
+                    bot._remember_context_token("user-1", "ctx-2")
+                    bot._remember_context_token("user-2", "ctx-9")
+                    self.assertEqual(writes.call_count, 3)
+
+                # Nor does a restarted process that reads back those same tokens.
+                restored = self._make_bot()
+                restored._load_context_tokens()
+                with patch("modules.im.wechat.write_atomic") as writes:
+                    restored._remember_context_token("user-1", "ctx-2")
+                    writes.assert_not_called()
+
+                cache_path = Path(tmpdir) / "state" / "wechat_context_tokens.json"
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                self.assertEqual(data["tokens"]["user-1"]["context_token"], "ctx-2")
+                self.assertEqual(data["tokens"]["user-2"]["context_token"], "ctx-9")
+
+    async def test_a_failed_save_is_retried_rather_than_latched_shut(self):
+        """The skip compares against what reached disk, not against intent.
+
+        Comparing against the in-memory map instead would record a write that
+        never happened, and every later message carrying that same token would
+        then be skipped as redundant — one transient ``ENOSPC`` losing the token
+        for good.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
+                bot = self._make_bot()
+                with patch("modules.im.wechat.write_atomic", side_effect=OSError("no space left on device")):
+                    bot._remember_context_token("user-1", "ctx-1")
+
+                bot._remember_context_token("user-1", "ctx-1")
+
+                cache_path = Path(tmpdir) / "state" / "wechat_context_tokens.json"
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                self.assertEqual(data["tokens"]["user-1"]["context_token"], "ctx-1")
 
     async def test_send_dm_reuses_persisted_context_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -28,6 +28,7 @@ from typing import (
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.platform_registry import (
     WORKBENCH_PLATFORM_ID,
     get_platform_descriptor,
@@ -65,53 +66,6 @@ def _path_file_lock(lock_path: Path, *, timeout_seconds: float | None):
     from storage.lock import MigrationFileLock
 
     return MigrationFileLock(lock_path, timeout_seconds=timeout_seconds)
-
-
-def _fsync_directory(path: Path) -> None:
-    """Best-effort durability for a replaced directory entry."""
-
-    flags = getattr(os, "O_DIRECTORY", None)
-    if flags is None:
-        return
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Replace one text file durably without retaining a failed temp file."""
-
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-        text=True,
-    )
-    temporary: Path | None = Path(temp_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            descriptor = -1
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        _fsync_directory(path.parent)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
 
 
 @contextmanager
@@ -1505,7 +1459,7 @@ def _write_config_payload(path: Path, payload: dict) -> None:
     content = json.dumps(payload, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
     with config_file_lock(path):
-        _atomic_write_text(path, content)
+        write_atomic(path, content)
 
 
 def _write_config_payload_if_unchanged(

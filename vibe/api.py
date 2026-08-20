@@ -49,6 +49,7 @@ from config.v2_settings import (
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
+from core import latest_version_cache
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -8121,19 +8122,10 @@ def _fetch_latest_askill_version() -> str | None:
 
 
 def _cached_latest_askill() -> str | None:
-    # Share the backend lifecycle cache so every local tool latest probe obeys the
-    # same one-hour success TTL and short failure TTL.
-    key = "askill"
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_LATEST_CACHE.get(key)
-    if cached:
-        ttl = _BACKEND_LATEST_TTL_SECONDS if cached[1] else _BACKEND_LATEST_FAILURE_TTL_SECONDS
-        if time.time() - cached[0] < ttl:
-            return cached[1]
-    latest = _fetch_latest_askill_version()
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE[key] = (time.time(), latest)
-    return latest
+    # Share the managed-dependency cache so every local tool latest probe obeys
+    # the same TTLs — and, more to the point here, so ``vibe runtime prepare``
+    # inherits the answer a previous process already paid GitHub for.
+    return latest_version_cache.cached_latest(_ASKILL_CACHE_KEY, _fetch_latest_askill_version)
 
 
 def askill_update_status(*, include_latest: bool = True) -> dict:
@@ -8214,8 +8206,13 @@ def refresh_askill_if_stale() -> dict:
     result["action"] = "update"
     result["from_version"] = status.get("version")
     result["latest_version"] = latest
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE.pop("askill", None)
+    # Deliberately no cache invalidation here, unlike the in-memory cache this
+    # replaced. The entry says which version askill *publishes*, and installing
+    # that version does not change the answer — it makes it the one a later
+    # ``askill_update_status`` needs, to compare a freshly measured local version
+    # against and conclude ``up_to_date``. Dropping it would send the next
+    # ``runtime prepare`` back to GitHub for a string we still hold, in the one
+    # window (right after an update) where prepare runs most often.
     return result
 
 
@@ -8703,9 +8700,14 @@ def start_dependency_install_job(dep: str) -> dict:
 # Backend lifecycle (version probe, latest check, restart)
 # =============================================================================
 
-# In-memory caches keyed by (backend, cli_path) so version answers stay tied
-# to the binary they came from. Trade freshness for fewer probes during rapid
-# popover opens. Tuned for human pacing (seconds), not bots.
+# The *locally installed* version, keyed by (backend, cli_path) so answers stay
+# tied to the binary they came from. Trade freshness for fewer probes during
+# rapid popover opens. Tuned for human pacing (seconds), not bots.
+#
+# In memory only, deliberately: this answers "what did the binary at this path
+# just print", which a new process can re-measure in milliseconds and which a
+# stale file could get wrong after an install. The *published* version is the
+# expensive one, and :mod:`core.latest_version_cache` persists that instead.
 #
 # The UI server handles requests on multiple threads, so reads, writes, and
 # invalidation can race. A single lock serializes mutation — fast in practice
@@ -8714,14 +8716,12 @@ def start_dependency_install_job(dep: str) -> dict:
 # scan in ``_invalidate_version_cache``.
 _BACKEND_CACHE_LOCK = __import__("threading").Lock()
 _BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
-_BACKEND_LATEST_CACHE: dict[str, tuple[float, str | None]] = {}
 _BACKEND_VERSION_TTL_SECONDS = 30.0
-_BACKEND_LATEST_TTL_SECONDS = 3600.0
-# Failed lookups (network down, registry hiccup) re-probe sooner so a
-# transient outage doesn't pin "—" for the full hour.
-_BACKEND_LATEST_FAILURE_TTL_SECONDS = 120.0
 _BACKEND_RUNTIME_USER_AGENT = "avibe/backend-runtime"
 _ASKILL_RELEASE_REPOSITORY = "avibe-bot/askill"
+#: askill is a managed dependency, not an agent backend, so it needs a name of
+#: its own in the shared latest-version cache.
+_ASKILL_CACHE_KEY = "askill"
 _ASKILL_AUTO_UPDATE_ENV = "VIBE_ASKILL_AUTO_UPDATE"
 _ASKILL_SKIP_ENV = "VIBE_INSTALL_SKIP_ASKILL"
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -8841,17 +8841,7 @@ def _invalidate_version_cache(name: str) -> None:
 
 
 def _cached_latest(name: str) -> str | None:
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_LATEST_CACHE.get(name)
-    if cached:
-        ttl = _BACKEND_LATEST_TTL_SECONDS if cached[1] else _BACKEND_LATEST_FAILURE_TTL_SECONDS
-        if time.time() - cached[0] < ttl:
-            return cached[1]
-    # Network fetch outside the lock — same reasoning as ``_cached_version``.
-    latest = _fetch_latest_version(name)
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE[name] = (time.time(), latest)
-    return latest
+    return latest_version_cache.cached_latest(name, lambda: _fetch_latest_version(name))
 
 
 def _is_comparable_version(value: str | None) -> bool:

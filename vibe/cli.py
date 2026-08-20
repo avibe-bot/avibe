@@ -33,6 +33,7 @@ from tzlocal import get_localzone_name
 from sqlalchemy import select
 
 from config import SettingsStore, paths
+from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
@@ -9746,31 +9747,6 @@ def cmd_vault_fetch(args):
     return 0 if 200 <= status <= 299 else 1
 
 
-def _write_private_file(path: Path, content: str) -> None:
-    """Atomically write ``content`` to ``path`` as a 0600 file.
-
-    ``tempfile.mkstemp`` creates the temp file 0600 from the start, so the secret is never
-    momentarily world-readable even when ``path`` pre-existed with looser perms (``O_TRUNC``
-    would have kept the old mode until a late ``chmod``). ``os.replace`` swaps it in
-    atomically — a crash mid-write leaves either the old file or the complete new one, never
-    a truncated/partial secret.
-    """
-    import tempfile
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def cmd_vault_export(args):
     # Deprecated. avault (the custody core) deliberately has no plaintext-to-stdout sink —
     # emitting `export NAME=...` for `eval` would hand the decrypted value back to the shell
@@ -9910,9 +9886,10 @@ def cmd_vault_key_export(args):
         blob = api.avault_key_export(passphrase)
         out = getattr(args, "out", None)
         if out:
-            # Create 0600 from the start (the blob holds the passphrase-wrapped key) —
-            # no window where it's world-readable under a permissive umask.
-            _write_private_file(Path(out), json.dumps(blob, indent=2) + "\n")
+            # 0600 from the moment the file exists (the blob holds the passphrase-wrapped
+            # key) — write_atomic leaves no window where it's world-readable, whatever the
+            # umask and whatever mode ``out`` already had.
+            write_atomic(Path(out), json.dumps(blob, indent=2) + "\n")
             _print_cli_payload("vault_key_export", written=True, path=str(out))
         else:
             print(json.dumps(blob, indent=2))

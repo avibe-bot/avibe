@@ -20,6 +20,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from core import latest_version_cache
 from vibe import api
 
 
@@ -846,6 +847,69 @@ def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeyp
     assert out["ok"] is True
     assert out["reason"] == "up_to_date"
     assert "action" not in out
+
+
+def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch):
+    # The waste this closes: ``vibe runtime prepare`` is a fresh process on every
+    # install, upgrade, regression sync, and tenant update, and each one used to
+    # spend a GitHub request re-learning askill's newest release. That request
+    # comes out of the unauthenticated 60/hour/IP budget, and exhausting it makes
+    # the latest lookup fail, which makes prepare reinstall askill outright.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+
+    assert len(probes) == 1
+
+
+def test_installing_askill_keeps_the_persisted_latest_for_the_next_process(monkeypatch):
+    """An install is the one moment prepare runs most, and must not cost a probe.
+
+    Installing 0.1.14 does not change the fact that 0.1.14 is what askill
+    publishes, so the entry that justified the install is exactly what the next
+    process needs: it compares a freshly measured local version against it and
+    concludes ``up_to_date``. Retiring it here — the reflex the in-memory cache
+    this replaced had — would send every post-update ``runtime prepare`` back to
+    GitHub for a string already on disk.
+    """
+
+    installed = {"version": "0.1.13"}
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": installed["version"], "status": "ready"},
+    )
+
+    def _install(force=False):
+        installed["version"] = "0.1.14"
+        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
+
+    monkeypatch.setattr(api, "ensure_askill_installed", _install)
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["action"] == "update"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    assert len(probes) == 1
 
 
 def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):

@@ -902,7 +902,7 @@ def test_memory_config_drops_retired_proactive_capture_flag(tmp_path) -> None:
 
 
 def test_fresh_config_save_fsyncs_parent_after_replace(monkeypatch, tmp_path) -> None:
-    from config import v2_config
+    from config import atomic_io
 
     config_path = tmp_path / "config.json"
     observed: list[tuple[Path, str]] = []
@@ -910,7 +910,7 @@ def test_fresh_config_save_fsyncs_parent_after_replace(monkeypatch, tmp_path) ->
     def observe_directory_sync(directory: Path) -> None:
         observed.append((directory, config_path.read_text(encoding="utf-8")))
 
-    monkeypatch.setattr(v2_config, "_fsync_directory", observe_directory_sync)
+    monkeypatch.setattr(atomic_io, "_fsync_directory", observe_directory_sync)
 
     V2Config.from_payload(
         _payload({"recovery_intent": "rebuild"})
@@ -925,7 +925,7 @@ def test_config_save_cleans_temporary_file_when_replace_fails(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from config import v2_config
+    from config import atomic_io
 
     config_path = tmp_path / "config.json"
     config = V2Config.from_payload(_payload({"recovery_intent": "rebuild"}))
@@ -935,7 +935,7 @@ def test_config_save_cleans_temporary_file_when_replace_fails(
     def fail_replace(source: Path, target: Path) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(v2_config.os, "replace", fail_replace)
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
         config.language = "zh"

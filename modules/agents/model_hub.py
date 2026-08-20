@@ -8,12 +8,12 @@ import json
 import os
 import re
 import shutil
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
@@ -1064,28 +1064,15 @@ class ModelHubRuntimeRouter:
         )
 
     def _secure_write_overlay(self, content: bytes) -> None:
+        # ``mode=0o700`` on the directory is this method's own concern; the file is
+        # 0600 by ``write_atomic``.
         self.overlay_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             if self.overlay_path.read_bytes() == content:
                 return
         except FileNotFoundError:
             pass
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.overlay_path.name}.",
-            dir=self.overlay_path.parent,
-        )
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.chmod(temporary_name, 0o600)
-            os.replace(temporary_name, self.overlay_path)
-        finally:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
+        write_atomic(self.overlay_path, content)
 
 
 def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | None) -> str | None:

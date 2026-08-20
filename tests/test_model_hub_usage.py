@@ -27,7 +27,6 @@ from pathlib import Path
 import pytest
 
 from config.v2_config import ModelHubModelConfig
-from core.handlers.model_hub import state_file
 from core.handlers.model_hub.identifiers import (
     MODEL_ID_MAX_LENGTH,
     USAGE_LEDGER_KEY_MAX_LENGTH,
@@ -1306,8 +1305,12 @@ def test_a_record_leaves_no_temporary_file_behind(tmp_path: Path) -> None:
     assert [entry.name for entry in ledger.path.parent.iterdir()] == [ledger.path.name]
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs POSIX directory permissions, which root ignores",
+)
 def test_a_write_that_fails_leaves_neither_residue_nor_a_damaged_document(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """MH-USAGE-003, review 4965677908: a failed replacement must cost only that write.
 
@@ -1316,21 +1319,28 @@ def test_a_write_that_fails_leaves_neither_residue_nor_a_damaged_document(
     behind. A ledger bounded to `max_rows` whose state directory gains one orphan
     per failure is not bounded, and a half-written document would lose the days
     already recorded — so the write either lands whole or changes nothing.
+
+    The failure is a genuinely unwritable directory rather than a patched
+    ``os.replace``: the swap moved out of this package into ``config.atomic_io``,
+    and a test that reaches for the mechanism has to be rewritten every time the
+    mechanism moves. A real ``OSError`` from the filesystem does not care where
+    the temp file was going to be created.
     """
 
     ledger = _ledger(tmp_path)
     ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
     recorded = ledger.path.read_bytes()
 
-    def refuse(*_args, **_kwargs) -> None:
-        raise OSError("no space left on device")
+    directory = ledger.path.parent
+    directory.chmod(0o500)
+    try:
+        with pytest.raises(OSError):
+            ledger.record(source_id="src_b", model_id="model-y", usage=None, at=NOW)
 
-    monkeypatch.setattr(state_file.os, "replace", refuse)
-    with pytest.raises(OSError):
-        ledger.record(source_id="src_b", model_id="model-y", usage=None, at=NOW)
-
-    assert [entry.name for entry in ledger.path.parent.iterdir()] == [ledger.path.name]
-    assert ledger.path.read_bytes() == recorded
+        assert [entry.name for entry in directory.iterdir()] == [ledger.path.name]
+        assert ledger.path.read_bytes() == recorded
+    finally:
+        directory.chmod(0o700)
 
 
 def test_days_bucket_by_the_host_calendar_not_utc(tmp_path: Path) -> None:

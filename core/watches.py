@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import tempfile
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -16,6 +15,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from config import paths
+from config.atomic_io import write_atomic
 from core import watch_worker
 from core.command_runner import SupervisedCommandStartupError, run_supervised_command
 from core.process_isolation import (
@@ -424,16 +424,7 @@ class ManagedWatchStore:
                     )
                 ]
             }
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.path.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(self.path)
+            write_atomic(self.path, json.dumps(payload, indent=2))
             self._signature = _path_signature(self.path)
 
     def list_watches(self) -> list[ManagedWatch]:
@@ -947,16 +938,7 @@ class WatchRuntimeStateStore:
             self._sqlite.write_watch_runtime(payload, updated_at=_utc_now_iso())
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.path.parent,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(self.path)
+        write_atomic(self.path, json.dumps(payload, indent=2))
 
     def load(self) -> dict[str, Any]:
         if self._sqlite is not None:
