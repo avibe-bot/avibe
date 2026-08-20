@@ -270,6 +270,32 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.queryAllByRole('option')).toHaveLength(0);
   });
 
+  it('exposes the keyboard-active suggestion through aria-activedescendant', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    const input = await openAudience();
+    const engineering = await screen.findByRole('option', { name: /Engineering/ });
+    expect(input.getAttribute('aria-activedescendant')).toBeNull();
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(engineering.getAttribute('id')).toBeTruthy();
+    expect(input.getAttribute('aria-activedescendant')).toBe(engineering.getAttribute('id'));
+    expect(engineering.getAttribute('aria-selected')).toBe('true');
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    const alice = screen.getByRole('option', { name: 'alice@example.com' });
+    expect(input.getAttribute('aria-activedescendant')).toBe(alice.getAttribute('id'));
+    expect(alice.getAttribute('aria-selected')).toBe('true');
+    expect(engineering.getAttribute('aria-selected')).toBe('false');
+  });
+
   it('closes the audience list when focus leaves the field from the add button', async () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({

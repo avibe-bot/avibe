@@ -187,6 +187,10 @@ function AudienceCombobox({
   );
   const activeIndex = options.findIndex((option) => showAccessEntryKey(option) === activeKey);
   const active = activeIndex >= 0 ? options[activeIndex] : null;
+  const optionDomId = (option: ShowAccessSuggestion) => (
+    `${listId}-${showAccessEntryKey(option).replace(/[^A-Za-z0-9_-]+/g, '-')}`
+  );
+  const activeDescendantId = open && active ? optionDomId(active) : undefined;
 
   const moveActive = (delta: number) => {
     if (!options.length) return;
@@ -217,6 +221,7 @@ function AudienceCombobox({
             role="combobox"
             aria-expanded={open}
             aria-controls={open ? listId : undefined}
+            aria-activedescendant={activeDescendantId}
             aria-autocomplete="list"
             aria-label={t('chat.showPage.shareAudience')}
             aria-invalid={invalid || undefined}
@@ -296,6 +301,7 @@ function AudienceCombobox({
             return (
               <button
                 key={showAccessEntryKey(option)}
+                id={optionDomId(option)}
                 type="button"
                 role="option"
                 aria-selected={index === activeIndex}
