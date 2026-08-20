@@ -415,6 +415,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/config$"),
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
+        ("GET", r"^/api/show-pages/[^/]+$"),
         ("POST", r"^/api/show-pages/[^/]+/icon$"),
         ("POST", r"^/api/show-pages/[^/]+/(?:ensure|availability)$"),
         ("POST", r"^/api/show-pages/[^/]+/access-settings/(?:read|apply)$"),
