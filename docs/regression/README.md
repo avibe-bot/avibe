@@ -136,8 +136,13 @@ its product state across normal source updates.
 environments from Incus rather than from the runner's metadata, so an
 environment created outside the runner shows up too — otherwise it is invisible
 to every command that reads `.runtime/incus-regression/worktrees.json`, and can
-only be removed by hand. For each one it prints the instance state and whatever
-provenance the metadata holds, plus the `delete` command that removes it.
+only be removed by hand. For each one it prints what Incus was observed to hold
+— its project and its instance, reported separately, because an environment can
+be half gone — plus whatever provenance the metadata holds and the `delete`
+command that removes it. An instance living in a project other than the one its
+slug implies is listed with that project and *without* a delete command:
+`delete --slug` derives the project from the slug, so it would report success
+without touching the instance.
 
 Deletion stays a separate, explicit call. Nothing recorded about an environment
 can prove it is no longer wanted: the recorded path is the checkout the runner
@@ -147,6 +152,20 @@ environment may sit on a detached HEAD with no branch whose merge status could
 be checked. `reconcile --yes` therefore changes exactly one thing — it drops
 metadata rows for environments Incus no longer has, releasing their reserved
 host ports. Without `--yes` it only reports.
+
+"No longer has" is read strictly, because releasing a port that is still in use
+is worse than keeping a row nobody needs:
+
+- The daemon must have completed a listing that held neither the environment's
+  project nor its instance. A daemon that could not be reached is an unanswered
+  question, not an absence, and aborts instead.
+- A row that reserves a slug whose environment is not built yet is left alone.
+  `up` records the slug and its port before it creates the project and the
+  instance, so this is what a concurrent `up` looks like from the outside.
+- `--remote` reports and never forgets. `worktrees.json` reserves ports on this
+  machine and describes this machine's daemon, so a remote's inventory is no
+  evidence about those rows. The `delete` commands it prints carry `--remote`,
+  or they would name the same slug on the wrong daemon.
 
 Useful flags:
 

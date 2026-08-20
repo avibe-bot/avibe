@@ -467,15 +467,104 @@ def mapped_worktree_port(repo_root: Path, slug: str) -> int | None:
     return None
 
 
+def parse_metadata_timestamp(value: object) -> datetime | None:
+    """Parse an ISO-8601 metadata timestamp, or None when the value is not one."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 @dataclass(frozen=True)
 class WorktreeEnvironment:
-    """One worktree regression environment, as Incus has it and as metadata describes it."""
+    """One worktree regression environment, as Incus has it and as metadata describes it.
+
+    `project` and `instance` are always the names the naming convention derives
+    from the slug, because those are the objects `delete --slug` acts on. What
+    Incus was observed to hold is kept separately, so a partial or misplaced
+    footprint can be reported as what it is rather than averaged into a single
+    "present" flag.
+    """
 
     slug: str
     project: str
     instance: str
-    present: bool
+    has_project: bool
+    instance_state: str | None
+    instance_project: str | None
     entry: dict | None
+
+    @property
+    def exists(self) -> bool:
+        """Whether Incus still holds any part of this environment.
+
+        Either half is enough. A project whose instance is gone still owns the
+        slug and still has to be reclaimed, and an instance whose project was
+        never recorded still holds a host port.
+        """
+        return self.has_project or self.instance_state is not None
+
+    @property
+    def deletable_by_slug(self) -> bool:
+        """Whether `delete --slug` would reach the instance that was observed."""
+        return self.instance_project is None or self.instance_project == self.project
+
+    @property
+    def pending(self) -> bool:
+        """Whether metadata describes a reservation whose `up` has not completed.
+
+        `reserve_worktree_mapping` records the slug and its port before the
+        project and instance are created, so this row is what a concurrent `up`
+        looks like from the outside: claimed, not yet built. Only an
+        `update_worktree_mapping` stamp that provably came later clears it -- a
+        reservation we cannot date is still a reservation.
+        """
+        entry = self.entry or {}
+        if "reserved_at" not in entry:
+            return False
+        reserved = parse_metadata_timestamp(entry.get("reserved_at"))
+        updated = parse_metadata_timestamp(entry.get("updated_at"))
+        if reserved is None or updated is None:
+            return True
+        return reserved > updated
+
+    @property
+    def footprint(self) -> str:
+        """What Incus was observed to hold, one half at a time.
+
+        Reported rather than summarised: `Unknown` used to stand for an instance
+        nobody had looked for, which reads as a daemon that would not answer.
+        """
+        if self.instance_state is None:
+            instance = "no instance"
+        elif self.deletable_by_slug:
+            instance = self.instance_state
+        else:
+            instance = f"{self.instance_state} in {self.instance_project}"
+        return f"{'project' if self.has_project else 'no project'}, {instance}"
+
+
+def worktree_instances(runner: Runner, *, remote: str | None) -> dict[str, dict[str, str]]:
+    """Map each worktree instance name to the state and project Incus reports for it.
+
+    The project is part of the observation, not decoration. An instance living
+    in a project other than the one its name implies is not reachable by
+    `delete --slug`, and reporting it as if it were promises a removal that
+    would silently leave it running.
+    """
+    command = incus("list", *optional_remote_ref(remote), "--all-projects", "--format", "json")
+    instances: dict[str, dict[str, str]] = {}
+    for item in runner.records(command, what="Incus instances"):
+        name = item.get("name")
+        if isinstance(name, str) and name.startswith(WORKTREE_INSTANCE_PREFIX):
+            instances[name] = {
+                "state": str(item.get("status") or "Unknown"),
+                "project": str(item.get("project") or "default"),
+            }
+    return instances
 
 
 def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None) -> list[WorktreeEnvironment]:
@@ -485,39 +574,40 @@ def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None
     the runner happened to record. Walking the metadata instead cannot see an
     environment created outside the runner, so a running instance stays
     invisible to every command that works from the mapping.
+
+    Both halves of the footprint are enumerated separately. An environment whose
+    project was deleted while its instance survived is neither fully present nor
+    absent, and reading one half as the whole answer reports the other half as
+    something it never observed.
     """
     entries = load_worktree_mapping(repo_root).get("worktrees") or {}
-    command = incus("project", "list", *optional_remote_ref(remote), "--format", "json")
-    present = {
+    projects = {
         name[len(WORKTREE_PROJECT_PREFIX):]
-        for name in runner.names(command, what="Incus projects")
+        for name in runner.names(
+            incus("project", "list", *optional_remote_ref(remote), "--format", "json"),
+            what="Incus projects",
+        )
         if name.startswith(WORKTREE_PROJECT_PREFIX)
     }
+    instances = worktree_instances(runner, remote=remote)
+    slugs = set(entries) | projects | {name[len(WORKTREE_INSTANCE_PREFIX):] for name in instances}
     environments = []
-    for slug in sorted(set(entries) | present):
+    for slug in sorted(slugs):
         entry = entries.get(slug)
         entry = entry if isinstance(entry, dict) else None
+        observed = instances.get(instance_name_for(WORKTREE_TARGET, slug))
         environments.append(
             WorktreeEnvironment(
                 slug=slug,
-                project=str((entry or {}).get("project") or project_name_for(WORKTREE_TARGET, slug)),
-                instance=str((entry or {}).get("instance") or instance_name_for(WORKTREE_TARGET, slug)),
-                present=slug in present,
+                project=project_name_for(WORKTREE_TARGET, slug),
+                instance=instance_name_for(WORKTREE_TARGET, slug),
+                has_project=slug in projects,
+                instance_state=observed["state"] if observed else None,
+                instance_project=observed["project"] if observed else None,
                 entry=entry,
             )
         )
     return environments
-
-
-def worktree_instance_states(runner: Runner, *, remote: str | None) -> dict[str, str]:
-    """Map each worktree instance name to the state Incus reports for it."""
-    command = incus("list", *optional_remote_ref(remote), "--all-projects", "--format", "json")
-    states = {}
-    for item in runner.records(command, what="Incus instances"):
-        name = item.get("name")
-        if isinstance(name, str) and name.startswith(WORKTREE_INSTANCE_PREFIX):
-            states[name] = str(item.get("status") or "Unknown")
-    return states
 
 
 def describe_worktree_entry(entry: dict | None) -> str:
@@ -746,14 +836,37 @@ def proxy_device_args(target: RegressionTarget, *, remote: str | None = None) ->
     ]
 
 
-def observed_ui_endpoints(runner: Runner, target: RegressionTarget, *, remote: str | None) -> dict[str, str] | None:
-    """Return the instance's current `ui` endpoints, or None when they are unknown.
+def ui_device_present(runner: Runner, target: RegressionTarget, *, remote: str | None) -> bool:
+    """Whether the instance has a `ui` device, from a listing the daemon completed.
 
-    A non-zero exit answers both "no such device" and "could not reach the
-    daemon", and an empty value answers both "unset" and "dry run", so none of
-    them are treated as an observation. Unknown means the caller rebuilds the
-    device rather than acting on a shape it never actually saw.
+    `config device get` cannot answer this: it exits non-zero both for a device
+    that is genuinely absent and for a daemon it could not reach. `config device
+    list` can, because it exits zero only after the daemon enumerated the
+    instance's devices -- so a failure here means "cannot tell" and is raised
+    rather than being read as "there is nothing there".
     """
+    result = runner.run(
+        incus("config", "device", "list", remote_ref(remote, target.instance), project=target.project),
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        raise RegressionError(
+            f"Could not list the devices of {target.instance}: {daemon_failure_detail(result)}\n"
+            f"{DAEMON_UNREACHABLE_HINT}"
+        )
+    return "ui" in (result.stdout or "").split()
+
+
+def observed_ui_endpoints(runner: Runner, target: RegressionTarget, *, remote: str | None) -> dict[str, str] | None:
+    """The endpoints the instance's `ui` device forwards, or None when it has none.
+
+    None is a confirmed absence, never an unanswered question: a daemon that
+    will not say raises instead. The caller is about to change this device, and
+    silence is not evidence that there is nothing there to lose.
+    """
+    if not ui_device_present(runner, target, remote=remote):
+        return None
     observed: dict[str, str] = {}
     for key in ("listen", "connect"):
         result = runner.run(
@@ -771,7 +884,10 @@ def observed_ui_endpoints(runner: Runner, target: RegressionTarget, *, remote: s
         )
         value = (result.stdout or "").strip()
         if result.returncode != 0 or not value:
-            return None
+            raise RegressionError(
+                f"Incus lists a `ui` device on {target.instance} but would not report its {key}: "
+                f"{daemon_failure_detail(result)}\n{DAEMON_UNREACHABLE_HINT}"
+            )
         observed[key] = value
     return observed
 
@@ -779,34 +895,34 @@ def observed_ui_endpoints(runner: Runner, target: RegressionTarget, *, remote: s
 def ensure_proxy_device(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
     """Make the instance's `ui` proxy device forward the target's endpoints.
 
-    Removing the device before re-adding it is the destructive way to do this: a
-    failed `add` aborts the run with the instance left holding no `ui` device at
-    all, so a routine re-run of `up` could take the Web UI away. The device is
-    therefore left alone when it already matches, and updated in place when it
-    does not; only an unobservable device is rebuilt.
+    The device is added only when the daemon reported it missing and updated in
+    place only when the daemon reported what it currently forwards. Removing it
+    first was the destructive way to do this: a failed `add` aborted the run
+    with the instance left holding no `ui` device at all, so a routine re-run of
+    `up` could take the Web UI away -- and it ran precisely when the daemon was
+    already misbehaving, because an unreadable device was treated as an absent
+    one. An unreadable device now aborts before anything is mutated.
     """
-    instance_ref = remote_ref(remote, target.instance)
     desired = ui_device_endpoints(target)
     observed = observed_ui_endpoints(runner, target, remote=remote)
+    if observed is None:
+        runner.run(incus(*proxy_device_args(target, remote=remote), project=target.project))
+        return
     if observed == desired:
         print(f"ui proxy device already forwards {desired['listen']} -> {desired['connect']}")
         return
-    if observed is not None:
-        runner.run(
-            incus(
-                "config",
-                "device",
-                "set",
-                instance_ref,
-                "ui",
-                f"listen={desired['listen']}",
-                f"connect={desired['connect']}",
-                project=target.project,
-            )
+    runner.run(
+        incus(
+            "config",
+            "device",
+            "set",
+            remote_ref(remote, target.instance),
+            "ui",
+            f"listen={desired['listen']}",
+            f"connect={desired['connect']}",
+            project=target.project,
         )
-        return
-    runner.run(incus("config", "device", "remove", instance_ref, "ui", project=target.project), check=False)
-    runner.run(incus(*proxy_device_args(target, remote=remote), project=target.project))
+    )
 
 
 def ensure_office_converter(
@@ -2039,6 +2155,12 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     guess. It shows every environment with its state and provenance, leaves
     container deletion to an explicit `delete --slug`, and only ever removes
     metadata rows Incus has already outlived.
+
+    "Already outlived" is deliberately strict: a row is dropped only when the
+    daemon that owns it completed a listing, that listing held neither half of
+    the environment, and the row is not a reservation whose `up` is still
+    running. Every weaker reading of the same evidence would release a host port
+    somebody else is using.
     """
     repo_root = current_repo_root()
     require_incus()
@@ -2047,47 +2169,82 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     # environment as untracked metadata and offer to forget all of it. --dry-run
     # withholds the mapping write instead, which is this command's only change.
     runner = Runner(dry_run=False)
-    environments = worktree_environments(runner, repo_root, remote=args.remote)
-    states = worktree_instance_states(runner, remote=args.remote)
+    authority = f"remote {args.remote}" if args.remote else "the local Incus daemon"
+    remote_suffix = f" --remote {shlex.quote(args.remote)}" if args.remote else ""
+    # The mapping is read, classified, and written under one lock, so no row can
+    # be added or completed midway through the decision. The lock alone cannot
+    # close the race, though: `up` reserves a slug and its port under this same
+    # lock and then releases it before creating the project and instance, so a
+    # reconcile running in that window legitimately sees a row with no footprint
+    # yet. Such a row identifies itself by its own stamps and is never pruned --
+    # see `WorktreeEnvironment.pending`.
+    with worktree_mapping_lock(repo_root, dry_run=False):
+        environments = worktree_environments(runner, repo_root, remote=args.remote)
+        if not environments:
+            print(f"No worktree regression environments exist in {authority}.")
+            return 0
 
-    if not environments:
-        print("No worktree regression environments exist.")
+        live = [env for env in environments if env.exists]
+        pending = [env for env in environments if not env.exists and env.pending]
+        forgotten = [env for env in environments if not env.exists and not env.pending]
+        stranded = [env for env in live if not env.deletable_by_slug]
+
+        if live:
+            print(f"{len(live)} worktree regression environment(s) exist in {authority}:")
+            for env in live:
+                print(f"  {env.slug}  [{env.footprint}]  {describe_worktree_entry(env.entry)}")
+            print()
+            # Deletion stays explicit and per-environment. `delete` derives the
+            # project and instance from the slug by naming convention, so it
+            # reaches an environment with no metadata just as well as a tracked
+            # one -- but only where that convention matches what Incus holds.
+            deletable = [env for env in live if env.deletable_by_slug]
+            if deletable:
+                print("Delete any of them with:")
+                for env in deletable:
+                    print(
+                        "  python3 scripts/incus_regression.py delete --target worktree "
+                        f"--slug {shlex.quote(env.slug)} --yes{remote_suffix}"
+                    )
+            for env in stranded:
+                print(
+                    f"  {env.slug}: instance lives in project {env.instance_project}, not {env.project}. "
+                    "Delete by slug would not reach it; reclaim it by hand."
+                )
+
+        if pending:
+            if live:
+                print()
+            print(f"{len(pending)} metadata entr(ies) reserve a slug whose environment is not built yet:")
+            for env in pending:
+                print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
+            print("Left alone: a concurrent `up` may still be creating them, and their ports stay reserved.")
+
+        if not forgotten:
+            return 0
+        if live or pending:
+            print()
+        print(f"{len(forgotten)} metadata entr(ies) describe environments {authority} no longer has:")
+        for env in forgotten:
+            print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
+        if args.remote:
+            # `worktrees.json` reserves ports on this machine and describes the
+            # environments this machine's daemon holds. A remote's inventory is
+            # no evidence about those rows, so a remote reconcile reports and
+            # never prunes.
+            print(f"Not dropped: this metadata describes the local Incus daemon, not {authority}.")
+            return 0
+        if args.dry_run:
+            print("Re-run with --yes to drop them and release their reserved host ports.")
+            return 0
+        if not args.yes:
+            raise RegressionError("Dropping stale metadata entries requires --yes.")
+        payload = load_worktree_mapping(repo_root)
+        for env in forgotten:
+            (payload.get("worktrees") or {}).pop(env.slug, None)
+        save_worktree_mapping(repo_root, payload)
+        print(f"Dropped {len(forgotten)} stale metadata entr(ies). No instance was deleted.")
         return 0
-
-    live = [env for env in environments if env.present]
-    forgotten = [env for env in environments if not env.present]
-
-    if live:
-        print(f"{len(live)} worktree regression environment(s) exist in Incus:")
-        for env in live:
-            state = states.get(env.instance, "Unknown")
-            print(f"  {env.instance}  [{state}]  {describe_worktree_entry(env.entry)}")
-        print()
-        # Deletion stays explicit and per-environment. `delete` derives the
-        # project and instance from the slug by naming convention, so it reaches
-        # an environment with no metadata just as well as a tracked one.
-        print("Delete any of them with:")
-        for env in live:
-            print(f"  python3 scripts/incus_regression.py delete --target worktree --slug {env.slug} --yes")
-
-    if not forgotten:
-        return 0
-    if live:
-        print()
-    print(f"{len(forgotten)} metadata entr(ies) describe environments Incus no longer has:")
-    for env in forgotten:
-        print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
-    if args.dry_run:
-        print("Re-run with --yes to drop them and release their reserved host ports.")
-        return 0
-    if not args.yes:
-        raise RegressionError("Dropping stale metadata entries requires --yes.")
-    payload = load_worktree_mapping(repo_root)
-    for env in forgotten:
-        (payload.get("worktrees") or {}).pop(env.slug, None)
-    save_worktree_mapping(repo_root, payload)
-    print(f"Dropped {len(forgotten)} stale metadata entr(ies). No instance was deleted.")
-    return 0
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
