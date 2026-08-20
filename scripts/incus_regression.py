@@ -587,6 +587,13 @@ class WorktreeMetadata:
         one condition the reservation then needs: no claim covers a dry run, a
         target that owns no row, and a remote accessor that writes nothing --
         each of which used to be re-derived at every end of the reservation.
+
+        The row says a run holds this slug; it says nothing about what is built
+        there, because this run has not built it yet. `complete` owns the branch
+        and the commit for that reason: the merge means anything written here
+        lands beside the previous run's fields, and a reservation that wrote its
+        own branch produced a row reporting the new branch for an environment
+        still built from the old one's commit.
         """
         reservation = WorktreeReservation(metadata=self, target=target, dry_run=dry_run)
         if dry_run or not self.owned or target.target != WORKTREE_TARGET:
@@ -598,7 +605,6 @@ class WorktreeMetadata:
             "instance": target.instance,
             "host_port": target.host_port,
             "reserved_at": datetime.now(timezone.utc).isoformat(),
-            "branch": branch_name(self.repo_root),
             "claim": reservation.claim,
         }
         self.mutate(lambda worktrees: worktrees.setdefault(target.slug, {}).update(row))
@@ -634,7 +640,7 @@ class WorktreeMetadata:
         self.mutate(guarded)
 
     def complete(self, target: RegressionTarget, claim: str) -> None:
-        """Stamp the environment as built, replacing the row and its `reserved_at`."""
+        """Stamp the environment as built, replacing the row, its claim and its `reserved_at`."""
         self.apply_claimed(
             target,
             claim,
@@ -752,17 +758,6 @@ def allocate_worktree_port(
     raise RegressionError(f"No available worktree regression port in range {start}-{end}.")
 
 
-def parse_metadata_timestamp(value: object) -> datetime | None:
-    """Parse an ISO-8601 metadata timestamp, or None when the value is not one."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip())
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-
-
 @dataclass(frozen=True)
 class ObservedInstance:
     """One instance Incus reported, named by the project that actually holds it.
@@ -852,22 +847,23 @@ class WorktreeEnvironment:
 
     @property
     def pending(self) -> bool:
-        """Whether metadata describes a reservation whose `up` has not completed.
+        """Whether metadata describes a reservation whose `up` has not ended.
 
-        `WorktreeMetadata.reserve` records the slug and its port before the
-        project and instance are created, so this row is what a concurrent `up`
-        looks like from the outside: claimed, not yet built. Only a
-        `WorktreeMetadata.complete` stamp that provably came later clears it --
-        a reservation we cannot date is still a reservation.
+        The claim answers this, so nothing here compares stamps. `reserve`
+        records the slug and its port before the project and instance exist, and
+        mints the claim in the same row; both ends of the reservation take it
+        away again -- `complete` by replacing the row, `release` by dropping it.
+        A claim is therefore present exactly while a run holds this slug, which
+        is the question. The two wall-clock stamps were this property's first
+        implementation, from before the claim existed, and comparing them
+        answered it wrongly whenever the row carried a completion stamp older
+        than the reservation over it: a re-reserved slug (`reserve` merges, so
+        the previous run's `updated_at` survives) read as finished under a clock
+        that had moved backward, and a concurrent `reconcile --yes` was then free
+        to drop the row and release the port of an `up` still building against
+        it. The stamps stay as provenance; no decision reads them.
         """
-        entry = self.entry or {}
-        if "reserved_at" not in entry:
-            return False
-        reserved = parse_metadata_timestamp(entry.get("reserved_at"))
-        updated = parse_metadata_timestamp(entry.get("updated_at"))
-        if reserved is None or updated is None:
-            return True
-        return reserved > updated
+        return bool((self.entry or {}).get("claim"))
 
     @property
     def footprint(self) -> str:
@@ -2528,8 +2524,8 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     # cannot close the race, though: `up` reserves a slug and its port under this
     # same lock and then releases it before creating the project and instance, so a
     # reconcile running in that window legitimately sees a row with no footprint
-    # yet. Such a row identifies itself by its own stamps and is never pruned --
-    # see `WorktreeEnvironment.pending`.
+    # yet. Such a row identifies itself by the claim its reservation left in it and
+    # is never pruned -- see `WorktreeEnvironment.pending`.
     with metadata.locked(dry_run=False):
         environments = worktree_environments(runner, metadata)
         if not environments:

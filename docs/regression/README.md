@@ -193,6 +193,19 @@ is worse than keeping a row nobody needs:
   must also still be the one that run wrote, because `up` merges over whatever
   row it finds: a second `up` on the same slug takes the row over, and the first
   one failing afterwards must not free a port the second is building on.
+
+  One opaque claim, written by the reservation and removed by whichever end of it
+  arrives, answers both "is a run holding this slug" and "is this row still
+  mine" — the two questions are the same fact, and no timestamp is compared to
+  decide either. A row that carries a claim is a reservation; a row without one
+  describes an environment that was built. `reserved_at` and `updated_at` are
+  provenance for whoever reads the file, and nothing decides on them: a stamp
+  written by another machine's clock, or by this one before it was corrected, is
+  no evidence about whether an `up` is running right now. For the same reason a
+  reservation records no branch or commit until it completes — the run that built
+  the environment is the one that can say what it built — so a slug reserved
+  again reports the branch it is still running, not the one being installed over
+  it.
 - `worktrees.json` is reached only through an accessor bound to the daemon it
   describes. The file reserves host ports on this machine and records what this
   machine's daemon holds, so every read of it and every write to it is a claim

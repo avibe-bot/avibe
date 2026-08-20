@@ -2004,70 +2004,89 @@ def test_reconcile_lists_names_the_runner_would_not_mint_and_offers_only_runnabl
     assert payload["worktrees"] == {}
 
 
-def test_reconcile_never_forgets_a_reservation_that_is_still_in_flight(
+def test_a_prune_keeps_a_row_for_its_claim_whatever_its_stamps_say(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # `up` records the slug and its port before it creates the project and the
-    # instance, and it does not hold the mapping lock across that gap. A row in
-    # that state has no footprint yet and never had one, so reading "no footprint"
-    # as "stale" releases a port a live `up` is about to bind.
-    mapping_path, _ = reconcile_fixture(
-        tmp_path,
-        monkeypatch,
-        entries={
-            "inflight": {
-                "path": str(tmp_path / "checkout"),
-                "host_port": 52906,
-                "reserved_at": "2026-08-20T05:32:29.994595+00:00",
-            }
+    """A row survives a `--yes` prune exactly while it carries a claim.
+
+    `up` records the slug and its port before it creates the project and the
+    instance, and it does not hold the mapping lock across that gap, so a row in
+    that state has no footprint yet and never had one: reading "no footprint" as
+    "stale" releases a port a live `up` is about to bind. What identifies such a
+    row is the claim its reservation left in it -- `reserve` writes one, and both
+    ends of the reservation take it away.
+
+    Every stamp shape is seeded against both answers rather than the two cases
+    the rule was first written from, because the rule must not read the stamps at
+    all. It used to compare them, which is wrong for more shapes than a list
+    would think to name: `reserve` merges, so a re-reserved slug keeps the
+    previous run's `updated_at`, and any clock that puts that stamp after the new
+    `reserved_at` -- one that moved backward, one machine's stamp in another's
+    file, a future-dated write -- made a live reservation read as finished and
+    its port free to hand out.
+    """
+    stamps = {
+        "no stamps at all": {},
+        "reserved, never completed": {"reserved_at": "2026-08-20T05:32:29.994595+00:00"},
+        "completed after reserving": {
+            "reserved_at": "2026-08-20T05:32:29.994595+00:00",
+            "updated_at": "2026-08-20T05:41:11.000000+00:00",
         },
-        projects=(),
-        instances=(),
+        "completion older than the reservation over it": {
+            "reserved_at": "2026-08-20T05:41:11.000000+00:00",
+            "updated_at": "2026-08-20T05:32:29.994595+00:00",
+        },
+        "completion dated in the future": {
+            "reserved_at": "2026-08-20T05:32:29.994595+00:00",
+            "updated_at": "2099-01-01T00:00:00.000000+00:00",
+        },
+        "stamps nothing can parse": {"reserved_at": "yesterday", "updated_at": "soon"},
+        "completed, no reservation left": {"updated_at": "2026-08-20T05:41:11.000000+00:00"},
+    }
+
+    entries: dict[str, dict] = {}
+    held: set[str] = set()
+    for index, (shape, stamped) in enumerate(sorted(stamps.items())):
+        for claimed in (True, False):
+            slug = f"{'held' if claimed else 'free'}-{index}"
+            entries[slug] = {
+                "path": str(tmp_path / "checkout"),
+                "host_port": 53000 + 2 * index + int(claimed),
+                **stamped,
+            }
+            if claimed:
+                entries[slug]["claim"] = f"claim-of-{slug}"
+                held.add(slug)
+    assert len(entries) == 2 * len(stamps) and len(held) == len(stamps)
+
+    mapping_path, _ = reconcile_fixture(
+        tmp_path, monkeypatch, entries=entries, projects=(), instances=()
     )
 
-    exit_code = incus_regression.cmd_reconcile(
-        argparse.Namespace(yes=True, dry_run=False, remote=None)
-    )
+    exit_code = incus_regression.cmd_reconcile(argparse.Namespace(yes=True, dry_run=False, remote=None))
     out = capsys.readouterr().out
 
     assert exit_code == 0
-    assert "reserve a slug whose environment is not built yet" in out
-    assert "inflight  port 52906" in out
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
-    assert set(payload["worktrees"]) == {"inflight"}
-
-
-def test_reconcile_forgets_a_row_whose_reservation_already_completed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # The complement of the test above, and the reason the rule reads the stamps
-    # rather than the mere presence of `reserved_at`: a row stamped complete
-    # after it was reserved describes an environment that was built and is now
-    # gone, which is exactly what this command is for.
-    mapping_path, _ = reconcile_fixture(
-        tmp_path,
-        monkeypatch,
-        entries={
-            "finished": {
-                "path": str(tmp_path / "checkout"),
-                "host_port": 52907,
-                "reserved_at": "2026-08-20T05:32:29.994595+00:00",
-                "updated_at": "2026-08-20T05:41:11.000000+00:00",
-            }
-        },
-        projects=(),
-        instances=(),
-    )
-
-    exit_code = incus_regression.cmd_reconcile(
-        argparse.Namespace(yes=True, dry_run=False, remote=None)
-    )
-    out = capsys.readouterr().out
-
-    assert exit_code == 0
-    assert "no longer has" in out
-    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
-    assert payload["worktrees"] == {}
+    assert set(payload["worktrees"]) == held
+    # And each row is reported under what happened to it, so a kept one is not
+    # silence and a dropped one is not a surprise. Read out of the report by
+    # section rather than asserted line by line: the sections are what the
+    # operator acts on, and every seeded row has to appear in exactly one.
+    reported: dict[str, set[str]] = {"kept": set(), "dropped": set()}
+    section = None
+    for line in out.splitlines():
+        if line.endswith("not built yet:"):
+            section = "kept"
+        elif line.endswith("no longer has:"):
+            section = "dropped"
+        elif not line.strip():
+            section = None
+        elif section and line.startswith("  "):
+            slug = line.strip().split()[0]
+            if slug in entries:
+                reported[section].add(slug)
+    assert reported == {"kept": held, "dropped": set(entries) - held}
 
 
 def test_reconcile_decides_under_the_mapping_lock_even_when_writing_nothing(
@@ -3536,6 +3555,47 @@ def test_no_end_of_a_reservation_writes_over_a_row_another_run_took(
     rows = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
     assert rows["demo"]["claim"] == theirs.claim
     assert rows["demo"]["host_port"] == 15201
+
+
+def test_a_reserved_row_still_reports_the_environment_that_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Taking a slug over does not restate what is built there.
+
+    `reserve` merges into whatever row it finds, so every field it writes lands
+    beside the previous run's. Build identity is therefore written only by
+    `complete`, the end of the reservation that has one: a reservation that wrote
+    its own branch produced a row naming the new branch next to the old commit --
+    an environment that never existed -- and the report that row feeds is what an
+    operator reads before deciding whether the environment is still wanted.
+    """
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "branch_name", lambda repo_root: "fix/installed")
+    monkeypatch.setattr(incus_regression, "commit_sha", lambda repo_root: "aaaaaaaaaaaa")
+    (tmp_path / ".runtime" / "incus-regression").mkdir(parents=True)
+    target = incus_regression.RegressionTarget(
+        target="worktree",
+        slug="demo",
+        project="avr-wt-demo",
+        instance="avibe-wt-demo",
+        host_port=15300,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    metadata = incus_regression.WorktreeMetadata(tmp_path, None)
+    built = metadata.reserve(target)
+    metadata.complete(target, built.claim)
+
+    monkeypatch.setattr(incus_regression, "branch_name", lambda repo_root: "fix/arriving")
+    taking_over = metadata.reserve(target)
+
+    row = metadata.rows()["demo"]
+    assert row["claim"] == taking_over.claim
+    assert row["commit"] == "aaaaaaaaaaaa"
+    described = incus_regression.describe_worktree_entry(row)
+    assert "fix/installed" in described
+    assert "fix/arriving" not in described
 
 
 def test_an_empty_remote_names_the_local_daemon_for_every_command() -> None:
