@@ -2799,6 +2799,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     eventBridgeConnectedRef.current = false;
   };
 
+  /**
+   * The stream's own handshake, or null while events cannot reach handlers. A
+   * controller-sourced stream also needs its bridge up: the browser leg being
+   * open says nothing about the controller leg behind it.
+   */
+  const workbenchEventHandshake = () => {
+    const connection = eventConnectionRef.current;
+    if (!connection) return null;
+    if (connection.source === 'controller' && !eventBridgeConnectedRef.current) return null;
+    return connection;
+  };
+
+  /**
+   * Events are flowing end to end right now, so a reconnect would close no gap.
+   *
+   * Transport liveness is the browser's to own: it errors the stream on network
+   * changes and on HTTP/2 ping timeouts, which is what `readyState` reports. The
+   * server's own keep-alive is an SSE comment plus it only fires after 15s of
+   * silence on the timeout branch, so it is invisible to EventSource and absent
+   * from a stream busy delivering events this context filters out -- a
+   * last-frame staleness check built on it would call healthy streams dead.
+   */
+  const isWorkbenchEventStreamLive = () =>
+    eventSourceRef.current?.readyState === EventSource.OPEN && workbenchEventHandshake() !== null;
+
   function reconnectWorkbenchEventSource(): void {
     if (eventHandlersRef.current.size === 0) return;
     closeActiveWorkbenchEventSource();
@@ -2810,6 +2835,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventReconnectLoopRef.current = new WorkbenchEventReconnectLoop({
         reconnect: reconnectWorkbenchEventSource,
         isVisible: () => document.visibilityState === 'visible',
+        isStreamLive: isWorkbenchEventStreamLive,
       });
     }
     return eventReconnectLoopRef.current;
@@ -3051,7 +3077,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const wakeWorkbenchEvents = () => {
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
-    setWorkbenchEventConnectionState('reconnecting');
+    // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
+    // marks it reconnecting on every attempt. Announcing it here instead made a
+    // wake that keeps a live stream flash "reconnecting" over a healthy one.
     getWorkbenchEventReconnectLoop().wake();
   };
   wakeWorkbenchEventsRef.current = wakeWorkbenchEvents;
@@ -3988,17 +4016,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           handlers.onConnectionState?.(eventConnectionStateRef.current);
         }
       });
-      if (
-        eventConnectionRef.current &&
-        (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
-      ) {
+      if (workbenchEventHandshake()) {
         queueMicrotask(() => {
-          if (
-            eventHandlersRef.current.has(handlers) &&
-            eventConnectionRef.current &&
-            (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
-          ) {
-            handlers.onConnected?.(eventConnectionRef.current);
+          const connected = workbenchEventHandshake();
+          if (eventHandlersRef.current.has(handlers) && connected) {
+            handlers.onConnected?.(connected);
           }
         });
       }

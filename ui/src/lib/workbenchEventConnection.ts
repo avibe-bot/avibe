@@ -9,12 +9,15 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 interface WorkbenchEventReconnectLoopOptions {
   reconnect: () => void;
   isVisible: () => boolean;
+  /** Whether events are flowing end to end right now, so no gap needs closing. */
+  isStreamLive: () => boolean;
 }
 
 /** Owns the retry policy; EventSource wiring stays in ApiContext. */
 export class WorkbenchEventReconnectLoop {
   private readonly reconnect: () => void;
   private readonly isVisible: () => boolean;
+  private readonly isStreamLive: () => boolean;
   private retryTimer: TimerHandle | null = null;
   private openTimer: TimerHandle | null = null;
   private retryAttempt = 0;
@@ -23,6 +26,7 @@ export class WorkbenchEventReconnectLoop {
   constructor(options: WorkbenchEventReconnectLoopOptions) {
     this.reconnect = options.reconnect;
     this.isVisible = options.isVisible;
+    this.isStreamLive = options.isStreamLive;
   }
 
   attemptStarted(): void {
@@ -56,10 +60,19 @@ export class WorkbenchEventReconnectLoop {
     }, delayMs);
   }
 
+  /** The page came back or the network returned: stop waiting out a backoff. */
   wake(): void {
     if (this.stopped || !this.isVisible()) return;
+    // A backoff was sized while nobody was watching. Someone is watching now,
+    // so the next attempt should not sit out the rest of a 15s delay.
     this.retryAttempt = 0;
     this.clearRetryTimer();
+    // An unbroken stream missed nothing, so there is no gap to close. Recycling
+    // it would manufacture the very outage -- and the catch-up read every
+    // consumer runs on reconnect -- that waking exists to recover from.
+    // Checked before clearOpenTimer() so a stream that is open at the transport
+    // but has not completed its handshake keeps its watchdog armed.
+    if (this.isStreamLive()) return;
     this.clearOpenTimer();
     this.reconnect();
   }
