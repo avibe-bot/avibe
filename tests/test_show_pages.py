@@ -29,7 +29,7 @@ from core.show_pages import (
     show_public_event_write_token,
 )
 from storage.pagination import PageRequest
-from vibe import cli
+from vibe import api, cli
 
 
 @dataclass(frozen=True)
@@ -48,12 +48,12 @@ def _stub_runtime_prepare_dependencies(
 ):
     calls = {"askill": [], "avault": [], "tmux": [], "git": []}
 
-    def fake_askill(offline=False):
-        calls["askill"].append({"offline": offline})
+    def fake_askill(offline=False, force=False):
+        calls["askill"].append({"offline": offline, "force": force})
         return askill_result or {"ok": True, "installed": True}
 
-    def fake_avault(offline=False):
-        calls["avault"].append({"offline": offline})
+    def fake_avault(offline=False, force=False):
+        calls["avault"].append({"offline": offline, "force": force})
         return avault_result or {"ok": True, "installed": True}
 
     def fake_tmux(offline=False, force=False):
@@ -292,45 +292,29 @@ def test_runtime_prepare_cli_strict_allows_unsupported_git_platform(monkeypatch,
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])
-    seen = {"askill": None, "avault": None, "tmux": None, "git": None}
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
             assert offline is True
             return {"ok": True}
 
-    def fake_askill(offline=False):
-        seen["askill"] = offline
-        return {"ok": True, "skipped": True, "reason": "offline"}
-
-    def fake_avault(offline=False):
-        seen["avault"] = offline
-        return {"ok": True, "skipped": True, "reason": "offline"}
-
-    def fake_tmux(offline=False, force=False):
-        seen["tmux"] = {"offline": offline, "force": force}
-        return {"ok": True, "skipped": True, "reason": "offline"}
-
-    def fake_git(offline=None, force=False):
-        seen["git"] = {"offline": offline, "force": force}
-        return {"ok": True, "installed": True}
-
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
-    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
-    monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
+    offline_result = {"ok": True, "skipped": True, "reason": "offline"}
+    calls = _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        askill_result=offline_result,
+        avault_result=offline_result,
+        tmux_result=offline_result,
+    )
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert seen == {
-        "askill": True,
-        "avault": True,
-        "tmux": {"offline": True, "force": False},
-        "git": {"offline": True, "force": False},
-    }
-    assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
-    assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
+    for phase, recorded in calls.items():
+        assert recorded, f"{phase} phase did not run"
+        assert all(call["offline"] for call in recorded), phase
+        assert all(call["force"] is False for call in recorded), phase
+    assert payload["avault"] == offline_result
+    assert payload["tmux"] == offline_result
     assert payload["git"] == {"ok": True, "installed": True}
 
 
@@ -370,6 +354,115 @@ def test_runtime_prepare_tmux_runs_when_terminal_enabled(monkeypatch):
 
     assert cli._ensure_tmux_during_prepare(force=True) == {"ok": True}
     assert calls == [True]
+
+
+def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeypatch):
+    # Prepare is the chokepoint that keeps managed local deps current, which is
+    # not the same as reinstalling them: every install here is a network download
+    # (askill ~30s, avault ~20s), so a prepare with nothing to change must reach
+    # none of them. Stubbing the installers rather than the decision keeps this
+    # honest whichever way the wrappers ask the question.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_AVAULT", raising=False)
+    monkeypatch.setattr(api, "install_askill", lambda: pytest.fail("askill must not reinstall when current"))
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("avault must not reinstall when current"))
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+
+    askill = cli._ensure_askill_during_prepare()
+    avault = cli._ensure_avault_during_prepare()
+
+    assert askill == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/x/askill",
+        "version": "0.1.14",
+    }
+    assert avault["ok"] is True
+    assert avault["changed"] is False
+    assert avault["version"] == api.AVAULT_VERSION
+
+
+@pytest.mark.parametrize("reason", ["latest_unavailable", "a_reason_invented_after_this_test"])
+def test_runtime_prepare_installs_when_currency_was_not_established(monkeypatch, reason):
+    # "I did not install" and "it is current" are different facts, and prepare
+    # may only report ready for the second. `up_to_date` is the one verdict that
+    # states it; every other non-install verdict — the upstream probe failing
+    # today, whatever is added later — means unknown, so prepare installs rather
+    # than printing `askill ready.` off a check that never happened. Keyed on the
+    # verdict rather than on a list of reasons, so a reason added later inherits
+    # the safe branch instead of a false pass.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.setattr(
+        api,
+        "refresh_askill_if_stale",
+        lambda: {"ok": True, "skipped": True, "reason": reason, "status": {"path": "/x/askill", "version": "0.1.14"}},
+    )
+    forced = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: forced.append(force) or {"ok": True, "installed": True, "changed": True},
+    )
+
+    out = cli._ensure_askill_during_prepare()
+
+    assert forced == [True], "an unestablished currency must reach the installer"
+    assert out["changed"] is True
+    assert out["action"] == "refresh_currency_unknown"
+
+
+def test_runtime_prepare_force_still_reinstalls_current_managed_deps(monkeypatch):
+    # The mirror of the test above, and the boundary of the change: making the
+    # ordinary prepare cheap must not take the repair away. A corrupted binary
+    # can still report the current version, so `--force` has to reach the
+    # installer for exactly the states the currency check skips.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_AVAULT", raising=False)
+    installed = []
+    monkeypatch.setattr(api, "refresh_askill_if_stale", lambda: pytest.fail("--force must not settle for a currency check"))
+    monkeypatch.setattr(api, "refresh_avault_if_stale", lambda: pytest.fail("--force must not settle for a currency check"))
+    monkeypatch.setattr(api, "install_askill", lambda: installed.append("askill") or {"ok": True})
+    monkeypatch.setattr(api, "install_avault", lambda force=False: installed.append("avault") or {"ok": True, "changed": True})
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/askill")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+
+    assert cli._ensure_askill_during_prepare(force=True)["ok"] is True
+    assert cli._ensure_avault_during_prepare(force=True)["ok"] is True
+    assert installed == ["askill", "avault"]
+
+
+def test_runtime_prepare_force_reaches_every_managed_dependency(monkeypatch):
+    # `--force` is advertised by the parser as "reinstall even when the cached
+    # runtime matches", so it belongs to every dependency phase, not to the ones
+    # that happen to accept it. Asserted over whatever phases ran rather than a
+    # list of names, so a phase added later fails here instead of silently
+    # ignoring the flag.
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare", "--force"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            assert force is True
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
+
+    assert cli.cmd_runtime(args) == 0
+    assert calls, "prepare recorded no dependency phases"
+    for phase, recorded in calls.items():
+        assert recorded, f"{phase} phase did not run"
+        assert all(call["force"] is True for call in recorded), phase
 
 
 def _save_config() -> V2Config:

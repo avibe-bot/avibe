@@ -7469,6 +7469,35 @@ def _probe_avault_version(path: str | None) -> str | None:
     return None
 
 
+def refresh_avault_if_stale() -> dict:
+    """Bring avault to the managed pin, installing only when that changes it.
+
+    Sibling of ``refresh_askill_if_stale`` for the version-pinned dependency, so
+    both managed local deps answer "am I current?" before paying for an install.
+    The wanted version is ``AVAULT_VERSION`` rather than an upstream latest, so
+    the staleness question is answered locally with no download at all.
+
+    ``force`` on ``ensure_avault_installed`` stays a repair verb — it reinstalls
+    an equal or older managed release on purpose — so callers that only want the
+    pin satisfied come here instead of charging every call a ~20s reinstall of
+    the release that is already on disk.
+
+    Skipping the install may never report a healthier state than forcing it
+    would. Being at the pin is not the whole of being current: when the
+    readiness floor is raised ahead of the published pin, a binary equal to
+    ``AVAULT_VERSION`` is still ``upgrade_required``, and only the forced path
+    surfaces that release gap. So the question is asked of the status as a
+    whole, not of the version alone.
+    """
+    status = avault_status()
+    current = (
+        bool(status.get("installed"))
+        and status.get("status") == "ready"
+        and _version_at_least(status.get("version"), AVAULT_VERSION)
+    )
+    return ensure_avault_installed(force=not current)
+
+
 def avault_status() -> dict:
     """Report whether avault is installed and its version (best-effort)."""
     path = _resolve_avault_cli_path()
@@ -8119,9 +8148,75 @@ def askill_update_status(*, include_latest: bool = True) -> dict:
         "has_update": has_update,
         "auto_update": not _askill_auto_update_disabled(),
     }
-    if current.get("installed") and current_version is None:
+    if current.get("installed") and not _is_comparable_version(current_version):
+        # Not just a missing version: a version nobody can order (``dev``, a git
+        # sha) tells us as little as no version at all, and every consumer —
+        # the Dependencies page, prepare — must read the same fact from the same
+        # field rather than re-deriving it from the raw string.
         out["status"] = "unknown"
     return out
+
+
+def refresh_askill_if_stale() -> dict:
+    """Bring askill to the published version, installing only when that changes it.
+
+    The single owner of "is the managed askill current, and make it so". Every
+    caller that wants currency asks this instead of forcing an install, because
+    the askill.sh installer re-downloads the CLI on every run: answering the
+    question costs one cached version probe, answering it by reinstalling costs
+    ~30s of network even when the local binary is already the published version.
+    ``refresh_avault_if_stale`` is the same rule for the version-pinned sibling.
+
+    Callers own their own policy gate; this function only decides staleness. An
+    install attempt is reported by ``action``, so its absence means the
+    dependency was already current.
+
+    ``up_to_date`` is an affirmative verdict, never a fallthrough: it requires
+    two versions that could actually be ordered. Anything else is unknown, and
+    unknown is answered by the repair the forced path would have done.
+    """
+    status = askill_update_status()
+    if not status.get("installed"):
+        result = ensure_askill_installed(force=False)
+        result["action"] = "install"
+        return result
+
+    latest = status.get("latest_version")
+    if status.get("status") == "unknown":
+        # A binary whose version cannot be ordered is not current, it is broken —
+        # whether it reported nothing or reported ``dev``. The status field owns
+        # that judgement (see ``askill_update_status``) so this path and the
+        # Dependencies page cannot disagree. Deciding it before the
+        # ``latest_unavailable`` exit keeps the repair from being gated on
+        # network reachability: callers that used to force this install
+        # unconditionally would otherwise be told a broken askill is ready
+        # whenever the latest lookup failed too.
+        logger.info("askill local version is unknown; refreshing managed dependency")
+        result = ensure_askill_installed(force=True)
+        result["action"] = "refresh_unknown_version"
+        result["latest_version"] = latest
+        return result
+
+    if not _is_comparable_version(latest):
+        # No usable upstream version to compare against — missing, or a string
+        # that cannot be ordered. Either way staleness is undecided, which is a
+        # different fact from being current; each caller owns what to do with it
+        # (prepare installs, the update cadence skips).
+        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
+
+    if not status.get("has_update"):
+        # Two comparable versions, compared: this is the one state that may claim
+        # currency, and it is reached only by having established it.
+        return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
+
+    logger.info("askill update available: %s -> %s", status.get("version"), latest)
+    result = ensure_askill_installed(force=True)
+    result["action"] = "update"
+    result["from_version"] = status.get("version")
+    result["latest_version"] = latest
+    with _BACKEND_CACHE_LOCK:
+        _BACKEND_LATEST_CACHE.pop("askill", None)
+    return result
 
 
 def reconcile_askill_auto_update() -> dict:
@@ -8135,35 +8230,7 @@ def reconcile_askill_auto_update() -> dict:
     """
     if _askill_auto_update_disabled():
         return {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
-
-    status = askill_update_status()
-    if not status.get("installed"):
-        result = ensure_askill_installed(force=False)
-        result["action"] = "install"
-        return result
-
-    latest = status.get("latest_version")
-    if latest is None:
-        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
-
-    if status.get("version") is None:
-        logger.info("askill local version is unknown; refreshing managed dependency")
-        result = ensure_askill_installed(force=True)
-        result["action"] = "refresh_unknown_version"
-        result["latest_version"] = latest
-        return result
-
-    if not status.get("has_update"):
-        return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
-
-    logger.info("askill update available: %s -> %s", status.get("version"), latest)
-    result = ensure_askill_installed(force=True)
-    result["action"] = "update"
-    result["from_version"] = status.get("version")
-    result["latest_version"] = latest
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE.pop("askill", None)
-    return result
+    return refresh_askill_if_stale()
 
 
 # =============================================================================
@@ -8787,15 +8854,48 @@ def _cached_latest(name: str) -> str | None:
     return latest
 
 
+def _is_comparable_version(value: str | None) -> bool:
+    """Whether *value* can be ordered against another version at all.
+
+    The single owner of "do we actually have a version?", because a nonempty
+    string is not the same fact: ``askill --version`` answers ``askill dev`` on a
+    development build, and the last token of that is stored as the version. Both
+    comparison helpers deliberately return False for anything they cannot parse,
+    so every caller that asks a comparison instead of asking this reads "cannot
+    tell" as "no update available" — which is how a broken binary comes to look
+    current. Ask this first; a False answer means unknown, not healthy.
+    """
+    if not value:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            Version(value)
+            return True
+        except InvalidVersion:
+            pass
+    except Exception:  # pragma: no cover - packaging is a transitive dep
+        pass
+
+    core = value.split("+", 1)[0].split("-", 1)[0]
+    try:
+        tuple(int(part) for part in core.split("."))
+    except ValueError:
+        return False
+    return True
+
+
 def _compare_versions(current: str | None, latest: str | None) -> bool:
     """Return True when *latest* is strictly greater than *current*.
 
     Honors PEP 440 / semver pre-release ordering when possible (e.g. ``0.77.1``
     is greater than ``0.77.1-beta.0``). Falls back to a conservative numeric
     tuple comparison; returns False on any parsing failure so we never nag the
-    user with a phantom update.
+    user with a phantom update. That conservatism is why "no update" is not a
+    statement about health: use ``_is_comparable_version`` to tell the two apart.
     """
-    if not current or not latest or current == latest:
+    if not _is_comparable_version(current) or not _is_comparable_version(latest) or current == latest:
         return False
 
     try:

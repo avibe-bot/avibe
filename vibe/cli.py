@@ -14162,10 +14162,11 @@ def cmd_runtime(args) -> int:
     if command == "prepare":
         offline = True if getattr(args, "offline", False) else None
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
-        askill = _ensure_askill_during_prepare(offline=bool(offline))
-        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
-        git = _ensure_git_during_prepare(offline=offline, force=getattr(args, "force", False))
-        avault = _ensure_avault_during_prepare(offline=bool(offline))
+        force = bool(getattr(args, "force", False))
+        askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
+        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
+        git = _ensure_git_during_prepare(offline=offline, force=force)
+        avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         payload["askill"] = askill
         payload["avault"] = avault
         payload["tmux"] = tmux
@@ -14317,25 +14318,67 @@ def _prepare_show_runtime_after_install(vibe_path: str | None) -> None:
         print(detail)
 
 
-def _ensure_askill_during_prepare(offline: bool = False) -> dict:
+def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) -> dict:
     """Ensure askill (a required local dependency) alongside the Show Runtime.
 
     Folded into ``vibe runtime prepare`` so askill auto-installs at exactly the
     same lifecycle points as the Show Page runtime (post install / upgrade),
     with a ``VIBE_INSTALL_SKIP_ASKILL`` escape hatch mirroring the Show Runtime
     one. Skipped under ``--offline`` (the askill installer needs the network).
-    Refreshes askill to latest even when a binary already exists — prepare is
-    the chokepoint that keeps required local deps current on upgrade. An askill
-    hiccup never fails the prepare; the Dependencies page offers a manual retry.
+    Refreshes askill to latest so prepare stays the chokepoint that keeps
+    required local deps current on upgrade, but asks whether that refresh would
+    change anything before running the installer: askill.sh re-downloads the CLI
+    on every run, so an unconditional refresh charged every prepare ~30s to
+    install the version already on disk. An askill hiccup never fails the
+    prepare; the Dependencies page offers a manual retry.
+
+    ``force`` is prepare's ``--force``, and it means repair, not currency: a
+    corrupted binary can still report the current version, so an explicit
+    ``vibe runtime prepare --force`` must reinstall rather than ask. Currency is
+    the default; repair stays available on request, exactly as it is for the
+    Show Runtime, tmux, and git phases.
+
+    Only an explicit ``up_to_date`` verdict may report ready. Any other verdict
+    that installed nothing means currency was not established, not that it holds,
+    so prepare installs instead of claiming a fact it never checked.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
-        return api.ensure_askill_installed(force=True)
+        if force:
+            return api.ensure_askill_installed(force=True)
+        result = api.refresh_askill_if_stale()
+        if not (result.get("ok") and result.get("action") is None):
+            return result
+        if result.get("reason") != "up_to_date":
+            # The owner skipped without establishing currency — today that is
+            # ``latest_unavailable``, when the upstream version probe failed.
+            # Prepare is the chokepoint that must *make* the dependency current,
+            # so with no evidence either way it does what it did before this fast
+            # path existed and installs. The probe and the askill.sh installer
+            # are independent paths: a rate-limited or blipped version lookup
+            # says nothing about whether the install would succeed, and reporting
+            # ready off the back of it would claim currency we never checked.
+            # Only ``up_to_date`` may report ready, so a skip reason added later
+            # takes this branch rather than inheriting a false pass.
+            refreshed = api.ensure_askill_installed(force=True)
+            refreshed["action"] = "refresh_currency_unknown"
+            return refreshed
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
+    # Already current, and the owner said so: report ready rather than skipped so
+    # prepare's dependency lines read the same way as the pinned providers when
+    # nothing needed doing.
+    status = result.get("status") or {}
+    return {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": status.get("path"),
+        "version": status.get("version"),
+    }
 
 
 def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> dict:
@@ -14388,14 +14431,23 @@ def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
         return {"ok": False, "removed": [], "message": str(exc)}
 
 
-def _ensure_avault_during_prepare(offline: bool = False) -> dict:
-    """Ensure avault (the Vault custody core) alongside other local deps."""
+def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) -> dict:
+    """Ensure avault (the Vault custody core) alongside other local deps.
+
+    Raises avault to the managed pin on upgrade, but only downloads when the pin
+    is not already satisfied: the reinstall it used to force on every prepare
+    took ~20s to put back the release that was already installed. ``force`` is
+    prepare's ``--force`` repair request and still reinstalls the managed
+    release, since a corrupted binary can report the pinned version.
+    """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
-        return api.ensure_avault_installed(force=True)
+        if force:
+            return api.ensure_avault_installed(force=True)
+        return api.refresh_avault_if_stale()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 
