@@ -738,6 +738,50 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   });
 
+  it('keeps the Organization directory after a CAS reload overlaps the first fetch', async () => {
+    api.getShowAccessSettings
+      .mockResolvedValueOnce({
+        show_access: showAccess({
+          access_mode: 'limited',
+          normalized_emails: ['guest@example.com'],
+        }),
+      })
+      .mockResolvedValueOnce({
+        show_access: showAccess({
+          access_mode: 'limited',
+          revision: 3,
+          normalized_emails: ['guest@example.com'],
+        }),
+      });
+    let resolvePermissions = (_value: PermissionsResponse) => undefined;
+    getPermissions.mockReturnValue(new Promise<PermissionsResponse>((resolve) => {
+      resolvePermissions = resolve;
+    }));
+    api.applyShowAccess.mockResolvedValue({
+      status: 'conflict',
+      show_access: showAccess({ access_mode: 'limited', revision: 2 }),
+    });
+    renderSettings();
+
+    await waitFor(() => expect(getPermissions).toHaveBeenCalledTimes(1));
+    const input = await openAudience();
+    expect(screen.getByText('Loading Organization directory…')).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: 'alice@example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
+    await waitFor(() => expect(api.getShowAccessSettings).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      resolvePermissions(ORGANIZATION);
+      await Promise.resolve();
+    });
+
+    await openAudience();
+    await waitFor(() => expect(screen.getByRole('option', { name: /Engineering/ })).toBeTruthy());
+    expect(screen.queryByText('Loading Organization directory…')).toBeNull();
+    expect(getPermissions).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a mismatched result identity without adopting its audience', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     getPermissions.mockResolvedValue(ORGANIZATION);

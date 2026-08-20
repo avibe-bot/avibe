@@ -361,6 +361,11 @@ export function ShowPageSharingSettings({
   const savingRef = useRef(false);
   const savedRef = useRef<ShowAccess | null>(null);
   const directoryRequestedRef = useRef(false);
+  // Directory is instance-level (`getPermissions`), not page-revision-level.
+  // Tying it to generationRef let a CAS `load()` discard an in-flight
+  // directory response while the latch stayed true, so the combobox spun
+  // until remount. This counter only advances with the session effect.
+  const directoryGenerationRef = useRef(0);
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
@@ -397,6 +402,7 @@ export function ShowPageSharingSettings({
 
   useEffect(() => {
     generationRef.current += 1;
+    directoryGenerationRef.current += 1;
     savingRef.current = false;
     savedRef.current = null;
     setSaved(null);
@@ -413,6 +419,7 @@ export function ShowPageSharingSettings({
     if (active && canManage) void load();
     return () => {
       generationRef.current += 1;
+      directoryGenerationRef.current += 1;
       savingRef.current = false;
     };
   }, [active, canManage, load, sessionId]);
@@ -426,17 +433,17 @@ export function ShowPageSharingSettings({
   useEffect(() => {
     if (!active || !canManage || mode !== 'limited' || directoryRequestedRef.current) return;
     directoryRequestedRef.current = true;
-    const generation = generationRef.current;
+    const generation = directoryGenerationRef.current;
     setDirectoryGate('loading');
     void (async () => {
       try {
         const permissions = await getPermissions();
-        if (generation !== generationRef.current) return;
+        if (generation !== directoryGenerationRef.current) return;
         const next = showAccessDirectoryOf(permissions);
         setDirectory(next);
         setDirectoryGate(next ? 'ready' : 'unavailable');
       } catch {
-        if (generation !== generationRef.current) return;
+        if (generation !== directoryGenerationRef.current) return;
         setDirectory(null);
         setDirectoryGate('unavailable');
       }
