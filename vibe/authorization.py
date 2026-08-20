@@ -25,7 +25,33 @@ INSTANCE_ACCESS_SOURCES = frozenset(
     }
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+INSTANCE_KINDS = frozenset({"personal", "organization"})
 _ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+
+
+def recognized_instance_kind(value: object) -> str | None:
+    """Return a recognized instance kind, or None for a genuine no-kind snapshot.
+
+    A present-but-unrecognized value (corruption, a future release, a typo)
+    is not a no-kind legacy snapshot. Callers that need fail-closed behavior
+    must distinguish ``None`` (absent/legacy) from an unrecognized string
+    via :func:`instance_kind_is_unsupported`.
+    """
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned if cleaned in INSTANCE_KINDS else None
+
+
+def instance_kind_is_unsupported(value: object) -> bool:
+    """True when a kind field is present but not a known Personal/Organization value."""
+
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        return True
+    return value.strip() not in {"", *INSTANCE_KINDS}
 _RESOURCE_USE_MINIMUM_ROLES = {
     "agent": "editor",
     "skill": "editor",
@@ -235,9 +261,11 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     )
     if organization_role not in ORGANIZATION_ROLES:
         organization_role = None
-    instance_kind = _optional_string(payload.get("vibe_instance_kind"))
-    if instance_kind not in {"personal", "organization"}:
+    raw_instance_kind = payload.get("vibe_instance_kind")
+    if instance_kind_is_unsupported(raw_instance_kind):
         instance_kind = None
+    else:
+        instance_kind = recognized_instance_kind(raw_instance_kind)
     return AuthorizationContext(
         instance_role=role,
         subject=_optional_string(payload.get("sub")),

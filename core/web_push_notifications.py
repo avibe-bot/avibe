@@ -299,8 +299,10 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_REVOKED,
             reason="persisted snapshot was issued for a different paired instance",
         )
+    from vibe.authorization import instance_kind_is_unsupported
+
     record_kind = record.get("vibe_instance_kind")
-    if record_kind is not None and record_kind not in {"personal", "organization"}:
+    if instance_kind_is_unsupported(record_kind):
         # A present-but-unrecognized kind is corruption or a future version,
         # never a no-kind legacy snapshot. Fail closed instead of falling
         # through to the currently-paired Personal policy.

@@ -356,10 +356,16 @@ def _decode_binding_state(value: Any) -> dict[str, Any] | None:
         if state == INSTANCE_BINDING_STATE_READY and instance_kind is None:
             return None
         generation = int(payload.get("generation"))
-        schema_version = int(payload.get("schema_version") or 1)
+        raw_schema_version = payload.get("schema_version")
+        if raw_schema_version is None:
+            schema_version = 1
+        else:
+            schema_version = int(raw_schema_version)
+            if schema_version != 1:
+                return None
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    if generation <= 0 or schema_version <= 0:
+    if generation <= 0:
         return None
     return {
         "schema_version": schema_version,

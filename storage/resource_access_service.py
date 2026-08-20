@@ -353,7 +353,11 @@ def resource_user_context_from_metadata(
         state = remote_access_authorization_service.load_instance_binding_state(
             ensure=False
         )
-        if not ready and state is not None:
+        if not ready:
+            # Absent row (upgrade of a known-kind pairing) AND reconciling /
+            # mismatched rows all fail closed for deferred/non-interactive
+            # consumers. Interactive callers hoist bootstrap via
+            # remote_access.binding_is_ready(..., bootstrap=True).
             return None
         if context.instance_kind is not None and (
             not paired_instance_id or not paired_kind
@@ -368,7 +372,14 @@ def resource_user_context_from_metadata(
             return None
         if context.instance_kind and paired_kind and context.instance_kind != paired_kind:
             return None
-    if context.instance_kind is not None or snapshot.get("vibe_instance_kind") is not None:
+    from vibe.authorization import instance_kind_is_unsupported
+
+    raw_snapshot_kind = snapshot.get("vibe_instance_kind")
+    if instance_kind_is_unsupported(raw_snapshot_kind):
+        # Same class as Web Push: a present-but-unrecognized kind is not a
+        # no-kind legacy snapshot. Fail closed for deferred execution.
+        return None
+    if context.instance_kind is not None or raw_snapshot_kind is not None:
         return context
 
     # Released snapshots predate the instance-kind field. Recover their kind
@@ -445,11 +456,26 @@ def _configured_resource_state() -> ConfiguredResourceState:
         from config.v2_config import V2Config
 
         loaded = V2Config.load(persist_migrations=False)
-        # A recovered/defaulted load is not an authoritative unpaired state:
-        # the file is broken and the user will repair it. Treat it as a
-        # transient UNAVAILABLE so we never seal snapshots against empty
-        # recovery defaults.
-        if getattr(loaded, "load_warnings", ()):
+        # Only pairing/vibe_cloud recovery makes this reader UNAVAILABLE.
+        # Unrelated-section warnings (e.g. Model Hub) must not block an
+        # intact Vibe Cloud pairing or seal snapshots against it.
+        pairing_warnings = tuple(
+            warning
+            for warning in getattr(loaded, "load_warnings", ())
+            if (
+                "remote_access" in warning
+                or "vibe_cloud" in warning
+                or (
+                    "using recovery defaults" in warning
+                    and "model_hub" not in warning
+                    and "Recovered invalid config section" not in warning
+                )
+                or "not valid UTF-8" in warning
+                or "JSON could not be parsed" in warning
+                or "root is not an object" in warning
+            )
+        )
+        if pairing_warnings:
             return ConfiguredResourceState(
                 status=RESOURCE_BINDING_STATE_UNAVAILABLE,
                 instance_id=None,
@@ -885,6 +911,13 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         if not identity_matches:
             write_marker(state="pending", instance_id=current_instance_id)
             return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
+    else:
+        # Known-kind config with no durable binding row is an upgrade
+        # artifact, not a validated pairing. Leave the opportunity pending
+        # so a later heartbeat/bootstrap can attribute snapshots after the
+        # server-owned kind is confirmed.
+        write_marker(state="pending", instance_id=current_instance_id)
+        return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
     paired_instance_id = current_instance_id
     paired_kind = current_kind
 
