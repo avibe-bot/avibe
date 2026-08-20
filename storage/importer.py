@@ -269,7 +269,9 @@ def _set_background_import_marker(conn: Connection) -> None:
 
 
 def _run_sqlite_data_migrations(conn: Connection) -> dict[str, int]:
-    return {}
+    from storage.resource_access_service import migrate_legacy_deferred_resource_contexts
+
+    return migrate_legacy_deferred_resource_contexts(conn)
 
 
 def _backup_json_state(state_dir: Path) -> Path:

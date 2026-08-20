@@ -444,6 +444,15 @@ def _configured_resource_state() -> ConfiguredResourceState:
             cloud.instance_kind if cloud.instance_kind in {"personal", "organization"} else None
         )
         credentials = cloud.runtime_credentials()
+    except FileNotFoundError:
+        # A missing config file is an authoritative unpaired install, not a
+        # transient read failure. pair() must be allowed to redeem.
+        return ConfiguredResourceState(
+            status=RESOURCE_BINDING_STATE_UNPAIRED,
+            instance_id=None,
+            instance_kind=None,
+            runtime_ready=False,
+        )
     except Exception:
         return ConfiguredResourceState(
             status=RESOURCE_BINDING_STATE_UNAVAILABLE,
@@ -559,6 +568,67 @@ def _legacy_deferred_context_binding(
     }
 
 
+def _metadata_snapshot_lacks_binding(metadata: Any) -> bool:
+    """True when a deferred snapshot exists but carries no complete binding."""
+
+    if not isinstance(metadata, dict):
+        return False
+    snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return False
+    instance_id = _clean_optional_string(snapshot.get("vibe_instance_id"))
+    kind = snapshot.get("vibe_instance_kind")
+    return instance_id is None or kind not in {"personal", "organization"}
+
+
+def _has_unbound_deferred_snapshots(connection: Connection) -> bool:
+    """True when any released deferred record still lacks an instance binding.
+
+    A fresh install has nothing to protect: sealing or pinning a marker there
+    would only block the first real pairing. Only actual legacy snapshots make
+    the first migration opportunity meaningful.
+    """
+
+    definition_rows = connection.execute(
+        select(run_definitions.c.metadata_json).where(
+            run_definitions.c.definition_type.in_(("scheduled", "watch"))
+        )
+    )
+    for (metadata_json,) in definition_rows:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if _metadata_snapshot_lacks_binding(metadata):
+            return True
+    run_rows = connection.execute(
+        select(agent_runs.c.metadata_json).where(
+            agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
+        )
+    )
+    for (metadata_json,) in run_rows:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if _metadata_snapshot_lacks_binding(metadata):
+            return True
+    delivery_rows = connection.execute(
+        select(message_deliveries.c.snapshot_json).where(
+            message_deliveries.c.snapshot_json.is_not(None)
+        )
+    )
+    for (snapshot_json,) in delivery_rows:
+        try:
+            snapshot = json.loads(snapshot_json or "{}")
+            metadata = json.loads(snapshot.get("metadata_json") or "{}")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if _metadata_snapshot_lacks_binding(metadata):
+            return True
+    return False
+
+
 def _migrate_deferred_metadata_value(
     metadata: Any,
     *,
@@ -652,6 +722,8 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         if configured.status == RESOURCE_BINDING_STATE_READY
         else None
     )
+    # PARTIAL still carries a known instance ID; heartbeat/backfill uses it to
+    # keep snapshots pending instead of sealing them as unattributed.
 
     def write_marker(
         *,
@@ -715,9 +787,16 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
 
     if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
+        if marker is None and not _has_unbound_deferred_snapshots(connection):
+            # A fresh install has no legacy snapshots to protect. Writing a
+            # sealed marker here would only block the first real pairing.
+            return _counts(binding_status=RESOURCE_BINDING_STATE_UNPAIRED)
         write_marker(state="sealed_unattributed", instance_id=current_instance_id)
         return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
     if configured.status != RESOURCE_BINDING_STATE_READY:
+        # A PARTIAL pairing still records its identity: the pending marker is
+        # what lets the SAME instance complete after credential repair while a
+        # DIFFERENT instance stays sealed out.
         write_marker(state="pending", instance_id=current_instance_id)
         return _counts(binding_status=configured.status)
     if current_instance_id is None or current_kind not in {"personal", "organization"}:
