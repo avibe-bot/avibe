@@ -2633,14 +2633,13 @@ def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch
     def decode(chunk) -> str:
         return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
 
-    async def collect_heartbeats() -> tuple[str, str]:
+    async def collect_heartbeats() -> tuple[str, str, str]:
         with app.test_request_context("/api/events"):
             g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
             response = await ui_server.workbench_events()
             iterator = response.body_iterator.__aiter__()
             try:
-                for _ in range(3):
-                    await iterator.__anext__()
+                handshake = [decode(await iterator.__anext__()) for _ in range(3)]
                 idle = await asyncio.wait_for(iterator.__anext__(), timeout=2)
                 # A stream carrying events this viewer may not see is silent
                 # from the browser's side while being anything but idle, so a
@@ -2650,25 +2649,37 @@ def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch
                 busy = await asyncio.wait_for(iterator.__anext__(), timeout=2)
             finally:
                 await iterator.aclose()
-        return decode(idle), decode(busy)
+        return handshake[1], decode(idle), decode(busy)
 
-    idle, busy = asyncio.run(collect_heartbeats())
+    connected, idle, busy = asyncio.run(collect_heartbeats())
+
+    # The handshake declares the cadence before anything proves it. That promise
+    # is what lets a client hold a brand-new stream to a deadline: without it, a
+    # stream that opens and then goes silent has nothing to have broken, and the
+    # client's only options are to trust it for a whole window or to watchdog
+    # servers that never promised anything.
+    assert "event: connected" in connected
+    assert '"interval_ms":50' in connected
 
     assert "event: heartbeat" in idle
-    # The cadence rides along so the client sizes its staleness window from
-    # whichever side actually sets it.
+    # The cadence rides along here too, because only a heartbeat is proof, and
+    # proof is what the staleness window is measured from.
     assert '"interval_ms":50' in idle
     assert "event: heartbeat" in busy
     assert "hidden-secret" not in busy
 
 
-def test_workbench_events_tell_a_subscriber_its_queue_overflowed(monkeypatch, tmp_path):
-    """A dropped event has to reach the client as news rather than as silence.
+def test_workbench_events_end_a_subscriber_whose_queue_overflowed(monkeypatch, tmp_path):
+    """A subscriber that lost an event is not a subscriber any more.
 
     The broker's per-subscriber queue is bounded, so "slow subscriber" and "lost
     events" are one condition -- and nothing else on the wire betrays it: the
-    socket stays open and the heartbeats keep proving it alive. The stream is the
-    only thing positioned to admit what it could not hand over.
+    socket stays open and the heartbeats keep proving it alive. Ending the stream
+    is the repair, because the client's reconnect path gets a fresh empty queue
+    and catches consumers up exactly once, with backoff if the load that
+    overflowed the queue is still going. Announcing the hole on this stream
+    instead keeps a full queue full: the next iteration finds another discard and
+    announces again, starving the payload frames it was warning about.
     """
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
@@ -2680,19 +2691,20 @@ def test_workbench_events_tell_a_subscriber_its_queue_overflowed(monkeypatch, tm
     def decode(chunk) -> str:
         return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
 
-    async def collect_until_gap() -> tuple[int, list[str]]:
+    async def collect_until_end() -> tuple[int, list[str], bool, int]:
         with app.test_request_context("/api/events"):
             g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
             response = await ui_server.workbench_events()
             iterator = response.body_iterator.__aiter__()
             frames: list[str] = []
+            ended = False
             try:
                 handshake = [decode(await iterator.__anext__()) for _ in range(3)]
                 sub_id = int(json.loads(handshake[1].split("data: ", 1)[1])["sub_id"])
                 # Park the stream inside its read loop before overflowing the
                 # queue. A discard from before the loop started is already
                 # covered by the handshake the client just received, so only a
-                # later one is worth a frame.
+                # later one is worth acting on.
                 pending = asyncio.create_task(iterator.__anext__())
                 await asyncio.sleep(0)
 
@@ -2704,22 +2716,32 @@ def test_workbench_events_tell_a_subscriber_its_queue_overflowed(monkeypatch, tm
                 await asyncio.sleep(0)
                 dropped = broker.dropped_count(sub_id)
 
-                frames.append(decode(await asyncio.wait_for(pending, timeout=2)))
-                while "event: workbench.events.gap" not in frames[-1] and len(frames) < 4:
-                    frames.append(decode(await asyncio.wait_for(iterator.__anext__(), timeout=2)))
+                # Bounded well below the ~200 frames still sitting in the queue:
+                # a stream that kept serving them would run out of the budget
+                # rather than end, which is the failure this asserts against.
+                for _ in range(5):
+                    awaitable = pending if pending is not None else iterator.__anext__()
+                    pending = None
+                    try:
+                        frames.append(decode(await asyncio.wait_for(awaitable, timeout=2)))
+                    except StopAsyncIteration:
+                        ended = True
+                        break
             finally:
                 await iterator.aclose()
-        return dropped, frames
+        # Read after the generator has exited: its ``finally`` releases the
+        # subscription, so the client's reconnect starts from a clean slate
+        # rather than inheriting a count that would end the new stream too.
+        return dropped, frames, ended, broker.dropped_count(sub_id)
 
-    dropped, frames = asyncio.run(collect_until_gap())
+    dropped, frames, ended, dropped_after_release = asyncio.run(collect_until_end())
 
     assert dropped > 0
-    gap_frames = [frame for frame in frames if "event: workbench.events.gap" in frame]
-    assert len(gap_frames) == 1
-    # Named, not merely signalled: the client clears its read caches wholesale
-    # because the frame says an event was lost, and the count is what makes the
-    # loss auditable in a log after the fact.
-    assert f'"dropped":{dropped}' in gap_frames[0]
+    assert ended
+    assert dropped_after_release == 0
+    # Not by announcing the hole on the stream that has it: nothing about a
+    # subscriber whose view is incomplete is worth another frame.
+    assert not [frame for frame in frames if "workbench.events.gap" in frame]
 
 
 def test_workbench_events_allow_show_events_when_show_page_acl_allows(monkeypatch, tmp_path) -> None:

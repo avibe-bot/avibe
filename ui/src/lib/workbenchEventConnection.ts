@@ -23,15 +23,30 @@ const WORKBENCH_EVENT_HEARTBEAT_STALE_FLOOR_MS = 45_000;
 const WORKBENCH_EVENT_HEARTBEAT_MIN_MS = 1_000;
 const WORKBENCH_EVENT_HEARTBEAT_MAX_MS = 120_000;
 
-/** Read a server-declared cadence, falling back on anything unusable. */
-export function parseWorkbenchHeartbeatInterval(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-    return WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
-  }
+/**
+ * A cadence the server actually declared, or undefined when it declared none.
+ *
+ * The distinction carries real weight: a declaration is what makes a deadline
+ * enforceable, so a server that never made one must not be held to a default it
+ * never agreed to. Substituting the fallback here would put every stream from a
+ * server too old to declare a cadence on a deadline it cannot meet, and recycle
+ * it every stale window forever.
+ */
+export function declaredWorkbenchHeartbeatInterval(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
   return Math.min(
     WORKBENCH_EVENT_HEARTBEAT_MAX_MS,
     Math.max(WORKBENCH_EVENT_HEARTBEAT_MIN_MS, raw),
   );
+}
+
+/**
+ * Read a server-declared cadence, falling back on anything unusable. For a
+ * frame that is itself proof of life -- a heartbeat -- an unreadable cadence is
+ * not worth discarding the proof over, so the fallback sizes the next window.
+ */
+export function parseWorkbenchHeartbeatInterval(raw: unknown): number {
+  return declaredWorkbenchHeartbeatInterval(raw) ?? WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
 }
 
 /** How long a stream's last proof of life stays good. */

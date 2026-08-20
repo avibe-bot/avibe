@@ -75,7 +75,7 @@ const onConnected = vi.fn();
 
 const Subscriber = () => {
   const api = useApi();
-  useEffect(() => api.connectWorkbenchEvents({ onConnected: () => onConnected() }), [api]);
+  useEffect(() => api.connectWorkbenchEvents({ onConnected: (data) => onConnected(data) }), [api]);
   return null;
 };
 
@@ -94,21 +94,36 @@ const emitControllerLeg = (connected: boolean) => {
   });
 };
 
-/** The UI server admitting it discarded events for this subscriber. */
-const emitDroppedEvents = (dropped: number) => {
-  FakeEventSource.latest().emit('workbench.events.gap', { dropped });
+/** A handshake from a server that declares the cadence it owes. */
+const emitHandshake = (subId: number) => {
+  FakeEventSource.latest().emit('connected', {
+    sub_id: subId,
+    interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+  });
+};
+
+/** A handshake from a server too old to declare one: nothing to enforce. */
+const emitUndeclaredHandshake = (subId: number) => {
+  FakeEventSource.latest().emit('connected', { sub_id: subId });
 };
 
 /** Open a stream and complete its handshake, as a real connect would. */
 const mountStream = () => {
   render(<ApiProvider><Subscriber /></ApiProvider>);
-  FakeEventSource.latest().emit('connected', { sub_id: 1 });
+  emitHandshake(1);
+};
+
+/** The same, against a server that never declares a cadence. */
+const mountUndeclaredStream = () => {
+  render(<ApiProvider><Subscriber /></ApiProvider>);
+  emitUndeclaredHandshake(1);
 };
 
 /**
- * The ordinary case: a stream that handshook and then declared its cadence.
- * A handshake is not proof of continuity, so anything that expects a stream to
- * vouch for itself has to start here rather than at the handshake.
+ * The ordinary case: a stream that handshook and then proved itself. A handshake
+ * is a promise about the future, not evidence about the past, so anything that
+ * expects a stream to vouch for a gap has to start here rather than at the
+ * handshake.
  */
 const mountConnectedStream = () => {
   mountStream();
@@ -183,7 +198,7 @@ describe('ApiProvider workbench stream liveness', () => {
 
     vi.advanceTimersByTime(WORKBENCH_EVENT_RETRY_INITIAL_MS);
     expect(FakeEventSource.instances).toHaveLength(2);
-    FakeEventSource.latest().emit('connected', { sub_id: 2 });
+    emitHandshake(2);
     expect(onConnected).toHaveBeenCalledTimes(2);
   });
 
@@ -201,15 +216,40 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(onConnected).toHaveBeenCalledTimes(1);
 
     // Coming back is where that stream is asked to account for the gap. It
-    // cannot, so it is replaced -- and the catch-up lands once, on the
-    // replacement's handshake, rather than on the edge itself.
+    // cannot, so it is replaced -- and the edge itself carries the catch-up,
+    // because the replacement may be several backoff windows away.
     setVisibility('visible');
     reactivate();
     expect(zombie.closed).toBe(true);
+    expect(onConnected).toHaveBeenCalledTimes(2);
+
+    emitHandshake(2);
+    expect(onConnected).toHaveBeenCalledTimes(3);
+  });
+
+  it('catches consumers up on the wake edge, not on the stream it is replacing', () => {
+    mountConnectedStream();
     expect(onConnected).toHaveBeenCalledTimes(1);
 
-    FakeEventSource.latest().emit('connected', { sub_id: 2 });
+    setVisibility('hidden');
+    vi.advanceTimersByTime(STALE_AFTER_MS);
+    setVisibility('visible');
+    reactivate();
+
+    // Recovery must not depend on the thing being recovered. The stale stream is
+    // gone and its replacement has not handshaken -- and against a stopped
+    // server or an offline network it never will -- so waiting for that
+    // handshake would leave a returning page showing what it had before it was
+    // hidden, with nothing on the way.
     expect(onConnected).toHaveBeenCalledTimes(2);
+    // No handshake stands behind this one, and it says nothing about which leg
+    // of the stream is up -- only that a gap has to be read back from storage.
+    expect(onConnected).toHaveBeenLastCalledWith(null);
+
+    // Repeated edges on a stream that still cannot prove itself each pay for
+    // themselves, exactly as the unconditional refetch did before this change.
+    reactivate();
+    expect(onConnected).toHaveBeenCalledTimes(3);
   });
 
   it('does not let a replacement stream inherit the old one as proof of life', () => {
@@ -222,21 +262,24 @@ describe('ApiProvider workbench stream liveness', () => {
     reactivate();
     expect(first.closed).toBe(true);
 
-    // The stale stream was recycled; until the replacement completes its own
-    // handshake there is nothing vouching for it, so a second return is another
-    // gap rather than a stream that proved anything.
+    // The stale stream was recycled; until the replacement proves itself there
+    // is nothing vouching for it, so a second return is another gap rather than
+    // a stream that accounted for one.
     const replacement = FakeEventSource.latest();
     expect(replacement).not.toBe(first);
     reactivate();
     expect(replacement.closed).toBe(true);
-    expect(onConnected).toHaveBeenCalledTimes(1);
 
-    // Once a stream does connect, it speaks for itself again.
-    FakeEventSource.latest().emit('connected', { sub_id: 2 });
-    expect(onConnected).toHaveBeenCalledTimes(2);
+    // Once a stream proves itself, it speaks for itself again -- and a return is
+    // free, which is the entire point of the design.
+    emitHandshake(2);
+    emitHeartbeat();
+    const proven = FakeEventSource.latest();
+    const catchUps = onConnected.mock.calls.length;
     reactivate();
-    expect(FakeEventSource.latest().closed).toBe(false);
-    expect(onConnected).toHaveBeenCalledTimes(2);
+    expect(FakeEventSource.latest()).toBe(proven);
+    expect(proven.closed).toBe(false);
+    expect(onConnected).toHaveBeenCalledTimes(catchUps);
   });
 
   it('ends a controller-leg gap in place, without recycling the browser leg', () => {
@@ -270,8 +313,8 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(onConnected).toHaveBeenCalledTimes(3);
   });
 
-  it('never lets a handshake alone vouch for a stream', () => {
-    mountStream();
+  it('never holds a server to a cadence it did not declare', () => {
+    mountUndeclaredStream();
     const legacy = FakeEventSource.latest();
 
     // An older server -- a rollback under a tab that stayed open -- completes
@@ -286,43 +329,50 @@ describe('ApiProvider workbench stream liveness', () => {
 
     // But it never counts as proven either, not even for one cadence: the
     // handshake says this stream is alive now, which is not the question. So the
-    // reactivation edge recycles it immediately -- the pre-heartbeat behavior
-    // this optimization replaces, and no worse than it.
+    // reactivation edge recycles it immediately and pays for the catch-up -- the
+    // pre-heartbeat behavior this optimization replaces, and no worse than it.
     reactivate();
     expect(legacy.closed).toBe(true);
+    expect(onConnected).toHaveBeenCalledTimes(2);
   });
 
-  it('puts a stream on a deadline as soon as its server declares one', () => {
+  it('holds a stream to the cadence its handshake promised, heartbeat or not', () => {
     mountStream();
-    const proven = FakeEventSource.latest();
+    const silent = FakeEventSource.latest();
 
-    vi.advanceTimersByTime(1_000);
-    emitHeartbeat();
+    // The hole a stamp-only clock cannot express: this stream opened, promised a
+    // cadence, and then went quiet without ever sending a first heartbeat. There
+    // is nothing to stamp, so the promise itself has to start the clock -- or a
+    // stream that dies this way is watched by nobody, and the browser will keep
+    // reporting the dead socket `OPEN`.
     vi.advanceTimersByTime(STALE_AFTER_MS);
-    expect(proven.closed).toBe(true);
+    expect(silent.closed).toBe(true);
+
+    // A heartbeat then restarts that same clock rather than replacing the
+    // mechanism, so a stream that keeps proving itself is never recycled.
+    vi.advanceTimersByTime(WORKBENCH_EVENT_RETRY_INITIAL_MS);
+    emitHandshake(2);
+    const proven = FakeEventSource.latest();
+    for (let pass = 0; pass < 3; pass += 1) {
+      vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
+      emitHeartbeat();
+    }
+    expect(proven.closed).toBe(false);
   });
 
-  it('treats discarded events as a gap on a stream that stayed healthy', () => {
-    mountConnectedStream();
-    expect(onConnected).toHaveBeenCalledTimes(1);
+  it('keeps a declared cadence when a relayed handshake carries none', () => {
+    mountStream();
+    const declared = FakeEventSource.latest();
 
-    // A full broker queue discards events and cannot replay them, so this
-    // stream is alive but no longer complete. Nothing else can say so: the
-    // socket never broke and the heartbeats keep proving it.
-    emitDroppedEvents(3);
-    expect(onConnected).toHaveBeenCalledTimes(2);
-
-    // Announced in place, because the loss is behind the socket rather than in
-    // it -- reopening would discard the same events again under the same load.
-    expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.latest().closed).toBe(false);
-
-    // And the stream still speaks for itself afterwards: a gap is news about
-    // what was missed, not a verdict on whether the stream is alive.
+    // The UI server relays the controller's own handshake down the same stream,
+    // and that frame speaks for the controller leg, not for this socket's
+    // cadence. Only a frame carrying a cadence may speak for one: arriving late
+    // in the window, a relayed handshake that was allowed to speak would either
+    // retire the deadline the UI server promised or push it out by a full window
+    // -- and this stream is already dead, having never sent a heartbeat.
     vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
-    emitHeartbeat();
-    reactivate();
-    expect(FakeEventSource.latest().closed).toBe(false);
-    expect(onConnected).toHaveBeenCalledTimes(2);
+    FakeEventSource.latest().emit('connected', { type: 'connected' });
+    vi.advanceTimersByTime(1_000);
+    expect(declared.closed).toBe(true);
   });
 });

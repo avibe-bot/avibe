@@ -174,12 +174,6 @@ _AUTHORIZATION_REVISION_RECHECK_SECONDS = 1.0
 # proxy keep-alive -- Cloudflare Tunnel's default idle is well below 100s, and
 # mid-tier proxies are happier still with something this short.
 WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S = 15.0
-# Told to a subscriber whose broker queue overflowed. A dropped event is a hole
-# in that one subscriber's view with nothing else to reveal it: the socket is
-# healthy, heartbeats keep arriving, and the broker cannot replay. Naming the
-# hole is what lets the client re-read instead of trusting a stream that is
-# alive but no longer complete.
-WORKBENCH_EVENTS_GAP_EVENT = "workbench.events.gap"
 _TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
@@ -11583,6 +11577,27 @@ def _workbench_event_data(payload: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _workbench_event_heartbeat_interval_ms() -> int:
+    return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
+
+
+def _workbench_event_connected_frame(sub_id: int) -> str:
+    """The handshake: this subscription's id, and the cadence it is owed.
+
+    Carrying the cadence here is what lets a client hold a brand-new stream to a
+    deadline. The promise arrives before the first heartbeat does, so a stream
+    that opens and then goes silent has something to have broken -- without it,
+    the client's only options are to trust an unproven stream for a whole window
+    or to watchdog servers that never promised anything.
+
+    A declaration, never proof: a server too old to send this field is simply
+    never held to a cadence, and a client must still wait for a heartbeat before
+    believing the stream is carrying events.
+    """
+    interval_ms = _workbench_event_heartbeat_interval_ms()
+    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms}}}\n\n'
+
+
 def _workbench_event_heartbeat_frame() -> str:
     """A frame whose only job is to be seen.
 
@@ -11594,7 +11609,7 @@ def _workbench_event_heartbeat_frame() -> str:
     duplicating the interval on both sides -- which is also why the interval
     belongs in the payload even though nothing else here needs a body.
     """
-    interval_ms = int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
+    interval_ms = _workbench_event_heartbeat_interval_ms()
     return f'event: heartbeat\ndata: {{"interval_ms":{interval_ms}}}\n\n'
 
 
@@ -11773,7 +11788,7 @@ async def workbench_events():
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield f"event: connected\ndata: {{\"sub_id\": {sub_id}}}\n\n"
+            yield _workbench_event_connected_frame(sub_id)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,
@@ -11786,29 +11801,35 @@ async def workbench_events():
             last_heartbeat_at = time.monotonic()
             # Anything discarded before this point is already covered by the
             # handshake above: the client catches up on connect. From here on a
-            # discard is news, so only growth past this reading is reported.
+            # discard means this subscription's view has a hole in it.
             last_dropped = broker.dropped_count(sub_id)
             while True:
                 state = await authorization_state()
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
                     return
-                # Before the heartbeat, because a heartbeat is a claim that this
-                # stream is worth trusting and an unreported drop would make that
-                # claim false. Reported from the generator rather than from the
-                # broker because this is where there is room to say it: the queue
-                # that overflowed is drained here, and the client is reachable
-                # here. Growth, never a reset -- resetting a shared counter would
-                # let one reader consume another's evidence.
+                # A subscriber that lost an event is not a subscriber any more,
+                # so end its stream and let it reconnect: the fresh subscription
+                # gets an empty queue and the client's reconnect path already
+                # catches consumers up exactly once, with backoff if the load
+                # that overflowed the queue is still going. Announcing the hole
+                # on this stream instead looks cheaper and is not -- the queue
+                # stays full, so the next iteration finds another discard and
+                # announces again, starving the payload frames it was warning
+                # about. Reopening is the actual repair here, unlike the
+                # controller leg, which announces in place because a new socket
+                # would inherit the same severed bridge.
+                #
+                # Checked before the heartbeat: a heartbeat claims this stream is
+                # worth trusting, which stopped being true.
                 dropped = broker.dropped_count(sub_id)
                 if dropped > last_dropped:
-                    lost = dropped - last_dropped
-                    last_dropped = dropped
                     logger.warning(
-                        "workbench events: telling subscriber %s it lost %s event(s)", sub_id, lost
+                        "workbench events: ending subscriber %s after %s dropped event(s)",
+                        sub_id,
+                        dropped - last_dropped,
                     )
-                    yield f'event: {WORKBENCH_EVENTS_GAP_EVENT}\ndata: {{"dropped":{lost}}}\n\n'
-                    continue
+                    return
                 # A fixed cadence, deliberately not "only when the queue went
                 # quiet". Data frames are no proof of life to a client that may
                 # be filtered out of all of them, and one unconditional clock

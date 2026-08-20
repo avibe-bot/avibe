@@ -4,6 +4,7 @@ import {
   WorkbenchEventReconnectLoop,
   WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
   WORKBENCH_EVENT_OPEN_TIMEOUT_MS,
+  declaredWorkbenchHeartbeatInterval,
   isWorkbenchHeartbeatFresh,
   parseWorkbenchHeartbeatInterval,
   workbenchEventStaleAfterMs,
@@ -152,5 +153,25 @@ describe('workbench event stream liveness', () => {
     const clamped = parseWorkbenchHeartbeatInterval(Number.MAX_SAFE_INTEGER);
     expect(isWorkbenchHeartbeatFresh(now - 3_600_000, clamped, now)).toBe(false);
     expect(parseWorkbenchHeartbeatInterval(-5)).toBeGreaterThan(0);
+  });
+
+  it('separates a cadence the server declared from one the client assumed', () => {
+    // The two readers differ only in what they do with an unusable field, and
+    // that difference is the whole point: a heartbeat is proof of life whatever
+    // it says about cadence, while a handshake that declares nothing must not be
+    // held to a deadline it never agreed to.
+    for (const undeclared of [undefined, null, 'soon', NaN, Infinity, {}]) {
+      expect(declaredWorkbenchHeartbeatInterval(undeclared)).toBeUndefined();
+      expect(parseWorkbenchHeartbeatInterval(undeclared)).toBe(
+        WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+      );
+    }
+    // A declaration is honored, and bounded by the same clamp, so a nonsense
+    // promise cannot buy a window no real outage could exceed.
+    expect(declaredWorkbenchHeartbeatInterval(20_000)).toBe(20_000);
+    expect(declaredWorkbenchHeartbeatInterval(Number.MAX_SAFE_INTEGER)).toBe(
+      parseWorkbenchHeartbeatInterval(Number.MAX_SAFE_INTEGER),
+    );
+    expect(declaredWorkbenchHeartbeatInterval(-5)).toBeGreaterThan(0);
   });
 });

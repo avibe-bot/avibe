@@ -216,7 +216,7 @@ export const AgentsPage: React.FC = () => {
     }
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
-        if (data.source === 'controller') {
+        if (data?.source === 'controller') {
           setEventBridgeConnected(true);
           fetchRunningActiveCount();
         }
