@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildEndpointPatch,
+  draftFromConfig,
   memoryNavShouldBeVisible,
   memoryRuntimeRecoveryAvailable,
   memorySetupStage,
@@ -96,6 +97,20 @@ describe('buildEndpointPatch', () => {
       false,
       true,
     )).toEqual({ api_key: null, base_url: null, model: null });
+  });
+
+  it('does not attach a provider to non-rerank drafts', () => {
+    expect(draftFromConfig({
+      base_url: 'https://llm.example.test/v1',
+      model: 'chat',
+      api_key: null,
+      has_api_key: true,
+    })).toEqual({
+      baseUrl: 'https://llm.example.test/v1',
+      model: 'chat',
+      apiKey: '',
+      clearKey: false,
+    });
   });
 
   it('sends the selected rerank provider when creating an optional endpoint', () => {

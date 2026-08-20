@@ -42,12 +42,17 @@ export const memoryRuntimeRecoveryAvailable = (
 export const memoryNavShouldBeVisible = (settings: MemorySettingsResult): boolean =>
   isMemoryOk(settings) && settings.enabled;
 
-export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
+export const draftFromConfig = (
+  config: MemoryEndpointConfig,
+  options?: { includeProvider?: boolean },
+): EndpointDraft => ({
   baseUrl: config.base_url ?? '',
   model: config.model ?? '',
   apiKey: '',
   clearKey: false,
-  provider: normalizeRerankProvider(config.provider),
+  ...(options?.includeProvider
+    ? { provider: normalizeRerankProvider(config.provider) }
+    : {}),
 });
 
 // `allowClear` gates the explicit `api_key: null` clear. `identityLocked` protects
@@ -75,9 +80,18 @@ export function buildEndpointPatch(
     if (draft.provider !== undefined) {
       const provider = normalizeRerankProvider(draft.provider);
       const originalProvider = original.provider ?? null;
-      // A new optional endpoint has no saved provider. Always send the selected
-      // one so preflight cannot fall back to DeepInfra's `/{model}` path.
-      if (originalProvider == null || provider !== normalizeRerankProvider(originalProvider)) {
+      const configuringNow = Boolean(
+        patch.base_url
+        || patch.model
+        || draft.apiKey.trim(),
+      );
+      // A new optional endpoint has no saved provider. Send the selected one
+      // when this patch itself is configuring the endpoint, so preflight
+      // cannot fall back to DeepInfra's `/{model}` path.
+      if (
+        configuringNow
+        && (originalProvider == null || provider !== normalizeRerankProvider(originalProvider))
+      ) {
         patch.provider = provider;
         changed = true;
       }
