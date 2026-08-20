@@ -86,7 +86,12 @@ const emitHeartbeat = () => {
   });
 };
 
-/** What the UI server reports about its own leg to the controller. */
+/**
+ * What the UI server reports about its own leg to the controller. It sends one
+ * of these immediately after the handshake on every stream it opens, which is
+ * why every mount below sends one too: a fixture that skipped it would be
+ * testing a client talking to a server that does not exist.
+ */
 const emitControllerLeg = (connected: boolean) => {
   FakeEventSource.latest().emit('workbench.events.bridge.status', {
     type: 'workbench.events.bridge.status',
@@ -111,12 +116,14 @@ const emitUndeclaredHandshake = (subId: number) => {
 const mountStream = () => {
   render(<ApiProvider><Subscriber /></ApiProvider>);
   emitHandshake(1);
+  emitControllerLeg(true);
 };
 
 /** The same, against a server that never declares a cadence. */
 const mountUndeclaredStream = () => {
   render(<ApiProvider><Subscriber /></ApiProvider>);
   emitUndeclaredHandshake(1);
+  emitControllerLeg(true);
 };
 
 /**
@@ -313,8 +320,11 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(replacement.closed).toBe(true);
 
     // Once a stream proves itself across the gap, it speaks for itself again --
-    // and the return is free, which is the entire point of the design.
+    // and the return is free, which is the entire point of the design. Both legs
+    // report in, because a replacement stream inherits nothing: the old one's
+    // controller-leg report went with it.
     emitHandshake(2);
+    emitControllerLeg(true);
     emitHeartbeat();
     const proven = FakeEventSource.latest();
     const catchUps = onConnected.mock.calls.length;
@@ -327,9 +337,10 @@ describe('ApiProvider workbench stream liveness', () => {
   it('ends a controller-leg gap in place, without recycling the browser leg', () => {
     mountConnectedStream();
 
-    // The leg's opening report is its state, not a recovery. A stream that just
-    // dispatched its handshake catch-up must not be charged a second one, or
-    // every connect would cost double what it saves.
+    // A report of the level it is already at is not a recovery, any more than
+    // the opening one the mount already sent was. A stream that just dispatched
+    // its handshake catch-up must not be charged a second one, or every connect
+    // would cost double what it saves.
     emitControllerLeg(true);
     expect(onConnected).toHaveBeenCalledTimes(1);
 
@@ -353,6 +364,35 @@ describe('ApiProvider workbench stream liveness', () => {
     emitControllerLeg(false);
     emitControllerLeg(true);
     expect(onConnected).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not let a live socket vouch for a gap the controller leg was down for', () => {
+    mountConnectedStream();
+    emitControllerLeg(false);
+    const socket = FakeEventSource.latest();
+    const catchUps = onConnected.mock.calls.length;
+
+    // The two rulings meet here, and each keeps its own scope. The socket
+    // heartbeats through the whole gap, so the transport has nothing to repair
+    // and is left alone -- reopening it would inherit the same severed bridge.
+    // But what it carried across that gap came from a bridge that was down, so
+    // the interval is not accounted for and the returning page reads.
+    awayAndBack({ beat: true });
+    expect(onConnected).toHaveBeenCalledTimes(catchUps + 1);
+    expect(FakeEventSource.latest()).toBe(socket);
+    expect(socket.closed).toBe(false);
+
+    // Every return during the outage pays, exactly as an unconditional refetch
+    // would: nothing here can shorten a gap that is still open.
+    awayAndBack({ beat: true });
+    expect(onConnected).toHaveBeenCalledTimes(catchUps + 2);
+
+    // And once both legs are carrying again, returns are free again -- the
+    // recovery itself is the last catch-up the outage costs.
+    emitControllerLeg(true);
+    const settled = onConnected.mock.calls.length;
+    awayAndBack({ beat: true });
+    expect(onConnected).toHaveBeenCalledTimes(settled);
   });
 
   it('never holds a server to a cadence it did not declare', () => {

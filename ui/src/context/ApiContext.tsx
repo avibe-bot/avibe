@@ -23,10 +23,11 @@ import {
   WorkbenchEventReconnectLoop,
   WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
   declaredWorkbenchHeartbeatInterval,
-  heartbeatCoversGap,
   isWorkbenchHeartbeatFresh,
   parseWorkbenchHeartbeatInterval,
+  streamCoveredGap,
   workbenchEventStaleAfterMs,
+  type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
@@ -2650,7 +2651,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // replaying what the controller published in between. `unknown` is not a third
   // kind of outage -- it is a stream that has not heard from the leg yet, which
   // is what keeps its first "connected" report from reading as a recovery.
-  const eventControllerLegRef = useRef<'unknown' | 'connected' | 'disconnected'>('unknown');
+  const eventControllerLegRef = useRef<WorkbenchControllerLegState>('unknown');
   // When the active stream last proved it was alive, and the cadence the server
   // said it would prove it at. Null whenever there is no stream to speak for --
   // including a stream that has connected but not yet been heard from, because a
@@ -2893,6 +2894,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * controller leg is not a term here; it announces its own recovery instead, in
    * the `workbench.events.bridge.status` listener below.
    *
+   * That makes this the answer to one question only: whether recycling this
+   * socket would close anything. It is not a verdict on the stream, and asking
+   * it as one is how a controller-leg outage came to read as a gap-free resume.
+   * `streamCoveredGap` is where every leg is accounted for.
+   *
    * All three terms are needed for this leg. `readyState` is the browser's own
    * transport verdict, which it revises on network changes and HTTP/2 ping
    * timeouts. The handshake says a stream that is open can also reach handlers.
@@ -2901,7 +2907,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * delivered, so only a recent heartbeat distinguishes a quiet stream from that
    * zombie.
    */
-  const isWorkbenchEventStreamLive = () =>
+  const isWorkbenchBrowserLegLive = () =>
     eventSourceRef.current?.readyState === EventSource.OPEN &&
     workbenchEventHandshake() !== null &&
     isWorkbenchHeartbeatFresh(
@@ -2948,7 +2954,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (document.visibilityState !== 'visible') return;
       // A heartbeat may have landed since this timer was set, in which case the
       // stream is proving itself and only the deadline moved.
-      if (isWorkbenchEventStreamLive()) {
+      if (isWorkbenchBrowserLegLive()) {
         armWorkbenchHeartbeatWatchdog();
         return;
       }
@@ -3001,7 +3007,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventReconnectLoopRef.current = new WorkbenchEventReconnectLoop({
         reconnect: reconnectWorkbenchEventSource,
         isVisible: () => document.visibilityState === 'visible',
-        isStreamLive: isWorkbenchEventStreamLive,
+        isBrowserLegLive: isWorkbenchBrowserLegLive,
       });
     }
     return eventReconnectLoopRef.current;
@@ -3302,20 +3308,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
     // Read before waking, because waking is what changes the answer.
     //
-    // Two questions, asked separately because they have different answers. The
-    // transport one -- is this socket worth keeping -- is the reconnect loop's,
-    // and freshness is the whole of it. This one is about the interval, so it
-    // also needs evidence dated inside the interval: freshness appears in both
-    // because each predicate is a complete statement of its own question, and
-    // one extra comparison is cheaper than a term stated half here.
-    const survivedTheGap =
-      isWorkbenchEventStreamLive() &&
-      heartbeatCoversGap({
-        lastHeartbeatAt: eventHeartbeatAtRef.current,
-        awaySince,
-        intervalMs: eventHeartbeatIntervalRef.current,
-        now: Date.now(),
-      });
+    // Two questions, asked separately because they have different subjects. The
+    // transport one -- is this socket worth keeping -- is about the browser leg,
+    // and is the reconnect loop's. This one is about the whole path across an
+    // interval, so it is asked of every leg, by the one function that knows what
+    // the legs are; the browser leg's own verdict goes in as a term rather than
+    // standing in for the answer.
+    const survivedTheGap = streamCoveredGap({
+      browserLegLive: isWorkbenchBrowserLegLive(),
+      lastHeartbeatAt: eventHeartbeatAtRef.current,
+      controllerLeg: eventControllerLegRef.current,
+      awaySince,
+      intervalMs: eventHeartbeatIntervalRef.current,
+      now: Date.now(),
+    });
     // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
     // marks it reconnecting on every attempt. Announcing it here instead made a
     // wake that keeps a live stream flash "reconnecting" over a healthy one.

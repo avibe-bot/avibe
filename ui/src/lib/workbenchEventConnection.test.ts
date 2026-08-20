@@ -8,7 +8,9 @@ import {
   heartbeatCoversGap,
   isWorkbenchHeartbeatFresh,
   parseWorkbenchHeartbeatInterval,
+  streamCoveredGap,
   workbenchEventStaleAfterMs,
+  type WorkbenchControllerLegState,
 } from './workbenchEventConnection';
 
 describe('WorkbenchEventReconnectLoop', () => {
@@ -22,7 +24,7 @@ describe('WorkbenchEventReconnectLoop', () => {
     const loop = new WorkbenchEventReconnectLoop({
       reconnect,
       isVisible: () => true,
-      isStreamLive: () => false,
+      isBrowserLegLive: () => false,
     });
 
     for (const delayMs of [1_000, 2_000, 4_000, 8_000, 15_000, 15_000]) {
@@ -49,7 +51,7 @@ describe('WorkbenchEventReconnectLoop', () => {
     const loop = new WorkbenchEventReconnectLoop({
       reconnect,
       isVisible: () => visible,
-      isStreamLive: () => false,
+      isBrowserLegLive: () => false,
     });
 
     loop.attemptStarted();
@@ -74,14 +76,14 @@ describe('WorkbenchEventReconnectLoop', () => {
     expect(reconnect).toHaveBeenCalledTimes(2);
   });
 
-  it('leaves a live stream alone on wake while still dropping the backoff', () => {
+  it('leaves a live browser leg alone on wake while still dropping the backoff', () => {
     vi.useFakeTimers();
-    let streamLive = false;
+    let browserLegLive = false;
     const reconnect = vi.fn();
     const loop = new WorkbenchEventReconnectLoop({
       reconnect,
       isVisible: () => true,
-      isStreamLive: () => streamLive,
+      isBrowserLegLive: () => browserLegLive,
     });
 
     for (const delayMs of [1_000, 2_000, 4_000, 8_000, 15_000]) {
@@ -91,19 +93,19 @@ describe('WorkbenchEventReconnectLoop', () => {
     expect(reconnect).toHaveBeenCalledTimes(5);
     reconnect.mockClear();
 
-    // A retry is waiting out the ceiling when the stream comes back up.
+    // A retry is waiting out the ceiling when the socket comes back up.
     loop.failed();
-    streamLive = true;
+    browserLegLive = true;
     loop.wake();
     vi.advanceTimersByTime(60_000);
-    // A stream that never dropped missed nothing, so waking must not recycle
+    // A socket that never dropped missed nothing, so waking must not recycle
     // it -- every consumer refetches on reconnect to close a gap that a live
-    // stream does not have. The queued retry is cancelled, not deferred.
+    // socket does not have. The queued retry is cancelled, not deferred.
     expect(reconnect).not.toHaveBeenCalled();
 
     // Clearing the backoff is the other half of waking: the next real drop
     // retries from the shortest delay instead of resuming at the ceiling.
-    streamLive = false;
+    browserLegLive = false;
     loop.failed();
     vi.advanceTimersByTime(999);
     expect(reconnect).not.toHaveBeenCalled();
@@ -239,5 +241,64 @@ describe('workbench event stream liveness', () => {
         now,
       }),
     ).toBe(true);
+  });
+});
+
+describe('streamCoveredGap', () => {
+  const now = 1_700_000_000_000;
+  const interval = WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
+  const staleAfter = workbenchEventStaleAfterMs(interval);
+  const legs: WorkbenchControllerLegState[] = ['unknown', 'connected', 'disconnected'];
+
+  it('holds only when every leg accounts for the interval', () => {
+    // Stated as the conjunction it claims to be, spelled independently of how
+    // the implementation spells each term -- a comparison here against a record
+    // lookup there -- so dropping any one leg fails this.
+    const carrying = (leg: WorkbenchControllerLegState) => leg === 'connected';
+
+    for (const browserLegLive of [true, false]) {
+      for (const controllerLeg of legs) {
+        for (const lastHeartbeatAt of [now, now - 1_000, now - staleAfter, null]) {
+          for (const awaySince of [now - 2_000, now - staleAfter * 10, null]) {
+            expect(
+              streamCoveredGap({
+                browserLegLive,
+                lastHeartbeatAt,
+                controllerLeg,
+                awaySince,
+                intervalMs: interval,
+                now,
+              }),
+              `browser ${browserLegLive}, controller ${controllerLeg}, beat ${lastHeartbeatAt}, away ${awaySince}`,
+            ).toBe(
+              browserLegLive &&
+                carrying(controllerLeg) &&
+                heartbeatCoversGap({ lastHeartbeatAt, awaySince, intervalMs: interval, now }),
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it('reads an unreported controller leg as unproven rather than healthy', () => {
+    // The case the socket cannot see: it is open, heartbeating, and carrying
+    // nothing, because the link behind the server is down. Every term about the
+    // browser leg says covered, and the answer must still be no -- otherwise a
+    // returning page skips its catch-up read and stays stale for as long as the
+    // outage lasts.
+    const provenBrowserLeg = {
+      browserLegLive: true,
+      lastHeartbeatAt: now - 1_000,
+      awaySince: now - 2_000,
+      intervalMs: interval,
+      now,
+    };
+    expect(heartbeatCoversGap(provenBrowserLeg)).toBe(true);
+    expect(streamCoveredGap({ ...provenBrowserLeg, controllerLeg: 'connected' })).toBe(true);
+    expect(streamCoveredGap({ ...provenBrowserLeg, controllerLeg: 'disconnected' })).toBe(false);
+    // And no report is not a report of health: a leg nobody has spoken about
+    // cannot vouch for an interval either.
+    expect(streamCoveredGap({ ...provenBrowserLeg, controllerLeg: 'unknown' })).toBe(false);
   });
 });

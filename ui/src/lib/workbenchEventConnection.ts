@@ -117,20 +117,88 @@ export function heartbeatCoversGap({
   return lastHeartbeatAt > awaySince && isWorkbenchHeartbeatFresh(lastHeartbeatAt, intervalMs, now);
 }
 
+/**
+ * How far the controller leg has been observed from this client. `unknown` is
+ * not a third kind of outage: it is a leg nobody has reported on yet.
+ */
+export type WorkbenchControllerLegState = 'unknown' | 'connected' | 'disconnected';
+
+/**
+ * Whether each state means the controller leg is carrying events. A record keyed
+ * by the union rather than a comparison against `'connected'`, so a state added
+ * later cannot compile until this answer is decided for it -- and the answer
+ * that is easy to get wrong is already here: `unknown` is a leg nobody has
+ * reported on, and no report is not a report of health.
+ */
+const CONTROLLER_LEG_CARRYING: Record<WorkbenchControllerLegState, boolean> = {
+  unknown: false,
+  connected: true,
+  disconnected: false,
+};
+
+/**
+ * Whether the stream as a whole can vouch for the interval a page spent away.
+ *
+ * Every leg, every time. An event crosses two links that fail independently to
+ * reach a handler -- controller to UI server, UI server to browser -- so a
+ * verdict about the stream is a verdict about both, and one assembled from a
+ * single leg is a sound answer to a different question. That substitution is
+ * what this function exists to make unavailable: the browser leg is deliberately
+ * the whole of the *transport* question, because reopening that socket cannot
+ * repair the link behind the server, and reading the transport verdict here
+ * imported that deliberate scope into a claim about the whole path.
+ *
+ * The legs prove themselves differently, and the asymmetry is structural rather
+ * than an omission. The browser leg is sampled, so only its own periodic proof,
+ * dated inside the interval, separates a quiet socket from a dead one. The
+ * controller leg is reported -- and reported *over* the browser leg -- so a
+ * browser leg proven continuous across the interval is what makes the
+ * controller leg's present level an account of the whole interval: every
+ * transition it made was delivered, and a recovery among them already announced
+ * itself as the gap it was. A leg whose reports travelled some other way would
+ * need its own term dated inside the interval, exactly as the browser leg has.
+ */
+export function streamCoveredGap({
+  browserLegLive,
+  lastHeartbeatAt,
+  controllerLeg,
+  awaySince,
+  intervalMs,
+  now,
+}: {
+  browserLegLive: boolean;
+  lastHeartbeatAt: number | null;
+  controllerLeg: WorkbenchControllerLegState;
+  awaySince: number | null;
+  intervalMs: number;
+  now: number;
+}): boolean {
+  return (
+    browserLegLive &&
+    CONTROLLER_LEG_CARRYING[controllerLeg] &&
+    heartbeatCoversGap({ lastHeartbeatAt, awaySince, intervalMs, now })
+  );
+}
+
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 interface WorkbenchEventReconnectLoopOptions {
   reconnect: () => void;
   isVisible: () => boolean;
-  /** Whether events are flowing end to end right now, so no gap needs closing. */
-  isStreamLive: () => boolean;
+  /**
+   * Whether the leg this loop owns -- the browser's socket -- is carrying right
+   * now, so reopening it would close nothing. Scoped to that leg on purpose: it
+   * is the only one a reconnect can repair. Not a verdict on the whole stream,
+   * and not usable as one.
+   */
+  isBrowserLegLive: () => boolean;
 }
 
 /** Owns the retry policy; EventSource wiring stays in ApiContext. */
 export class WorkbenchEventReconnectLoop {
   private readonly reconnect: () => void;
   private readonly isVisible: () => boolean;
-  private readonly isStreamLive: () => boolean;
+  private readonly isBrowserLegLive: () => boolean;
   private retryTimer: TimerHandle | null = null;
   private openTimer: TimerHandle | null = null;
   private retryAttempt = 0;
@@ -139,7 +207,7 @@ export class WorkbenchEventReconnectLoop {
   constructor(options: WorkbenchEventReconnectLoopOptions) {
     this.reconnect = options.reconnect;
     this.isVisible = options.isVisible;
-    this.isStreamLive = options.isStreamLive;
+    this.isBrowserLegLive = options.isBrowserLegLive;
   }
 
   attemptStarted(): void {
@@ -185,7 +253,7 @@ export class WorkbenchEventReconnectLoop {
     // consumer runs on reconnect -- that waking exists to recover from.
     // Checked before clearOpenTimer() so a stream that is open at the transport
     // but has not completed its handshake keeps its watchdog armed.
-    if (this.isStreamLive()) return;
+    if (this.isBrowserLegLive()) return;
     this.clearOpenTimer();
     this.reconnect();
   }
