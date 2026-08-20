@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -78,7 +79,7 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
-from core.memory.admission import (
+from core.memory.admission_metadata import (
     is_cli_admitted as memory_cli_admitted,
     is_ordinary_text as memory_ordinary_text,
     merge_identity as memory_admission_merge_identity,
@@ -96,22 +97,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-TURN_LIFECYCLE_ADMISSION_KEY = "_turn_lifecycle_admission"
-TURN_LIFECYCLE_EPOCH_KEY = "_turn_lifecycle_epoch"
+@dataclass
+class _SessionLifecycleState:
+    """One live session generation retained only by active lifecycle work."""
+
+    admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    epoch: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionLifecycleSnapshot:
+    """Strong reference proving which live session generation admitted a turn."""
+
+    _state: _SessionLifecycleState
+    epoch: int
 
 
 @dataclass
 class TurnLifecycleAdmission:
     """One idempotent lease bridging turn admission into Memory capture."""
 
-    _lock: asyncio.Lock
+    _state: _SessionLifecycleState
     _released: bool = field(default=False, init=False)
 
     def release(self) -> None:
         if self._released:
             return
         self._released = True
-        self._lock.release()
+        self._state.admission_lock.release()
 
 
 def _utc_now_iso() -> str:
@@ -611,9 +625,9 @@ class SessionTurnManager:
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
-        self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
-        self._session_lifecycle_epochs: dict[str, int] = {}
-        self._session_lifecycle_ops: dict[str, asyncio.Lock] = {}
+        self._session_lifecycle_states: weakref.WeakValueDictionary[
+            str, _SessionLifecycleState
+        ] = weakref.WeakValueDictionary()
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
@@ -653,6 +667,44 @@ class SessionTurnManager:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
 
+    def _session_lifecycle_state(
+        self,
+        raw_session_id: str,
+    ) -> _SessionLifecycleState:
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            raise ValueError("session lifecycle requires a session id")
+        state = self._session_lifecycle_states.get(raw_session_id)
+        if state is None:
+            state = _SessionLifecycleState()
+            self._session_lifecycle_states[raw_session_id] = state
+        return state
+
+    def snapshot_session_lifecycle(
+        self,
+        raw_session_id: str,
+    ) -> SessionLifecycleSnapshot:
+        """Retain the generation that may attribute one optional capture."""
+
+        state = self._session_lifecycle_state(raw_session_id)
+        return SessionLifecycleSnapshot(state, state.epoch)
+
+    def session_lifecycle_snapshot_matches(
+        self,
+        raw_session_id: str,
+        snapshot: object,
+    ) -> bool:
+        """Revalidate a retained generation before Memory attribution."""
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            raise ValueError("session lifecycle requires a session id")
+        if not isinstance(snapshot, SessionLifecycleSnapshot):
+            return False
+        state = self._session_lifecycle_states.get(raw_session_id)
+        return (
+            state is snapshot._state
+            and snapshot._state.epoch == snapshot.epoch
+        )
+
     async def acquire_lifecycle_admission(
         self,
         raw_session_id: str,
@@ -663,53 +715,27 @@ class SessionTurnManager:
         their own task so a hung sidecar cannot fence the next message.
         """
 
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            raise ValueError("session lifecycle admission requires a session id")
-        lock = self._session_lifecycle_locks.setdefault(
-            raw_session_id,
-            asyncio.Lock(),
-        )
-        await lock.acquire()
-        return TurnLifecycleAdmission(lock)
+        state = self._session_lifecycle_state(raw_session_id)
+        await state.admission_lock.acquire()
+        return TurnLifecycleAdmission(state)
 
-    def session_lifecycle_epoch(self, raw_session_id: str) -> int:
-        """Return the local lifecycle generation for one canonical session."""
-
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            raise ValueError("session lifecycle epoch requires a session id")
-        return self._session_lifecycle_epochs.get(raw_session_id, 0)
-
-    def session_lifecycle_epoch_matches(
+    def _advance_session_lifecycle(
         self,
         raw_session_id: str,
-        expected_epoch: int,
-    ) -> bool:
-        """Revalidate a pre-await lifecycle fact before Memory attribution."""
-
-        return self.session_lifecycle_epoch(raw_session_id) == expected_epoch
-
-    def _advance_session_lifecycle_epoch(
-        self,
-        raw_session_id: str,
+        state: _SessionLifecycleState,
         *,
         abandon_captures: bool = False,
-    ) -> int:
-        """Advance the generation token; cancel captures only when asked.
+    ) -> None:
+        """Invalidate retained snapshots; cancel captures only when asked."""
 
-        Cancellation is for the timeout path, where a capture may still hold
-        the lifecycle lock. The success path only needs the epoch bump: the
-        capture task's epoch check discards stale work without killing a
-        capture admitted for the new generation.
-        """
-
-        next_epoch = self.session_lifecycle_epoch(raw_session_id) + 1
-        self._session_lifecycle_epochs[raw_session_id] = next_epoch
+        if self._session_lifecycle_states.get(raw_session_id) is not state:
+            raise RuntimeError("session lifecycle ownership changed")
+        state.epoch += 1
         if abandon_captures:
             handler = getattr(self.controller, "message_handler", None)
             abandon = getattr(handler, "abandon_memory_captures_for_session", None)
             if callable(abandon):
                 abandon(raw_session_id)
-        return next_epoch
 
     async def run_session_lifecycle(
         self,
@@ -721,16 +747,13 @@ class SessionTurnManager:
         """Run a destructive transition, failing open if capture is still busy.
 
         Waits up to ``deadline_seconds`` so a nearly-finished capture can
-        flush. On timeout the epoch advances, in-flight captures are
+        flush. On timeout the generation advances, in-flight captures are
         abandoned, and ``operation`` still runs. A hung Memory sidecar
         must not fail ``/new`` or archive.
         """
 
-        op_lock = self._session_lifecycle_ops.setdefault(
-            raw_session_id,
-            asyncio.Lock(),
-        )
-        await op_lock.acquire()
+        state = self._session_lifecycle_state(raw_session_id)
+        await state.operation_lock.acquire()
         admission = None
         try:
             try:
@@ -745,18 +768,19 @@ class SessionTurnManager:
                     "session=%s",
                     raw_session_id,
                 )
-            pre_epoch = self.session_lifecycle_epoch(raw_session_id)
+            pre_epoch = state.epoch
             result = await operation()
-            if self.session_lifecycle_epoch(raw_session_id) == pre_epoch:
-                self._advance_session_lifecycle_epoch(
+            if state.epoch == pre_epoch:
+                self._advance_session_lifecycle(
                     raw_session_id,
+                    state,
                     abandon_captures=admission is None,
                 )
             return result
         finally:
             if admission is not None:
                 admission.release()
-            op_lock.release()
+            state.operation_lock.release()
 
     @staticmethod
     def _agent_run_ids_from_spec(spec: Any) -> set[str]:
@@ -4087,7 +4111,7 @@ class SessionTurnManager:
             delivery,
             str(turn["session_id"]),
         )
-        lifecycle_epoch = self.session_lifecycle_epoch(lifecycle_anchor)
+        lifecycle_snapshot = self.snapshot_session_lifecycle(lifecycle_anchor)
 
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
@@ -4220,7 +4244,6 @@ class SessionTurnManager:
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
-            resolved.platform_specific[TURN_LIFECYCLE_EPOCH_KEY] = lifecycle_epoch
             resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
@@ -4283,6 +4306,9 @@ class SessionTurnManager:
                 logical_turn_id=turn_id,
                 delivery_id=str((delivery or {}).get("id") or "") or None,
                 durable_preallocated=True,
+                lifecycle_snapshot=(
+                    lifecycle_snapshot if source == SOURCE_HUMAN else None
+                ),
             )
             return True
         except Exception:
@@ -7176,6 +7202,7 @@ class SessionTurnManager:
         logical_turn_id: str | None = None,
         delivery_id: str | None = None,
         durable_preallocated: bool = False,
+        lifecycle_snapshot: object | None = None,
     ) -> None:
         """Start a fire-and-forget turn and HOLD it open until it settles.
 
@@ -7209,6 +7236,7 @@ class SessionTurnManager:
         context.platform_specific["turn_token"] = logical_turn_id
 
         async def _runner() -> None:
+            nonlocal lifecycle_snapshot
             cancelled = False
             failed = False
             prewrite_refused = False
@@ -7233,7 +7261,12 @@ class SessionTurnManager:
                         evidence_kind="terminal_run_before_native_dispatch",
                     )
                     return
-                outcome = await dispatch_turn_with_outcome(
+                snapshot_options = (
+                    {"lifecycle_snapshot": lifecycle_snapshot}
+                    if lifecycle_snapshot is not None
+                    else {}
+                )
+                dispatch = dispatch_turn_with_outcome(
                     self.controller,
                     context,
                     text,
@@ -7247,7 +7280,11 @@ class SessionTurnManager:
                     # slot would free + a Chat send could preempt the still-running
                     # scheduled turn (Codex P2).
                     on_chunk=self._noop_chunk,
+                    **snapshot_options,
                 )
+                snapshot_options.clear()
+                lifecycle_snapshot = None
+                outcome = await dispatch
                 settled_by = outcome.settled_by
                 definitive_prewrite_exit = outcome.backend_dispatch_attempted is False
                 current = self.in_flight.get(str(session_id or ""))

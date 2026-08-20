@@ -1198,6 +1198,34 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         admission = await asyncio.wait_for(blocked_lifecycle, timeout=1.0)
         admission.release()
 
+    async def test_text_memory_capture_setup_failure_is_best_effort(self):
+        """Scenario: MEMORY-INDEP-006."""
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.capture_user_memory = Mock(
+            side_effect=RuntimeError("Memory runtime binding failed")
+        )
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-memory-setup-failure",
+            platform="slack",
+        )
+
+        handler._schedule_text_only_memory_capture(
+            context,
+            "remember this",
+            "base-session",
+            expected_snapshot=0,
+        )
+
+        assert handler._memory_capture_tasks == set()
+
     async def test_text_memory_capture_starts_before_agent_route_resolution(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         captured = asyncio.Event()
@@ -1822,7 +1850,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         handler._schedule_memory_capture_task(
             session_id="base-session",
-            expected_epoch=0,
+            expected_snapshot=0,
             capture=capture_write(),
             attachment_lease=retained_lease,
         )

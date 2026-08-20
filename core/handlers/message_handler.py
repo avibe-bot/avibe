@@ -24,10 +24,6 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-
-# Keep this string local: importing ``core.session_turns`` here cycles through
-# Memory admission into ``core.handlers``.
-TURN_LIFECYCLE_EPOCH_KEY = "_turn_lifecycle_epoch"
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -154,10 +150,10 @@ class MessageHandler(BaseHandler):
     async def _run_memory_capture(
         self,
         session_id: str,
-        expected_epoch: int,
+        expected_snapshot: object,
         capture: Awaitable[None],
     ) -> None:
-        """Acquire the lifecycle lock and attribute only if the epoch still matches."""
+        """Acquire the lifecycle lock and attribute only in the same generation."""
 
         pending: Awaitable[None] | None = capture
         try:
@@ -167,15 +163,15 @@ class MessageHandler(BaseHandler):
             try:
                 if not self._memory_capture_registration_open:
                     return
-                if not self._memory_session_lifecycle_epoch_matches(
+                if not self._memory_session_lifecycle_snapshot_matches(
                     session_id,
-                    expected_epoch,
+                    expected_snapshot,
                 ):
                     logger.info(
                         "Memory capture abandoned after session lifecycle "
                         "transition session=%s epoch=%s",
                         session_id,
-                        expected_epoch,
+                        getattr(expected_snapshot, "epoch", None),
                     )
                     return
                 await capture
@@ -194,7 +190,7 @@ class MessageHandler(BaseHandler):
         self,
         *,
         session_id: str,
-        expected_epoch: int,
+        expected_snapshot: object,
         capture: Awaitable[None],
         attachment_lease: Any = None,
         attachment_reservation: Any = None,
@@ -204,7 +200,7 @@ class MessageHandler(BaseHandler):
         if not self._memory_capture_registration_open:
             return None
         capture_task = asyncio.create_task(
-            self._run_memory_capture(session_id, expected_epoch, capture),
+            self._run_memory_capture(session_id, expected_snapshot, capture),
             name="memory-capture",
         )
         self._track_memory_capture_task(
@@ -215,50 +211,83 @@ class MessageHandler(BaseHandler):
         )
         return capture_task
 
+    @staticmethod
+    def _close_memory_capture(capture: object) -> None:
+        close = getattr(capture, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            logger.debug("Memory capture coroutine close failed", exc_info=True)
+
     def _schedule_text_only_memory_capture(
         self,
         context: MessageContext,
         text: str,
         session_id: str,
         *,
-        expected_epoch: int,
+        expected_snapshot: object,
     ) -> None:
         capture_memory = getattr(self.controller, "capture_user_memory", None)
         if not callable(capture_memory) or not text.strip():
             return
         if not self._memory_capture_registration_open:
             return
-        capture = capture_memory(context, text, session_id)
-        if (
-            self._schedule_memory_capture_task(
-                session_id=session_id,
-                expected_epoch=expected_epoch,
-                capture=capture,
+        capture: Awaitable[None] | None = None
+        try:
+            capture = capture_memory(context, text, session_id)
+            if (
+                self._schedule_memory_capture_task(
+                    session_id=session_id,
+                    expected_snapshot=expected_snapshot,
+                    capture=capture,
+                )
+                is None
+            ):
+                self._close_memory_capture(capture)
+        except Exception:
+            self._close_memory_capture(capture)
+            logger.warning(
+                "Memory text capture could not be scheduled",
+                exc_info=True,
             )
-            is None
-        ):
-            close = getattr(capture, "close", None)
-            if callable(close):
-                close()
 
-    def _memory_session_lifecycle_epoch(self, session_id: str) -> int:
+    def _memory_session_lifecycle_snapshot(self, session_id: str) -> object:
         manager = getattr(self.controller, "session_turns", None)
+        snapshot = getattr(manager, "snapshot_session_lifecycle", None)
+        if callable(snapshot):
+            try:
+                return snapshot(session_id)
+            except Exception:
+                logger.warning(
+                    "Memory lifecycle snapshot failed session=%s",
+                    session_id,
+                    exc_info=True,
+                )
+                return None
         read_epoch = getattr(manager, "session_lifecycle_epoch", None)
         if not callable(read_epoch):
             return 0
         epoch = read_epoch(session_id)
         return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 0
 
-    def _memory_session_lifecycle_epoch_matches(
+    def _memory_session_lifecycle_snapshot_matches(
         self,
         session_id: str,
-        expected_epoch: int,
+        expected_snapshot: object,
     ) -> bool:
         manager = getattr(self.controller, "session_turns", None)
-        matches = getattr(manager, "session_lifecycle_epoch_matches", None)
+        matches = getattr(manager, "session_lifecycle_snapshot_matches", None)
         if callable(matches):
-            return bool(matches(session_id, expected_epoch))
-        return self._memory_session_lifecycle_epoch(session_id) == expected_epoch
+            return bool(matches(session_id, expected_snapshot))
+        legacy_matches = getattr(manager, "session_lifecycle_epoch_matches", None)
+        if callable(legacy_matches):
+            return bool(legacy_matches(session_id, expected_snapshot))
+        return (
+            self._memory_session_lifecycle_snapshot(session_id)
+            == expected_snapshot
+        )
 
     async def drain_memory_capture_tasks(self) -> None:
         """Settle captures accepted before controller shutdown closes Memory."""
@@ -283,17 +312,40 @@ class MessageHandler(BaseHandler):
 
         self._memory_capture_registration_open = False
 
-    async def handle_user_message(self, context: MessageContext, message: str):
+    async def handle_user_message(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        lifecycle_snapshot: object | None = None,
+    ):
         """Process regular human-originated messages and route to configured agent."""
-        await self._handle_turn(context, message, source=self.TURN_SOURCE_HUMAN)
+        await self._handle_turn(
+            context,
+            message,
+            source=self.TURN_SOURCE_HUMAN,
+            lifecycle_snapshot=lifecycle_snapshot,
+        )
 
-    async def handle_scheduled_message(self, context: MessageContext, message: str, parsed_session_key=None):
+    async def handle_scheduled_message(
+        self,
+        context: MessageContext,
+        message: str,
+        parsed_session_key=None,
+        *,
+        lifecycle_snapshot: object | None = None,
+    ):
         """Process a scheduler-originated turn through the shared turn pipeline."""
         if parsed_session_key is not None:
             payload = dict(context.platform_specific or {})
             payload["parsed_session_key"] = parsed_session_key
             context.platform_specific = payload
-        return await self._handle_turn(context, message, source=self.TURN_SOURCE_SCHEDULED)
+        return await self._handle_turn(
+            context,
+            message,
+            source=self.TURN_SOURCE_SCHEDULED,
+            lifecycle_snapshot=lifecycle_snapshot,
+        )
 
     async def _prepare_turn_context(self, context: MessageContext, source: str) -> MessageContext:
         payload = dict(context.platform_specific or {})
@@ -350,7 +402,14 @@ class MessageHandler(BaseHandler):
             )
             return False
 
-    async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
+    async def _handle_turn(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        source: str,
+        lifecycle_snapshot: object | None = None,
+    ) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
@@ -458,14 +517,15 @@ class MessageHandler(BaseHandler):
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             memory_session_id = base_session_id
+            memory_session_snapshot: object | None = None
+            if is_human:
+                memory_session_snapshot = (
+                    lifecycle_snapshot
+                    if lifecycle_snapshot is not None
+                    else self._memory_session_lifecycle_snapshot(memory_session_id)
+                )
+            lifecycle_snapshot = None
             payload = dict(context.platform_specific or {})
-            snapshotted_epoch = payload.pop(TURN_LIFECYCLE_EPOCH_KEY, None)
-            memory_session_pre_epoch = (
-                snapshotted_epoch
-                if isinstance(snapshotted_epoch, int)
-                and not isinstance(snapshotted_epoch, bool)
-                else self._memory_session_lifecycle_epoch(memory_session_id)
-            )
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
             payload["scheduled_anchor_required"] = self.session_handler.should_allocate_scheduled_anchor(
@@ -481,8 +541,9 @@ class MessageHandler(BaseHandler):
                     context,
                     control_message,
                     memory_session_id,
-                    expected_epoch=memory_session_pre_epoch,
+                    expected_snapshot=memory_session_snapshot,
                 )
+                memory_session_snapshot = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -876,7 +937,7 @@ class MessageHandler(BaseHandler):
                                 context,
                                 control_message,
                                 memory_session_id,
-                                expected_epoch=memory_session_pre_epoch,
+                                expected_snapshot=memory_session_snapshot,
                             )
                         except Exception:
                             logger.warning(
@@ -915,9 +976,9 @@ class MessageHandler(BaseHandler):
                         if not self._memory_capture_registration_open:
                             raise _MemoryCaptureRegistrationClosed
                         stale_attachment_capture = (
-                            not self._memory_session_lifecycle_epoch_matches(
+                            not self._memory_session_lifecycle_snapshot_matches(
                                 memory_session_id,
-                                memory_session_pre_epoch,
+                                memory_session_snapshot,
                             )
                         )
                         reserve_attachment = getattr(
@@ -971,15 +1032,13 @@ class MessageHandler(BaseHandler):
                         )
                         capture_task = self._schedule_memory_capture_task(
                             session_id=memory_session_id,
-                            expected_epoch=memory_session_pre_epoch,
+                            expected_snapshot=memory_session_snapshot,
                             capture=capture,
                             attachment_lease=memory_attachment_lease,
                             attachment_reservation=memory_capture_reservation,
                         )
                         if capture_task is None:
-                            close = getattr(capture, "close", None)
-                            if callable(close):
-                                close()
+                            self._close_memory_capture(capture)
                             raise _MemoryCaptureRegistrationClosed
                     except _MemoryCaptureRegistrationClosed:
                         if memory_attachment_lease is not None:
@@ -1011,6 +1070,7 @@ class MessageHandler(BaseHandler):
                             "Memory capture task could not be scheduled",
                             exc_info=True,
                         )
+                memory_session_snapshot = None
 
             if durable_ingress_enabled and not durable_delivery_owned:
                 assert durable_dispatch_text is not None
