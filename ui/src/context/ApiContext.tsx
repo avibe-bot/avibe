@@ -24,6 +24,7 @@ import {
   WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
   isWorkbenchHeartbeatFresh,
   parseWorkbenchHeartbeatInterval,
+  workbenchEventStaleAfterMs,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
@@ -1165,18 +1166,20 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 };
 
 export type WorkbenchEventHandlers = {
-  onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   /**
-   * The page or the network came back and the stream could NOT prove it stayed
-   * connected across the gap, so anything that happened in it may be missing:
-   * re-read whatever this consumer keeps live off the stream.
+   * A stream is live and reaching this consumer. Every gap ends here — an
+   * error, a page that came back to a stream that could not prove it survived,
+   * a heartbeat that stopped arriving — because all of them are recovered by
+   * reconnecting, and this fires once the new subscription exists. So it is
+   * also the one place to re-read whatever this consumer keeps live off the
+   * stream, including the window between its own first read and this
+   * subscription.
    *
-   * Deliberately not fired when the stream did prove continuity — that is the
-   * whole point of the callback. Consumers must not subscribe to the raw
-   * reactivation edge themselves; the proof lives here, in one place, and a
-   * consumer checking it a second time is a consumer that will drift from it.
+   * Consumers must not subscribe to the raw reactivation edge to find this out:
+   * a returning page whose stream never broke has missed nothing, and that
+   * verdict is made in one place. A consumer re-deriving it will drift from it.
    */
-  onResumeGap?: () => void;
+  onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -2629,6 +2632,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // said it would prove it at. Null whenever there is no stream to speak for.
   const eventHeartbeatAtRef = useRef<number | null>(null);
   const eventHeartbeatIntervalRef = useRef(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
+  // Fires when the next heartbeat is overdue. A heartbeat is a continuous clock,
+  // so whoever trusts it has to keep watching it: sampling only at the moment a
+  // page returns would leave a stream that dies one second later unquestioned
+  // until the next return, which may never come while the tab stays open.
+  const eventHeartbeatWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const resumeWorkbenchEventsRef = useRef<() => void>(() => {});
@@ -2809,6 +2817,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const clearWorkbenchHeartbeatWatchdog = () => {
+    if (eventHeartbeatWatchdogRef.current === null) return;
+    clearTimeout(eventHeartbeatWatchdogRef.current);
+    eventHeartbeatWatchdogRef.current = null;
+  };
+
   const closeActiveWorkbenchEventSource = () => {
     const source = eventSourceRef.current;
     eventSourceRef.current = null;
@@ -2817,6 +2831,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     eventBridgeConnectedRef.current = false;
     // The stamp speaks for one socket only; a later stream must earn its own.
     eventHeartbeatAtRef.current = null;
+    clearWorkbenchHeartbeatWatchdog();
   };
 
   /**
@@ -2851,6 +2866,57 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventHeartbeatIntervalRef.current,
       Date.now(),
     );
+
+  /**
+   * This stream is over: drop it, say so, and let the loop schedule the next
+   * attempt. One owner for the transition, because a stream that dies silently
+   * has to end up in exactly the same state as one that reports `error` --
+   * consumers recover through the reconnect's `connected`, so a path that
+   * skipped any of these steps would strand them.
+   */
+  const failWorkbenchEventStream = () => {
+    closeActiveWorkbenchEventSource();
+    setWorkbenchEventConnectionState('reconnecting');
+    dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
+    getWorkbenchEventReconnectLoop().failed();
+  };
+
+  /**
+   * Watch for the heartbeat the current stream owes us. A stream that stops
+   * proving itself is dead whether or not the browser ever says so, and the
+   * only way a consumer learns that is if someone is still looking.
+   */
+  const armWorkbenchHeartbeatWatchdog = () => {
+    clearWorkbenchHeartbeatWatchdog();
+    const stampedAt = eventHeartbeatAtRef.current;
+    if (stampedAt === null) return;
+    const staleAt = stampedAt + workbenchEventStaleAfterMs(eventHeartbeatIntervalRef.current);
+    eventHeartbeatWatchdogRef.current = setTimeout(() => {
+      eventHeartbeatWatchdogRef.current = null;
+      // A hidden page cannot hold a stream open anyway, and its timers are
+      // throttled or frozen: the reactivation edge is the honest check there.
+      if (document.visibilityState !== 'visible') return;
+      // A heartbeat may have landed since this timer was set, in which case the
+      // stream is proving itself and only the deadline moved.
+      if (isWorkbenchEventStreamLive()) {
+        armWorkbenchHeartbeatWatchdog();
+        return;
+      }
+      failWorkbenchEventStream();
+    }, Math.max(0, staleAt - Date.now()));
+  };
+
+  /**
+   * Record proof of life and keep watching for the next one. Stamping and
+   * watching are one action on purpose: a stamp nobody watches expires
+   * unnoticed, and a watchdog armed off a stale stamp fires against the wrong
+   * deadline.
+   */
+  const stampWorkbenchHeartbeat = (intervalMs?: number) => {
+    eventHeartbeatAtRef.current = Date.now();
+    if (intervalMs !== undefined) eventHeartbeatIntervalRef.current = intervalMs;
+    armWorkbenchHeartbeatWatchdog();
+  };
 
   function reconnectWorkbenchEventSource(): void {
     if (eventHandlersRef.current.size === 0) return;
@@ -2898,8 +2964,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // send heartbeats this is the only stamp there will ever be, so its
       // streams stop counting as proven once it lapses -- which is exactly the
       // behavior this optimization replaces.
-      eventHeartbeatAtRef.current = Date.now();
-      eventHeartbeatIntervalRef.current = WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
+      stampWorkbenchHeartbeat(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
@@ -2927,13 +2992,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // cadence lets the staleness window be sized by the side that sets it.
     source.addEventListener('heartbeat', (e: MessageEvent) => {
       if (eventSourceRef.current !== source) return;
-      eventHeartbeatAtRef.current = Date.now();
+      let intervalMs: number | undefined;
       try {
         const payload = JSON.parse(e.data) as { interval_ms?: unknown };
-        eventHeartbeatIntervalRef.current = parseWorkbenchHeartbeatInterval(payload.interval_ms);
+        intervalMs = parseWorkbenchHeartbeatInterval(payload.interval_ms);
       } catch {
         // The frame arrived, which is what matters; keep the current cadence.
       }
+      stampWorkbenchHeartbeat(intervalMs);
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<{
@@ -3097,17 +3163,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
-      closeActiveWorkbenchEventSource();
+      failWorkbenchEventStream();
       // EventSource does not expose a failed response's status or JSON body.
       // Probe through apiFetch, then inspect the successful /api/session form;
       // both 401s and the 200 refresh payload enter the shared login recovery.
       void apiFetch('/api/session', { cache: 'no-store' })
         .then(recoverRemoteAuthFromSessionProbe)
         .catch(() => undefined);
-      setWorkbenchEventConnectionState('reconnecting');
-      dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
-      getWorkbenchEventReconnectLoop().failed();
     };
   }
 
@@ -3125,27 +3188,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   stopWorkbenchEventsRef.current = stopWorkbenchEventSource;
 
   /**
-   * The page or the network came back. Catch the transport up, and hand the
-   * gap to consumers only when the stream could not account for it itself.
+   * The page or the network came back. Catch the transport up; the stream then
+   * tells consumers whether anything was missed, by reconnecting or not.
    *
    * One owner, deliberately. Every consumer used to subscribe to the raw
    * reactivation edge and refetch unconditionally, which is why returning to a
-   * tab cost a burst of reads that a healthy stream had already delivered. The
-   * proof of continuity lives here; a consumer that re-derived it would drift
-   * from it.
+   * tab cost a burst of reads that a healthy stream had already delivered. A
+   * stream that cannot prove it survived the gap is recycled here, and its
+   * replacement's `connected` is what tells consumers to catch up -- one signal,
+   * dispatched once the new subscription exists rather than before it, and the
+   * same one an ordinary mid-session reconnect already used.
    */
-  const resumeWorkbenchEvents = () => {
+  const wakeWorkbenchEvents = () => {
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
-    // Read before the wake, which may recycle the stream and discard the very
-    // proof of life this verdict rests on.
-    const gap = !isWorkbenchEventStreamLive();
     // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
     // marks it reconnecting on every attempt. Announcing it here instead made a
     // wake that keeps a live stream flash "reconnecting" over a healthy one.
     getWorkbenchEventReconnectLoop().wake();
-    if (gap) dispatchToWorkbenchHandlers((handlers) => handlers.onResumeGap?.());
+    // Timers are not trustworthy across a hidden period -- throttled, frozen,
+    // or fired while hidden and declined -- so re-establish the watch on a
+    // stream that was kept rather than reasoning about which of those happened.
+    // Idempotent: it re-arms off the surviving stamp, and a recycled stream has
+    // no stamp yet and starts watching on `connected`.
+    armWorkbenchHeartbeatWatchdog();
   };
-  resumeWorkbenchEventsRef.current = resumeWorkbenchEvents;
+  resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
   useEffect(() => {
     const wakeIfVisible = () => {

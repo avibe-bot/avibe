@@ -96,17 +96,20 @@ type FakeApi = {
 
 const apiRef = { current: null as FakeApi | null };
 
-const resumeGapHandlers = new Set<() => void>();
+type StreamConnectHandler = NonNullable<WorkbenchEventHandlers['onConnected']>;
+
+const streamConnectHandlers = new Set<StreamConnectHandler>();
 const wrappedApis = new WeakMap<FakeApi, FakeApi>();
 
 /**
  * Supply the half of the resume edge the real ApiContext owns. Consumers no
  * longer watch page activity themselves: ApiContext decides whether the shared
- * event stream can vouch for the gap the page spent away and hands only the ones
- * it cannot to `onResumeGap`. These fakes stand in for that context, so the
- * signal has to come from here rather than from every fake in the file.
+ * event stream can vouch for the gap the page spent away, recycles the ones that
+ * cannot, and announces the replacement through `onConnected`. These fakes stand
+ * in for that context, so the signal has to come from here rather than from every
+ * fake in the file.
  */
-function withResumeGap(api: FakeApi | null): FakeApi | null {
+function withStreamConnect(api: FakeApi | null): FakeApi | null {
   if (!api) return null;
   // Consumers key their subscription effect on the api object, so a fresh
   // wrapper per render would resubscribe forever.
@@ -116,11 +119,11 @@ function withResumeGap(api: FakeApi | null): FakeApi | null {
     ...api,
     connectWorkbenchEvents: (handlers) => {
       const disconnect = api.connectWorkbenchEvents(handlers);
-      const onResumeGap = handlers.onResumeGap;
-      if (!onResumeGap) return disconnect;
-      resumeGapHandlers.add(onResumeGap);
+      const onConnected = handlers.onConnected;
+      if (!onConnected) return disconnect;
+      streamConnectHandlers.add(onConnected);
       return () => {
-        resumeGapHandlers.delete(onResumeGap);
+        streamConnectHandlers.delete(onConnected);
         disconnect();
       };
     },
@@ -131,7 +134,7 @@ function withResumeGap(api: FakeApi | null): FakeApi | null {
 
 vi.mock('./ApiContext', async () => {
   const actual = await vi.importActual<typeof import('./ApiContext')>('./ApiContext');
-  return { ...actual, useApi: () => withResumeGap(apiRef.current) };
+  return { ...actual, useApi: () => withStreamConnect(apiRef.current) };
 });
 
 // The provider reports its one never-sent refusal through the toast surface, which
@@ -197,12 +200,13 @@ const InboxProbe = ({
 };
 
 // A resume only concerns the feed when the shared event stream cannot vouch for
-// the gap the page spent away, and that verdict belongs to ApiContext. So drive
-// the signal it dispatches rather than the raw activity edge, which a page whose
-// stream never dropped also sees and which no longer reaches these consumers.
+// the gap the page spent away. That verdict belongs to ApiContext, which recycles
+// such a stream and announces the replacement -- so drive that signal rather than
+// the raw activity edge, which a page whose stream never dropped also sees and
+// which no longer reaches these consumers.
 const resumePage = async () => {
   await act(async () => {
-    for (const handler of [...resumeGapHandlers]) handler();
+    for (const handler of [...streamConnectHandlers]) handler({ sub_id: 1, source: 'browser' });
   });
 };
 

@@ -866,15 +866,15 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           return next;
         });
       },
-      // Recover after the OS suspended us. A backgrounded mobile PWA has its
-      // page frozen and its SSE socket dropped, and the broker never replays
-      // the gap; iOS can leave EventSource in a zombie OPEN state without
-      // onerror. ApiContext reopens the shared stream when the page comes back
-      // and when the network returns, and fires this only when that stream
-      // cannot prove it stayed connected across the gap — so a feed whose
-      // events all arrived is left alone, and one that may have missed some
-      // reconciles against durable storage.
-      onResumeGap: () => {
+      // A live stream is reaching us again, so anything it missed has to come
+      // from durable storage. This is the recovery for every gap, including the
+      // OS suspending us: a backgrounded mobile PWA has its page frozen and its
+      // SSE socket dropped, the broker never replays the gap, and iOS can leave
+      // EventSource in a zombie OPEN state without onerror. ApiContext recycles
+      // a stream that cannot prove it survived, so that case arrives here too —
+      // while a returning page whose stream did prove it fires nothing, having
+      // already delivered the events.
+      onConnected: () => {
         if (isFeedActive()) void reconcile();
         else void refreshUnread();
       },

@@ -1631,13 +1631,12 @@ export const ChatPage: React.FC = () => {
         // invalidation and converge on the complete committed row.
         void refreshSessionRow();
       },
-      // A socket that was down missed whatever happened while it was.
+      // A socket that was down missed whatever happened while it was. This
+      // covers every way a stream can break, including a mobile tab suspended
+      // without a clean reconnect: ApiContext recycles a stream that cannot
+      // prove it survived, so the recovery arrives here (Codex P2). A stream
+      // that did prove it fires nothing — it already delivered them.
       onConnected: catchUpAfterGap,
-      // The page came back and the stream could not prove it stayed connected,
-      // so a mobile tab whose feed was suspended without a clean reconnect
-      // still recovers the reply and the working state (Codex P2). A stream
-      // that did prove it fires nothing: it already delivered them.
-      onResumeGap: catchUpAfterGap,
       onAuthorizationChanged: (data) => {
         const currentSessionId = sessionIdRef.current;
         if (!currentSessionId) return;
