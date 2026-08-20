@@ -148,6 +148,10 @@ def load_scoped(
     return _record_from_row(row) if row is not None else None
 
 
+class InstanceBindingChangedError(RuntimeError):
+    """A durable binding generation advanced while this authorization write was in flight."""
+
+
 def upsert_scoped(
     *,
     reference: str | None,
@@ -160,8 +164,14 @@ def upsert_scoped(
     claims: Mapping[str, Any],
     last_checked_at: int,
     updated_at: int,
+    expected_binding_generation: int | None = None,
 ) -> str:
-    """Store one current Instance or Show Page context without expiring it."""
+    """Store one current Instance or Show Page context without expiring it.
+
+    When ``expected_binding_generation`` is provided, the compare and the write
+    run atomically under the cross-process binding lock (C2): a generation
+    that advanced, or a binding still reconciling, refuses the write.
+    """
 
     from storage.importer import ensure_sqlite_state
 
@@ -182,7 +192,19 @@ def upsert_scoped(
         "updated_at": updated_at,
     }
     engine = get_cached_sqlite_engine()
+    # Compare and write share one SQLite writer transaction: that is the
+    # cross-process CAS for authorization rows (C2). Generation is monotonic
+    # so a peer completing a transition after we captured expected_generation
+    # is still refused here.
     with engine.begin() as conn:
+        if expected_binding_generation is not None:
+            live = _load_binding_state_from_connection(conn)
+            live_generation = int((live or {}).get("generation") or 0)
+            live_state = (live or {}).get("state")
+            if live_generation > int(expected_binding_generation) or (
+                live_state == INSTANCE_BINDING_STATE_RECONCILING
+            ):
+                raise InstanceBindingChangedError("instance_binding_changed")
         existing_scope_reference = conn.execute(
             select(remote_access_authorizations.c.id)
             .where(remote_access_authorizations.c.instance_id == instance_id)
@@ -604,11 +626,14 @@ def _complete_instance_binding_transition_locked(
         or existing["generation"] != int(generation)
     ):
         return False
+    # Publishing ready is itself a binding event: bump generation so any
+    # in-flight authorization write that captured the reconciling generation
+    # CAS-fails instead of landing under the new ready binding.
     payload, now = _binding_payload(
         state=INSTANCE_BINDING_STATE_READY,
         instance_id=instance_id,
         instance_kind=instance_kind,
-        generation=generation,
+        generation=int(generation) + 1,
     )
     _write_binding_state(conn, payload, now)
     return True
@@ -774,6 +799,7 @@ def _reconcile_instance_binding_locked(
         }
     return {
         **transition,
+        "generation": int(transition["generation"]) + 1,
         "ok": True,
         "ready": True,
         "invalidated": invalidated,

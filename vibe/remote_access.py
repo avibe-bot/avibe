@@ -4909,6 +4909,7 @@ def _store_scoped_authorization(
     authorization_state: str,
     checked_at: int,
     instance_kind: str | None = None,
+    expected_binding_generation: int | None = None,
 ) -> str:
     from storage import remote_access_authorization_service
 
@@ -4919,24 +4920,15 @@ def _store_scoped_authorization(
     if persisted_kind is not None:
         stored_claims["vibe_instance_kind"] = persisted_kind
     scope_kind, scope_ref = _authorization_scope(config, stored_claims)
-    state = None
-    try:
-        state = remote_access_authorization_service.load_instance_binding_state(
-            ensure=False
-        )
-    except Exception:
-        state = None
-    if (
-        scope_kind != "show_page"
-        and state is not None
-        and state.get("state")
-        == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
-        and authorization_state in {"current", "revoked"}
-    ):
-        # Revoked writes need the same fence as current writes: a 403 that
-        # raced a reconciliation must not persist a row the completed binding
-        # would then short-circuit on.
-        raise RuntimeError("instance_binding_not_ready")
+    if expected_binding_generation is None and scope_kind != "show_page":
+        try:
+            expected_binding_generation = (
+                remote_access_authorization_service.current_instance_binding_generation(
+                    ensure=False
+                )
+            )
+        except Exception:
+            expected_binding_generation = None
     return remote_access_authorization_service.upsert_scoped(
         reference=reference,
         instance_id=str(config.remote_access.vibe_cloud.instance_id),
@@ -4948,6 +4940,7 @@ def _store_scoped_authorization(
         claims=stored_claims,
         last_checked_at=checked_at,
         updated_at=checked_at,
+        expected_binding_generation=expected_binding_generation,
     )
 
 
@@ -5267,21 +5260,6 @@ def _fetch_authorization_context(
             revoked_claims = dict(previous_claims)
             if observed_revision is not None:
                 revoked_claims[_AUTHORIZATION_CHECKED_REVISION_KEY] = observed_revision
-            binding_state = remote_access_authorization_service.load_instance_binding_state(
-                ensure=False
-            )
-            current_generation = int((binding_state or {}).get("generation") or 0)
-            if current_generation > int(request_binding_generation) or (
-                binding_state is not None
-                and binding_state.get("state")
-                == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
-            ):
-                # A denial that raced a binding transition (same generation,
-                # reconciling in progress) must not persist a revoked row.
-                return AuthorizationResolution(
-                    "unavailable",
-                    reason="instance_binding_changed",
-                )
             try:
                 _store_scoped_authorization(
                     config,
@@ -5295,6 +5273,12 @@ def _fetch_authorization_context(
                     claims=revoked_claims,
                     authorization_state="revoked",
                     checked_at=now,
+                    expected_binding_generation=request_binding_generation,
+                )
+            except remote_access_authorization_service.InstanceBindingChangedError:
+                return AuthorizationResolution(
+                    "unavailable",
+                    reason="instance_binding_changed",
                 )
             except Exception:
                 logger.warning("remote authorization revocation persistence failed", exc_info=True)
