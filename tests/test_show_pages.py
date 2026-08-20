@@ -1045,6 +1045,78 @@ def test_share_link_edits_carry_the_whole_entry_set(monkeypatch, tmp_path) -> No
         store.close()
 
 
+def test_show_access_stamps_organization_entries_from_the_pairing_held_at_persist(
+    monkeypatch, tmp_path
+) -> None:
+    """Organization-scoped entries are stamped with the pairing live at persist.
+
+    Resolving ownership before the pairing lock used to let a re-pair land
+    between that read and the write, so the former organization's ID could be
+    stored after the new pairing was already active. Resolution and persist now
+    share one lock hold: an unlocked snapshot is never the one written.
+    """
+
+    from contextlib import contextmanager
+
+    import core.show_pages as show_pages_mod
+    from config.v2_config import config_file_lock as real_config_file_lock
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-pairing-lock")
+        held = {"depth": 0}
+        resolved_under_lock: list[bool] = []
+
+        @contextmanager
+        def tracking_lock(*args, **kwargs):
+            held["depth"] += 1
+            try:
+                with real_config_file_lock(*args, **kwargs):
+                    yield
+            finally:
+                held["depth"] -= 1
+
+        def resolve_ownership():
+            under_lock = held["depth"] > 0
+            resolved_under_lock.append(under_lock)
+            organization_id = "org-live" if under_lock else "org-stale"
+            return {"mode": "organization", "organization_id": organization_id}
+
+        monkeypatch.setattr(show_pages_mod, "config_file_lock", tracking_lock)
+        monkeypatch.setattr(
+            ShowPageStore,
+            "_resolve_instance_ownership",
+            staticmethod(resolve_ownership),
+        )
+        applied = store.apply_access(
+            "ses-pairing-lock",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": "guest@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        persisted = store.get_access("ses-pairing-lock")
+
+        assert applied.status == "applied"
+        assert persisted.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+            ShowAccessEntry("group", "group-7", "org-live"),
+            ShowAccessEntry("organization", "org-live", "org-live"),
+        )
+        assert resolved_under_lock
+        assert all(resolved_under_lock)
+        assert "org-stale" not in {
+            entry.organization_id for entry in persisted.entries
+        }
+    finally:
+        store.close()
+
+
 def test_set_share_id_rejects_archived_session(monkeypatch, tmp_path):
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state

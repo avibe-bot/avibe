@@ -678,115 +678,124 @@ class ShowPageStore:
             )
             if target_access_mode == ACCESS_MODE_PRIVATE and normalized_share_id is None:
                 normalized_share_id = current.share_id
-            normalized_entries = self._normalize_target_entries(
-                target_emails=target_emails,
-                target_entries=target_entries,
-            )
-            if target_access_mode == ACCESS_MODE_LIMITED:
-                if normalized_share_id is None or not normalized_entries:
-                    raise ShowPageError(
-                        "Limited ShowAccess requires a share ID and at least one "
-                        "access entry.",
-                        code="invalid_show_access",
-                    )
-            elif normalized_entries:
-                raise ShowPageError(
-                    "Only Limited ShowAccess may contain access entries.",
-                    code="invalid_show_access",
-                )
-            if target_access_mode == ACCESS_MODE_PUBLIC and normalized_share_id is None:
-                raise ShowPageError(
-                    "Public ShowAccess requires a share ID.",
-                    code="invalid_show_access",
-                )
         except (ShowPageError, TypeError):
             return ShowAccessApplyResult(status="invalid", show_access=current)
 
         status = "applied"
         now = _utc_now_iso()
         try:
-            with self.engine.begin() as conn:
-                row = (
-                    conn.execute(
-                        select(show_pages)
-                        .where(show_pages.c.session_id == page_id)
-                        .limit(1)
+            # Organization-scoped entries are stamped with the instance's
+            # current organization. Hold the pairing lock that ``ensure`` /
+            # ``get_for_use`` already use across that read AND the database
+            # write, so a re-pair cannot land between them and persist the
+            # former organization's ID.
+            with config_file_lock():
+                try:
+                    normalized_entries = self._normalize_target_entries(
+                        target_emails=target_emails,
+                        target_entries=target_entries,
                     )
-                    .mappings()
-                    .first()
-                )
-                if row is None:
-                    raise ShowPageError(
-                        "This session has no Show Page.",
-                        code="show_page_not_found",
-                    )
-                self._require_sharing_control(conn, page_id, context)
-                current = _show_access_from_row(conn, row)
-                if current.revision != expected_revision:
-                    return ShowAccessApplyResult(
-                        status="conflict",
-                        show_access=current,
-                    )
-                canonical_target = (
-                    target_access_mode,
-                    normalized_share_id,
-                    normalized_entries,
-                )
-                canonical_current = (
-                    current.access_mode,
-                    current.share_id,
-                    current.entries,
-                )
-                if canonical_target == canonical_current:
-                    return ShowAccessApplyResult(
-                        status="no_change",
-                        show_access=current,
-                    )
-                archived = conn.execute(
-                    select(agent_sessions.c.status)
-                    .where(agent_sessions.c.id == page_id)
-                    .limit(1)
-                ).scalar_one_or_none()
-                if archived == "archived":
-                    return ShowAccessApplyResult(
-                        status="invalid",
-                        show_access=current,
-                    )
-                result = conn.execute(
-                    update(show_pages)
-                    .where(
-                        show_pages.c.session_id == page_id,
-                        show_pages.c.access_revision == expected_revision,
-                    )
-                    .values(
-                        access_mode=target_access_mode,
-                        share_id=normalized_share_id,
-                        access_revision=expected_revision + 1,
-                        updated_at=now,
-                    )
-                )
-                if not result.rowcount:
-                    status = "conflict"
-                else:
-                    conn.execute(
-                        delete(show_page_access_entries).where(
-                            show_page_access_entries.c.page_id == page_id
+                    if target_access_mode == ACCESS_MODE_LIMITED:
+                        if normalized_share_id is None or not normalized_entries:
+                            raise ShowPageError(
+                                "Limited ShowAccess requires a share ID and at least one "
+                                "access entry.",
+                                code="invalid_show_access",
+                            )
+                    elif normalized_entries:
+                        raise ShowPageError(
+                            "Only Limited ShowAccess may contain access entries.",
+                            code="invalid_show_access",
                         )
-                    )
-                    if normalized_entries:
+                    if target_access_mode == ACCESS_MODE_PUBLIC and normalized_share_id is None:
+                        raise ShowPageError(
+                            "Public ShowAccess requires a share ID.",
+                            code="invalid_show_access",
+                        )
+                except (ShowPageError, TypeError):
+                    return ShowAccessApplyResult(status="invalid", show_access=current)
+                with self.engine.begin() as conn:
+                    row = (
                         conn.execute(
-                            insert(show_page_access_entries),
-                            [
-                                {
-                                    "page_id": page_id,
-                                    "kind": entry.kind,
-                                    "value": entry.value,
-                                    "organization_id": entry.organization_id,
-                                    "created_at": now,
-                                }
-                                for entry in normalized_entries
-                            ],
+                            select(show_pages)
+                            .where(show_pages.c.session_id == page_id)
+                            .limit(1)
                         )
+                        .mappings()
+                        .first()
+                    )
+                    if row is None:
+                        raise ShowPageError(
+                            "This session has no Show Page.",
+                            code="show_page_not_found",
+                        )
+                    self._require_sharing_control(conn, page_id, context)
+                    current = _show_access_from_row(conn, row)
+                    if current.revision != expected_revision:
+                        return ShowAccessApplyResult(
+                            status="conflict",
+                            show_access=current,
+                        )
+                    canonical_target = (
+                        target_access_mode,
+                        normalized_share_id,
+                        normalized_entries,
+                    )
+                    canonical_current = (
+                        current.access_mode,
+                        current.share_id,
+                        current.entries,
+                    )
+                    if canonical_target == canonical_current:
+                        return ShowAccessApplyResult(
+                            status="no_change",
+                            show_access=current,
+                        )
+                    archived = conn.execute(
+                        select(agent_sessions.c.status)
+                        .where(agent_sessions.c.id == page_id)
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if archived == "archived":
+                        return ShowAccessApplyResult(
+                            status="invalid",
+                            show_access=current,
+                        )
+                    result = conn.execute(
+                        update(show_pages)
+                        .where(
+                            show_pages.c.session_id == page_id,
+                            show_pages.c.access_revision == expected_revision,
+                        )
+                        .values(
+                            access_mode=target_access_mode,
+                            share_id=normalized_share_id,
+                            access_revision=expected_revision + 1,
+                            updated_at=now,
+                        )
+                    )
+                    if not result.rowcount:
+                        status = "conflict"
+                    else:
+                        conn.execute(
+                            delete(show_page_access_entries).where(
+                                show_page_access_entries.c.page_id == page_id
+                            )
+                        )
+                        if normalized_entries:
+                            conn.execute(
+                                insert(show_page_access_entries),
+                                [
+                                    {
+                                        "page_id": page_id,
+                                        "kind": entry.kind,
+                                        "value": entry.value,
+                                        "organization_id": entry.organization_id,
+                                        "created_at": now,
+                                    }
+                                    for entry in normalized_entries
+                                ],
+                            )
         except IntegrityError:
             status = "share_id_taken"
 
