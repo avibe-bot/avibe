@@ -74,7 +74,10 @@ export function buildEndpointPatch(
     }
     if (draft.provider !== undefined) {
       const provider = normalizeRerankProvider(draft.provider);
-      if (provider !== normalizeRerankProvider(original.provider)) {
+      const originalProvider = original.provider ?? null;
+      // A new optional endpoint has no saved provider. Always send the selected
+      // one so preflight cannot fall back to DeepInfra's `/{model}` path.
+      if (originalProvider == null || provider !== normalizeRerankProvider(originalProvider)) {
         patch.provider = provider;
         changed = true;
       }

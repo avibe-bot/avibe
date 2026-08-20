@@ -285,7 +285,11 @@ class EverOSPort:
         self._rerank_base_url = _normalized_endpoint_url(rerank_base_url)
         self._rerank_model = _optional_string(rerank_model)
         self._rerank_api_key = _optional_string(rerank_api_key)
-        self._rerank_provider = _normalized_rerank_provider(rerank_provider)
+        self._rerank_provider = _normalized_rerank_provider(
+            rerank_provider,
+            base_url=rerank_base_url,
+            model=rerank_model,
+        )
         self._multimodal_base_url = _normalized_endpoint_url(multimodal_base_url)
         self._multimodal_model = _optional_string(multimodal_model)
         self._multimodal_api_key = _optional_string(multimodal_api_key)
@@ -1933,10 +1937,19 @@ def _normalized_endpoint_url(value: str | None) -> str | None:
     return normalized.rstrip("/") if normalized else None
 
 
-def _normalized_rerank_provider(value: str | None) -> MemoryRerankProvider:
+def _normalized_rerank_provider(
+    value: str | None,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> MemoryRerankProvider:
     provider = _optional_string(value)
     if provider in {"deepinfra", "vllm", "dashscope"}:
         return provider
+    normalized_url = (_normalized_endpoint_url(base_url) or "").lower()
+    normalized_model = (_optional_string(model) or "").lower()
+    if normalized_url.endswith(".maas.aliyuncs.com") or normalized_model == "gte-rerank-v2":
+        return "dashscope"
     return DEFAULT_MEMORY_RERANK_PROVIDER
 
 

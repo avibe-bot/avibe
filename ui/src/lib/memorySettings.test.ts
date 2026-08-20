@@ -98,6 +98,32 @@ describe('buildEndpointPatch', () => {
     )).toEqual({ api_key: null, base_url: null, model: null });
   });
 
+  it('sends the selected rerank provider when creating an optional endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://llm-space.example.test',
+        model: 'gte-rerank-v2',
+        apiKey: 'rerank-secret',
+        clearKey: false,
+        provider: 'dashscope',
+      },
+      {
+        base_url: null,
+        model: null,
+        api_key: null,
+        has_api_key: false,
+      },
+      true,
+      false,
+      true,
+    )).toEqual({
+      base_url: 'https://llm-space.example.test',
+      model: 'gte-rerank-v2',
+      api_key: 'rerank-secret',
+      provider: 'dashscope',
+    });
+  });
+
   it('includes an explicit rerank provider when it differs from the saved endpoint', () => {
     expect(buildEndpointPatch(
       {
