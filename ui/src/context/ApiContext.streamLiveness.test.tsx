@@ -75,7 +75,7 @@ const onConnected = vi.fn();
 
 const Subscriber = () => {
   const api = useApi();
-  useEffect(() => api.connectWorkbenchEvents({ onConnected: (data) => onConnected(data) }), [api]);
+  useEffect(() => api.connectWorkbenchEvents({ onConnected }), [api]);
   return null;
 };
 
@@ -256,9 +256,9 @@ describe('ApiProvider workbench stream liveness', () => {
     // handshake would leave a returning page showing what it had before it was
     // hidden, with nothing on the way.
     expect(onConnected).toHaveBeenCalledTimes(2);
-    // No handshake stands behind this one, and it says nothing about which leg
-    // of the stream is up -- only that a gap has to be read back from storage.
-    expect(onConnected).toHaveBeenLastCalledWith(null);
+    // And it is the edge's own catch-up: the stale stream is closed and its
+    // replacement has not reported in, so nothing else could have produced it.
+    expect(FakeEventSource.instances).toHaveLength(2);
 
     // Repeated edges on a stream that still cannot prove itself each pay for
     // themselves, exactly as the unconditional refetch did before this change.
@@ -276,7 +276,6 @@ describe('ApiProvider workbench stream liveness', () => {
     // scheduling jitter that tolerance exists for. It is silence.
     awayAndBack({ awayMs: 5_000 });
     expect(onConnected).toHaveBeenCalledTimes(2);
-    expect(onConnected).toHaveBeenLastCalledWith(null);
 
     // The socket itself is still plausible, so it is kept: recycling on every
     // short tab switch would cost more than the read it saves, and the watchdog

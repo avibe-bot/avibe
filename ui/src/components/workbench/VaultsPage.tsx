@@ -552,16 +552,11 @@ export const VaultsPage: React.FC = () => {
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data?.source === 'controller') {
-          setEventBridgeConnected(true);
-          refresh();
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) refresh();
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the indicator's level: it comes with its own
+      // `onConnected`, and refetching from both would pay twice for one gap.
+      onConnected: () => refresh(),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => refresh(),
       onAuthorizationChanged: () => refresh(),

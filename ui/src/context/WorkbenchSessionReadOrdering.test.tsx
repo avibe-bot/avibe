@@ -198,7 +198,7 @@ describe('Workbench session read ownership', () => {
     await settle();
 
     act(() => {
-      handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -293,7 +293,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
@@ -402,7 +402,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 3, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
@@ -557,7 +557,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -766,7 +766,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 3, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {

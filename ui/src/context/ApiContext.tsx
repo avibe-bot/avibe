@@ -1186,14 +1186,17 @@ export type WorkbenchEventHandlers = {
    * an edge. Both verdicts are made in one place, and a consumer recomputing
    * them will drift from it.
    *
-   * `null` is a gap declared with no stream standing behind it: a page returning
-   * onto a stream that could not prove it survived says to catch up now, without
-   * waiting for a replacement that may be several backoff windows away. Read it
-   * as "no handshake to speak for this" -- a consumer keying off `source` should
-   * leave that state alone, because this edge says nothing about which leg of
-   * the stream is up.
+   * It carries no payload, deliberately. Which leg came back, and whether any
+   * handshake stands behind this edge at all -- a page returning onto a stream
+   * that could not prove it survived says to catch up now, rather than wait for
+   * a replacement several backoff windows away -- are distinctions a catch-up
+   * cannot branch on without silently skipping the gaps it does not recognise.
+   * So there is nothing here to branch on. `onEventBridgeStatus` stays the level
+   * a bridge indicator renders from, and is not a second catch-up trigger: every
+   * bridge recovery arrives here too, so refetching from both would charge each
+   * one twice.
    */
-  onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' } | null) => void;
+  onConnected?: () => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -3064,8 +3067,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (eventConnectionRef.current) {
         getWorkbenchEventReconnectLoop().streamOpened();
-        const connected = eventConnectionRef.current;
-        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
+        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
     });
     // The server's proof of life. It carries no news, so nothing is dispatched
@@ -3252,8 +3254,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // a new stream's opening report is the leg's state, not a recovery, and
       // treating it as one would charge every connect a duplicate catch-up.
       if (previousLeg === 'disconnected' && envelope.data.connected) {
-        const connected = workbenchEventHandshake();
-        if (connected) dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
+        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
     });
     source.onerror = (err) => {
@@ -3335,7 +3336,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // replacement's later `connected` is a second catch-up in exactly the case
     // that already paid for two.
     if (!survivedTheGap) {
-      dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(null));
+      dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
     }
   };
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
@@ -4277,9 +4278,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       if (workbenchEventHandshake()) {
         queueMicrotask(() => {
-          const connected = workbenchEventHandshake();
-          if (eventHandlersRef.current.has(handlers) && connected) {
-            handlers.onConnected?.(connected);
+          if (eventHandlersRef.current.has(handlers) && workbenchEventHandshake()) {
+            handlers.onConnected?.();
           }
         });
       }

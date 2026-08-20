@@ -981,7 +981,7 @@ describe('Demand-driven shell bootstrap', () => {
       const before = reads();
 
       await act(async () => {
-        handlers?.onConnected?.({ sub_id: 1 });
+        handlers?.onConnected?.();
         handlers?.onSessionActivity?.({
           session_id: session.id,
           scope_id: session.scope_id,
@@ -1423,7 +1423,7 @@ describe('Demand-driven shell bootstrap', () => {
       expect(bootstrap).toHaveBeenCalledTimes(1);
 
       await act(async () => {
-        handlers?.onConnected?.({ sub_id: 1 });
+        handlers?.onConnected?.();
       });
       expect(bootstrap).toHaveBeenCalledTimes(2);
       expect(bootstrap.mock.calls[1][0]).toMatchObject({ projectIds: [project.id] });
@@ -1756,7 +1756,7 @@ describe('Demand-driven shell bootstrap', () => {
       // reach the minimum and does not get to clear it either: the reconnect
       // still asks for eleven. Paying part of a debt is not paying it.
       await act(async () => {
-        handlers?.onConnected?.({ sub_id: 1 });
+        handlers?.onConnected?.();
       });
       await settle();
       expect(bootstrap).toHaveBeenCalledTimes(3);
@@ -1767,7 +1767,7 @@ describe('Demand-driven shell bootstrap', () => {
       // that produces it — otherwise a restore later undone would widen every
       // rebuild of this project forever.
       await act(async () => {
-        handlers?.onConnected?.({ sub_id: 1 });
+        handlers?.onConnected?.();
       });
       await settle();
       expect(bootstrap).toHaveBeenCalledTimes(4);
@@ -1947,7 +1947,7 @@ describe('Demand-driven shell bootstrap', () => {
       // The debt is untouched, so the next trigger asks for eleven rows: the
       // failure declined to pay it, exactly as a refusal does.
       await act(async () => {
-        handlers?.onConnected?.({ sub_id: 1 });
+        handlers?.onConnected?.();
       });
       await settle();
       expect(bootstrap).toHaveBeenCalledTimes(2);

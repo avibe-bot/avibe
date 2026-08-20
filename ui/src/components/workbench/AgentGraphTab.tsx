@@ -315,16 +315,11 @@ export const AgentGraphTab: React.FC = () => {
   // transport (contract). Refetch in the background on any signal.
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data?.source === 'controller') {
-          setEventBridgeConnected(true);
-          void fetchGraph(true);
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) void fetchGraph(true);
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the indicator's level: it comes with its own
+      // `onConnected`, and refetching from both would pay twice for one gap.
+      onConnected: () => void fetchGraph(true),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => void fetchGraph(true),
       onTurnStart: () => void fetchGraph(true),
