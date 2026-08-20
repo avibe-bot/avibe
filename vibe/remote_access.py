@@ -5219,8 +5219,14 @@ def _validated_authorization_payload(
     config: V2Config,
     identity: Mapping[str, Any],
     record: Mapping[str, Any],
+    *,
+    binding_gate: bool | None = None,
 ) -> dict[str, Any] | None:
-    if not binding_is_ready(config, identity) and not _is_exact_show_page_grant(identity, record):
+    # Class 2: one (ready, kind, generation) consultation per evaluation.
+    # Callers that already captured the gate pass it in; this function must
+    # not trigger a second live read inside the same evaluation.
+    gate = binding_is_ready(config, identity) if binding_gate is None else binding_gate
+    if not gate and not _is_exact_show_page_grant(identity, record):
         return None
     if (
         _known_kind_requires_runtime_pairing(config)
@@ -5230,6 +5236,15 @@ def _validated_authorization_payload(
         return None
     claims = record.get("claims")
     if not isinstance(claims, Mapping):
+        return None
+    from vibe.authorization import instance_kind_is_unsupported
+
+    if instance_kind_is_unsupported(
+        claims.get("vibe_instance_kind")
+    ) and not _is_exact_show_page_grant(identity, record):
+        # A present-but-unrecognized persisted kind (corruption or a newer
+        # release's artifact) is not a legacy no-kind row. Fail closed so the
+        # row revalidates instead of falling through to legacy-current.
         return None
     payload = dict(identity)
     payload.update(claims)
@@ -5664,8 +5679,15 @@ def resolve_current_authorization(
             if refreshed.state != "unavailable":
                 return refreshed
         return AuthorizationResolution("revoked", reason="access_denied")
+    # Class 2: capture the binding gate ONCE for this evaluation. Both the
+    # payload admission and the kind derivation below use this snapshot; a
+    # reconciling that begins mid-evaluation can no longer collapse a failed
+    # second read into the legacy no-kind branch.
+    binding_gate = binding_is_ready(config, identity)
     payload = (
-        _validated_authorization_payload(config, identity, record)
+        _validated_authorization_payload(
+            config, identity, record, binding_gate=binding_gate
+        )
         if record is not None
         else None
     )
@@ -5686,7 +5708,7 @@ def resolve_current_authorization(
 
     instance_kind = (
         _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
-        if binding_is_ready(config, identity)
+        if binding_gate
         else None
     )
     signed_revision = _authorization_revision_from_claims(payload)

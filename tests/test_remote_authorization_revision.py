@@ -2804,3 +2804,108 @@ def test_successful_context_store_refused_when_generation_advances_after_persist
                 stored.get("authorization_state") == original_state
             )
     assert remote_access_authorization_service.current_instance_binding_generation() > captured
+
+
+def test_interactive_gate_is_read_once_and_failed_gate_never_collapses_to_legacy(
+    monkeypatch,
+    tmp_path,
+):
+    """Class 2 (interactive path): one binding-gate snapshot per evaluation.
+
+    A reconciling that begins between record admission and the former second
+    gate call must not collapse instance_kind to None and return the old
+    Personal payload through the legacy branch.
+    """
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    cookie = remote_access.make_session_cookie(
+        config,
+        "user-1@example.com",
+        "user-1",
+        session_claims={
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_instance_kind": "personal",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+
+    calls = {"n": 0}
+    real_gate = remote_access.binding_is_ready
+
+    def counting_gate(*args, **kwargs):
+        calls["n"] += 1
+        # Simulate a peer entering reconciling right after the first read:
+        # any SECOND read within one evaluation would observe False.
+        if calls["n"] == 1:
+            return real_gate(*args, **kwargs)
+        return False
+
+    monkeypatch.setattr(remote_access, "binding_is_ready", counting_gate)
+    result = remote_access.resolve_current_authorization(config, identity)
+    # One evaluation = one gate read; the flip value is never consumed.
+    assert calls["n"] == 1
+    # With the single ready snapshot the personal branch ran (not legacy).
+    assert result.current is True
+    assert result.policy == "personal"
+
+    # Failed gate at snapshot time: fail closed (refresh/unavailable), never
+    # legacy-current with the old Personal payload.
+    calls["n"] = 0
+    monkeypatch.setattr(remote_access, "binding_is_ready", lambda *a, **k: False)
+    blocked = remote_access.resolve_current_authorization(
+        config, identity, allow_refresh=False
+    )
+    assert blocked.current is False
+    assert blocked.state in {"unavailable", "invalid_identity"}
+
+
+def test_unsupported_stored_kind_fails_closed_on_the_interactive_path(
+    monkeypatch,
+    tmp_path,
+):
+    """A persisted scoped row with kind="enterprise" under a legacy no-kind
+    pairing must fail closed instead of falling through legacy-current."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = ""
+    config.save()
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    claims = dict(record.get("claims") or {})
+    claims["vibe_instance_kind"] = "enterprise"
+    remote_access_authorization_service.upsert_scoped(
+        reference=str(record["id"]),
+        instance_id="inst_123",
+        subject="user-1",
+        email="user-1@example.com",
+        scope_kind=str(record.get("scope_kind") or "instance"),
+        scope_ref=str(record.get("scope_ref") or "inst_123"),
+        authorization_state="current",
+        claims=claims,
+        last_checked_at=now,
+        updated_at=now,
+    )
+    blocked = remote_access.resolve_current_authorization(
+        config, identity, allow_refresh=False
+    )
+    assert blocked.current is False
+    assert blocked.state == "unavailable"
