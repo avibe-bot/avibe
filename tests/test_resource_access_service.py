@@ -434,6 +434,17 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
     config.remote_access.vibe_cloud.instance_kind = "organization"
     config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
+    from storage import remote_access_authorization_service as _auth
+
+    started = _auth.begin_instance_binding_transition(
+        instance_id="organization-instance",
+        instance_kind="organization",
+    )
+    _auth.complete_instance_binding_transition(
+        instance_id="organization-instance",
+        instance_kind="organization",
+        generation=started["generation"],
+    )
 
     issued_at = 1_700_000_000
     context = resource_access_service.ResourceUserContext(
@@ -661,6 +672,17 @@ def test_kindless_deferred_context_adopts_matching_validated_pairing(
         }
     }
 
+    from storage import remote_access_authorization_service as _auth
+
+    started = _auth.begin_instance_binding_transition(
+        instance_id="paired-instance",
+        instance_kind="personal",
+    )
+    _auth.complete_instance_binding_transition(
+        instance_id="paired-instance",
+        instance_kind="personal",
+        generation=started["generation"],
+    )
     restored = resource_access_service.resource_user_context_from_metadata(legacy_metadata)
 
     assert restored is not None
@@ -781,6 +803,7 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
             )
             from storage.importer import _run_sqlite_data_migrations
 
+            _seed_ready_binding(connection, instance_id="paired-instance", instance_kind=paired_kind)
             counts = _run_sqlite_data_migrations(connection)
             assert _migration_counts(counts) == {
                 "legacy_deferred_definitions": 2,
@@ -798,6 +821,17 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
                 snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
                 assert snapshot["vibe_instance_id"] == "paired-instance"
                 assert snapshot["vibe_instance_kind"] == paired_kind
+                from storage import remote_access_authorization_service as _auth
+
+                started = _auth.begin_instance_binding_transition(
+                    instance_id="paired-instance",
+                    instance_kind=paired_kind,
+                )
+                _auth.complete_instance_binding_transition(
+                    instance_id="paired-instance",
+                    instance_kind=paired_kind,
+                    generation=started["generation"],
+                )
                 assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
 
             run_metadata = connection.execute(
@@ -1013,6 +1047,7 @@ def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
         config.save()
 
         with engine.begin() as connection:
+            _seed_ready_binding(connection, instance_id="same-instance", instance_kind="personal")
             assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 1,
                 "legacy_deferred_runs": 0,
@@ -1091,6 +1126,7 @@ def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
         config.save()
 
         with engine.begin() as connection:
+            _seed_ready_binding(connection, instance_id="same-instance", instance_kind="personal")
             assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 1,
                 "legacy_deferred_runs": 0,
@@ -1207,22 +1243,31 @@ def _paired_cloud_config(
     cloud.instance_kind = instance_kind
     cloud.instance_secret = instance_secret
     config.save()
-    if enabled and instance_id and instance_kind in {"personal", "organization"}:
-        # T5: a known configured kind is ready only with a validated durable
-        # row. Tests that construct a pairing this way must look like an
-        # already-bootstrapped install, not an upgrade with a missing row.
-        from storage import remote_access_authorization_service
-
-        started = remote_access_authorization_service.begin_instance_binding_transition(
-            instance_id=instance_id,
-            instance_kind=instance_kind,
-        )
-        remote_access_authorization_service.complete_instance_binding_transition(
-            instance_id=instance_id,
-            instance_kind=instance_kind,
-            generation=started["generation"],
-        )
     return config
+
+
+def _seed_ready_binding(connection, *, instance_id: str, instance_kind: str, generation: int = 1) -> None:
+    """Write a validated ready binding onto THIS connection's database."""
+
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "state": "ready",
+            "instance_id": instance_id,
+            "instance_kind": instance_kind,
+            "generation": generation,
+            "updated_at": "1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    connection.execute(
+        state_meta.insert().values(
+            key="remote_access.instance_binding.v1",
+            value_json=payload,
+            updated_at="1",
+        )
+    )
 
 
 def _seed_legacy_scheduled_task(store, *, definition_id: str, snapshot: dict) -> None:
@@ -1311,6 +1356,7 @@ def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
         config.save()
 
         with engine.begin() as connection:
+            _seed_ready_binding(connection, instance_id="same-instance", instance_kind="personal")
             assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 **_EMPTY_MIGRATION_COUNTS,
                 "legacy_deferred_definitions": 1,
@@ -1319,6 +1365,17 @@ def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
             snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
             assert snapshot["vibe_instance_id"] == "same-instance"
             assert snapshot["vibe_instance_kind"] == "personal"
+            from storage import remote_access_authorization_service as _auth
+
+            started = _auth.begin_instance_binding_transition(
+                instance_id="same-instance",
+                instance_kind="personal",
+            )
+            _auth.complete_instance_binding_transition(
+                instance_id="same-instance",
+                instance_kind="personal",
+                generation=started["generation"],
+            )
             assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
             completed = json.loads(_stored_migration_marker(connection))
 
@@ -1376,11 +1433,23 @@ def test_transient_configuration_failure_leaves_the_migration_retryable(
         assert V2Config.load.__func__ is real_load.__func__
 
         with engine.begin() as connection:
+            _seed_ready_binding(connection, instance_id="same-instance", instance_kind="personal")
             assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 **_EMPTY_MIGRATION_COUNTS,
                 "legacy_deferred_definitions": 1,
             }
             metadata = _legacy_definition_metadata(connection, "legacy-task")
+            from storage import remote_access_authorization_service as _auth
+
+            started = _auth.begin_instance_binding_transition(
+                instance_id="same-instance",
+                instance_kind="personal",
+            )
+            _auth.complete_instance_binding_transition(
+                instance_id="same-instance",
+                instance_kind="personal",
+                generation=started["generation"],
+            )
             assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
     finally:
         store.close()
@@ -1523,6 +1592,7 @@ def test_shared_access_source_snapshots_migrate_for_either_pairing_kind(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
+            _seed_ready_binding(connection, instance_id="paired-instance", instance_kind=paired_kind)
             assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 **_EMPTY_MIGRATION_COUNTS,
                 "legacy_deferred_definitions": 1,
@@ -1531,6 +1601,17 @@ def test_shared_access_source_snapshots_migrate_for_either_pairing_kind(
             snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
             assert snapshot["vibe_instance_id"] == "paired-instance"
             assert snapshot["vibe_instance_kind"] == paired_kind
+            from storage import remote_access_authorization_service as _auth
+
+            started = _auth.begin_instance_binding_transition(
+                instance_id="paired-instance",
+                instance_kind=paired_kind,
+            )
+            _auth.complete_instance_binding_transition(
+                instance_id="paired-instance",
+                instance_kind=paired_kind,
+                generation=started["generation"],
+            )
             restored = resource_access_service.resource_user_context_from_metadata(metadata)
             assert restored is not None
             assert restored.is_personal_instance is (paired_kind == "personal")
@@ -1783,6 +1864,7 @@ def test_recovered_config_is_unavailable_and_does_not_seal_legacy_snapshots(
         monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
         _paired_cloud_config(tmp_path)
         with engine.begin() as connection:
+            _seed_ready_binding(connection, instance_id="same-instance", instance_kind="personal")
             repaired = _migration_counts(_run_sqlite_data_migrations(connection))
             metadata = _legacy_definition_metadata(connection, "legacy-task")
         snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
@@ -1957,3 +2039,122 @@ def test_terminal_delivery_snapshots_are_left_byte_identical(
         assert rows["del_retired"]["snapshot_sha256"] == snapshot_sha
     finally:
         engine.dispose()
+
+
+def test_absent_binding_fails_closed_for_deferred_personal_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r5: a known-kind pairing with no durable binding
+    row must not project a Personal context for deferred execution.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "personal-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+    context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="personal-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+
+
+def test_migration_stays_pending_without_a_validated_binding_row(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r5: known-kind config + absent binding row must
+    not complete the deferred-context migration or relabel snapshots.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.instance_id = "same-instance"
+    cloud.instance_kind = "personal"
+    cloud.instance_secret = "instance-secret"
+    config.save()
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            counts = _migration_counts(_run_sqlite_data_migrations(connection))
+            marker = json.loads(_stored_migration_marker(connection))
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+        assert counts == _EMPTY_MIGRATION_COUNTS
+        assert marker["state"] == "pending"
+        snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+        assert "vibe_instance_kind" not in snapshot
+    finally:
+        engine.dispose()
+
+
+def test_unsupported_deferred_snapshot_kind_is_rejected(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r5: a present-but-unrecognized kind is not a
+    no-kind legacy snapshot for deferred execution either.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_instance_id": "same-instance",
+            "vibe_instance_kind": "enterprise",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+
+
+def test_unrelated_section_load_warning_does_not_make_pairing_unavailable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r5: Model Hub recovery warnings must not classify
+    an intact Vibe Cloud pairing as UNAVAILABLE.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+
+    class IntactPairing:
+        load_warnings = ("Recovered invalid config section 'model_hub.sources.vendor': bad",)
+        class remote_access:
+            class vibe_cloud:
+                enabled = True
+                instance_id = "same-instance"
+                instance_kind = "personal"
+                instance_secret = "instance-secret"
+                @staticmethod
+                def runtime_credentials():
+                    return ("https://backend.test", "same-instance", "instance-secret")
+
+    monkeypatch.setattr(V2Config, "load", staticmethod(lambda **kwargs: IntactPairing()))
+    state = resource_access_service._configured_resource_state()
+    assert state.status == "ready"
+    assert state.instance_id == "same-instance"
+    assert state.instance_kind == "personal"

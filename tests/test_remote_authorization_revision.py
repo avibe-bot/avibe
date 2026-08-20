@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import itertools
+import json
 import threading
 import time
 from typing import Any
@@ -2590,3 +2591,52 @@ def test_kindless_current_row_revalidates_after_known_kind_bootstrap(
     assert len(calls) == 1
     assert result.payload is not None
     assert result.payload.get("vibe_instance_kind") == "personal"
+
+
+def test_binding_decoder_rejects_explicit_non_v1_schema_versions(tmp_path):
+    """Regression PR #1606 r5: only a genuinely absent schema_version defaults
+    to v1; explicit 0 or 2 must fail closed.
+    """
+
+    config = _paired_config(tmp_path)
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import state_meta
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    for version in (0, 2):
+        payload = json.dumps(
+            {
+                "schema_version": version,
+                "state": "ready",
+                "instance_id": "inst_123",
+                "instance_kind": "personal",
+                "generation": 1,
+                "updated_at": "1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with engine.begin() as conn:
+            statement = sqlite_insert(state_meta).values(
+                key=remote_access_authorization_service.INSTANCE_BINDING_STATE_META_KEY,
+                value_json=payload,
+                updated_at="1",
+            )
+            conn.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[state_meta.c.key],
+                    set_={"value_json": payload, "updated_at": "1"},
+                )
+            )
+        decoded = remote_access_authorization_service.load_instance_binding_state(
+            ensure=False
+        )
+        assert decoded is None or decoded.get("state") == remote_access_authorization_service.INSTANCE_BINDING_STATE_INVALID
+        assert remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id="inst_123",
+            instance_kind="personal",
+            ensure=False,
+        ) is False
