@@ -336,7 +336,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/browse"),
         ("POST", "/api/browse/mkdir"),
         ("PUT", "/api/permissions/projects/project-1/access"),
-        ("PUT", "/api/permissions/resources/show_page/page-1/access"),
+        ("PUT", "/api/permissions/resources/agent/agent-1/access"),
         ("GET", "/api/remote-access/status"),
         ("GET", "/api/remote-access/network-interfaces"),
         ("POST", "/api/remote-access/optimize-route"),
