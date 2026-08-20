@@ -180,9 +180,22 @@ def normalized_remote(value: str) -> str | None:
     could be written to agree with the other, which is why agreement is not the
     fix -- normalizing at the parser leaves one value to read, for every reader
     that exists now and every one added later.
+
+    That one value has to be a name and not an arbitrary string, because two of
+    those readers spell it into places that only hold one: `remote_ref` joins it
+    to an object with `:`, and `target_lock_path` makes it part of a filename. A
+    separator in it would name a different daemon than the one written, or put a
+    lock outside the directory that holds them, so it is refused here -- the one
+    point both readers are downstream of.
     """
     name = value.strip()
-    return name or None
+    if not name:
+        return None
+    if name in {".", ".."} or any(char in name for char in "/\\:"):
+        raise argparse.ArgumentTypeError(
+            f"invalid Incus remote name {value!r}: a remote is one name, without '/', '\\' or ':'"
+        )
+    return name
 
 
 def remote_ref(remote: str | None, name: str = "") -> str:
@@ -285,23 +298,36 @@ def runtime_root(repo_root: Path) -> Path:
     return git_common_root(repo_root) / ".runtime" / "incus-regression"
 
 
-def target_lock_path(repo_root: Path, project: str) -> Path:
-    return runtime_root(repo_root) / "locks" / f"{project}.lock"
+def target_lock_path(repo_root: Path, remote: str | None, project: str) -> Path:
+    """Where the lock for one environment lives, on this machine.
+
+    An environment is identified by the daemon that holds it and the project on
+    it, never by the project alone -- the same rule `worktrees.json` follows,
+    because project names are per-daemon and every remote has the same ones. The
+    lock file is local wherever the environment is, so a `--remote` run that keyed
+    on the project would take the lock of the local environment with that name and
+    be read as one, which is what `remote_ref` exists to stop everywhere else.
+    Local runs keep exactly the path they have always had: `remote_ref` renders no
+    authority as no prefix, so this is byte-identical to every released version,
+    and their lock is the same file as ours -- the reason a lock can answer for
+    them at all.
+    """
+    return runtime_root(repo_root) / "locks" / f"{remote_ref(remote, project)}.lock"
 
 
 @contextmanager
-def target_update_lock(repo_root: Path, project: str, *, dry_run: bool):
+def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry_run: bool):
     """Serialize runs against one environment, and say so to `reconcile`.
 
-    Keyed on the project name rather than on a resolved target, because that is
-    the whole key: a caller can name the lock before it has asked the mapping for
-    a port, which is what lets the port be allocated inside the lock that
-    protects it.
+    Keyed on the daemon and the project name rather than on a resolved target,
+    because that is the whole key: a caller can name the lock before it has asked
+    the mapping for a port, which is what lets the port be allocated inside the
+    lock that protects it.
     """
     if dry_run or fcntl is None:
         yield
         return
-    lock_path = target_lock_path(repo_root, project)
+    lock_path = target_lock_path(repo_root, remote, project)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as fh:
         print(f"Acquiring regression update lock: {lock_path}")
@@ -312,8 +338,8 @@ def target_update_lock(repo_root: Path, project: str, *, dry_run: bool):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def target_run_in_flight(repo_root: Path, project: str) -> bool:
-    """Whether some live process is updating `project` right now.
+def target_run_in_flight(repo_root: Path, remote: str | None, project: str) -> bool:
+    """Whether some live process is updating `project` on `remote` right now.
 
     Asked of the kernel rather than of `worktrees.json`, because no field a run
     writes can answer it. A record lies in both directions: a run that dies
@@ -327,7 +353,10 @@ def target_run_in_flight(repo_root: Path, project: str) -> bool:
     older runs take the lock a moment after writing their row rather than before
     it, so what is exposed there is that instant, not the build; reading the row
     instead would mean trusting a stamp from another clock, which says nothing
-    about whether a run is live.
+    about whether a run is live. Nor do they carry which daemon they are updating:
+    they key the lock on the project alone, so a released `up --remote` takes the
+    local environment's lock. That is the one direction still left, and it errs
+    towards in flight, which keeps a row rather than dropping a live one.
 
     Not-yet-known answers in flight, as every unanswered question in `reconcile`
     does: a platform without `flock`, a lock file this user cannot open. Only a
@@ -335,7 +364,7 @@ def target_run_in_flight(repo_root: Path, project: str) -> bool:
     """
     if fcntl is None:
         return True
-    lock_path = target_lock_path(repo_root, project)
+    lock_path = target_lock_path(repo_root, remote, project)
     try:
         # Read-only, and no `mkdir`: a probe must not create the artifact whose
         # absence is the answer. `flock` is owned by the open file description,
@@ -1015,12 +1044,15 @@ def worktree_environments(runner: Runner, metadata: WorktreeMetadata) -> list[Wo
                 has_project=slug in projects,
                 instances=instances.get(instance, ()),
                 entry=entry,
+                # Asked of this accessor's own daemon, so the lock read is about
+                # the environment being listed and not about one that merely
+                # shares its project name -- the rule the rows follow too.
                 # Locks live on this machine, so they are evidence about runs
-                # started on it -- the same scope as the rows above, and the same
-                # reason. A remote daemon's environment may be built from a
-                # machine this one cannot see, and it has no local row to act on,
-                # so no answer is claimed for it.
-                in_flight=metadata.owned and target_run_in_flight(metadata.repo_root, project),
+                # started on it: a remote daemon's environment may be built from
+                # a machine this one cannot see, and it has no local row to act
+                # on, so no answer is claimed for it at all.
+                in_flight=metadata.owned
+                and target_run_in_flight(metadata.repo_root, metadata.remote, project),
             )
         )
     return environments
@@ -2388,8 +2420,9 @@ def cmd_up(args: argparse.Namespace) -> int:
     # The lock comes before the row, because the lock is what says a run holds
     # this slug: `reconcile` prunes a reservation whose lock nobody holds, so a
     # row written outside it is a row that can be dropped while this run is still
-    # building against it. Naming the lock needs only the environment's identity,
-    # so the port is asked for and recorded inside the lock that protects it --
+    # building against it. Naming the lock needs only the environment's identity
+    # -- the daemon that holds it and the project on it -- so the port is asked
+    # for and recorded inside the lock that protects it --
     # picking a free port and reserving it stay one step under the mapping lock,
     # which is why the identity is observed here and not derived from a target.
     slug = target_slug(args, repo_root)
@@ -2400,7 +2433,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     runner = Runner(dry_run=args.dry_run)
     reservation: WorktreeReservation | None = None
     try:
-        with target_update_lock(repo_root, lock_project, dry_run=args.dry_run):
+        with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run):
             with metadata.locked(dry_run=args.dry_run):
                 target = resolve_target(args, repo_root, dry_run=args.dry_run, slug=slug)
                 reservation = metadata.reserve(target, dry_run=args.dry_run)

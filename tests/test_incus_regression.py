@@ -2075,7 +2075,7 @@ def test_a_prune_keeps_a_row_exactly_while_a_run_holds_its_slug(
             # conflicts with these exactly as another run's would. A test that
             # had to fork to hold a lock would be testing the fork.
             lock_path = incus_regression.target_lock_path(
-                tmp_path / "repo", f"{incus_regression.WORKTREE_PROJECT_PREFIX}{slug}"
+                tmp_path / "repo", None, f"{incus_regression.WORKTREE_PROJECT_PREFIX}{slug}"
             )
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             handle = stack.enter_context(lock_path.open("w", encoding="utf-8"))
@@ -2120,18 +2120,18 @@ def test_a_slug_is_in_flight_whenever_the_kernel_cannot_say_it_is_free(
     """
     repo = tmp_path / "repo"
     monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
-    lock_path = incus_regression.target_lock_path(repo, "avr-wt-demo")
+    lock_path = incus_regression.target_lock_path(repo, None, "avr-wt-demo")
 
-    assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is False
+    assert incus_regression.target_run_in_flight(repo, None, "avr-wt-demo") is False
     assert not lock_path.exists()
 
     lock_path.parent.mkdir(parents=True)
     with lock_path.open("w", encoding="utf-8") as handle:
         # An `up` that ended left its lock file behind; the file is not the claim.
-        assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is False
+        assert incus_regression.target_run_in_flight(repo, None, "avr-wt-demo") is False
         incus_regression.fcntl.flock(handle.fileno(), incus_regression.fcntl.LOCK_EX)
-        assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is True
-    assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is False
+        assert incus_regression.target_run_in_flight(repo, None, "avr-wt-demo") is True
+    assert incus_regression.target_run_in_flight(repo, None, "avr-wt-demo") is False
 
     real_open = os.open
 
@@ -2142,10 +2142,74 @@ def test_a_slug_is_in_flight_whenever_the_kernel_cannot_say_it_is_free(
 
     with monkeypatch.context() as unreadable:
         unreadable.setattr(incus_regression.os, "open", refuse)
-        assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is True
+        assert incus_regression.target_run_in_flight(repo, None, "avr-wt-demo") is True
 
     monkeypatch.setattr(incus_regression, "fcntl", None)
-    assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is True
+    assert incus_regression.target_run_in_flight(repo, None, "avr-wt-demo") is True
+
+
+def test_a_lock_answers_for_one_daemon_and_local_runs_keep_the_released_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An environment is a daemon and a project -- for locks as much as for rows.
+
+    Project names are per-daemon and every remote has the same ones, so a lock
+    keyed on the project alone leaves a `--remote` run indistinguishable from a
+    local one holding that slug, and a local `reconcile` reads it as a reason to
+    keep a stale row and its port. Asserted over every ordered pair of
+    authorities rather than over the one crossing that was reported: a lock held
+    under one authority is never evidence under another, and a lock held under
+    the same one always is.
+
+    The local path is a cross-version contract on top of that. Every released
+    runner locks at `locks/<project>.lock`, and sharing that exact file is the
+    whole reason a lock can answer for a run this code did not start, so no
+    authority may be spelled into it.
+    """
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+
+    assert incus_regression.target_lock_path(repo, None, "avr-wt-demo") == (
+        incus_regression.runtime_root(repo) / "locks" / "avr-wt-demo.lock"
+    )
+
+    authorities = (None, "lab", "other")
+    for holder in authorities:
+        # Held from this process: `flock` belongs to the open file description, so
+        # the probe's own descriptor conflicts exactly as another run's would.
+        with incus_regression.target_update_lock(repo, holder, "avr-wt-demo", dry_run=False):
+            for asker in authorities:
+                assert incus_regression.target_run_in_flight(repo, asker, "avr-wt-demo") is (
+                    asker == holder
+                )
+
+
+def test_a_remote_that_is_not_one_name_cannot_leave_the_locks_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--remote` is spelled into a daemon reference and into a lock filename.
+
+    Each holds exactly one name, so the invariant is about what survives the
+    parser rather than about which spellings are listed here: whatever it accepts
+    puts its lock inside the locks directory. Refused at the normalizer because
+    that is the one point both readers are downstream of, and refused as an
+    argparse error because `main` catches `RegressionError` only after the parser
+    has already run.
+    """
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    locks = incus_regression.runtime_root(repo) / "locks"
+
+    # Not vacuous: an ordinary name still gets through, whitespace and all.
+    assert incus_regression.normalized_remote("  lab  ") == "lab"
+    assert incus_regression.normalized_remote("   ") is None
+
+    for value in ("lab", "lab-2", "lab.local", "a/b", "../evil", "a\\b", "lab:extra", ".", ".."):
+        try:
+            name = incus_regression.normalized_remote(value)
+        except argparse.ArgumentTypeError:
+            continue
+        assert incus_regression.target_lock_path(repo, name, "avr-wt-demo").parent == locks
 
 
 def test_reconcile_decides_under_the_mapping_lock_even_when_writing_nothing(
@@ -3272,7 +3336,7 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
 
     monkeypatch.setattr(incus_regression, "_write_worktree_mapping", recording_write)
 
-    def target_lock(repo_root, project, *, dry_run):
+    def target_lock(repo_root, remote, project, *, dry_run):
         class Lock:
             def __enter__(self):
                 calls.append("target_lock_enter")

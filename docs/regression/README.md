@@ -181,9 +181,11 @@ is worse than keeping a row nobody needs:
 - A row whose slug a live `up` is still holding is left alone. `up` records the
   slug and its port before it creates the project and the instance, so this is
   what a concurrent `up` looks like from the outside. Who holds a slug is asked
-  of the kernel, not of the file: an `up` takes that slug's update lock before it
-  writes the row and holds it until the environment is built, so `reconcile`
-  answers the question by trying to take the same lock. Nothing a run writes
+  of the kernel, not of the file: an `up` takes that environment's update lock —
+  named by the daemon and the project, so a `--remote` run is never read as the
+  local environment of the same name — before it writes the row and holds it until
+  the environment is built, so `reconcile` answers the question by trying to take
+  the same lock. Nothing a run writes
   could answer it. A record over-reports — a run killed outright leaves its own
   behind — and under-reports, since a run from an older checkout writes no field
   a newer `reconcile` would recognise; a lock does neither, because the kernel
@@ -193,12 +195,23 @@ is worse than keeping a row nobody needs:
   while a live run's row is kept without any operator having to tell the two
   apart. Not knowing counts as held: a platform without `flock`, or a lock file
   that cannot be opened, keeps the row like every other unanswered question here.
-  One gap is left, and it is in older checkouts rather than in this rule: their
-  `up` writes the row and then takes the lock, so a `reconcile --yes` landing in
-  the instant between the two prunes a reservation whose build is about to start.
-  That instant is what is exposed there, not the build, and closing it would mean
-  deciding on the row's stamp again — written by a clock this command cannot
-  check, and no evidence about whether a run is live.
+  Two things the rule does not cover, and both are in older checkouts rather than
+  in the rule. Their `up` writes the row and then takes the lock, so a
+  `reconcile --yes` landing between the two prunes a reservation whose build is
+  about to start. What that exposes is those two operations and not the build:
+  between releasing the mapping lock and acquiring the update lock they run one
+  `git rev-parse` and the two lock calls, and contention shortens the window
+  rather than widening it, since a slug whose lock somebody is already holding
+  reads as in flight. The older run then repairs the row itself, because its `up`
+  rewrites the mapping when the build finishes. What is left of it needs a third
+  `up` to start inside that same window and take the freed port, and that ends
+  loudly: an `up` creating a local environment re-checks the host port inside its
+  own update lock before it builds. Their `up` also keys the lock on the project
+  alone, so a released `up --remote` takes the local environment's lock and reads
+  as a local run — which errs towards in flight, and keeps a row. Closing either
+  from this side would mean deciding on the row's stamp again, written by a clock
+  this command cannot check and no evidence about whether a run is live, or never
+  pruning a row without a claim, which is every row any release has written.
 
   Giving a row back at the end of a failed `up` is still worth doing — it frees
   the port now instead of at the next `reconcile --yes` — and both of its
