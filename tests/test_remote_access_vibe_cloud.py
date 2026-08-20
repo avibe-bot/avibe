@@ -1498,6 +1498,101 @@ def test_report_runtime_status_backfills_instance_kind_once(monkeypatch, tmp_pat
     ]
 
 
+def test_report_runtime_status_binds_pending_deferred_contexts_through_the_real_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A long-running upgraded service must not need another initialization.
+
+    The heartbeat is the only place the authoritative kind arrives, so it owns
+    rerunning the pending migration itself rather than relying on a later
+    ``ensure_sqlite_state()`` call.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    cloud.instance_kind = ""
+    config.save()
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import _run_sqlite_data_migrations, ensure_sqlite_state
+    from storage.models import run_definitions, state_meta
+    from storage.resource_access_service import (
+        LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+        RESOURCE_USER_CONTEXT_METADATA_KEY,
+        resource_user_context_from_metadata,
+    )
+
+    legacy_metadata = {
+        RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-editor",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        connection.execute(
+            run_definitions.insert().values(
+                id="legacy-task",
+                definition_type="scheduled",
+                name="legacy task",
+                message="run",
+                schedule_type="interval",
+                enabled=1,
+                created_at="2026-08-20T00:00:00Z",
+                updated_at="2026-08-20T00:00:00Z",
+                metadata_json=json.dumps(legacy_metadata),
+            )
+        )
+        assert _run_sqlite_data_migrations(connection) == {
+            "legacy_deferred_definitions": 0,
+            "legacy_deferred_runs": 0,
+            "legacy_deferred_deliveries": 0,
+        }
+        marker = json.loads(
+            connection.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                )
+            ).scalar_one()
+        )
+    assert marker["state"] == "pending"
+    assert marker["instance_id"] == "inst_123"
+
+    monkeypatch.setattr(
+        remote_access,
+        "runtime_status_payload",
+        lambda *args, **kwargs: {"event": "heartbeat"},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "personal"},
+    )
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "personal"
+    with engine.connect() as connection:
+        metadata = json.loads(
+            connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+        )
+    snapshot = metadata[RESOURCE_USER_CONTEXT_METADATA_KEY]
+    assert snapshot["vibe_instance_id"] == "inst_123"
+    assert snapshot["vibe_instance_kind"] == "personal"
+    assert resource_user_context_from_metadata(metadata) is not None
+
+
 @pytest.mark.parametrize("reported_kind", [None, "enterprise", "", 7])
 def test_report_runtime_status_ignores_invalid_instance_kind(
     monkeypatch,
