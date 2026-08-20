@@ -7345,6 +7345,91 @@ def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tm
     assert exc.value.code == ui_server._AUTHORIZATION_LOGIN_REQUIRED_WEBSOCKET_CLOSE_CODE
 
 
+def test_private_show_page_hmr_websocket_requires_editor(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager()
+    set_show_runtime_manager_for_tests(manager)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _active_org_cookie(config, "viewer@example.com", "viewer-1", role="viewer"),
+        domain="alex.avibe.bot",
+    )
+    try:
+        with client.websocket_connect(
+            "wss://alex.avibe.bot/show/ses123/__vite_hmr",
+            headers={"host": "alex.avibe.bot"},
+            subprotocols=["vite-hmr"],
+        ) as websocket:
+            websocket.receive_text()
+            raise AssertionError("viewer HMR should not connect")
+    except WebSocketDisconnect as exc:
+        assert exc.code == 1008
+    finally:
+        set_show_runtime_manager_for_tests(None)
+    assert manager.calls == []
+
+
+def test_show_page_viewer_is_read_only_but_editor_can_mutate(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+
+    def _client(role: str):
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _active_org_cookie(config, f"{role}@example.com", f"{role}-1", role=role),
+            domain="alex.avibe.bot",
+        )
+        return client
+
+    manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        viewer = _client("viewer")
+        read = viewer.get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert read.status_code == 200
+        manager.calls.clear()
+        for method in ("post", "put", "patch", "delete"):
+            response = getattr(viewer, method)(
+                "/show/ses123/api/health",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+                headers={
+                    "Origin": "https://alex.avibe.bot",
+                    "Content-Type": "application/json",
+                },
+                content=b'{"ping":true}',
+            )
+            assert response.status_code == 403
+        assert manager.calls == []
+
+        editor = _client("editor")
+        mutation = editor.post(
+            "/show/ses123/api/health",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={
+                "Origin": "https://alex.avibe.bot",
+                "Content-Type": "application/json",
+            },
+            content=b'{"ping":true}',
+        )
+        assert mutation.status_code == 200
+        assert [call[0] for call in manager.calls] == ["POST"]
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+
 def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -7407,7 +7492,7 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
         ui_server,
         "_show_runtime_websocket_resource_context",
         lambda websocket, **kwargs: resource_access_service.ResourceUserContext(
-            instance_role="viewer",
+            instance_role="editor",
             subject="remote-member",
             instance_access_source="organization_group",
             organization_id="org-1",
@@ -7418,7 +7503,7 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
     )
     remote_payload = {
         "sub": "remote-member",
-        "vibe_instance_role": "viewer",
+        "vibe_instance_role": "editor",
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": "membership-1",

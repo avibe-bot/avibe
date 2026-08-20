@@ -3283,11 +3283,9 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         from vibe.authorization import context_from_session_payload
 
         authorization_context = context_from_session_payload(remote_payload)
-        if not _websocket_context_authorized(
-            authorization_context,
-            minimum_role="viewer",
-            project_session_id=session_id,
-        ):
+        # §3.2: HMR drives live mutation of the page, so it is an Editor surface.
+        # A Viewer may read /show but must not open HMR (nor POST/PUT/PATCH/DELETE).
+        if not _show_page_mutation_allowed(authorization_context):
             await websocket.close(code=1008)
             return
 
@@ -3319,9 +3317,7 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         from vibe.sse_broker import broker
 
         access_sub_id, access_queue = broker.subscribe()
-        if not authorization_context.has_role("viewer") or not _show_page_resource_access_allowed(
-            authorization_context, session_id
-        ):
+        if not _show_page_mutation_allowed(authorization_context):
             broker.unsubscribe(access_sub_id)
             await websocket.close(code=1008)
             return
@@ -3682,7 +3678,7 @@ async def _wait_for_show_page_access_loss(
         event_type, _payload = await queue.get()
         if event_type != "authorization.changed":
             continue
-        if not context.has_role("viewer") or not _show_page_resource_access_allowed(context, session_id):
+        if not _show_page_mutation_allowed(context):
             return
 
 
@@ -3700,6 +3696,21 @@ def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
     if context is None:
         return False
     return context.has_role("viewer") and context.instance_access_source != "show_page_email"
+
+
+def _show_page_mutation_allowed(context: Any) -> bool:
+    """§3.2 mutation boundary: only an Instance Editor/owner may drive ``/show``.
+
+    ``/show`` reads admit every Instance Viewer, but the route also forwards
+    POST/PUT/PATCH/DELETE to Show Runtime and exposes a live HMR websocket —
+    both mutation surfaces. Viewers stay read-only: mutations and HMR require
+    ``has_role("editor")``. A ``show_page_email`` session is Viewer-only, so it
+    can never pass an Editor check.
+    """
+
+    if context is None:
+        return False
+    return context.has_role("editor") and context.instance_access_source != "show_page_email"
 
 
 async def _wait_for_remote_session_authorization_loss(
@@ -14766,6 +14777,12 @@ async def serve_private_show_page(session_id, asset_path):
             author=show_author,
             page=page,
         )
+        # §3.2: /show reads admit every Instance Viewer, but the route forwards
+        # mutation methods straight to Show Runtime — keep Viewers read-only.
+        if request.method not in {"GET", "HEAD"} and not _show_page_mutation_allowed(
+            _request_authorization_context()
+        ):
+            return _show_page_access_forbidden_response()
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
