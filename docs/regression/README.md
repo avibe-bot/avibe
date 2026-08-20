@@ -124,12 +124,29 @@ Temporary worktree environment:
 python3 scripts/incus_regression.py up --target worktree
 python3 scripts/incus_regression.py status --target worktree
 python3 scripts/incus_regression.py delete --target worktree --yes
-python3 scripts/incus_regression.py cleanup-stale --yes
+python3 scripts/incus_regression.py reconcile
+python3 scripts/incus_regression.py reconcile --yes
 ```
 
 Delete worktree environments promptly after the worktree is merged, abandoned,
 or removed. The persistent `master` environment should stay running and preserve
 its product state across normal source updates.
+
+`reconcile` answers "what is actually still here?". It enumerates worktree
+environments from Incus rather than from the runner's metadata, so an
+environment created outside the runner shows up too — otherwise it is invisible
+to every command that reads `.runtime/incus-regression/worktrees.json`, and can
+only be removed by hand. For each one it prints the instance state and whatever
+provenance the metadata holds, plus the `delete` command that removes it.
+
+Deletion stays a separate, explicit call. Nothing recorded about an environment
+can prove it is no longer wanted: the recorded path is the checkout the runner
+was invoked from, shared by every environment created there and still present
+long after that worktree is gone; the slug is chosen by the caller; and an
+environment may sit on a detached HEAD with no branch whose merge status could
+be checked. `reconcile --yes` therefore changes exactly one thing — it drops
+metadata rows for environments Incus no longer has, releasing their reserved
+host ports. Without `--yes` it only reports.
 
 Useful flags:
 

@@ -453,7 +453,97 @@ def test_proxy_device_uses_remote_instance_ref() -> None:
     assert "connect=tcp:127.0.0.1:5123" in args
 
 
-def test_existing_instance_proxy_device_is_refreshed() -> None:
+def proxy_device_runner(observed: dict[str, str] | None):
+    """A runner whose `config device get` answers from `observed`, or fails if it is None."""
+
+    commands = []
+
+    class RecordingRunner:
+        names = daemon_listing(*MASTER_NAMES)
+
+        def run(self, command, *, check=True, capture=False, **kwargs):
+            commands.append((command, check))
+            if "get" in command and "ui" in command:
+                if observed is None:
+                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="Error: Device doesn't exist")
+                return subprocess.CompletedProcess(command, 0, stdout=f"{observed[command[-1]]}\n")
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+    return RecordingRunner(), commands
+
+
+def test_matching_proxy_device_is_left_alone() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    runner, commands = proxy_device_runner(
+        {"listen": "tcp:127.0.0.1:15130", "connect": "tcp:127.0.0.1:5123"}
+    )
+
+    incus_regression.ensure_proxy_device(runner, target, remote=None)
+
+    # A device that already forwards the wanted endpoints must not be touched:
+    # removing it drops the port forward, and every `up` used to do exactly that.
+    mutations = [command for command, _ in commands if {"add", "remove", "set"} & set(command)]
+    assert mutations == []
+
+
+def test_mismatched_proxy_device_is_updated_in_place() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15131,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    runner, commands = proxy_device_runner(
+        {"listen": "tcp:127.0.0.1:15130", "connect": "tcp:127.0.0.1:5123"}
+    )
+
+    incus_regression.ensure_proxy_device(runner, target, remote=None)
+
+    rendered = [" ".join(command) for command, _ in commands]
+    assert (
+        "incus --project avr-master config device set avibe-master ui"
+        " listen=tcp:127.0.0.1:15131 connect=tcp:127.0.0.1:5123" in rendered
+    )
+    # An in-place set leaves no window in which the instance has no ui device,
+    # so a repointed port never needs the device removed first.
+    assert not any("remove" in command for command, _ in commands)
+
+
+def test_unobservable_proxy_device_is_rebuilt() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15131,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    runner, commands = proxy_device_runner(None)
+
+    incus_regression.ensure_proxy_device(runner, target, remote=None)
+
+    rendered = [" ".join(command) for command, _ in commands]
+    assert "incus --project avr-master config device remove avibe-master ui" in rendered
+    assert any(
+        "incus --project avr-master config device add avibe-master ui proxy"
+        " listen=tcp:127.0.0.1:15131" in command
+        for command in rendered
+    )
+
+
+def test_existing_instance_is_not_reinitialised() -> None:
     commands = []
 
     class RecordingRunner:
@@ -487,8 +577,6 @@ def test_existing_instance_proxy_device_is_refreshed() -> None:
     )
 
     rendered = [" ".join(command) for command, _ in commands]
-    assert "incus --project avr-master config device remove avibe-master ui" in rendered
-    assert any("incus --project avr-master config device add avibe-master ui proxy listen=tcp:127.0.0.1:15131" in command for command in rendered)
     assert not any(" init " in f" {command} " for command in rendered)
     assert any(
         "PATH=/usr/bin:/bin command -v soffice" in command
@@ -1395,25 +1483,21 @@ def test_write_runtime_env_uses_stdin_not_command_line() -> None:
     assert "OPENAI_API_KEY" not in joined_command
 
 
-def test_cleanup_stale_deletes_missing_worktree_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def reconcile_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    entries: dict,
+    projects: tuple[str, ...],
+    instances: tuple[dict, ...],
+) -> tuple[Path, list]:
+    """Point `reconcile` at a repo with `entries` recorded and `projects` in Incus."""
+
     repo = tmp_path / "repo"
-    repo.mkdir()
     runtime = repo / ".runtime" / "incus-regression"
     runtime.mkdir(parents=True)
     (runtime / "worktrees.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "worktrees": {
-                    "old": {
-                        "path": str(tmp_path / "missing"),
-                        "project": "avr-wt-old",
-                        "instance": "avibe-wt-old",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
+        json.dumps({"schema_version": 1, "worktrees": entries}), encoding="utf-8"
     )
 
     commands = []
@@ -1426,16 +1510,164 @@ def test_cleanup_stale_deletes_missing_worktree_mapping(tmp_path: Path, monkeypa
             commands.append(command)
             return subprocess.CompletedProcess(command, 0)
 
+        def names(self, command, *, what):
+            commands.append(command)
+            return list(projects)
+
+        def records(self, command, *, what):
+            commands.append(command)
+            return [dict(item) for item in instances]
+
     monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
     monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
     monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+    return runtime / "worktrees.json", commands
 
-    exit_code = incus_regression.cmd_cleanup_stale(argparse.Namespace(yes=True, dry_run=False, remote=None))
+
+def test_reconcile_reports_environments_incus_holds_without_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mapping_path, commands = reconcile_fixture(
+        tmp_path,
+        monkeypatch,
+        entries={"tracked": {"path": str(tmp_path / "checkout"), "host_port": 52900, "branch": "fix/one"}},
+        projects=("default", "avr-master", "avr-wt-tracked", "avr-wt-orphan"),
+        instances=(
+            {"name": "avibe-master", "status": "Running"},
+            {"name": "avibe-wt-orphan", "status": "Running"},
+            {"name": "avibe-wt-tracked", "status": "Stopped"},
+        ),
+    )
+
+    exit_code = incus_regression.cmd_reconcile(
+        argparse.Namespace(yes=False, dry_run=False, remote=None)
+    )
+    out = capsys.readouterr().out
 
     assert exit_code == 0
-    assert ["incus", "--project", "avr-wt-old", "delete", "avibe-wt-old", "--force"] in commands
-    payload = json.loads((runtime / "worktrees.json").read_text(encoding="utf-8"))
-    assert payload["worktrees"] == {}
+    # Enumerating from Incus is the point: an environment created outside the
+    # runner has no metadata row, so walking the mapping cannot see it at all.
+    assert "avibe-wt-orphan  [Running]  no runner metadata" in out
+    assert "delete --target worktree --slug orphan --yes" in out
+    assert "avibe-wt-tracked  [Stopped]" in out
+    assert "delete --target worktree --slug tracked --yes" in out
+    # The master environment is not a worktree environment and is never listed.
+    assert "avibe-master" not in out
+    # Reporting must never delete an environment.
+    assert not any("delete" in command for command in commands)
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert set(payload["worktrees"]) == {"tracked"}
+
+
+def test_reconcile_forgets_metadata_for_environments_incus_no_longer_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `gone` records a path that still exists, which is exactly the case the old
+    # staleness criterion could not see: the path is the checkout the runner was
+    # invoked from, not the environment. Incus is what settles it.
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    mapping_path, commands = reconcile_fixture(
+        tmp_path,
+        monkeypatch,
+        entries={
+            "gone": {"path": str(checkout), "host_port": 52901, "commit": "b69d287d32f6aaaa"},
+            "kept": {"path": str(checkout), "host_port": 52902, "branch": "fix/two"},
+        },
+        projects=("avr-wt-kept",),
+        instances=({"name": "avibe-wt-kept", "status": "Running"},),
+    )
+
+    exit_code = incus_regression.cmd_reconcile(
+        argparse.Namespace(yes=True, dry_run=False, remote=None)
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "gone  port 52901, detached at b69d287d32f6" in out
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert set(payload["worktrees"]) == {"kept"}
+    # Only metadata changes. The environment Incus still holds keeps running.
+    assert not any("delete" in command for command in commands)
+
+
+def test_reconcile_dry_run_keeps_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mapping_path, _ = reconcile_fixture(
+        tmp_path,
+        monkeypatch,
+        entries={"gone": {"path": str(tmp_path / "checkout"), "host_port": 52903}},
+        projects=(),
+        instances=(),
+    )
+
+    exit_code = incus_regression.cmd_reconcile(
+        argparse.Namespace(yes=False, dry_run=True, remote=None)
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Re-run with --yes" in out
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert set(payload["worktrees"]) == {"gone"}
+
+
+def test_reconcile_requires_yes_before_dropping_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mapping_path, _ = reconcile_fixture(
+        tmp_path,
+        monkeypatch,
+        entries={"gone": {"path": str(tmp_path / "checkout"), "host_port": 52904}},
+        projects=(),
+        instances=(),
+    )
+
+    with pytest.raises(incus_regression.RegressionError):
+        incus_regression.cmd_reconcile(argparse.Namespace(yes=False, dry_run=False, remote=None))
+
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert set(payload["worktrees"]) == {"gone"}
+
+
+def test_reconcile_enumerates_through_a_real_listing_under_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `Runner.names` answers [] for a dry run by contract. If reconcile enumerated
+    # through a dry-run runner it would read every recorded environment as gone
+    # and offer to forget all of it, so it must build its own real runner.
+    seen = []
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            seen.append(dry_run)
+            self.dry_run = dry_run
+
+        def names(self, command, *, what):
+            return ["avr-wt-kept"]
+
+        def records(self, command, *, what):
+            return [{"name": "avibe-wt-kept", "status": "Running"}]
+
+    repo = tmp_path / "repo"
+    (repo / ".runtime" / "incus-regression").mkdir(parents=True)
+    (repo / ".runtime" / "incus-regression" / "worktrees.json").write_text(
+        json.dumps({"schema_version": 1, "worktrees": {}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+
+    exit_code = incus_regression.cmd_reconcile(
+        argparse.Namespace(yes=False, dry_run=True, remote=None)
+    )
+
+    assert exit_code == 0
+    assert seen == [False]
+    assert "avibe-wt-kept  [Running]" in capsys.readouterr().out
 
 
 def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

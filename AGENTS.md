@@ -112,9 +112,15 @@ Hard rules:
   preparation, readiness checks, Show Runtime setup, metadata, and cleanup
 - `master` is the long-running unified four-platform environment; keep it online,
   preserve product state, sync source, and restart the service in place
-- `worktree` targets are temporary isolated environments; delete with
-  `python3 scripts/incus_regression.py delete --target worktree --yes` or
-  `cleanup-stale --yes` when merged, abandoned, or stale
+- `worktree` targets are temporary isolated environments; delete each one
+  explicitly with
+  `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
+  when merged, abandoned, or stale
+- `reconcile` lists every worktree environment Incus holds — including ones
+  created outside the runner, which no metadata-driven command can see — and
+  forgets metadata rows whose environment is already gone. It never deletes an
+  environment: no recorded field can prove one is unwanted, so that call stays
+  with the operator
 - never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
   Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
 - after any regression update, verify service health before reporting success

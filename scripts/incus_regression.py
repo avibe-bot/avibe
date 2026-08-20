@@ -119,8 +119,8 @@ class Runner:
             kwargs["input"] = input_text
         return subprocess.run(list(command), **kwargs)
 
-    def names(self, command: Sequence[str], *, what: str) -> list[str]:
-        """Return the names the daemon enumerated, or raise if it could not answer.
+    def records(self, command: Sequence[str], *, what: str) -> list[dict]:
+        """Return the objects the daemon enumerated, or raise if it could not answer.
 
         Existence must come from a listing the daemon actually completed, never
         from a lookup's exit status: `incus` exits non-zero both when an object
@@ -140,7 +140,15 @@ class Runner:
             raise RegressionError(f"Could not parse the {what} listing returned by Incus: {exc}") from exc
         if not isinstance(payload, list):
             raise RegressionError(f"Unexpected {what} listing returned by Incus: {type(payload).__name__}")
-        return [item["name"] for item in payload if isinstance(item, dict) and isinstance(item.get("name"), str)]
+        return [item for item in payload if isinstance(item, dict)]
+
+    def names(self, command: Sequence[str], *, what: str) -> list[str]:
+        """The names from `records`, for callers that only ask whether something exists."""
+        return [
+            item["name"]
+            for item in self.records(command, what=what)
+            if isinstance(item.get("name"), str)
+        ]
 
 
 def incus(*args: str, project: str | None = None) -> list[str]:
@@ -459,6 +467,83 @@ def mapped_worktree_port(repo_root: Path, slug: str) -> int | None:
     return None
 
 
+@dataclass(frozen=True)
+class WorktreeEnvironment:
+    """One worktree regression environment, as Incus has it and as metadata describes it."""
+
+    slug: str
+    project: str
+    instance: str
+    present: bool
+    entry: dict | None
+
+
+def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None) -> list[WorktreeEnvironment]:
+    """Every worktree regression environment, enumerated from Incus and annotated by metadata.
+
+    Incus is the authority on what exists; `worktrees.json` only describes what
+    the runner happened to record. Walking the metadata instead cannot see an
+    environment created outside the runner, so a running instance stays
+    invisible to every command that works from the mapping.
+    """
+    entries = load_worktree_mapping(repo_root).get("worktrees") or {}
+    command = incus("project", "list", *optional_remote_ref(remote), "--format", "json")
+    present = {
+        name[len(WORKTREE_PROJECT_PREFIX):]
+        for name in runner.names(command, what="Incus projects")
+        if name.startswith(WORKTREE_PROJECT_PREFIX)
+    }
+    environments = []
+    for slug in sorted(set(entries) | present):
+        entry = entries.get(slug)
+        entry = entry if isinstance(entry, dict) else None
+        environments.append(
+            WorktreeEnvironment(
+                slug=slug,
+                project=str((entry or {}).get("project") or project_name_for(WORKTREE_TARGET, slug)),
+                instance=str((entry or {}).get("instance") or instance_name_for(WORKTREE_TARGET, slug)),
+                present=slug in present,
+                entry=entry,
+            )
+        )
+    return environments
+
+
+def worktree_instance_states(runner: Runner, *, remote: str | None) -> dict[str, str]:
+    """Map each worktree instance name to the state Incus reports for it."""
+    command = incus("list", *optional_remote_ref(remote), "--all-projects", "--format", "json")
+    states = {}
+    for item in runner.records(command, what="Incus instances"):
+        name = item.get("name")
+        if isinstance(name, str) and name.startswith(WORKTREE_INSTANCE_PREFIX):
+            states[name] = str(item.get("status") or "Unknown")
+    return states
+
+
+def describe_worktree_entry(entry: dict | None) -> str:
+    if entry is None:
+        return "no runner metadata"
+    parts = []
+    if isinstance(entry.get("host_port"), int):
+        parts.append(f"port {entry['host_port']}")
+    branch = str(entry.get("branch") or "").strip()
+    commit = str(entry.get("commit") or "").strip()
+    if branch:
+        parts.append(f"branch {branch}")
+    elif commit:
+        parts.append(f"detached at {commit[:12]}")
+    else:
+        parts.append("no branch or commit recorded")
+    path = str(entry.get("path") or "").strip()
+    if path:
+        # Provenance only. This is the checkout the runner was invoked from, not
+        # the environment's identity: several environments created from one
+        # checkout all record the same path, so its presence on disk says
+        # nothing about whether any of them is still wanted.
+        parts.append(f"created from {path}")
+    return ", ".join(parts)
+
+
 def resolve_target(
     args: argparse.Namespace,
     repo_root: Path,
@@ -635,7 +720,20 @@ def yaml_block(value: str, indent: int = 6) -> str:
     return "\n".join(prefix + line if line else prefix for line in value.splitlines())
 
 
+def ui_device_endpoints(target: RegressionTarget) -> dict[str, str]:
+    """The `listen`/`connect` pair the `ui` proxy device must forward.
+
+    One owner for these strings, so the create, update, and compare paths cannot
+    drift into disagreeing about what "already correct" means.
+    """
+    return {
+        "listen": tcp_endpoint(target.ui_host, target.host_port),
+        "connect": f"tcp:127.0.0.1:{target.ui_port}",
+    }
+
+
 def proxy_device_args(target: RegressionTarget, *, remote: str | None = None) -> list[str]:
+    endpoints = ui_device_endpoints(target)
     return [
         "config",
         "device",
@@ -643,13 +741,70 @@ def proxy_device_args(target: RegressionTarget, *, remote: str | None = None) ->
         remote_ref(remote, target.instance),
         "ui",
         "proxy",
-        f"listen={tcp_endpoint(target.ui_host, target.host_port)}",
-        f"connect=tcp:127.0.0.1:{target.ui_port}",
+        f"listen={endpoints['listen']}",
+        f"connect={endpoints['connect']}",
     ]
 
 
+def observed_ui_endpoints(runner: Runner, target: RegressionTarget, *, remote: str | None) -> dict[str, str] | None:
+    """Return the instance's current `ui` endpoints, or None when they are unknown.
+
+    A non-zero exit answers both "no such device" and "could not reach the
+    daemon", and an empty value answers both "unset" and "dry run", so none of
+    them are treated as an observation. Unknown means the caller rebuilds the
+    device rather than acting on a shape it never actually saw.
+    """
+    observed: dict[str, str] = {}
+    for key in ("listen", "connect"):
+        result = runner.run(
+            incus(
+                "config",
+                "device",
+                "get",
+                remote_ref(remote, target.instance),
+                "ui",
+                key,
+                project=target.project,
+            ),
+            check=False,
+            capture=True,
+        )
+        value = (result.stdout or "").strip()
+        if result.returncode != 0 or not value:
+            return None
+        observed[key] = value
+    return observed
+
+
 def ensure_proxy_device(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    """Make the instance's `ui` proxy device forward the target's endpoints.
+
+    Removing the device before re-adding it is the destructive way to do this: a
+    failed `add` aborts the run with the instance left holding no `ui` device at
+    all, so a routine re-run of `up` could take the Web UI away. The device is
+    therefore left alone when it already matches, and updated in place when it
+    does not; only an unobservable device is rebuilt.
+    """
     instance_ref = remote_ref(remote, target.instance)
+    desired = ui_device_endpoints(target)
+    observed = observed_ui_endpoints(runner, target, remote=remote)
+    if observed == desired:
+        print(f"ui proxy device already forwards {desired['listen']} -> {desired['connect']}")
+        return
+    if observed is not None:
+        runner.run(
+            incus(
+                "config",
+                "device",
+                "set",
+                instance_ref,
+                "ui",
+                f"listen={desired['listen']}",
+                f"connect={desired['connect']}",
+                project=target.project,
+            )
+        )
+        return
     runner.run(incus("config", "device", "remove", instance_ref, "ui", project=target.project), check=False)
     runner.run(incus(*proxy_device_args(target, remote=remote), project=target.project))
 
@@ -1868,29 +2023,70 @@ def cmd_delete(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_cleanup_stale(args: argparse.Namespace) -> int:
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    """Report what Incus holds, and drop metadata for environments it no longer has.
+
+    This replaces the old `cleanup-stale`, which deleted an environment whose
+    recorded worktree path had disappeared. That criterion could not work: the
+    path records the checkout the runner was invoked from, so several
+    environments created from one checkout share it, and it keeps existing after
+    the worktree they were built for is gone. It therefore deleted running
+    environments that were still wanted and kept ones nobody wanted.
+
+    Nothing else about a regression environment says whether it is still wanted
+    either -- a slug is chosen by the caller and an environment may sit on a
+    detached HEAD with no branch to check for a merge -- so this command does not
+    guess. It shows every environment with its state and provenance, leaves
+    container deletion to an explicit `delete --slug`, and only ever removes
+    metadata rows Incus has already outlived.
+    """
     repo_root = current_repo_root()
-    payload = load_worktree_mapping(repo_root)
-    stale = []
-    for slug, item in (payload.get("worktrees") or {}).items():
-        path = Path(str(item.get("path", "")))
-        if not path.exists():
-            stale.append((slug, item))
-    if not stale:
-        print("No stale worktree regression environments found.")
+    require_incus()
+    # Enumeration must be a real listing even under --dry-run: `Runner.names`
+    # answers [] for a dry run by contract, which would report every existing
+    # environment as untracked metadata and offer to forget all of it. --dry-run
+    # withholds the mapping write instead, which is this command's only change.
+    runner = Runner(dry_run=False)
+    environments = worktree_environments(runner, repo_root, remote=args.remote)
+    states = worktree_instance_states(runner, remote=args.remote)
+
+    if not environments:
+        print("No worktree regression environments exist.")
         return 0
-    if not args.yes and not args.dry_run:
-        raise RegressionError("Stale worktree cleanup requires --yes.")
-    runner = Runner(dry_run=args.dry_run)
-    for slug, item in stale:
-        project = str(item.get("project") or project_name_for(WORKTREE_TARGET, slug))
-        instance = str(item.get("instance") or instance_name_for(WORKTREE_TARGET, slug))
-        runner.run(incus("delete", remote_ref(args.remote, instance), "--force", project=project), check=False)
-        runner.run(incus("project", "delete", remote_ref(args.remote, project)), check=False)
-        if not args.dry_run:
-            payload["worktrees"].pop(slug, None)
-    if not args.dry_run:
-        save_worktree_mapping(repo_root, payload)
+
+    live = [env for env in environments if env.present]
+    forgotten = [env for env in environments if not env.present]
+
+    if live:
+        print(f"{len(live)} worktree regression environment(s) exist in Incus:")
+        for env in live:
+            state = states.get(env.instance, "Unknown")
+            print(f"  {env.instance}  [{state}]  {describe_worktree_entry(env.entry)}")
+        print()
+        # Deletion stays explicit and per-environment. `delete` derives the
+        # project and instance from the slug by naming convention, so it reaches
+        # an environment with no metadata just as well as a tracked one.
+        print("Delete any of them with:")
+        for env in live:
+            print(f"  python3 scripts/incus_regression.py delete --target worktree --slug {env.slug} --yes")
+
+    if not forgotten:
+        return 0
+    if live:
+        print()
+    print(f"{len(forgotten)} metadata entr(ies) describe environments Incus no longer has:")
+    for env in forgotten:
+        print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
+    if args.dry_run:
+        print("Re-run with --yes to drop them and release their reserved host ports.")
+        return 0
+    if not args.yes:
+        raise RegressionError("Dropping stale metadata entries requires --yes.")
+    payload = load_worktree_mapping(repo_root)
+    for env in forgotten:
+        (payload.get("worktrees") or {}).pop(env.slug, None)
+    save_worktree_mapping(repo_root, payload)
+    print(f"Dropped {len(forgotten)} stale metadata entr(ies). No instance was deleted.")
     return 0
 
 
@@ -1972,10 +2168,13 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--yes", action="store_true")
         sub.set_defaults(func=func)
 
-    cleanup = subparsers.add_parser("cleanup-stale", help="Delete environments for missing worktree paths.")
-    add_common(cleanup)
-    cleanup.add_argument("--yes", action="store_true")
-    cleanup.set_defaults(func=cmd_cleanup_stale)
+    reconcile = subparsers.add_parser(
+        "reconcile",
+        help="List worktree environments Incus holds, and forget metadata for ones it no longer has.",
+    )
+    add_common(reconcile)
+    reconcile.add_argument("--yes", action="store_true")
+    reconcile.set_defaults(func=cmd_reconcile)
     return parser
 
 
@@ -1986,6 +2185,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return args.func(args)
     except RegressionError as exc:
         print(str(exc), file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        # A failing `check=True` step is an expected outcome here -- a busy host
+        # port, a device Incus refuses, a daemon that went away mid-run. Report
+        # which command failed instead of unwinding a traceback over it.
+        print(f"Command failed with exit code {exc.returncode}: {shlex.join(exc.cmd)}", file=sys.stderr)
         return 1
 
 
