@@ -14337,6 +14337,10 @@ def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) ->
     ``vibe runtime prepare --force`` must reinstall rather than ask. Currency is
     the default; repair stays available on request, exactly as it is for the
     Show Runtime, tmux, and git phases.
+
+    Only an explicit ``up_to_date`` verdict may report ready. Any other verdict
+    that installed nothing means currency was not established, not that it holds,
+    so prepare installs instead of claiming a fact it never checked.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
@@ -14346,21 +14350,35 @@ def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) ->
         if force:
             return api.ensure_askill_installed(force=True)
         result = api.refresh_askill_if_stale()
+        if not (result.get("ok") and result.get("action") is None):
+            return result
+        if result.get("reason") != "up_to_date":
+            # The owner skipped without establishing currency — today that is
+            # ``latest_unavailable``, when the upstream version probe failed.
+            # Prepare is the chokepoint that must *make* the dependency current,
+            # so with no evidence either way it does what it did before this fast
+            # path existed and installs. The probe and the askill.sh installer
+            # are independent paths: a rate-limited or blipped version lookup
+            # says nothing about whether the install would succeed, and reporting
+            # ready off the back of it would claim currency we never checked.
+            # Only ``up_to_date`` may report ready, so a skip reason added later
+            # takes this branch rather than inheriting a false pass.
+            refreshed = api.ensure_askill_installed(force=True)
+            refreshed["action"] = "refresh_currency_unknown"
+            return refreshed
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
-    if result.get("ok") and not result.get("action"):
-        # No install was attempted, so askill was already current. Report that as
-        # ready rather than skipped, so prepare's dependency lines read the same
-        # way as the pinned providers when nothing needed doing.
-        status = result.get("status") or {}
-        return {
-            "ok": True,
-            "installed": True,
-            "changed": False,
-            "path": status.get("path"),
-            "version": status.get("version"),
-        }
-    return result
+    # Already current, and the owner said so: report ready rather than skipped so
+    # prepare's dependency lines read the same way as the pinned providers when
+    # nothing needed doing.
+    status = result.get("status") or {}
+    return {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": status.get("path"),
+        "version": status.get("version"),
+    }
 
 
 def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> dict:

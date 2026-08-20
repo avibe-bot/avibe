@@ -391,6 +391,35 @@ def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeyp
     assert avault["version"] == api.AVAULT_VERSION
 
 
+@pytest.mark.parametrize("reason", ["latest_unavailable", "a_reason_invented_after_this_test"])
+def test_runtime_prepare_installs_when_currency_was_not_established(monkeypatch, reason):
+    # "I did not install" and "it is current" are different facts, and prepare
+    # may only report ready for the second. `up_to_date` is the one verdict that
+    # states it; every other non-install verdict — the upstream probe failing
+    # today, whatever is added later — means unknown, so prepare installs rather
+    # than printing `askill ready.` off a check that never happened. Keyed on the
+    # verdict rather than on a list of reasons, so a reason added later inherits
+    # the safe branch instead of a false pass.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.setattr(
+        api,
+        "refresh_askill_if_stale",
+        lambda: {"ok": True, "skipped": True, "reason": reason, "status": {"path": "/x/askill", "version": "0.1.14"}},
+    )
+    forced = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: forced.append(force) or {"ok": True, "installed": True, "changed": True},
+    )
+
+    out = cli._ensure_askill_during_prepare()
+
+    assert forced == [True], "an unestablished currency must reach the installer"
+    assert out["changed"] is True
+    assert out["action"] == "refresh_currency_unknown"
+
+
 def test_runtime_prepare_force_still_reinstalls_current_managed_deps(monkeypatch):
     # The mirror of the test above, and the boundary of the change: making the
     # ordinary prepare cheap must not take the repair away. A corrupted binary
