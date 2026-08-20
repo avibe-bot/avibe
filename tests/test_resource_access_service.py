@@ -1641,3 +1641,64 @@ def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> N
                 )
     finally:
         engine.dispose()
+
+
+def test_migration_defers_to_a_disagreeing_durable_binding_row(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A binding row from a peer's reclassification outranks the config read.
+
+    Regression: PR #1606 round 1 — the migration running from a bare
+    ``ensure_sqlite_state()`` must not bind ambiguous snapshots to a config
+    kind that the durable binding row does not (yet) agree with.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path, instance_kind="personal")
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        binding_row = json.dumps(
+            {
+                "schema_version": 1,
+                "state": "ready",
+                "instance_id": "same-instance",
+                "instance_kind": "organization",
+                "generation": 3,
+                "updated_at": "1700000000",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            connection.execute(
+                state_meta.insert().values(
+                    key="remote_access.instance_binding.v1",
+                    value_json=binding_row,
+                    updated_at="1700000000",
+                )
+            )
+            counts = _migration_counts(_run_sqlite_data_migrations(connection))
+            marker = json.loads(_stored_migration_marker(connection))
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+
+        # No snapshot was bound and the opportunity stays retriable.
+        assert counts == _EMPTY_MIGRATION_COUNTS
+        assert marker["state"] == "pending"
+        assert marker["instance_id"] == "same-instance"
+        snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+        assert "vibe_instance_kind" not in snapshot
+    finally:
+        engine.dispose()

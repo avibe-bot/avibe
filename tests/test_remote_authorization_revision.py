@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import itertools
 import threading
 import time
 from typing import Any
@@ -1216,7 +1217,10 @@ def test_refresh_backoff_starts_when_the_network_request_finishes(
     identity = remote_access.parse_session_identity(config, _organization_cookie(config))
     assert identity is not None
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *args, **kwargs: 42)
-    monotonic_values = iter((100.0, 110.0, 110.05, 110.1, 110.15, 110.2))
+    monotonic_values = itertools.chain(
+        (100.0, 110.0, 110.05, 110.1, 110.15),
+        itertools.repeat(110.2),
+    )
     monkeypatch.setattr(remote_access.time, "monotonic", lambda: next(monotonic_values))
     calls = 0
 
@@ -2273,3 +2277,91 @@ def test_trusted_local_access_ignores_hosted_revision_state(monkeypatch, tmp_pat
 
     assert response.status_code == 200
     assert response.get_json()["runtime"]["default_cwd"] == "."
+
+
+def test_denied_response_during_reconciliation_does_not_persist_revoked(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r1: a 403 racing a same-generation reconciliation
+    must not persist a revoked row the completed binding then trips over."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    # A reconciliation begins BEFORE the refresh starts: same generation is
+    # captured, and completing a transition does not increment it.
+    started = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    assert (
+        started["state"]
+        == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
+    )
+
+    def deny(*args, **kwargs):
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny)
+
+    result = remote_access._fetch_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        observed_revision=41,
+    )
+
+    assert result.state == "unavailable"
+    assert result.reason == "instance_binding_changed"
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    if stored is not None:
+        assert stored.get("authorization_state") != "revoked"
+
+
+def test_known_kind_without_binding_row_bootstraps_a_durable_transition(tmp_path):
+    """Regression PR #1606 r1: upgrade path — config carries a kind but the
+    state_meta binding row is absent; the gate must earn a validated row
+    through one real transition instead of trusting the config value."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    assert (
+        remote_access_authorization_service.load_instance_binding_state(ensure=False)
+        is None
+    )
+    # The storage gate alone fails closed for a known kind with no row.
+    assert remote_access_authorization_service.binding_is_ready_for_pairing(
+        instance_id="inst_123",
+        instance_kind="personal",
+        ensure=False,
+    ) is False
+
+    # The consumer gate bootstraps one durable transition, then admits.
+    assert remote_access.binding_is_ready(config) is True
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert state is not None
+    assert state["state"] == remote_access_authorization_service.INSTANCE_BINDING_STATE_READY
+    assert state["instance_id"] == "inst_123"
+    assert state["instance_kind"] == "personal"
+    assert state["generation"] >= 1

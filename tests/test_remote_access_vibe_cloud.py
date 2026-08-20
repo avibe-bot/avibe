@@ -1792,7 +1792,15 @@ def test_pair_accepts_legacy_or_invalid_instance_kind_as_unknown(monkeypatch, re
     if reported_kind is not None:
         response["instance_kind"] = reported_kind
     monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
-    monkeypatch.setattr(remote_access.api, "save_config", lambda payload: save_payloads.append(payload) or config)
+
+    def fake_save_config(payload, **kwargs):
+        save_payloads.append(payload)
+        # Mirror the real save: the returned config carries the persisted
+        # pairing identity, which pair() verifies before publishing a binding.
+        config.remote_access.vibe_cloud.instance_id = payload["remote_access"]["vibe_cloud"]["instance_id"]
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", fake_save_config)
     monkeypatch.setattr(
         remote_access,
         "_run_pending_deferred_context_migration",
@@ -3355,3 +3363,88 @@ def test_ra_tq_030_connectivity_diagnostics_filters_dns_by_selected_family(
 
     assert result["dns"]["status"] == "unavailable"
     assert result["http2"]["status"] == "unknown"
+
+
+def test_unknown_kind_pairing_stays_usable_after_pair(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r1: no-kind pairings must not park in reconciling."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    response = {
+        "instance_id": "inst_456",
+        "client_id": "vr_client_456",
+        "issuer": "https://backend.test",
+        "authorization_endpoint": "https://backend.test/oauth/authorize",
+        "token_endpoint": "https://backend.test/oauth/token",
+        "jwks_uri": "https://backend.test/oauth/jwks.json",
+        "public_url": "https://new.avibe.bot",
+        "redirect_uri": "https://new.avibe.bot/auth/callback",
+        "tunnel_token": "tunnel-token",
+        "instance_secret": "instance-secret",
+    }
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
+
+    def fake_save_config(payload, **kwargs):
+        config.remote_access.vibe_cloud.instance_id = payload["remote_access"]["vibe_cloud"]["instance_id"]
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", fake_save_config)
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True})
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+
+    assert remote_access.pair("vrp_test", "https://backend.test")["ok"] is True
+
+    from storage import remote_access_authorization_service
+
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert state is not None
+    assert state["state"] == remote_access_authorization_service.INSTANCE_BINDING_STATE_PENDING_KIND
+    assert state["instance_id"] == "inst_456"
+    # The legacy no-kind path stays usable for every authorization consumer.
+    assert remote_access_authorization_service.binding_is_ready_for_pairing(
+        instance_id="inst_456",
+        instance_kind=None,
+        ensure=False,
+    ) is True
+    # A kind-specific bypass is still not claimable from this state.
+    assert remote_access_authorization_service.binding_is_ready_for_pairing(
+        instance_id="inst_456",
+        instance_kind="personal",
+        ensure=False,
+    ) is False
+
+
+def test_pair_refuses_to_publish_binding_for_a_replaced_instance(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r1: pairing save + transition are one critical section."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: _pair_redeem_response())
+
+    def racing_save_config(payload, **kwargs):
+        # Simulate a peer's pairing landing between our save and verification:
+        # the persisted config no longer names the instance we redeemed.
+        config.remote_access.vibe_cloud.instance_id = "inst_other"
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", racing_save_config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_reconciliation_failed"
+    assert result["detail"] == "persisted_instance_mismatch"
+
+    from storage import remote_access_authorization_service
+
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    redeemed = _pair_redeem_response()["instance_id"]
+    assert state is None or state.get("instance_id") != redeemed

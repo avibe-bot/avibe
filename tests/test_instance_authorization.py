@@ -183,6 +183,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/show-pages/session-1/availability"),
         ("POST", "/api/show-pages/session-1/access-settings/read"),
         ("POST", "/api/show-pages/session-1/access-settings/apply"),
+        # The Web UI's ShowPageShareControl reads the page it can mutate;
+        # editors must keep GET access (regression: PR #1606 round 1).
+        ("GET", "/api/show-pages/session-1"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path
