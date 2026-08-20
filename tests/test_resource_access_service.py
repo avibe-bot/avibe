@@ -6,6 +6,7 @@ from config.v2_config import V2Config
 from storage import resource_access_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
+from storage.models import resource_access_policies
 from vibe import permissions
 
 
@@ -132,6 +133,63 @@ def test_show_page_is_no_longer_a_resource_kind(monkeypatch, tmp_path) -> None:
                 with pytest.raises(resource_access_service.ResourceAccessError, match="invalid_resource_kind"):
                     call()
             assert "show_page" not in resource_access_service.RESOURCE_KINDS
+    finally:
+        engine.dispose()
+
+
+def _insert_legacy_show_page_policy(connection, *, organization_id: str | None, resource_id: str = "legacy-page") -> None:
+    """Write a retired-kind policy row exactly as an older release shipped it."""
+    now = "2026-07-27T20:00:00.000000+00:00"
+    connection.execute(
+        resource_access_policies.insert().values(
+            resource_kind="show_page",
+            resource_id=resource_id,
+            organization_id=organization_id,
+            owner_user_id="owner-1",
+            owner_email=None,
+            access_level="public",
+            created_by_user_id="owner-1",
+            updated_by_user_id="owner-1",
+            policy_revision=1,
+            last_applied_control_plane_revision=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
+def test_retired_show_page_rows_stay_inert_in_unscoped_queries(tmp_path) -> None:
+    """§3.2 kept legacy ``show_page`` policy rows in place for load safety, but
+    unscoped queries must not resurrect them: neither the sync organization
+    enumeration nor an unscoped policy listing may surface a retired kind.
+    """
+
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as connection:
+            _seed_policies(connection)
+            _insert_legacy_show_page_policy(connection, organization_id="legacy-org")
+
+        with engine.connect() as connection:
+            # The row is present on disk, so any exclusion below is a query
+            # filter, not a failed insert.
+            retained = connection.execute(
+                resource_access_policies.select().where(
+                    resource_access_policies.c.resource_kind == "show_page"
+                )
+            ).mappings().all()
+            assert len(retained) == 1
+
+            assert resource_access_service.list_resource_organization_ids(connection=connection) == ["org-1"]
+            policies = resource_access_service.list_resource_policies(connection=connection)
+            assert [policy["resource_kind"] for policy in policies] == [
+                "agent",
+                "agent",
+                "agent",
+            ]
+            assert all(policy["organization_id"] == "org-1" for policy in policies)
     finally:
         engine.dispose()
 

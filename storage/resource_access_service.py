@@ -370,6 +370,7 @@ def list_resource_organization_ids(*, connection: Connection | None = None) -> l
             str(row.organization_id)
             for row in conn.execute(
                 select(resource_access_policies.c.organization_id)
+                .where(resource_access_policies.c.resource_kind.in_(RESOURCE_KINDS))
                 .where(resource_access_policies.c.organization_id.is_not(None))
                 .distinct()
             )
@@ -435,6 +436,11 @@ def list_resource_policies(
     )
     if kind is not None:
         statement = statement.where(resource_access_policies.c.resource_kind == kind)
+    else:
+        # Unscoped listings exclude retired resource kinds so preserved legacy
+        # rows (e.g. show_page policies written by older releases) degrade
+        # silently instead of surfacing through sync or onboarding queries.
+        statement = statement.where(resource_access_policies.c.resource_kind.in_(RESOURCE_KINDS))
     if organization is not None:
         statement = statement.where(resource_access_policies.c.organization_id == organization)
     if owner is not None:
