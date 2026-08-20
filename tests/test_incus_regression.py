@@ -1408,7 +1408,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
     monkeypatch.setattr(incus_regression, "write_runtime_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "sync_source", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
-    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: set())
     monkeypatch.setattr(incus_regression, "run_prepare_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "write_metadata", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
@@ -1476,7 +1476,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
     monkeypatch.setattr(incus_regression, "write_runtime_env", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "sync_source", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
-    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: set())
     monkeypatch.setattr(incus_regression, "run_prepare_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "write_metadata", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
@@ -1535,7 +1535,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
     monkeypatch.setattr(incus_regression, "sync_source", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
     monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
-    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: set())
     monkeypatch.setattr(incus_regression, "run_prepare_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "write_metadata", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
@@ -1649,6 +1649,8 @@ def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: 
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
             if name == "require_runtime_seed_env":
                 raise SystemExit("missing")
 
@@ -1711,6 +1713,8 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
             if name == "require_runtime_seed_env":
                 raise SystemExit("missing platform")
 
@@ -1770,6 +1774,8 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
 
         return wrapper
 
@@ -1828,6 +1834,8 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
             if name == "require_runtime_seed_env":
                 raise AssertionError("dry-run should not require seed secrets")
 
@@ -1898,6 +1906,8 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
 
         return wrapper
 
@@ -1974,6 +1984,8 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
 
         return wrapper
 
@@ -2043,6 +2055,8 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
 
         return wrapper
 
@@ -2128,6 +2142,8 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     def record(name):
         def wrapper(*args, **kwargs):
             calls.append(name)
+            if name == "update_dependencies_and_build":
+                return set()
 
         return wrapper
 
@@ -2355,11 +2371,19 @@ def test_force_ui_rebuilds_with_realtime_enabled_by_default() -> None:
     assert "pip install -e ." not in joined
 
 
-def run_ui_update(*, present: set[str], force_ui: bool = False) -> str:
+def run_ui_update(
+    *,
+    present: set[str],
+    force_ui: bool = False,
+    previous_fingerprints: dict | None = None,
+    next_fingerprints: dict | None = None,
+) -> str:
     """Drive update_dependencies_and_build with a chosen instance state.
 
     ``present`` names the artifacts a sync left behind: ``node_modules`` and/or
-    ``dist``. Every other command succeeds.
+    ``dist``. Every other command succeeds. The fingerprints default to a pair
+    that matches, so a caller that cares only about instance state gets the
+    "nothing changed" case.
     """
     commands: list[str] = []
 
@@ -2386,8 +2410,8 @@ def run_ui_update(*, present: set[str], force_ui: bool = False) -> str:
     incus_regression.update_dependencies_and_build(
         RecordingRunner(),
         target,
-        previous_fingerprints=dict(fingerprints),
-        next_fingerprints=dict(fingerprints),
+        previous_fingerprints=dict(previous_fingerprints if previous_fingerprints is not None else fingerprints),
+        next_fingerprints=dict(next_fingerprints if next_fingerprints is not None else fingerprints),
         force_deps=False,
         build_ui=True,
         force_ui=force_ui,
@@ -2453,6 +2477,119 @@ def test_missing_ui_dist_overrides_no_build_ui_before_editable_install() -> None
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
     assert "cd ui && npm ci" in joined
     assert build_index < install_index
+
+
+def reconcile_update(*, build_ui: bool, present: set[str]) -> set[str]:
+    """The keys ``update_dependencies_and_build`` reports it reconciled."""
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            if "ui/node_modules/.package-lock.json" in joined:
+                return subprocess.CompletedProcess(command, 0 if "node_modules" in present else 1)
+            if "test -d ui/dist" in joined:
+                return subprocess.CompletedProcess(command, 0 if "dist" in present else 1)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    return incus_regression.update_dependencies_and_build(
+        RecordingRunner(),
+        target,
+        previous_fingerprints={"python": "p", "ui_deps": "old", "ui_source": "old"},
+        next_fingerprints={"python": "p", "ui_deps": "new", "ui_source": "new"},
+        force_deps=False,
+        build_ui=build_ui,
+        force_ui=False,
+        remote=None,
+    )
+
+
+def test_a_normal_update_reconciles_every_fingerprint_it_records(tmp_path: Path) -> None:
+    """Seeded from the real key set, so a fingerprint added later is covered.
+
+    Listing the keys here instead would pass forever while the new one silently
+    went unreconciled.
+    """
+    (tmp_path / "ui").mkdir()
+    every_key = set(incus_regression.compute_fingerprints(tmp_path))
+
+    reconciled = reconcile_update(build_ui=True, present={"node_modules", "dist"})
+
+    # ``show_runtime`` belongs to prepare_show_runtime, which cmd_up runs
+    # unconditionally; everything else is this function's to reconcile.
+    assert reconciled | {"show_runtime"} == every_key
+
+
+def test_no_build_ui_does_not_claim_the_ui_artifacts_it_never_touched() -> None:
+    reconciled = reconcile_update(build_ui=False, present={"node_modules", "dist"})
+
+    assert reconciled == {"python"}
+
+
+def test_no_build_ui_still_claims_a_ui_it_had_to_build_anyway() -> None:
+    """A missing dist overrides --no-build-ui, and then the record is honest."""
+    reconciled = reconcile_update(build_ui=False, present={"node_modules"})
+
+    assert reconciled == {"python", "ui_deps", "ui_source"}
+
+
+def test_an_unreconciled_fingerprint_keeps_the_value_that_described_the_artifact() -> None:
+    """The recorded fingerprint describes the artifact, not the synced source.
+
+    Blessing the new source here is what would let the next update skip
+    ``npm ci`` against a dependency tree installed from a different lockfile.
+    """
+    recorded = incus_regression.reconciled_fingerprints(
+        {"python": "p1", "ui_deps": "d1", "ui_source": "s1"},
+        {"python": "p2", "ui_deps": "d2", "ui_source": "s2"},
+        {"python"},
+    )
+
+    assert recorded == {"python": "p2", "ui_deps": "d1", "ui_source": "s1"}
+
+
+def test_an_unreconciled_fingerprint_with_no_history_stays_absent() -> None:
+    """Absent reads as "rebuild", which is the safe answer for a first run."""
+    recorded = incus_regression.reconciled_fingerprints(
+        {},
+        {"python": "p", "ui_deps": "d", "ui_source": "s"},
+        {"python"},
+    )
+
+    assert recorded == {"python": "p"}
+
+
+def test_a_no_build_ui_update_leaves_the_next_update_rebuilding_the_ui() -> None:
+    """The whole point, end to end across two updates.
+
+    A sync now keeps ``ui/node_modules``, so a stale tree survives a
+    ``--no-build-ui`` update. Only the fingerprint the first update recorded
+    decides whether the second one notices.
+    """
+    changed_lockfile = {"python": "p", "ui_deps": "new", "ui_source": "new"}
+    first = reconcile_update(build_ui=False, present={"node_modules", "dist"})
+    carried = incus_regression.reconciled_fingerprints(
+        {"python": "p", "ui_deps": "old", "ui_source": "old"},
+        changed_lockfile,
+        first,
+    )
+
+    joined = run_ui_update(
+        present={"node_modules", "dist"},
+        previous_fingerprints=carried,
+        next_fingerprints=changed_lockfile,
+    )
+
+    assert "cd ui && npm ci" in joined
+    assert "cd ui && npm run build" in joined
 
 
 def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:

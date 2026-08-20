@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Container, Iterator, Sequence
 
 try:
     import fcntl
@@ -1016,6 +1016,29 @@ def tree_hash(root: Path, *, prune: Sequence[str] = ()) -> str:
     return digest.hexdigest()
 
 
+def reconciled_fingerprints(previous: dict, current: dict, reconciled: Container[str]) -> dict:
+    """The fingerprints to record: what the artifacts on disk were built from.
+
+    A recorded fingerprint is read back as "the artifact in the instance was
+    produced from this input", which is what licenses a later update to skip
+    rebuilding it. That is only the same thing as "this input was synced" when
+    the run actually rebuilt the artifact. ``--no-build-ui`` skips the UI
+    entirely, so recording the synced source there would claim a dependency
+    tree and a bundle the instance never installed or built.
+
+    A key the run did not reconcile therefore keeps whatever the last
+    reconciliation recorded, so the next update still sees the difference. A key
+    with no previous value stays absent, which also reads as "rebuild".
+    """
+    merged = {}
+    for key, value in current.items():
+        if key in reconciled:
+            merged[key] = value
+        elif key in previous:
+            merged[key] = previous[key]
+    return merged
+
+
 def write_metadata(runner: Runner, target: RegressionTarget, repo_root: Path, fingerprints: dict, *, remote: str | None) -> None:
     payload = {
         "schema_version": 1,
@@ -1334,7 +1357,15 @@ def update_dependencies_and_build(
     build_ui: bool,
     force_ui: bool,
     remote: str | None,
-) -> None:
+) -> set[str]:
+    """Bring the instance's artifacts up to date; report which ones it reconciled.
+
+    The return value feeds ``reconciled_fingerprints``. A key belongs in it when
+    the artifact on disk now corresponds to ``next_fingerprints[key]`` -- either
+    because this run rebuilt it, or because the run skipped the rebuild
+    precisely because the fingerprint already matched. A key is absent only when
+    the run never looked, which is what ``--no-build-ui`` does to the UI.
+    """
     runner.run(root_exec(target, f"python3 -m venv {shlex.quote(VENV_DIR)} || true", remote=remote))
     runner.run(root_exec(target, f"chown -R {SERVICE_USER}:{SERVICE_USER} {shlex.quote(VENV_DIR)}", remote=remote))
     python_changed = (
@@ -1381,6 +1412,12 @@ def update_dependencies_and_build(
             print("UI source fingerprint unchanged; skipping npm run build.")
     if python_changed:
         runner.run(tenant_exec(target, f"{VENV_DIR}/bin/pip install -e .", remote=remote))
+    # ``python`` is always reconciled: it either just installed, or it was
+    # skipped because the previous fingerprint already equalled this one.
+    reconciled = {"python"}
+    if should_build_ui:
+        reconciled |= {"ui_deps", "ui_source"}
+    return reconciled
 
 
 def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
@@ -1629,7 +1666,7 @@ def cmd_up(args: argparse.Namespace) -> int:
         sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
         fingerprints = compute_fingerprints(repo_root)
         previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)
-        update_dependencies_and_build(
+        reconciled = update_dependencies_and_build(
             runner,
             target,
             previous_fingerprints=previous_fingerprints,
@@ -1639,9 +1676,18 @@ def cmd_up(args: argparse.Namespace) -> int:
             force_ui=args.force_ui,
             remote=args.remote,
         )
+        # ``prepare_show_runtime`` below is unconditional, so the run either
+        # reconciles the show runtime or fails outright.
+        reconciled = reconciled | {"show_runtime"}
         run_prepare_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
         normalize_runtime_config(runner, target, remote=args.remote)
-        write_metadata(runner, target, repo_root, fingerprints, remote=args.remote)
+        write_metadata(
+            runner,
+            target,
+            repo_root,
+            reconciled_fingerprints(previous_fingerprints, fingerprints, reconciled),
+            remote=args.remote,
+        )
         # Install updated runtime sources while the service is stopped so the
         # restarted process cannot keep serving code loaded before preparation.
         prepare_show_runtime(runner, target, remote=args.remote)
