@@ -1215,6 +1215,67 @@ def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
         engine.dispose()
 
 
+def test_typed_binding_reader_preserves_partial_identity_and_does_not_latch_read_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.instance_id = "same-instance"
+    cloud.instance_kind = "personal"
+    cloud.instance_secret = ""
+    config.save()
+
+    partial = resource_access_service._configured_resource_state()
+    assert partial.status == resource_access_service.RESOURCE_BINDING_STATE_PARTIAL
+    assert partial.instance_id == "same-instance"
+    assert partial.instance_kind == "personal"
+
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    marker = {
+        "schema_version": 2,
+        "state": "pending",
+        "instance_id": "same-instance",
+        "updated_at": "before-read-failure",
+    }
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                state_meta.insert().values(
+                    key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    value_json=json.dumps(marker),
+                    updated_at="before-read-failure",
+                )
+            )
+
+        monkeypatch.setattr(
+            V2Config,
+            "load",
+            classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(OSError("temporary read"))),
+        )
+        unavailable = resource_access_service._configured_resource_state()
+        assert unavailable.status == resource_access_service.RESOURCE_BINDING_STATE_UNAVAILABLE
+
+        with engine.begin() as connection:
+            assert resource_access_service.migrate_legacy_deferred_resource_contexts(connection) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            stored = connection.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                )
+            ).scalar_one()
+            assert json.loads(stored) == marker
+    finally:
+        engine.dispose()
+
+
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

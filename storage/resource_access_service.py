@@ -12,7 +12,7 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -46,6 +46,11 @@ SHOW_PAGE_INSTANCE_OWNERSHIP_META_KEY = "show_page_instance_ownership"
 HARNESS_ACCESS_FORBIDDEN_CODE = "harness_access_forbidden"
 SHOW_PAGE_OWNERSHIP_CONFIGURATION_UNAVAILABLE = "configuration_unavailable"
 
+RESOURCE_BINDING_STATE_UNAVAILABLE = "unavailable"
+RESOURCE_BINDING_STATE_UNPAIRED = "unpaired"
+RESOURCE_BINDING_STATE_PARTIAL = "partial"
+RESOURCE_BINDING_STATE_READY = "ready"
+
 _SHOW_PAGE_OWNERSHIP_MODES = frozenset(
     {
         "unmanaged",
@@ -56,6 +61,16 @@ _SHOW_PAGE_OWNERSHIP_MODES = frozenset(
     }
 )
 _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE = object()
+
+
+@dataclass(frozen=True)
+class ConfiguredResourceState:
+    """One coherent read of the pairing identity used by deferred resources."""
+
+    status: str
+    instance_id: str | None
+    instance_kind: str | None
+    runtime_ready: bool
 
 
 class ResourceAccessError(ValueError):
@@ -423,35 +438,79 @@ def _configured_show_page_instance() -> tuple[str, str] | None | object:
     return instance_id, cloud.instance_kind
 
 
-def _configured_resource_state() -> tuple[str | None, str | None, bool] | None | object:
-    """Return configured identity plus whether its runtime credentials are complete."""
+def _configured_resource_state() -> ConfiguredResourceState:
+    """Return one typed, fail-closed read of the configured pairing state.
+
+    ``UNAVAILABLE`` is intentionally distinct from a successfully read
+    unpaired configuration. Migration provenance must never be sealed because
+    a transient config read failed.
+    """
 
     try:
         from config.v2_config import V2Config
 
         cloud = V2Config.load().remote_access.vibe_cloud
-        instance_id = _clean_optional_string(cloud.instance_id)
+        raw_instance_id = cloud.instance_id
+        instance_id = _clean_optional_string(raw_instance_id)
+        if raw_instance_id not in (None, "") and instance_id is None:
+            return ConfiguredResourceState(
+                status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+                instance_id=None,
+                instance_kind=None,
+                runtime_ready=False,
+            )
         instance_kind = (
             cloud.instance_kind if cloud.instance_kind in {"personal", "organization"} else None
         )
-        runtime_ready = cloud.runtime_credentials() is not None
+        credentials = cloud.runtime_credentials()
     except Exception:
-        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-    if instance_id is None and instance_kind is None and not runtime_ready:
-        return None
-    return instance_id, instance_kind, runtime_ready
+        return ConfiguredResourceState(
+            status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+            instance_id=None,
+            instance_kind=None,
+            runtime_ready=False,
+        )
+
+    runtime_ready = False
+    if credentials is not None:
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return ConfiguredResourceState(
+                status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+                runtime_ready=False,
+            )
+        credential_instance_id = _clean_optional_string(credentials[1])
+        runtime_ready = instance_id is not None and credential_instance_id == instance_id
+
+    if instance_id is None:
+        return ConfiguredResourceState(
+            status=RESOURCE_BINDING_STATE_UNPAIRED,
+            instance_id=None,
+            instance_kind=instance_kind,
+            runtime_ready=False,
+        )
+    if runtime_ready and instance_kind in {"personal", "organization"}:
+        status = RESOURCE_BINDING_STATE_READY
+    else:
+        status = RESOURCE_BINDING_STATE_PARTIAL
+    return ConfiguredResourceState(
+        status=status,
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+        runtime_ready=runtime_ready,
+    )
 
 
 def _configured_resource_instance() -> tuple[str | None, str | None] | None | object:
     """Return the current complete pairing identity used to fence deferred resources."""
 
     configured = _configured_resource_state()
-    if configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE or configured is None:
-        return configured
-    instance_id, instance_kind, runtime_ready = configured
-    if not runtime_ready:
+    if configured.status == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    if configured.status != RESOURCE_BINDING_STATE_READY:
         return None
-    return instance_id, instance_kind
+    return configured.instance_id, configured.instance_kind
 
 
 def _legacy_snapshot_has_organization_context(
@@ -552,12 +611,11 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     The migration is deliberately conservative and one-shot. It needs complete
     runtime credentials and a known server-owned instance kind, and it only
     updates a legacy snapshot when its existing instance evidence or explicit
-    Organization claims agree with that pairing. Unreadable, ambiguous, or
-    stale records remain unchanged and are rejected by the runtime restore
-    checks. A marker records the first migration opportunity: a known instance
-    with an unknown kind remains pending until that same instance is
-    authoritatively classified, while a later different pairing can never
-    adopt the old records.
+    Organization claims agree with that pairing. A transient configuration read
+    is not an unpaired state: it leaves the marker untouched so the same
+    pairing can retry later. A successfully observed unpaired state is sealed,
+    while a known instance with an unknown kind remains pending until that same
+    instance is authoritatively classified.
     """
 
     empty_counts = {
@@ -582,32 +640,43 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             # duplicate key or guessing a new binding.
             return empty_counts
         marker = parsed_marker
-        if marker.get("state") not in {"pending", "completed"}:
-            marker["state"] = "completed" if marker.get("completed_at") else "pending"
+        marker_state = marker.get("state")
+        if marker_state not in {"pending", "completed", "sealed_unattributed"}:
+            marker_state = "completed" if marker.get("completed_at") else "pending"
+        # Markers written by e64/d667 used ``completed`` with no instance ID
+        # for an unpaired first opportunity. Preserve that terminal meaning;
+        # never reinterpret it as a fresh migration opportunity.
+        if marker_state == "completed" and marker.get("instance_id") is None:
+            marker_state = "sealed_unattributed"
+        marker = {**marker, "state": marker_state}
 
     configured = _configured_resource_state()
-    current_instance_id = (
-        configured[0]
-        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-        and isinstance(configured, tuple)
-        else None
-    )
+    if configured.status == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        # A read failure must not create ``pending(instance_id=None)`` or
+        # rewrite a known marker. Startup/heartbeat will retry this operation.
+        return empty_counts
+    current_instance_id = configured.instance_id
     current_kind = (
-        configured[1]
-        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-        and isinstance(configured, tuple)
-        and configured[2]
+        configured.instance_kind
+        if configured.status == RESOURCE_BINDING_STATE_READY
         else None
     )
 
-    def write_marker(*, state: str, instance_id: str | None) -> None:
+    def write_marker(
+        *,
+        state: str,
+        instance_id: str | None,
+        instance_kind: str | None = None,
+    ) -> None:
         now = _utc_now_iso()
         payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "state": state,
             "instance_id": instance_id,
             "updated_at": now,
         }
+        if instance_kind in {"personal", "organization"}:
+            payload["instance_kind"] = instance_kind
         if state == "completed":
             payload["completed_at"] = now
         values = {
@@ -628,28 +697,40 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
                 .values(**values)
             )
 
-    if marker is not None and marker.get("state") == "completed":
+    if marker is not None and marker.get("state") in {"completed", "sealed_unattributed"}:
         return empty_counts
 
-    marker_instance_id = _clean_optional_string(marker.get("instance_id")) if marker else None
+    raw_marker_instance_id = marker.get("instance_id") if marker else None
+    marker_instance_id = (
+        _clean_optional_string(raw_marker_instance_id) if marker else None
+    )
+    if marker and raw_marker_instance_id is not None and marker_instance_id is None:
+        # A malformed marker cannot prove ownership. Keep the existing value
+        # intact and fail closed rather than guessing a new pairing.
+        return empty_counts
     if marker is not None:
         if marker_instance_id is None:
             # No first pairing was available to prove ownership. A later
             # pairing must not be allowed to claim these records.
-            if current_instance_id is not None:
-                write_marker(state="completed", instance_id=None)
+            write_marker(state="sealed_unattributed", instance_id=None)
             return empty_counts
         if current_instance_id is None:
+            if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
+                write_marker(state="sealed_unattributed", instance_id=marker_instance_id)
             return empty_counts
         if current_instance_id != marker_instance_id:
-            write_marker(state="completed", instance_id=marker_instance_id)
+            write_marker(state="sealed_unattributed", instance_id=marker_instance_id)
             return empty_counts
 
-    if current_instance_id is None:
-        write_marker(state="pending", instance_id=None)
+    if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
+        write_marker(state="sealed_unattributed", instance_id=current_instance_id)
         return empty_counts
-    if current_kind not in {"personal", "organization"}:
+    if configured.status != RESOURCE_BINDING_STATE_READY:
         write_marker(state="pending", instance_id=current_instance_id)
+        return empty_counts
+    if current_instance_id is None or current_kind not in {"personal", "organization"}:
+        # Defensive guard for a future state-reader change. This branch is
+        # never authoritative enough to complete a migration.
         return empty_counts
     paired_instance_id = current_instance_id
     paired_kind = current_kind
@@ -763,7 +844,11 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             )
         )
         counts["legacy_deferred_deliveries"] += 1
-    write_marker(state="completed", instance_id=paired_instance_id)
+    write_marker(
+        state="completed",
+        instance_id=paired_instance_id,
+        instance_kind=paired_kind,
+    )
     return counts
 
 

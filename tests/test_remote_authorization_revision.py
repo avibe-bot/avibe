@@ -33,6 +33,7 @@ def _clear_authorization_refresh_process_state():
         remote_access._AUTHORIZATION_REFRESH_FAILURES.clear()
         remote_access._AUTHORIZATION_REFRESH_RESULTS.clear()
         remote_access._AUTHORIZATION_REFRESH_FLIGHTS.clear()
+        remote_access._AUTHORIZATION_REFRESH_FLIGHT_EPOCHS.clear()
     with remote_access._AUTHORIZATION_BACKGROUND_REFRESH_LOCK:
         remote_access._AUTHORIZATION_BACKGROUND_REFRESHES.clear()
     yield
@@ -40,6 +41,7 @@ def _clear_authorization_refresh_process_state():
         remote_access._AUTHORIZATION_REFRESH_FAILURES.clear()
         remote_access._AUTHORIZATION_REFRESH_RESULTS.clear()
         remote_access._AUTHORIZATION_REFRESH_FLIGHTS.clear()
+        remote_access._AUTHORIZATION_REFRESH_FLIGHT_EPOCHS.clear()
 
 
 def _paired_config(tmp_path, *, revision: int = 41) -> V2Config:
