@@ -109,6 +109,56 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
 
 
+def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatch, tmp_path):
+    """A pre-rollback release can still hand the new supervisor its target."""
+
+    tool_root = tmp_path / "uv" / "tools" / "vibe-remote"
+    python_path = tool_root / "bin" / "python"
+    vibe_path = tool_root / "bin" / "vibe"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    vibe_path.write_text(f"#!{python_path}\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.12")
+
+    target = restart_supervisor._discover_legacy_upgrade_target(trigger="upgrade", vibe_path=str(vibe_path))
+
+    assert target == RollbackTarget(
+        version="3.0.12",
+        package="vibe-remote",
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_failed_legacy_upgrade_uses_discovered_target_for_rollback(monkeypatch, tmp_path):
+    """The v3.0.12 path is recoverable even though it passed no rollback argv."""
+
+    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_discover_legacy_upgrade_target",
+        lambda **kwargs: _rollback_target(),
+    )
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="joblegacy",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        rollback_to=None,
+    )
+
+    assert rc == 1
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["rollback_to"] == "3.0.10"
+    assert status["rollback_target_source"] == "running_service"
+    assert status["rollback"]["state"] == "succeeded"
+    assert armed.observed_by_the_rolled_back_version == [["before the upgrade"]]
+
+
 def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

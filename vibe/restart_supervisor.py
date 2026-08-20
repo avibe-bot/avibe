@@ -6,6 +6,8 @@ import logging
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,12 +24,15 @@ from config import paths
 from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
 from vibe.upgrade import (
+    PACKAGE_NAME,
     RollbackTarget,
+    _names_a_published_release,
     build_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    installed_package_name,
 )
 
 
@@ -85,6 +90,71 @@ def _ui_is_serving(started: StartedRuntime) -> bool:
         return False
     host, port = started.ui_health_target
     return runtime.wait_for_ui_server(host, port, timeout=_ROLLBACK_UI_READY_TIMEOUT_SECONDS)
+
+
+def _running_ui_version() -> str | None:
+    """Read the version that is still serving while an upgrade is being staged.
+
+    Releases before the rollback protocol cannot pass a target into the detached
+    supervisor. The old service is still alive when that supervisor starts, so
+    its own version endpoint is the last authoritative answer before the old
+    install is stopped and replaced.
+    """
+
+    from core.services import settings as settings_service
+
+    config = settings_service.load_config(default_factory=settings_service.default_config)
+    host = runtime.effective_ui_bind_host(config)
+    if host in {"0.0.0.0", ""}:
+        host = "127.0.0.1"
+    elif host in {"::", "::0"}:
+        host = "::1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    url = f"http://{host}:{config.ui.setup_port}/api/version"
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, TypeError, urllib.error.URLError):
+        return None
+    version = payload.get("current") if isinstance(payload, dict) else None
+    return version if isinstance(version, str) and _names_a_published_release(version) else None
+
+
+def _legacy_service_launcher(vibe_path: str | None) -> runtime.ServiceLauncher:
+    """Recover the launcher that existed before the package-manager replace."""
+
+    fallback = runtime.current_service_launcher()
+    if not vibe_path:
+        return fallback
+
+    try:
+        script = Path(vibe_path).resolve()
+        shebang = script.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        python = shebang[2:].strip().split()[0] if shebang.startswith("#!") else ""
+        python_path = Path(python)
+        if not python or not python_path.is_file():
+            return fallback
+        package_root = python_path.parent.parent / "lib"
+        main_candidates = sorted(package_root.glob("python*/site-packages/vibe/service_main.py"))
+        if not main_candidates:
+            return fallback
+        return runtime.ServiceLauncher(python=str(python_path), main=str(main_candidates[0]))
+    except (OSError, IndexError, ValueError):
+        return fallback
+
+
+def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> RollbackTarget | None:
+    """Build a rollback target for an upgrade initiated by an older release."""
+
+    if trigger != "upgrade":
+        return None
+    version = _running_ui_version()
+    if version is None:
+        return None
+    launcher = _legacy_service_launcher(vibe_path)
+    package = installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
+    return RollbackTarget(version=version, package=package, launcher=launcher)
 
 
 def _now_iso() -> str:
@@ -586,6 +656,19 @@ def _run_restart_job(
     safe_cwd = get_safe_cwd()
     _prune_restart_logs()
 
+    rollback_target_source = "explicit" if rollback_to else None
+    rollback_discovery_error: str | None = None
+    if rollback_to is None and trigger == "upgrade":
+        try:
+            rollback_to = _discover_legacy_upgrade_target(trigger=trigger, vibe_path=vibe_path)
+            if rollback_to is not None:
+                rollback_target_source = "running_service"
+        except Exception as exc:
+            # Older releases do not know how to carry a target. Discovery is a
+            # compatibility aid, not a reason to turn an ordinary restart into
+            # a new failure; the original upgrade failure remains authoritative.
+            rollback_discovery_error = str(exc)
+
     with log_path.open("a", encoding="utf-8") as log:
         def write(message: str) -> None:
             log.write(f"{_now_iso()} {message}\n")
@@ -669,6 +752,8 @@ def _run_restart_job(
             "rollback_to": rollback_to.version if rollback_to else None,
             "rollback_package": rollback_to.package if rollback_to else None,
             "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
+            "rollback_target_source": rollback_target_source,
+            "rollback_discovery_error": rollback_discovery_error,
             "old_pid": old_pid,
             "new_pid": None,
             "log_path": str(log_path),
