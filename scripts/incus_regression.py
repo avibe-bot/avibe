@@ -876,8 +876,21 @@ def sync_source(
         # and ``npm run build`` to recreate on every update whether or not the
         # front end changed. Whether they are still valid is a fingerprint
         # question, answered in update_dependencies_and_build.
+        #
+        # Preservation covers only what the archive does not carry. ``tar``
+        # extracts over what is already there and never deletes, so keeping a
+        # directory the host also ships would leave the files the host deleted
+        # -- a stable-name public asset, a manifest -- served alongside the new
+        # bundle. Whatever the archive supplies has to end up equal to the
+        # host's copy, which means the old one goes first. Which of these the
+        # archive supplies is read off the exclusion table rather than restated
+        # here, so the two cannot drift.
         quoted_ui = shlex.quote(f"{SOURCE_DIR}/ui")
-        keep = " ".join(f"! -name {shlex.quote(name)}" for name in UI_NON_SOURCE_DIRS)
+        keep = " ".join(
+            f"! -name {shlex.quote(name)}"
+            for name in UI_NON_SOURCE_DIRS
+            if should_exclude(f"ui/{name}", include_ui_dist=include_ui_dist)
+        )
         wipe = (
             f"find {quoted_source} -mindepth 1 -maxdepth 1 ! -name ui -exec rm -rf {{}} + && "
             f"if [ -d {quoted_ui} ]; then find {quoted_ui} -mindepth 1 -maxdepth 1 {keep} -exec rm -rf {{}} +; fi"
@@ -972,15 +985,15 @@ def file_hash(repo_root: Path, relative_paths: Sequence[str]) -> str:
 
 
 def compute_fingerprints(repo_root: Path) -> dict:
-    # ``ui_source`` covers everything under ``ui/`` that is not an output or a
-    # dependency tree, rather than a list of the build inputs we happened to
-    # think of. The list form silently missed ``postcss.config.js``,
-    # ``eslint.config.js`` and ``ui/scripts/``; a build input added tomorrow is
-    # covered here without anyone remembering to extend a literal.
+    # ``ui_source`` covers the files the UI build reads, rather than a list of
+    # the build inputs we happened to think of. The list form silently missed
+    # ``postcss.config.js``, ``eslint.config.js`` and ``ui/scripts/``; a build
+    # input added tomorrow is covered without anyone remembering to extend a
+    # literal, including the ones that live outside ``ui/``.
     return {
         "python": file_hash(repo_root, ["pyproject.toml", "uv.lock"]),
         "ui_deps": file_hash(repo_root, ["ui/package.json", "ui/package-lock.json"]),
-        "ui_source": tree_hash(repo_root / "ui", prune=UI_NON_SOURCE_DIRS),
+        "ui_source": ui_source_hash(repo_root),
         "show_runtime": "|".join(
             [
                 regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
@@ -1013,6 +1026,58 @@ def tree_hash(root: Path, *, prune: Sequence[str] = ()) -> str:
     for path in sorted(files):
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def ui_external_build_inputs(repo_root: Path) -> list[str]:
+    """Repo-relative paths outside ``ui/`` that the UI bundle is built from.
+
+    ``ui_source`` licenses skipping ``npm run build``, so it has to cover the
+    files the build reads. ``ui/`` is where most of them live, not what they
+    are: ``ui/src/lib/messageTypes.ts`` imports the repo-root
+    ``vibe/message_types.json`` and Vite inlines it into the browser bundle, so
+    a commit touching only that catalog changes the artifact while leaving a
+    ``ui/``-only hash identical -- the backend would get the new message-type
+    policies and the front end would keep applying the old ones.
+
+    The repository already declares this set and already keeps the declaration
+    honest, so this reads it rather than deriving it a second way. The
+    ``ui-builder`` stage builds the UI from a context holding only ``ui/``, so
+    every escaping input needs its own ``COPY`` there, and
+    ``ui/scripts/validate-out-of-tree-imports.mjs`` -- part of ``npm run
+    build``, which CI runs on every pull request -- fails the build when those
+    ``COPY`` lines and the real imports disagree. An empty result is therefore a
+    real answer rather than a scan that broke: it means the stage declares
+    nothing outside ``ui/``.
+    """
+    stage = next(
+        (
+            block
+            for block in re.split(r"^FROM ", (repo_root / "Dockerfile").read_text(encoding="utf-8"), flags=re.MULTILINE)
+            if re.match(r"^\S+\s+AS\s+ui-builder\b", block, flags=re.IGNORECASE)
+        ),
+        None,
+    )
+    if stage is None:
+        # Failing here beats returning a smaller input set than the build has:
+        # a fingerprint missing an input reads back as "the UI is unchanged"
+        # and skips the rebuild for good.
+        raise RuntimeError("Dockerfile no longer declares a ui-builder stage, so the UI build inputs are unknown")
+    found = set()
+    for arguments in re.findall(r"^COPY\s+(.+)$", stage, flags=re.MULTILINE):
+        sources = [word for word in arguments.split()[:-1] if not word.startswith("--")]
+        found.update(source.rstrip("/") for source in sources if not source.startswith("ui/"))
+    return sorted(found)
+
+
+def ui_source_hash(repo_root: Path) -> str:
+    """The UI build's whole input set: the ``ui/`` tree plus what escapes it."""
+    digest = hashlib.sha256()
+    digest.update(tree_hash(repo_root / "ui", prune=UI_NON_SOURCE_DIRS).encode("utf-8"))
+    for relative in ui_external_build_inputs(repo_root):
+        path = repo_root / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update((tree_hash(path) if path.is_dir() else file_hash(repo_root, [relative])).encode("utf-8"))
     return digest.hexdigest()
 
 

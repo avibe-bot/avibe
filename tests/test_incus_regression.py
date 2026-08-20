@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tarfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -597,6 +598,27 @@ def test_source_tar_keeps_a_plain_directory_that_merely_looks_like_a_virtualenv(
         assert "env/settings.py" in tar.getnames()
 
 
+def write_ui_builder_stage(root: Path, *, external: Sequence[str] = ()) -> None:
+    """Give a fixture repo root the Dockerfile stage the UI fingerprint reads.
+
+    ``compute_fingerprints`` takes the build inputs living outside ``ui/`` from
+    the ``ui-builder`` stage's ``COPY`` lines, so a fixture without that stage is
+    not a checkout the runner could be pointed at.
+    """
+    copies = "".join(f"COPY {relative} /app/{relative}\n" for relative in external)
+    (root / "Dockerfile").write_text(
+        "FROM node:20-slim AS ui-builder\n"
+        "WORKDIR /app/ui\n"
+        "COPY ui/package.json ui/package-lock.json ./\n"
+        f"{copies}"
+        "COPY ui/ .\n"
+        "RUN npm run build\n"
+        "\nFROM python:3.12-slim AS base\n"
+        "COPY pyproject.toml /app/pyproject.toml\n",
+        encoding="utf-8",
+    )
+
+
 def test_ui_source_fingerprint_covers_every_ui_input_and_no_output(tmp_path: Path) -> None:
     """State the property: sources count, outputs and dependencies do not.
 
@@ -604,6 +626,7 @@ def test_ui_source_fingerprint_covers_every_ui_input_and_no_output(tmp_path: Pat
     ``ui/scripts/`` were left out, which lets an unchanged fingerprint ship a
     stale bundle now that the UI is no longer rebuilt unconditionally.
     """
+    write_ui_builder_stage(tmp_path)
     ui = tmp_path / "ui"
     (ui / "src").mkdir(parents=True)
     (ui / "src" / "main.tsx").write_text("export {}\n", encoding="utf-8")
@@ -621,6 +644,64 @@ def test_ui_source_fingerprint_covers_every_ui_input_and_no_output(tmp_path: Pat
         (ui / produced).mkdir(parents=True, exist_ok=True)
         (ui / produced / "generated").write_text("noise\n", encoding="utf-8")
     assert incus_regression.compute_fingerprints(tmp_path)["ui_source"] == baseline
+
+
+def test_ui_fingerprint_covers_the_build_inputs_that_live_outside_ui(tmp_path: Path) -> None:
+    """The UI build's input set is the files it reads, not the directory they sit in.
+
+    ``ui/src/lib/messageTypes.ts`` imports the repository-root message-type
+    catalog and Vite inlines it into the browser bundle, so a commit touching
+    only that catalog changes the artifact. A ``ui/``-only hash reads identical
+    and skips the rebuild, leaving the environment with a backend on the new
+    message-type policy and a front end still applying the old one.
+    """
+    (tmp_path / "ui" / "src").mkdir(parents=True)
+    (tmp_path / "ui" / "src" / "messageTypes.ts").write_text(
+        "import catalog from '../../vibe/message_types.json';\n",
+        encoding="utf-8",
+    )
+    catalog = tmp_path / "vibe" / "message_types.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text('{"version": 1}\n', encoding="utf-8")
+    write_ui_builder_stage(tmp_path, external=["vibe/message_types.json"])
+
+    before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+    catalog.write_text('{"version": 2}\n', encoding="utf-8")
+
+    assert incus_regression.compute_fingerprints(tmp_path)["ui_source"] != before
+
+
+def test_this_checkout_declares_the_message_type_catalog_as_a_ui_build_input() -> None:
+    """The fixture above proves the mechanism; this proves the answer is real.
+
+    Read against this repository rather than a synthetic tree, so the one import
+    that actually escapes ``ui/`` today has to be in the set.
+    """
+    repo_root = Path(incus_regression.__file__).resolve().parent.parent
+
+    assert "vibe/message_types.json" in incus_regression.ui_external_build_inputs(repo_root)
+
+
+def test_declaring_nothing_outside_ui_is_an_answer_but_an_unreadable_stage_is_not(tmp_path: Path) -> None:
+    """An empty set is a real answer here, and a missing declaration must not be.
+
+    The escaping inputs are read from a declaration the repository maintains --
+    the ``ui-builder`` stage builds from a context holding only ``ui/``, and
+    ``npm run build`` fails when its ``COPY`` lines and the real imports
+    disagree -- so "the stage declares nothing outside ``ui/``" is a state that
+    can legitimately hold. A Dockerfile that no longer has the stage is
+    different in kind: answering "nothing" there would narrow the input set to a
+    hash that keeps matching, and the UI would never be rebuilt again.
+    """
+    write_ui_builder_stage(tmp_path)
+    assert incus_regression.ui_external_build_inputs(tmp_path) == []
+
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.12-slim AS base\nCOPY pyproject.toml /app/pyproject.toml\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError):
+        incus_regression.ui_external_build_inputs(tmp_path)
 
 
 def test_source_tar_excludes_regression_secret_file(tmp_path: Path) -> None:
@@ -719,20 +800,53 @@ def test_sync_source_with_clean_wipes_the_ui_dirs_too(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
-def run_sync_wipe(source_root: Path, *, clean: bool) -> str:
+@pytest.mark.parametrize("include_ui_dist", [False, True])
+def test_a_sync_only_preserves_what_its_own_archive_does_not_ship(tmp_path: Path, include_ui_dist: bool) -> None:
+    """Preservation is for what the sync does not carry; equality is for what it does.
+
+    ``tar`` extracts over what is already there and never deletes, so preserving
+    a directory the archive also ships leaves whatever the host deleted -- a
+    renamed chunk, a dropped public asset -- served next to the new bundle. Both
+    sides are read out of the real code: the shipped set from the archive the
+    same call would send, the preserved set from the wipe command it emits. A
+    change to either one alone breaks this.
+    """
+    seed_source_tree(tmp_path)
+    with tarfile.open(
+        fileobj=io.BytesIO(incus_regression.build_source_tar(tmp_path, include_ui_dist=include_ui_dist))
+    ) as tar:
+        shipped = {name for name in incus_regression.UI_NON_SOURCE_DIRS if f"ui/{name}" in tar.getnames()}
+
+    script = run_sync_wipe(tmp_path, clean=False, include_ui_dist=include_ui_dist)
+    preserved = {name for name in incus_regression.UI_NON_SOURCE_DIRS if f"! -name {name}" in script}
+
+    assert preserved == set(incus_regression.UI_NON_SOURCE_DIRS) - shipped
+    assert shipped or not include_ui_dist  # the archive really carries ui/dist in that mode
+    for name in shipped:
+        assert not (tmp_path / "ui" / name).exists(), f"ui/{name} survived a sync that overwrites it"
+    for name in preserved:
+        assert (tmp_path / "ui" / name / "marker").exists(), f"ui/{name} was wiped for the build to recreate"
+
+
+def seed_source_tree(source_root: Path) -> None:
+    """A deployed source tree holding stale files, sources, and the UI's non-source dirs."""
+    for relative in ("stale.py", "stale-dir/old.txt", "ui/src/App.tsx"):
+        path = source_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    for name in incus_regression.UI_NON_SOURCE_DIRS:
+        (source_root / "ui" / name).mkdir(parents=True, exist_ok=True)
+        (source_root / "ui" / name / "marker").write_text("x", encoding="utf-8")
+
+
+def run_sync_wipe(source_root: Path, *, clean: bool, include_ui_dist: bool = False) -> str:
     """Run sync_source's wipe command against a real directory tree.
 
     The wipe is a shell one-liner, so asserting on its text only proves we
     wrote what we meant to write. Executing it against a populated tree is what
     proves it deletes the stale files and keeps the expensive ones.
     """
-    for relative in ("stale.py", "stale-dir/old.txt", "ui/src/App.tsx"):
-        path = source_root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("x", encoding="utf-8")
-    for kept in incus_regression.UI_NON_SOURCE_DIRS:
-        (source_root / "ui" / kept).mkdir(parents=True, exist_ok=True)
-        (source_root / "ui" / kept / "marker").write_text("x", encoding="utf-8")
+    seed_source_tree(source_root)
 
     commands: list[list[str]] = []
 
@@ -752,7 +866,14 @@ def run_sync_wipe(source_root: Path, *, clean: bool) -> str:
         ui_host="127.0.0.1",
         ui_port=5123,
     )
-    incus_regression.sync_source(RecordingRunner(), target, source_root, remote=None, clean=clean)
+    incus_regression.sync_source(
+        RecordingRunner(),
+        target,
+        source_root,
+        remote=None,
+        clean=clean,
+        include_ui_dist=include_ui_dist,
+    )
 
     script = next(
         command[-1]
@@ -767,6 +888,7 @@ def run_sync_wipe(source_root: Path, *, clean: bool) -> str:
 
 
 def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None:
+    write_ui_builder_stage(tmp_path)
     (tmp_path / "ui" / "src").mkdir(parents=True)
     (tmp_path / "ui" / "public").mkdir(parents=True)
     (tmp_path / "ui" / "public" / "push-sw.js").write_text("one\n", encoding="utf-8")
@@ -782,6 +904,7 @@ def test_legacy_voice_realtime_build_flag_does_not_change_ui_fingerprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    write_ui_builder_stage(tmp_path)
     monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
     before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
 
@@ -1382,6 +1505,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
 
 
 def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_ui_builder_stage(tmp_path)
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
     (tmp_path / "uv.lock").write_text("", encoding="utf-8")
     (tmp_path / "ui").mkdir()
@@ -1446,6 +1570,8 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
 def test_up_defers_master_port_preflight_until_after_instance_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    write_ui_builder_stage(tmp_path)
+
     class ExistingRunner:
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
@@ -2518,6 +2644,7 @@ def test_a_normal_update_reconciles_every_fingerprint_it_records(tmp_path: Path)
     Listing the keys here instead would pass forever while the new one silently
     went unreconciled.
     """
+    write_ui_builder_stage(tmp_path)
     (tmp_path / "ui").mkdir()
     every_key = set(incus_regression.compute_fingerprints(tmp_path))
 
