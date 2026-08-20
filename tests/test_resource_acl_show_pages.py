@@ -1352,31 +1352,38 @@ def test_remote_org_show_annotation_media_follows_instance_role(
                 local_path=_screenshot("orphan"),
             )
 
-        client = app.test_client()
-        client.set_cookie(
-            remote_access.SESSION_COOKIE_NAME,
-            _organization_cookie(
-                config,
-                subject="member-1",
-                groups=["group-engineering"],
-                instance_role="viewer",
-            ),
-            domain="alex.avibe.bot",
-        )
+        def _client(subject: str):
+            client = app.test_client()
+            client.set_cookie(
+                remote_access.SESSION_COOKIE_NAME,
+                _organization_cookie(
+                    config,
+                    subject=subject,
+                    groups=["group-engineering"],
+                    instance_role="viewer",
+                ),
+                domain="alex.avibe.bot",
+            )
+            return client
 
-        def _media(token: str):
+        def _media(client, token: str):
             return client.get(
                 f"/api/media/{token}",
                 base_url="https://alex.avibe.bot",
                 environ_base=_remote_peer(),
             )
 
+        in_scope = _client("member-1")
         # §3.2: a show_annotation screenshot inherits the page's /show admission
-        # (Instance Viewer role) plus the project role, so an in-scope viewer can
-        # read its own page's annotation bytes.
-        assert _media(tokens["show_annotation"]).status_code == 200
-        assert _media(tokens["agent_reply"]).status_code == 200
+        # (Instance Viewer role) alone — the Project/session role does NOT stack
+        # on top — so a viewer OUTSIDE the restricted Project still reads its own
+        # page's annotation bytes, while non-annotation media keeps the project gate.
+        out_of_scope = _client("member-2")
+        assert _media(out_of_scope, tokens["show_annotation"]).status_code == 200
+        assert _media(out_of_scope, tokens["agent_reply"]).status_code == 404
+        assert _media(in_scope, tokens["show_annotation"]).status_code == 200
+        assert _media(in_scope, tokens["agent_reply"]).status_code == 200
         # An annotation with no page to check against cannot be authorized.
-        assert _media(orphan_token).status_code == 404
+        assert _media(in_scope, orphan_token).status_code == 404
     finally:
         engine.dispose()

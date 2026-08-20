@@ -4841,7 +4841,7 @@ def test_private_show_events_stream_ends_at_authorization_refresh_deadline(monke
     assert len(asyncio.run(_collect_until_expired())) == 1
 
 
-def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypatch, tmp_path):
+def test_private_show_events_stream_ignores_project_access_revocation(monkeypatch, tmp_path):
     from storage import project_access_service
     from storage.db import create_sqlite_engine
     from vibe.authorization import AuthorizationContext
@@ -4860,7 +4860,7 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
         is_remote=True,
     )
 
-    async def _collect_until_revoked() -> list[str | bytes]:
+    async def _collect_after_project_revocation() -> str:
         response = await _show_events_stream(
             "ses123",
             authorization_context=context,
@@ -4881,13 +4881,19 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
                 )
             assert result.changed is True
             broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
-            with pytest.raises(StopAsyncIteration):
-                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            # §3.2: /show admission is the Instance role alone, so a Project ACL
+            # revocation must NOT close the stream — the residual Project gate is
+            # gone. The stream ends only when the Instance role itself is lost.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
         finally:
             await iterator.aclose()
-        return chunks
+        return "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in chunks
+        )
 
-    assert len(asyncio.run(_collect_until_revoked())) == 1
+    assert asyncio.run(_collect_after_project_revocation()) == ": show events connected\n\n"
 
 
 def test_remote_org_show_events_stream_ignores_resource_acl_changes(

@@ -85,28 +85,22 @@ class ShowPageEmailAccessScenarioTests(unittest.TestCase):
         exact = self.harness.get(handshake["next_path"])
         other = self.harness.get("/show/session-two/__show/me")
         api = self.harness.get("/api/show-pages")
-        self.assertEqual(exact.status_code, 200)
-        self.assertEqual(exact.get_json(), {"authenticated": False, "canAnnotate": False})
+        # §3.2: a show_page_email grant is a /p-only read visitor — it never
+        # enters the /show surface, even for its own signed page.
+        self.assertEqual(exact.status_code, 403)
         self.assertEqual(other.status_code, 403)
         self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
         self.assertEqual(api.status_code, 403)
 
         self.harness.seed_broader_session()
-        existing_session_handshake = self.harness.begin_login("session-one")
-        existing_session_callback = self.harness.complete_login(
-            existing_session_handshake,
-            instance_role="editor",
-            access_source="email",
-        )
-        self.assertEqual(existing_session_callback.status_code, 302)
+        # §3.2: a real Instance Editor session (email-sourced, not a show_page
+        # grant) enters /show directly, with no login handshake and independent
+        # of any show_page entitlement.
         self.assertEqual(
-            existing_session_callback.headers["Location"],
-            existing_session_handshake["next_path"],
-        )
-        self.assertEqual(
-            self.harness.get(existing_session_handshake["next_path"]).status_code,
+            self.harness.get("/show/session-one/__show/me").status_code,
             200,
         )
+        self.assertTrue(self.harness.get("/show/session-one/__show/me").get_json()["authenticated"])
 
 
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):

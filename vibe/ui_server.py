@@ -10417,6 +10417,12 @@ def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
     context = getattr(g, "authorization_context", None)
     if not _media_row_show_page_access_allowed(context, row):
         return False
+    if (row.get("source") or "") == "show_annotation":
+        # §3.2: annotation media inherits the /show Instance Viewer gate alone
+        # (already applied by _media_row_show_page_access_allowed). The
+        # Project/session role below must not stack on top, or an admitted
+        # Instance Viewer who is outside the page's Project loses the screenshot.
+        return True
     if context is None or _has_runtime_owner_access(context):
         return True
     session_ids = media_service.referenced_session_ids(conn, token)
@@ -13767,16 +13773,9 @@ async def _show_events_stream(
                     yield _remote_authorization_sse_frame(state)
                     return
                 yield ": show events connected\n\n"
-                if not public and (
-                    not _project_session_access_allowed(
-                        authorization_context,
-                        session_id,
-                        "viewer",
-                    )
-                    or not _show_page_resource_access_allowed(
-                        authorization_context,
-                        session_id,
-                    )
+                if not public and not _show_page_resource_access_allowed(
+                    authorization_context,
+                    session_id,
                 ):
                     if remote_session_payload is not None:
                         yield _remote_authorization_sse_frame("revoked")
@@ -13822,11 +13821,7 @@ async def _show_events_stream(
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
                     if event_type == "authorization.changed" and not public:
-                        if not _project_session_access_allowed(
-                            authorization_context,
-                            session_id,
-                            "viewer",
-                        ) or not _show_page_resource_access_allowed(
+                        if not _show_page_resource_access_allowed(
                             authorization_context,
                             session_id,
                         ):
