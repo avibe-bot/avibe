@@ -38,7 +38,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { canMarkConversationRead, onPageReactivated, usePageActive } from '../../lib/pageActivity';
+import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
@@ -1504,6 +1504,16 @@ export const ChatPage: React.FC = () => {
   // appear without the user having sent anything.
   useEffect(() => {
     if (!sessionId) return;
+    // Whatever the stream could not deliver, read back from durable storage:
+    // dropped message rows, the queue, whether a turn is still running, and a
+    // native bind whose turn.end went missing. Both gap edges want exactly
+    // this, so they share it rather than each keeping their own copy.
+    const catchUpAfterGap = () => {
+      void reconcile({ force: true });
+      void refreshQueue();
+      void syncTurnState({ quiet: true });
+      void refreshSessionRow();
+    };
     const disconnect = api.connectWorkbenchEvents({
       // NB: match against sessionIdRef.current (the CURRENT route), NOT the
       // captured ``sessionId`` — there is a window after a chat switch before
@@ -1621,15 +1631,13 @@ export const ChatPage: React.FC = () => {
         // invalidation and converge on the complete committed row.
         void refreshSessionRow();
       },
-      onConnected: () => {
-        // Every (re)connect recovers any state missed while the socket was down:
-        // dropped message rows, the queue, whether a turn is still running, and
-        // a native bind whose turn.end we missed.
-        void reconcile({ force: true });
-        void refreshQueue();
-        void syncTurnState({ quiet: true });
-        void refreshSessionRow();
-      },
+      // A socket that was down missed whatever happened while it was.
+      onConnected: catchUpAfterGap,
+      // The page came back and the stream could not prove it stayed connected,
+      // so a mobile tab whose feed was suspended without a clean reconnect
+      // still recovers the reply and the working state (Codex P2). A stream
+      // that did prove it fires nothing: it already delivered them.
+      onResumeGap: catchUpAfterGap,
       onAuthorizationChanged: (data) => {
         const currentSessionId = sessionIdRef.current;
         if (!currentSessionId) return;
@@ -1656,30 +1664,6 @@ export const ChatPage: React.FC = () => {
     });
     return disconnect;
   }, [api, sessionId, appendMessage, reconcile, refresh, refreshQueue, syncTurnState, refreshSessionRow, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive, probeShowPageAccess, installServerSession]);
-
-  // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
-  // SSE feed can be suspended without a clean reconnect, dropping the reply.
-  // Reconcile when the page comes back so the answer + working state catch up
-  // to durable storage.
-  useEffect(() => {
-    if (!sessionId) return;
-    const resync = () => {
-      if (document.visibilityState !== 'visible') return;
-      // A suspended tab can drop the reply AND the turn.end, so recover all
-      // three: missed rows, the queue, and the working/Stop state (Codex P2).
-      void reconcile({ force: true });
-      void refreshQueue();
-      void syncTurnState({ quiet: true });
-      void refreshSessionRow();
-    };
-    // Regaining the network is its own gap, independent of the page coming back.
-    const stopReactivation = onPageReactivated(resync);
-    window.addEventListener('online', resync);
-    return () => {
-      stopReactivation();
-      window.removeEventListener('online', resync);
-    };
-  }, [sessionId, reconcile, refreshQueue, syncTurnState, refreshSessionRow]);
 
   useEffect(() => {
     setRuntimeState((current) => ({ ...current, pending_input_count: queue.length }));

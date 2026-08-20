@@ -94,9 +94,42 @@ type FakeApi = {
 
 const apiRef = { current: null as FakeApi | null };
 
+const resumeGapHandlers = new Set<() => void>();
+const wrappedApis = new WeakMap<FakeApi, FakeApi>();
+
+/**
+ * Supply the half of the resume edge the real ApiContext owns. Consumers no
+ * longer watch page activity themselves: ApiContext decides whether the shared
+ * event stream can vouch for the gap the page spent away and hands only the ones
+ * it cannot to `onResumeGap`. These fakes stand in for that context, so the
+ * signal has to come from here rather than from every fake in the file.
+ */
+function withResumeGap(api: FakeApi | null): FakeApi | null {
+  if (!api) return null;
+  // Consumers key their subscription effect on the api object, so a fresh
+  // wrapper per render would resubscribe forever.
+  const cached = wrappedApis.get(api);
+  if (cached) return cached;
+  const wrapped: FakeApi = {
+    ...api,
+    connectWorkbenchEvents: (handlers) => {
+      const disconnect = api.connectWorkbenchEvents(handlers);
+      const onResumeGap = handlers.onResumeGap;
+      if (!onResumeGap) return disconnect;
+      resumeGapHandlers.add(onResumeGap);
+      return () => {
+        resumeGapHandlers.delete(onResumeGap);
+        disconnect();
+      };
+    },
+  };
+  wrappedApis.set(api, wrapped);
+  return wrapped;
+}
+
 vi.mock('./ApiContext', async () => {
   const actual = await vi.importActual<typeof import('./ApiContext')>('./ApiContext');
-  return { ...actual, useApi: () => apiRef.current };
+  return { ...actual, useApi: () => withResumeGap(apiRef.current) };
 });
 
 // The provider reports its one never-sent refusal through the toast surface, which
@@ -111,26 +144,19 @@ function settle() {
   });
 }
 
-// The inbox reconciles when the page comes back, which is an edge rather than a
-// level: the shared page-activity sampler ignores a `focus` event on a page that
-// never left. Simulate a real gap by hiding the document and revealing it again.
+// The inbox reconciles when the page comes back and the shared event stream
+// cannot prove it stayed connected across the gap. That verdict belongs to
+// ApiContext, so a resume worth reconciling is the signal it dispatches -- not
+// the raw visibility edge, which a page whose stream never dropped also sees.
 function simulatePageResume() {
-  const setVisibility = (state: DocumentVisibilityState) => {
-    Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  };
-  setVisibility('hidden');
-  setVisibility('visible');
-  // Drop the shadowing property so the rest of the suite reads jsdom's own getter.
-  Reflect.deleteProperty(document, 'visibilityState');
+  for (const handler of [...resumeGapHandlers]) handler();
 }
 
 describe('Workbench session read ownership', () => {
   beforeEach(() => {
     apiRef.current = null;
     // jsdom never reports window focus, so no reading would ever count as "the
-    // page is presented". Model a focused window and let visibility carry the
-    // transitions `simulatePageResume` needs.
+    // page is presented" and nothing would ever be marked read.
     document.hasFocus = () => true;
   });
 

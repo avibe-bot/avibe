@@ -4,6 +4,63 @@ export const WORKBENCH_EVENT_RETRY_INITIAL_MS = 1_000;
 export const WORKBENCH_EVENT_RETRY_MAX_MS = 15_000;
 export const WORKBENCH_EVENT_OPEN_TIMEOUT_MS = 20_000;
 
+/**
+ * Heartbeat cadence to assume until the server announces its own. It only has
+ * to cover the window between the `connected` frame and the first heartbeat; a
+ * server too old to send heartbeats never stamps one either, so its streams
+ * simply never read as proven.
+ */
+export const WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS = 15_000;
+
+// How many heartbeats a stream may miss before it stops speaking for itself.
+// Lower turns one dropped frame or a long GC pause into a phantom outage, and
+// the only cost of waiting is one catch-up read arriving late.
+const WORKBENCH_EVENT_HEARTBEAT_MISSES = 3;
+// Floor, so a fast cadence still tolerates ordinary scheduling jitter.
+const WORKBENCH_EVENT_HEARTBEAT_STALE_FLOOR_MS = 45_000;
+// Bounds on a cadence the server declares. A nonsense value must not be able to
+// switch the staleness check off by claiming an interval no gap could exceed.
+const WORKBENCH_EVENT_HEARTBEAT_MIN_MS = 1_000;
+const WORKBENCH_EVENT_HEARTBEAT_MAX_MS = 120_000;
+
+/** Read a server-declared cadence, falling back on anything unusable. */
+export function parseWorkbenchHeartbeatInterval(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
+  }
+  return Math.min(
+    WORKBENCH_EVENT_HEARTBEAT_MAX_MS,
+    Math.max(WORKBENCH_EVENT_HEARTBEAT_MIN_MS, raw),
+  );
+}
+
+/** How long a stream's last proof of life stays good. */
+export function workbenchEventStaleAfterMs(intervalMs: number): number {
+  return Math.max(
+    WORKBENCH_EVENT_HEARTBEAT_STALE_FLOOR_MS,
+    intervalMs * WORKBENCH_EVENT_HEARTBEAT_MISSES,
+  );
+}
+
+/**
+ * Whether a stream has proved itself alive recently enough to account for a gap
+ * the page spent away. `readyState === OPEN` cannot: a suspended tab's socket
+ * can die with the connection left in a zombie `OPEN` state and no `error`
+ * event, which is precisely the case a returning page must not trust.
+ */
+export function isWorkbenchHeartbeatFresh(
+  lastHeartbeatAt: number | null,
+  intervalMs: number,
+  now: number,
+): boolean {
+  if (lastHeartbeatAt === null) return false;
+  const age = now - lastHeartbeatAt;
+  // An age outside the window in either direction is unusable: the clock moved
+  // backwards, so the stamp cannot be dated. Read that as unproven, which costs
+  // one redundant read instead of trusting a stream that may be dead.
+  return age >= 0 && age < workbenchEventStaleAfterMs(intervalMs);
+}
+
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 interface WorkbenchEventReconnectLoopOptions {

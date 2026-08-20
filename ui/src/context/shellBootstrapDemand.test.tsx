@@ -96,9 +96,42 @@ type FakeApi = {
 
 const apiRef = { current: null as FakeApi | null };
 
+const resumeGapHandlers = new Set<() => void>();
+const wrappedApis = new WeakMap<FakeApi, FakeApi>();
+
+/**
+ * Supply the half of the resume edge the real ApiContext owns. Consumers no
+ * longer watch page activity themselves: ApiContext decides whether the shared
+ * event stream can vouch for the gap the page spent away and hands only the ones
+ * it cannot to `onResumeGap`. These fakes stand in for that context, so the
+ * signal has to come from here rather than from every fake in the file.
+ */
+function withResumeGap(api: FakeApi | null): FakeApi | null {
+  if (!api) return null;
+  // Consumers key their subscription effect on the api object, so a fresh
+  // wrapper per render would resubscribe forever.
+  const cached = wrappedApis.get(api);
+  if (cached) return cached;
+  const wrapped: FakeApi = {
+    ...api,
+    connectWorkbenchEvents: (handlers) => {
+      const disconnect = api.connectWorkbenchEvents(handlers);
+      const onResumeGap = handlers.onResumeGap;
+      if (!onResumeGap) return disconnect;
+      resumeGapHandlers.add(onResumeGap);
+      return () => {
+        resumeGapHandlers.delete(onResumeGap);
+        disconnect();
+      };
+    },
+  };
+  wrappedApis.set(api, wrapped);
+  return wrapped;
+}
+
 vi.mock('./ApiContext', async () => {
   const actual = await vi.importActual<typeof import('./ApiContext')>('./ApiContext');
-  return { ...actual, useApi: () => apiRef.current };
+  return { ...actual, useApi: () => withResumeGap(apiRef.current) };
 });
 
 // The provider reports its one never-sent refusal through the toast surface, which
@@ -163,17 +196,13 @@ const InboxProbe = ({
   return null;
 };
 
-// A resume is an EDGE, and ``onPageReactivated`` deliberately refuses to read a
-// bare ``focus`` as one: focus moving between elements of a page that never left
-// is the common case, and treating it as a return is what made the old listener
-// over-fire. So drive the transition the sampler actually reads — system focus
-// lost, then regained — rather than the event that used to stand in for it.
+// A resume only concerns the feed when the shared event stream cannot vouch for
+// the gap the page spent away, and that verdict belongs to ApiContext. So drive
+// the signal it dispatches rather than the raw activity edge, which a page whose
+// stream never dropped also sees and which no longer reaches these consumers.
 const resumePage = async () => {
   await act(async () => {
-    document.hasFocus = () => false;
-    window.dispatchEvent(new Event('blur'));
-    document.hasFocus = () => true;
-    window.dispatchEvent(new Event('focus'));
+    for (const handler of [...resumeGapHandlers]) handler();
   });
 };
 
@@ -185,9 +214,6 @@ describe('Demand-driven shell bootstrap', () => {
   afterEach(() => {
     cleanup();
     apiRef.current = null;
-    // Own property, so the prototype's real implementation comes back for tests
-    // that never resume.
-    Reflect.deleteProperty(document, 'hasFocus');
   });
 
   describe('projects tree', () => {

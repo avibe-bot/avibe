@@ -7,7 +7,6 @@ import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext'
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
 import { useConsumerActivation } from '../lib/useConsumerActivation';
-import { onPageReactivated } from '../lib/pageActivity';
 import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
@@ -867,6 +866,18 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           return next;
         });
       },
+      // Recover after the OS suspended us. A backgrounded mobile PWA has its
+      // page frozen and its SSE socket dropped, and the broker never replays
+      // the gap; iOS can leave EventSource in a zombie OPEN state without
+      // onerror. ApiContext reopens the shared stream when the page comes back
+      // and when the network returns, and fires this only when that stream
+      // cannot prove it stayed connected across the gap — so a feed whose
+      // events all arrived is left alone, and one that may have missed some
+      // reconciles against durable storage.
+      onResumeGap: () => {
+        if (isFeedActive()) void reconcile();
+        else void refreshUnread();
+      },
       onError: (err) => {
         // ApiContext owns the explicit reconnect loop. Keep this a log, not a
         // crash, so the workbench stays usable during the HTTP fallback.
@@ -883,28 +894,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     isFeedActive,
     oweWholeUnread,
     readFeedForActiveConsumer,
+    reconcile,
     reconcileSession,
+    refreshUnread,
   ]);
-
-  // Recover after the OS suspended us. A backgrounded mobile PWA has its page
-  // frozen and its SSE socket dropped, and the broker never replays the gap;
-  // iOS can leave EventSource in a zombie OPEN state without onerror. ApiContext
-  // reopens the shared stream when the page comes back and when the network
-  // returns; independently reconcile the durable feed here so missed events
-  // never gate data freshness.
-  useEffect(() => {
-    const resync = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (isFeedActive()) void reconcile();
-      else void refreshUnread();
-    };
-    const stopReactivation = onPageReactivated(resync);
-    window.addEventListener('online', resync);
-    return () => {
-      stopReactivation();
-      window.removeEventListener('online', resync);
-    };
-  }, [isFeedActive, reconcile, refreshUnread]);
 
   const totalUnread = useMemo(
     () => Object.values(unreadBySession).reduce((sum, n) => sum + (n || 0), 0),

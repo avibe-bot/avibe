@@ -21,6 +21,9 @@ import {
 } from '../lib/showPageAccess';
 import {
   WorkbenchEventReconnectLoop,
+  WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+  isWorkbenchHeartbeatFresh,
+  parseWorkbenchHeartbeatInterval,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
@@ -1163,6 +1166,17 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 
 export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
+  /**
+   * The page or the network came back and the stream could NOT prove it stayed
+   * connected across the gap, so anything that happened in it may be missing:
+   * re-read whatever this consumer keeps live off the stream.
+   *
+   * Deliberately not fired when the stream did prove continuity — that is the
+   * whole point of the callback. Consumers must not subscribe to the raw
+   * reactivation edge themselves; the proof lives here, in one place, and a
+   * consumer checking it a second time is a consumer that will drift from it.
+   */
+  onResumeGap?: () => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -2611,9 +2625,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
   const eventBridgeConnectedRef = useRef(false);
+  // When the active stream last proved it was alive, and the cadence the server
+  // said it would prove it at. Null whenever there is no stream to speak for.
+  const eventHeartbeatAtRef = useRef<number | null>(null);
+  const eventHeartbeatIntervalRef = useRef(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
-  const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const resumeWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -2797,6 +2815,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source?.close();
     eventConnectionRef.current = null;
     eventBridgeConnectedRef.current = false;
+    // The stamp speaks for one socket only; a later stream must earn its own.
+    eventHeartbeatAtRef.current = null;
   };
 
   /**
@@ -2812,17 +2832,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /**
-   * Events are flowing end to end right now, so a reconnect would close no gap.
+   * Events are flowing end to end right now, so a reconnect would close no gap
+   * and anything that happened while the page was away still arrived.
    *
-   * Transport liveness is the browser's to own: it errors the stream on network
-   * changes and on HTTP/2 ping timeouts, which is what `readyState` reports. The
-   * server's own keep-alive is an SSE comment plus it only fires after 15s of
-   * silence on the timeout branch, so it is invisible to EventSource and absent
-   * from a stream busy delivering events this context filters out -- a
-   * last-frame staleness check built on it would call healthy streams dead.
+   * All three terms are needed. `readyState` is the browser's own transport
+   * verdict, which it revises on network changes and HTTP/2 ping timeouts. The
+   * handshake says a stream that is open can also reach handlers. Neither
+   * survives suspension: a backgrounded tab can have its socket dropped and be
+   * resumed with the connection still reported `OPEN` and no `error` ever
+   * delivered, so only a recent heartbeat distinguishes a quiet stream from
+   * that zombie.
    */
   const isWorkbenchEventStreamLive = () =>
-    eventSourceRef.current?.readyState === EventSource.OPEN && workbenchEventHandshake() !== null;
+    eventSourceRef.current?.readyState === EventSource.OPEN &&
+    workbenchEventHandshake() !== null &&
+    isWorkbenchHeartbeatFresh(
+      eventHeartbeatAtRef.current,
+      eventHeartbeatIntervalRef.current,
+      Date.now(),
+    );
 
   function reconnectWorkbenchEventSource(): void {
     if (eventHandlersRef.current.size === 0) return;
@@ -2864,6 +2892,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
       if (eventSourceRef.current !== source) return;
+      // A frame just arrived, which is proof of life in its own right. Seeding
+      // here rather than waiting for the first heartbeat keeps a stream from
+      // reading as unproven for its first cadence. Against a server too old to
+      // send heartbeats this is the only stamp there will ever be, so its
+      // streams stop counting as proven once it lapses -- which is exactly the
+      // behavior this optimization replaces.
+      eventHeartbeatAtRef.current = Date.now();
+      eventHeartbeatIntervalRef.current = WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
@@ -2884,6 +2920,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         getWorkbenchEventReconnectLoop().streamOpened();
         const connected = eventConnectionRef.current;
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
+      }
+    });
+    // The server's proof of life. It carries no news, so nothing is dispatched
+    // to handlers -- the arrival itself is the whole payload, and the declared
+    // cadence lets the staleness window be sized by the side that sets it.
+    source.addEventListener('heartbeat', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
+      eventHeartbeatAtRef.current = Date.now();
+      try {
+        const payload = JSON.parse(e.data) as { interval_ms?: unknown };
+        eventHeartbeatIntervalRef.current = parseWorkbenchHeartbeatInterval(payload.interval_ms);
+      } catch {
+        // The frame arrived, which is what matters; keep the current cadence.
       }
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
@@ -3075,19 +3124,33 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   stopWorkbenchEventsRef.current = stopWorkbenchEventSource;
 
-  const wakeWorkbenchEvents = () => {
+  /**
+   * The page or the network came back. Catch the transport up, and hand the
+   * gap to consumers only when the stream could not account for it itself.
+   *
+   * One owner, deliberately. Every consumer used to subscribe to the raw
+   * reactivation edge and refetch unconditionally, which is why returning to a
+   * tab cost a burst of reads that a healthy stream had already delivered. The
+   * proof of continuity lives here; a consumer that re-derived it would drift
+   * from it.
+   */
+  const resumeWorkbenchEvents = () => {
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
+    // Read before the wake, which may recycle the stream and discard the very
+    // proof of life this verdict rests on.
+    const gap = !isWorkbenchEventStreamLive();
     // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
     // marks it reconnecting on every attempt. Announcing it here instead made a
     // wake that keeps a live stream flash "reconnecting" over a healthy one.
     getWorkbenchEventReconnectLoop().wake();
+    if (gap) dispatchToWorkbenchHandlers((handlers) => handlers.onResumeGap?.());
   };
-  wakeWorkbenchEventsRef.current = wakeWorkbenchEvents;
+  resumeWorkbenchEventsRef.current = resumeWorkbenchEvents;
 
   useEffect(() => {
     const wakeIfVisible = () => {
       if (document.visibilityState !== 'visible') return;
-      wakeWorkbenchEventsRef.current();
+      resumeWorkbenchEventsRef.current();
       syncSessionDraftsRef.current();
     };
     // Regaining the network is its own gap, independent of the page coming back.

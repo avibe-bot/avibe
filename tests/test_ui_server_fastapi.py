@@ -2613,6 +2613,55 @@ def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_
     assert "hidden-secret" not in body
 
 
+def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch, tmp_path):
+    """A browser must be able to tell a quiet stream from a dead one.
+
+    The keep-alive comment cannot say it -- ``EventSource`` never surfaces a
+    comment -- so the stream emits an observable frame on a wall-clock cadence
+    that no amount of traffic can suppress.
+    """
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    # Only to keep the test quick. The client reads the cadence off the frame
+    # rather than assuming the shipped value.
+    monkeypatch.setattr(ui_server, "WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S", 0.05)
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_heartbeats() -> tuple[str, str]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                idle = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+                # A stream carrying events this viewer may not see is silent
+                # from the browser's side while being anything but idle, so a
+                # cadence measured from the last delivered frame would leave
+                # exactly this subscriber unable to prove its stream alive.
+                broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
+                busy = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+            finally:
+                await iterator.aclose()
+        return decode(idle), decode(busy)
+
+    idle, busy = asyncio.run(collect_heartbeats())
+
+    assert "event: heartbeat" in idle
+    # The cadence rides along so the client sizes its staleness window from
+    # whichever side actually sets it.
+    assert '"interval_ms":50' in idle
+    assert "event: heartbeat" in busy
+    assert "hidden-secret" not in busy
+
+
 def test_workbench_events_allow_show_events_when_show_page_acl_allows(monkeypatch, tmp_path) -> None:
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
