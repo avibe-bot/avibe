@@ -100,7 +100,7 @@ scenarios:
     test: tests/scenarios/permissions/test_permissions_scenarios.py::test_permissions_010_legacy_management_surfaces_are_absent
     given: Current-instance Permissions and local Show Page sharing are installed
     when: Registered routes and frontend sources are inventoried
-    then: No Management OAuth proxy or embedded Organization route remains
+    then: No Management OAuth proxy, embedded Organization route, or Show Page Workspace-access control remains
   - id: PERMISSIONS-011
     name: Resource ACL round-trips through exact-instance boundary
     status: covered

@@ -3624,53 +3624,31 @@
         "limited": "仅允许列表中的用户访问",
         "public": "任何人无需登录即可访问"
       },
-      "limitedEmails": "允许访问的用户",
-      "limitedEmailRequired": "请至少添加一个邮箱。",
-      "limitedEmailHint": "输入邮箱后按回车添加 · 最多 {{count}} 个",
-      "keepOneLimitedEmail": "切换为私有后可移除最后一个邮箱",
+      "shareAudience": "允许访问的对象",
+      "shareAudienceOptions": "成员与群组建议",
+      "shareAudiencePlaceholder": {
+        "organization": "搜索成员或群组，也可输入邮箱",
+        "email": "name@example.com"
+      },
+      "shareAudienceHint": {
+        "organization": "可选择成员、群组，或输入任意邮箱 · 最多 {{limit}} 项",
+        "email": "输入邮箱后按回车添加 · 最多 {{limit}} 项"
+      },
+      "shareAudienceRequired": "请至少添加一个访问对象。",
+      "shareOrganizationGeneric": "本组织",
+      "shareOrganizationNamed": "本组织（{{name}}）",
+      "shareGroupBadge": "群组",
+      "shareSuggestionEmpty": "没有匹配的成员或群组；输入完整邮箱即可添加。",
+      "shareSuggestionNarrow": "结果较多，请继续输入以缩小范围。",
+      "loadingShareDirectory": "正在加载组织目录…",
+      "removeShareEntry": "移除 {{label}}",
+      "keepOneShareEntry": "切换为私有后可移除最后一项",
       "sharingErrors": {
         "conflict": "链接访问设置已在其他位置更新，已载入最新版本。",
-        "invalid": "请检查访问模式、链接和邮箱列表。",
+        "invalid": "请检查访问模式、链接和访问对象列表。",
         "error": "无法加载链接访问设置。"
       },
-      "workspaceAccess": "组织内访问",
-      "workspaceAccessDesc": "控制此组织内的已登录访问；与链接访问相互独立。",
-      "loadingWorkspaceAccess": "正在加载组织内访问设置…",
-      "workspacePersonal": "此 Show Page 属于 Personal Avibe。",
-      "workspaceUnmanaged": "此 Avibe 配对后才能使用组织内访问。",
-      "workspacePending": "已知此 Avibe 属于组织，但暂时无法取得精确绑定；访问保持私有。",
-      "workspaceConfigurationUnavailable": "Avibe 配置暂时不可用，无法验证组织内访问；访问保持私有。",
-      "workspaceOwnershipConflict": "此 Show Page 绑定到了其他所有权域；解决冲突前访问保持私有。",
-      "workspaceModes": {
-        "private": "私有",
-        "organization": "组织成员",
-        "scope": "指定群组"
-      },
-      "workspaceHelp": {
-        "private": "只有页面所有者和 Instance Owner 可以使用。",
-        "public": "此组织的已登录成员可以使用。",
-        "scope": "只有所选组织群组的成员可以使用。"
-      },
-      "workspaceGroups": "组织群组",
-      "workspaceArchived": "已归档",
-      "workspaceNoGroups": "暂无可选的活跃群组。",
-      "workspaceGroupRequired": "请至少选择一个群组。",
-      "workspaceRevisionConflict": "组织内访问已在其他位置更新；你的草稿已保留到最新版本。",
-      "workspaceOffline": "Permissions 离线时显示上次已知组织策略，暂不可编辑。",
-      "workspaceReadOnly": "此组织策略由 Avibe Cloud 管理，请前往 Avibe Cloud 修改。",
-      "workspaceOwnerOnly": "只有 Instance Owner 可以修改组织内访问。",
-      "workspaceLoadError": "无法加载组织内访问设置。",
-      "workspaceNarrowTitle": "收紧组织内访问权限？",
-      "workspaceNarrowBody": "策略应用后，部分用户可能立即失去访问权限。",
-      "applyWorkspaceAccess": "应用",
-      "workspaceSync": {
-        "pending": "策略正在等待此 Avibe 应用。",
-        "offline": "此 Avibe 尚未确认最新策略。",
-        "error": "无法应用最新策略。"
-      },
-      "emailPlaceholder": "name@example.com",
       "addEmail": "添加邮箱",
-      "removeEmail": "移除 {{email}}",
       "emailInvalid": "请输入有效的邮箱地址。",
       "accessLoadError": "无法加载权限详情，分享设置已停用。",
       "availability": "页面在线",

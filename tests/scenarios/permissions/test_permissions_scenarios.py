@@ -220,7 +220,7 @@ def test_permissions_010_legacy_management_surfaces_are_absent() -> None:
     show_control = root / "ui" / "src" / "components" / "workbench" / "ShowPageShareControl.tsx"
     source = show_control.read_text(encoding="utf-8")
     assert "cloud-management" not in source
-    assert "ShowPageWorkspaceAccessControl" in source
+    assert "ShowPageWorkspaceAccessControl" not in source
     assert "ShowPageSharingSettings" in source
 
 
