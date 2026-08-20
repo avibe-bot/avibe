@@ -108,6 +108,44 @@ def test_every_run_settlement_reason_resolves(reason: str, key: str) -> None:
         assert resolved.strip()
 
 
+@pytest.mark.parametrize(
+    ("key", "language", "expected"),
+    [
+        (
+            "harness.run.interrupted.restarted",
+            "en",
+            "[Avibe Harness] This run was interrupted during execution. Completed work is "
+            "preserved. Trigger it again if the work still needs doing.",
+        ),
+        (
+            "harness.run.interrupted.restarted",
+            "zh",
+            "[Avibe Harness] 本次 run 执行途中被中断。已执行的部分不会丢失，"
+            "如果这项工作仍需完成，请重新触发。",
+        ),
+        (
+            "harness.run.interrupted.orphaned",
+            "en",
+            "[Avibe Harness] Nothing is executing this run, most likely because the service "
+            "restarted during execution. Completed work is preserved. Trigger it again if the "
+            "work still needs doing.",
+        ),
+        (
+            "harness.run.interrupted.orphaned",
+            "zh",
+            "[Avibe Harness] 本次 run 没有任何执行在推进它，通常是服务在它执行途中"
+            "重启导致的。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
+        ),
+    ],
+)
+def test_interrupted_run_detail_copy_matches_product_language(
+    key: str,
+    language: str,
+    expected: str,
+) -> None:
+    assert t(key, language) == expected
+
+
 def test_sweep_reason_i18n_map_covers_every_store_sweep_reason() -> None:
     # ``SWEEP_I18N_KEYS`` spells its keys as literals so ``core.run_settlement``
     # stays dependency-free (see the comment there). This is the guard that makes
