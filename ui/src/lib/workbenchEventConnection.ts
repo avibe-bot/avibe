@@ -76,6 +76,47 @@ export function isWorkbenchHeartbeatFresh(
   return age >= 0 && age < workbenchEventStaleAfterMs(intervalMs);
 }
 
+/**
+ * Whether heartbeat evidence covers the gap a page spent away.
+ *
+ * The claim a returning page makes is about an interval -- nothing was missed
+ * between leaving and coming back -- so it takes evidence dated inside that
+ * interval. An interval is covered by two comparisons and there is no third:
+ * the newest heartbeat has to postdate the gap's start, and it has to still be
+ * fresh at its end. Freshness alone was the whole test, which let a heartbeat
+ * from *before* a short suspension speak for a socket that died during it: a
+ * page that is not executing receives nothing, so a heartbeat missing from the
+ * time it was away is not the scheduling jitter the freshness window exists to
+ * absorb. It is no evidence at all.
+ *
+ * `awaySince === null` is a gap that cannot be dated, and an undated interval
+ * is never covered. A stamp that lags the real departure -- all a listener that
+ * attached mid-gap can offer -- cannot manufacture coverage either: a heartbeat
+ * dated after it is traffic this page received while executing, on a socket
+ * that was therefore still alive.
+ *
+ * What this cannot cover is the tail after the newest heartbeat, and no
+ * comparison can: absence of traffic is never evidence of continuity, so a
+ * stream that dies late in a long gap still reads as covered here. The
+ * heartbeat watchdog is what closes that -- it is the only check that can wait
+ * for the stream to speak again. This term shrinks the untestable tail from the
+ * whole away period down to one cadence; it cannot remove it.
+ */
+export function heartbeatCoversGap({
+  lastHeartbeatAt,
+  awaySince,
+  intervalMs,
+  now,
+}: {
+  lastHeartbeatAt: number | null;
+  awaySince: number | null;
+  intervalMs: number;
+  now: number;
+}): boolean {
+  if (awaySince === null || lastHeartbeatAt === null) return false;
+  return lastHeartbeatAt > awaySince && isWorkbenchHeartbeatFresh(lastHeartbeatAt, intervalMs, now);
+}
+
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 interface WorkbenchEventReconnectLoopOptions {

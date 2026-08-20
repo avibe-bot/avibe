@@ -135,13 +135,30 @@ const setVisibility = (state: 'visible' | 'hidden') => {
   document.dispatchEvent(new Event('visibilitychange'));
 };
 
-/** The page or the network coming back, which is what the gate is asked about. */
-const reactivate = () => {
+/**
+ * The page leaving and coming back: the gap the gate is asked to account for.
+ * `beat` is whether the stream spoke while the page was away, which is the only
+ * evidence that can cover an interval -- a heartbeat from before it was away
+ * says nothing about what happened during it.
+ */
+const awayAndBack = ({ beat = false, awayMs = 1_000 } = {}) => {
+  setVisibility('hidden');
+  vi.advanceTimersByTime(awayMs);
+  if (beat) emitHeartbeat();
+  setVisibility('visible');
+};
+
+/** Regaining the network: a gap nothing here watched open, so an undated one. */
+const networkBack = () => {
   window.dispatchEvent(new Event('online'));
 };
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // jsdom reports no window focus, and a page that never counts as active never
+  // counts as coming back either. These tests are about what happens when it
+  // does, so give it the focus a real browser tab has.
+  document.hasFocus = () => true;
   apiFetch.mockReset();
   apiFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
   showToast.mockReset();
@@ -153,6 +170,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(document, 'hasFocus');
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -163,9 +181,9 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(onConnected).toHaveBeenCalledTimes(1);
 
     // The whole optimization: returning to a page whose stream kept running
-    // must not recycle it, and so must not make consumers re-read what it has
-    // already delivered.
-    reactivate();
+    // through the gap must not recycle it, and so must not make consumers
+    // re-read what it has already delivered.
+    awayAndBack({ beat: true });
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(onConnected).toHaveBeenCalledTimes(1);
 
@@ -175,7 +193,7 @@ describe('ApiProvider workbench stream liveness', () => {
     for (let pass = 0; pass < 3; pass += 1) {
       vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
       emitHeartbeat();
-      reactivate();
+      awayAndBack({ beat: true });
     }
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(FakeEventSource.latest().closed).toBe(false);
@@ -219,7 +237,6 @@ describe('ApiProvider workbench stream liveness', () => {
     // cannot, so it is replaced -- and the edge itself carries the catch-up,
     // because the replacement may be several backoff windows away.
     setVisibility('visible');
-    reactivate();
     expect(zombie.closed).toBe(true);
     expect(onConnected).toHaveBeenCalledTimes(2);
 
@@ -231,10 +248,7 @@ describe('ApiProvider workbench stream liveness', () => {
     mountConnectedStream();
     expect(onConnected).toHaveBeenCalledTimes(1);
 
-    setVisibility('hidden');
-    vi.advanceTimersByTime(STALE_AFTER_MS);
-    setVisibility('visible');
-    reactivate();
+    awayAndBack({ awayMs: STALE_AFTER_MS });
 
     // Recovery must not depend on the thing being recovered. The stale stream is
     // gone and its replacement has not handshaken -- and against a stopped
@@ -248,18 +262,47 @@ describe('ApiProvider workbench stream liveness', () => {
 
     // Repeated edges on a stream that still cannot prove itself each pay for
     // themselves, exactly as the unconditional refetch did before this change.
-    reactivate();
+    awayAndBack();
     expect(onConnected).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not let a heartbeat from before the gap speak for it', () => {
+    mountConnectedStream();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // A suspension shorter than the freshness window. The newest heartbeat is
+    // still fresh by the clock, but it arrived before the page left: a frozen
+    // tab receives nothing, so a window with no heartbeat in it is not the
+    // scheduling jitter that tolerance exists for. It is silence.
+    awayAndBack({ awayMs: 5_000 });
+    expect(onConnected).toHaveBeenCalledTimes(2);
+    expect(onConnected).toHaveBeenLastCalledWith(null);
+
+    // The socket itself is still plausible, so it is kept: recycling on every
+    // short tab switch would cost more than the read it saves, and the watchdog
+    // is already watching for the heartbeat this stream now owes.
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(FakeEventSource.latest().closed).toBe(false);
+  });
+
+  it('treats a network return as a gap nothing can vouch for', () => {
+    mountConnectedStream();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // Nothing here watched the connection drop, so no heartbeat can be placed
+    // inside the gap and the catch-up is the only safe reading -- what the
+    // unconditional refetch did before this change, on an event that fires when
+    // the network actually changes rather than on every focus move.
+    networkBack();
+    expect(onConnected).toHaveBeenCalledTimes(2);
+    expect(FakeEventSource.instances).toHaveLength(1);
   });
 
   it('does not let a replacement stream inherit the old one as proof of life', () => {
     mountConnectedStream();
     const first = FakeEventSource.latest();
 
-    setVisibility('hidden');
-    vi.advanceTimersByTime(STALE_AFTER_MS);
-    setVisibility('visible');
-    reactivate();
+    awayAndBack({ awayMs: STALE_AFTER_MS });
     expect(first.closed).toBe(true);
 
     // The stale stream was recycled; until the replacement proves itself there
@@ -267,16 +310,16 @@ describe('ApiProvider workbench stream liveness', () => {
     // a stream that accounted for one.
     const replacement = FakeEventSource.latest();
     expect(replacement).not.toBe(first);
-    reactivate();
+    awayAndBack();
     expect(replacement.closed).toBe(true);
 
-    // Once a stream proves itself, it speaks for itself again -- and a return is
-    // free, which is the entire point of the design.
+    // Once a stream proves itself across the gap, it speaks for itself again --
+    // and the return is free, which is the entire point of the design.
     emitHandshake(2);
     emitHeartbeat();
     const proven = FakeEventSource.latest();
     const catchUps = onConnected.mock.calls.length;
-    reactivate();
+    awayAndBack({ beat: true });
     expect(FakeEventSource.latest()).toBe(proven);
     expect(proven.closed).toBe(false);
     expect(onConnected).toHaveBeenCalledTimes(catchUps);
@@ -331,7 +374,7 @@ describe('ApiProvider workbench stream liveness', () => {
     // handshake says this stream is alive now, which is not the question. So the
     // reactivation edge recycles it immediately and pays for the catch-up -- the
     // pre-heartbeat behavior this optimization replaces, and no worse than it.
-    reactivate();
+    awayAndBack();
     expect(legacy.closed).toBe(true);
     expect(onConnected).toHaveBeenCalledTimes(2);
   });

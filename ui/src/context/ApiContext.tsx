@@ -6,7 +6,7 @@ import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
-import { onPageReactivated } from '../lib/pageActivity';
+import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
@@ -23,6 +23,7 @@ import {
   WorkbenchEventReconnectLoop,
   WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
   declaredWorkbenchHeartbeatInterval,
+  heartbeatCoversGap,
   isWorkbenchHeartbeatFresh,
   parseWorkbenchHeartbeatInterval,
   workbenchEventStaleAfterMs,
@@ -2669,7 +2670,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventHeartbeatWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
-  const resumeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -3291,11 +3292,29 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * only a stream that cannot prove it survived the gap costs a catch-up, and
    * consumers hear about it through the same `connected` signal an ordinary
    * mid-session reconnect already used.
+   *
+   * `awaySince` is when the gap being recovered from opened, or null for one
+   * nothing can date -- a network return, or a page back from an away period
+   * the sampler never saw begin.
    */
-  const wakeWorkbenchEvents = () => {
+  const wakeWorkbenchEvents: PageReactivationListener = (awaySince) => {
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
     // Read before waking, because waking is what changes the answer.
-    const survivedTheGap = isWorkbenchEventStreamLive();
+    //
+    // Two questions, asked separately because they have different answers. The
+    // transport one -- is this socket worth keeping -- is the reconnect loop's,
+    // and freshness is the whole of it. This one is about the interval, so it
+    // also needs evidence dated inside the interval: freshness appears in both
+    // because each predicate is a complete statement of its own question, and
+    // one extra comparison is cheaper than a term stated half here.
+    const survivedTheGap =
+      isWorkbenchEventStreamLive() &&
+      heartbeatCoversGap({
+        lastHeartbeatAt: eventHeartbeatAtRef.current,
+        awaySince,
+        intervalMs: eventHeartbeatIntervalRef.current,
+        now: Date.now(),
+      });
     // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
     // marks it reconnecting on every attempt. Announcing it here instead made a
     // wake that keeps a live stream flash "reconnecting" over a healthy one.
@@ -3322,18 +3341,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
   useEffect(() => {
-    const wakeIfVisible = () => {
+    const wakeIfVisible: PageReactivationListener = (awaySince) => {
       if (document.visibilityState !== 'visible') return;
-      resumeWorkbenchEventsRef.current();
+      resumeWorkbenchEventsRef.current(awaySince);
       syncSessionDraftsRef.current();
     };
-    // Regaining the network is its own gap, independent of the page coming back.
+    // Regaining the network is its own gap, independent of the page coming back,
+    // and an undated one: nothing here watched the connection drop, so no
+    // heartbeat can be placed inside it.
+    const wakeFromNetwork = () => wakeIfVisible(null);
     const stopReactivation = onPageReactivated(wakeIfVisible);
-    window.addEventListener('online', wakeIfVisible);
+    window.addEventListener('online', wakeFromNetwork);
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();
-      window.removeEventListener('online', wakeIfVisible);
+      window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };
   }, []);

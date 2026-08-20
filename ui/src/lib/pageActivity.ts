@@ -78,15 +78,33 @@ export function createPageActivityTracker(initialActive: boolean): PageActivityT
 // "the page is active" and "the page just came back" — rather than each binding
 // its own focus/visibility listeners and re-deriving them.
 
+/**
+ * Told when the page came back, and when it left. A gap has two ends, and a
+ * listener revalidating across it needs both: evidence that it was away is only
+ * evidence about the gap if it is dated inside it.
+ *
+ * `null` means the page is back from an away period this sampler never saw
+ * begin, which nothing can be dated against. Listeners must read it as the
+ * gap being unaccounted for rather than absent.
+ */
+export type PageReactivationListener = (awaySince: number | null) => void;
+
 const activeListeners = new Set<() => void>();
-const reactivationListeners = new Set<() => void>();
+const reactivationListeners = new Set<PageReactivationListener>();
 
 let tracker: PageActivityTracker | null = null;
 let detach: (() => void) | null = null;
+// When the current away period began, or null while the page is here. Only this
+// sampler watches the page leave, so only it can date that end of the gap.
+let awaySince: number | null = null;
 
 // Copy first: a listener may unsubscribe while the set is being walked.
 const notify = (listeners: Set<() => void>) => {
   for (const listener of [...listeners]) listener();
+};
+
+const notifyReactivated = (gapStart: number | null) => {
+  for (const listener of [...reactivationListeners]) listener(gapStart);
 };
 
 const sample = () => {
@@ -102,8 +120,19 @@ const sample = () => {
   // Either edge is a return: one this document watched happen, or one it could
   // only have missed while focus sat where it cannot look.
   const reactivated = tracker.observe(active) || (active && regainedSight);
+  // Date the away period from the first reading that shows the page gone, by
+  // either measure. The stamp is when this sampler first *saw* the page gone,
+  // which is no earlier than when it actually left -- a listener attaching
+  // mid-gap can only date it from the reading it took. A return clears the
+  // stamp instead of setting one, because a returning reading is neither
+  // inactive nor out of sight.
+  if (!active || focusOutOfSight) awaySince ??= Date.now();
   if (tracker.isActive() !== wasActive) notify(activeListeners);
-  if (reactivated) notify(reactivationListeners);
+  if (reactivated) {
+    const gapStart = awaySince;
+    awaySince = null;
+    notifyReactivated(gapStart);
+  }
 };
 
 // Focus events go to the window that holds focus, and Chrome hands focus to an
@@ -247,6 +276,9 @@ const attach = () => {
     releaseFocusChain();
     tracker = null;
     detach = null;
+    // Nobody is watching the page leave any more, so the next attach cannot
+    // date a gap from before it started looking.
+    awaySince = null;
   };
   // Fold the current reading in once, so a page that mounts while an embedded
   // frame already holds focus starts watching that chain without waiting for an
@@ -254,7 +286,7 @@ const attach = () => {
   sample();
 };
 
-const subscribe = (listeners: Set<() => void>, listener: () => void): (() => void) => {
+const subscribe = <Listener>(listeners: Set<Listener>, listener: Listener): (() => void) => {
   if (typeof document === 'undefined' || typeof window === 'undefined') return () => {};
   listeners.add(listener);
   if (!detach) attach();
@@ -275,8 +307,12 @@ const subscribePageActive = (listener: () => void): (() => void) =>
  * revalidating data that may have gone stale during the gap; a bare `focus`
  * listener over-fires because it cannot tell a return from a focus move that
  * never left the page.
+ *
+ * The listener is handed when the page left, for revalidation that can be
+ * skipped on evidence: see `PageReactivationListener`. A listener that
+ * revalidates unconditionally can keep ignoring it.
  */
-export function onPageReactivated(listener: () => void): () => void {
+export function onPageReactivated(listener: PageReactivationListener): () => void {
   return subscribe(reactivationListeners, listener);
 }
 

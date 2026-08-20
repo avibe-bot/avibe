@@ -5,6 +5,7 @@ import {
   WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
   WORKBENCH_EVENT_OPEN_TIMEOUT_MS,
   declaredWorkbenchHeartbeatInterval,
+  heartbeatCoversGap,
   isWorkbenchHeartbeatFresh,
   parseWorkbenchHeartbeatInterval,
   workbenchEventStaleAfterMs,
@@ -173,5 +174,70 @@ describe('workbench event stream liveness', () => {
       parseWorkbenchHeartbeatInterval(Number.MAX_SAFE_INTEGER),
     );
     expect(declaredWorkbenchHeartbeatInterval(-5)).toBeGreaterThan(0);
+  });
+
+  const interval = WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS;
+  const staleAfter = workbenchEventStaleAfterMs(interval);
+
+  it('covers a gap only when a heartbeat lands inside it and still holds at its end', () => {
+    // Stated as containment rather than as a list of scenarios. The gap is
+    // [awaySince, now]; one heartbeat vouches for [beat, beat + staleAfter).
+    // Coverage is that window reaching the gap's end while the beat itself falls
+    // after the gap's start -- both ends, spelled independently of how the
+    // implementation spells them, so dropping either one fails here.
+    const covered = (awaySince: number, beat: number) =>
+      awaySince < beat && beat <= now && now < beat + staleAfter;
+
+    const offsets = [0, 1, 500, interval, staleAfter - 1, staleAfter, staleAfter + 1, staleAfter * 3];
+    // A beat dated in the future is included: an unusable clock is not evidence.
+    for (const awayAgo of offsets) {
+      for (const beatAgo of [...offsets, -1]) {
+        const awaySince = now - awayAgo;
+        const lastHeartbeatAt = now - beatAgo;
+        expect(
+          heartbeatCoversGap({ lastHeartbeatAt, awaySince, intervalMs: interval, now }),
+          `away ${awayAgo}ms ago, heartbeat ${beatAgo}ms ago`,
+        ).toBe(covered(awaySince, lastHeartbeatAt));
+      }
+    }
+  });
+
+  it('reads an interval missing an end as uncovered', () => {
+    // Both nulls say the same thing -- one end of the interval is missing, and a
+    // comparison against a missing end has no answer. Unproven is the safe
+    // reading: it costs a redundant read instead of silently stale data.
+    for (const awaySince of [null, now - 1_000]) {
+      for (const lastHeartbeatAt of [null, now]) {
+        if (awaySince !== null && lastHeartbeatAt !== null) continue;
+        expect(heartbeatCoversGap({ lastHeartbeatAt, awaySince, intervalMs: interval, now })).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it('shrinks the untestable tail to one cadence without pretending to remove it', () => {
+    // What this costs: a gap too short to contain a heartbeat is not covered, so
+    // it pays the catch-up read that freshness alone would have skipped.
+    expect(
+      heartbeatCoversGap({
+        lastHeartbeatAt: now - 1_000,
+        awaySince: now - 500,
+        intervalMs: interval,
+        now,
+      }),
+    ).toBe(false);
+    // What it cannot fix, recorded rather than patched: silence is not evidence,
+    // so a stream that dies after its last heartbeat still reads as covering the
+    // rest of a long gap. Only the watchdog closes that, by waiting for the
+    // stream to speak again.
+    expect(
+      heartbeatCoversGap({
+        lastHeartbeatAt: now - (staleAfter - 1),
+        awaySince: now - staleAfter * 10,
+        intervalMs: interval,
+        now,
+      }),
+    ).toBe(true);
   });
 });

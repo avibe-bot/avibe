@@ -136,6 +136,41 @@ describe('onPageReactivated', () => {
     created.length = 0;
   });
 
+  it('dates the gap from when the page left, once per away period', () => {
+    vi.useFakeTimers();
+    try {
+      document.hasFocus = () => true;
+      const reactivated = listen();
+
+      const leftAt = Date.now();
+      document.hasFocus = () => false;
+      window.dispatchEvent(new Event('blur'));
+      // Time passing while away must not move the stamp: a listener revalidating
+      // across the gap needs when it opened, and "now" is its other end.
+      vi.advanceTimersByTime(30_000);
+      document.hasFocus = () => true;
+      window.dispatchEvent(new Event('focus'));
+
+      expect(reactivated).toHaveBeenCalledTimes(1);
+      expect(reactivated).toHaveBeenLastCalledWith(leftAt);
+
+      // The next gap is its own interval, not a continuation of the last one.
+      vi.advanceTimersByTime(5_000);
+      const leftAgainAt = Date.now();
+      document.hasFocus = () => false;
+      window.dispatchEvent(new Event('blur'));
+      vi.advanceTimersByTime(1_000);
+      document.hasFocus = () => true;
+      window.dispatchEvent(new Event('focus'));
+
+      expect(reactivated).toHaveBeenCalledTimes(2);
+      expect(reactivated).toHaveBeenLastCalledWith(leftAgainAt);
+      expect(leftAgainAt).toBeGreaterThan(leftAt);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports a system focus loss that arrived at the frame holding focus', () => {
     document.hasFocus = () => true;
 
