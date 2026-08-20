@@ -1014,6 +1014,72 @@ def test_refresh_askill_if_stale_repairs_an_unreadable_binary_without_the_latest
     assert out["action"] == "refresh_unknown_version"
 
 
+# Strings a version probe can produce that no comparison can order: absent,
+# empty, a development build, a git description, a partial number. The point is
+# not the list — it is that each one makes `_compare_versions` answer False, the
+# same answer it gives for "already newest", which is how "cannot tell" used to
+# be read as "current".
+UNORDERABLE_VERSIONS = [None, "", "dev", "unknown", "askill", "g1a2b3c", "0.1.x"]
+
+
+@pytest.mark.parametrize("version", UNORDERABLE_VERSIONS)
+def test_askill_status_calls_an_unorderable_version_unknown(monkeypatch, version):
+    # One field owns the fact, so prepare and the Dependencies page cannot
+    # disagree about whether a binary reporting `dev` is healthy.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+
+    assert api.askill_update_status()["status"] == "unknown"
+
+
+@pytest.mark.parametrize("version", UNORDERABLE_VERSIONS)
+def test_refresh_askill_if_stale_repairs_an_unorderable_local_version(monkeypatch, version):
+    # `up_to_date` must be an affirmative verdict, never the branch everything
+    # unrecognised falls into. A version that cannot be ordered against the
+    # published one means unknown, and unknown gets the repair the forced path
+    # would have performed — asserted over the shapes a probe can produce rather
+    # than over the one the review happened to name.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True], f"{version!r} is not a version we can trust as current"
+    assert out["action"] == "refresh_unknown_version"
+
+
+@pytest.mark.parametrize("latest", UNORDERABLE_VERSIONS)
+def test_refresh_askill_if_stale_needs_an_orderable_latest_to_claim_currency(monkeypatch, latest):
+    # The same rule on the upstream side: with nothing orderable to compare
+    # against, staleness is undecided. The owner reports that instead of
+    # currency, and each caller decides (prepare installs, the cadence skips).
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: latest)
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("the owner decides, it does not install here"))
+
+    out = api.refresh_askill_if_stale()
+
+    assert out["reason"] == "latest_unavailable"
+
+
 def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,
