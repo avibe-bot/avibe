@@ -181,6 +181,20 @@ export function showAccessTargetEmails(
     .map((entry) => entry.value);
 }
 
+export function showAccessEmailCount(entries: ShowAccessEntry[]): number {
+  return entries.filter((entry) => entry.kind === 'email').length;
+}
+
+/** Until A1/A2 land, the live store rejects Limited with an empty email list.
+ *  Group/Organization extras are local-only, so a Limited draft is wire-valid
+ *  only when at least one email would be on the five-key payload. */
+export function showAccessLimitedWireValid(
+  mode: ShowAccessMode,
+  entries: ShowAccessEntry[],
+): boolean {
+  return mode !== 'limited' || showAccessEmailCount(entries) > 0;
+}
+
 /** The Organization directory the audience combobox searches. `null` means this
  *  Avibe has no Organization (Personal), which is what hides the Organization
  *  toggle and group search — Personal pages can only list emails. */

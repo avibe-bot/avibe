@@ -30,6 +30,8 @@ import {
   showAccessEntryKey,
   showAccessSuggestions,
   showAccessApplyPayload,
+  showAccessEmailCount,
+  showAccessLimitedWireValid,
   showAccessTargetEntries,
   showAccessWireChanged,
   showAccessWithLocalExtras,
@@ -450,7 +452,10 @@ export function ShowPageSharingSettings({
   const shareIdDirty = Boolean(saved && normalizedShareId !== saved.share_id);
   const entryLimitReached = entries.length >= SHOW_ACCESS_ENTRY_MAX_COUNT;
   const editable = canManage && gate !== 'loading' && !saving;
-  const lastEntryPinned = mode === 'limited' && entries.length <= 1;
+  // Until A1/A2, Limited is only persistable with at least one email. Group
+  // and Organization extras stay removable; the last email is what is pinned.
+  const lastEmailPinned = mode === 'limited' && showAccessEmailCount(entries) <= 1;
+  const limitedWireValid = showAccessLimitedWireValid(mode, entries);
 
   const { suggestions, truncated } = useMemo(
     () => showAccessSuggestions(directory, query, entries),
@@ -474,7 +479,9 @@ export function ShowPageSharingSettings({
     const targetEntries = showAccessTargetEntries(nextMode, nextEntries);
     const nextInvalid =
       (nextMode !== 'private' && (!targetShareId || !isValidShareId(targetShareId)))
-      || (nextMode === 'limited' && targetEntries.length === 0);
+      || (nextMode === 'limited' && (
+        targetEntries.length === 0 || !showAccessLimitedWireValid(nextMode, nextEntries)
+      ));
     if (
       !current
       || savingRef.current
@@ -543,7 +550,7 @@ export function ShowPageSharingSettings({
     if (!editable || nextMode === mode) return;
     setMode(nextMode);
     setEmailInvalid(false);
-    if (nextMode === 'limited' && entries.length === 0) return;
+    if (nextMode === 'limited' && !showAccessLimitedWireValid(nextMode, entries)) return;
     void commit(nextMode, savedRef.current?.share_id ?? shareId, entries, shareIdDirty);
   };
 
@@ -573,7 +580,8 @@ export function ShowPageSharingSettings({
   };
 
   const removeEntry = (entry: ShowAccessEntry) => {
-    if (!editable || lastEntryPinned) return;
+    if (!editable) return;
+    if (entry.kind === 'email' && lastEmailPinned) return;
     applyEntries(withoutShowAccessEntry(entries, entry));
   };
 
@@ -643,7 +651,7 @@ export function ShowPageSharingSettings({
                       disabled={
                         !editable
                         || shareIdInvalid
-                        || (mode === 'limited' && entries.length === 0)
+                        || !limitedWireValid
                       }
                       onClick={saveShareId}
                       aria-label={t('common.save')}
@@ -749,7 +757,6 @@ export function ShowPageSharingSettings({
                         checked={Boolean(organizationEntry)}
                         disabled={
                           !editable
-                          || (Boolean(organizationEntry) && lastEntryPinned)
                           || (!organizationEntry && entryLimitReached)
                         }
                         onCheckedChange={toggleOrganization}
@@ -785,10 +792,10 @@ export function ShowPageSharingSettings({
                           size="icon"
                           variant="ghost"
                           className="size-5 shrink-0"
-                          disabled={!editable || lastEntryPinned}
+                          disabled={!editable || (entry.kind === 'email' && lastEmailPinned)}
                           onClick={() => removeEntry(entry)}
                           aria-label={t('chat.showPage.removeShareEntry', { label })}
-                          title={lastEntryPinned
+                          title={entry.kind === 'email' && lastEmailPinned
                             ? t('chat.showPage.keepOneShareEntry')
                             : t('chat.showPage.removeShareEntry', { label })}
                         >
@@ -799,7 +806,7 @@ export function ShowPageSharingSettings({
                   })}
                 </div>
 
-                {entries.length === 0 ? (
+                {!limitedWireValid ? (
                   <p className="text-[11px] text-destructive-ink">
                     {t('chat.showPage.shareAudienceRequired')}
                   </p>

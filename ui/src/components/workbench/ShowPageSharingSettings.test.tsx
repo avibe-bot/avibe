@@ -428,11 +428,61 @@ describe('ShowPageSharingSettings', () => {
 
     const remove = await screen.findByRole('button', { name: 'Remove guest@example.com' });
     expect((remove as HTMLButtonElement).disabled).toBe(true);
-    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last entry');
+    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last email');
     // The same guard covers an Organization that is the only entry left.
     expect((await screen.findByRole('switch', { name: 'This Organization' })).getAttribute(
       'aria-checked',
     )).toBe('false');
+  });
+
+  it('refuses Limited with no emails and pins the last email beside extras', async () => {
+    api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    await chooseMode('Limited');
+    expect(await screen.findByText(
+      'Add at least one email before Limited can be saved.',
+    )).toBeTruthy();
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+
+    const input = await openAudience();
+    fireEvent.click(await screen.findByRole('option', { name: /Engineering/ }));
+    expect(await screen.findByText('Engineering')).toBeTruthy();
+    expect(screen.getByText(
+      'Add at least one email before Limited can be saved.',
+    )).toBeTruthy();
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({
+        access_mode: 'limited',
+        revision: 1,
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    fireEvent.change(input, { target: { value: 'guest@example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_emails: ['guest@example.com'],
+    });
+    expect(screen.queryByText(
+      'Add at least one email before Limited can be saved.',
+    )).toBeNull();
+
+    const removeEmail = screen.getByRole('button', { name: 'Remove guest@example.com' });
+    const removeGroup = screen.getByRole('button', { name: 'Remove Engineering' });
+    expect((removeEmail as HTMLButtonElement).disabled).toBe(true);
+    expect((removeGroup as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(removeGroup);
+    expect(screen.queryByRole('button', { name: 'Remove Engineering' })).toBeNull();
+    expect(screen.getByText('guest@example.com')).toBeTruthy();
+    expect(api.applyShowAccess).toHaveBeenCalledTimes(1);
   });
 
   it('saves a direct mode change without an Apply button', async () => {

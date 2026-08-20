@@ -9,6 +9,7 @@ import {
   showAccessApplyPayload,
   showAccessDirectoryOf,
   showAccessDraftChanged,
+  showAccessLimitedWireValid,
   showAccessWireChanged,
   showAccessWithLocalExtras,
   showAccessEntriesOf,
@@ -199,6 +200,15 @@ describe('Show Page access policy helpers', () => {
       { kind: 'email', value: 'alice@example.com' },
       { kind: 'email', value: 'bob@example.com' },
     ]);
+    // Until A1/A2, Limited is only persistable with at least one email.
+    expect(showAccessLimitedWireValid('limited', entries)).toBe(true);
+    expect(showAccessLimitedWireValid('limited', [
+      { kind: 'organization', value: 'org-1' },
+      { kind: 'group', value: 'grp-eng' },
+    ])).toBe(false);
+    expect(showAccessLimitedWireValid('limited', [])).toBe(false);
+    expect(showAccessLimitedWireValid('public', [])).toBe(true);
+    expect(showAccessLimitedWireValid('private', [])).toBe(true);
   });
 
   it('derives the audience directory only for an Organization Avibe', () => {
