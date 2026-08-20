@@ -38,6 +38,12 @@ def _cold_process() -> None:
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
 
 
+def _remember(name: str, *, age: float, value: str | None) -> None:
+    """Seed the memory tier alone with an entry of a given age."""
+
+    latest_version_cache._MEMORY[name] = latest_version_cache._Entry(time.time() - age, value)  # noqa: SLF001
+
+
 def _persisted() -> dict:
     return json.loads(cache_path().read_text(encoding="utf-8"))
 
@@ -52,32 +58,64 @@ def test_a_second_process_inherits_the_answer_without_probing() -> None:
     assert probe.calls == 1
 
 
-def test_a_failed_probe_is_also_inherited_so_a_rate_limit_is_not_re_hit() -> None:
-    """A 403 costs the next process a fallback reinstall; don't earn it twice."""
+def test_a_failed_probe_stops_at_the_memory_tier() -> None:
+    """The file holds answers; a failure is not one, so it does not travel.
+
+    Inheriting one never bought what it looked like it bought: a process that
+    reads a cached ``None`` reports ``latest_unavailable`` and reinstalls askill
+    outright, where re-probing might find the blip already over. It saves one
+    HTTP request against a budget that — in the only case this arises — is
+    already exhausted, and pays for it with the race in the next test.
+    """
 
     probe = _Probe(None, "0.1.15")
 
     assert cached_latest("askill", probe) is None
-    _cold_process()
-    assert cached_latest("askill", probe) is None
+    assert not cache_path().exists()
 
+    # Same process asks again: the memory tier still backs off, which is the
+    # tier that needs to — a service polling a dead registry, not a fresh CLI.
+    assert cached_latest("askill", probe) is None
     assert probe.calls == 1
 
-
-def test_a_failed_probe_expires_far_sooner_than_a_successful_one() -> None:
-    probe = _Probe(None, "0.1.15")
-    cached_latest("askill", probe)
-
-    aged = latest_version_cache.FAILURE_TTL_SECONDS + 1
-    _write_entries({"askill": {"at": time.time() - aged, "value": None}})
-    _cold_process()
-    assert cached_latest("askill", probe) == "0.1.15"
-
-    aged = latest_version_cache.SUCCESS_TTL_SECONDS - 60
-    _write_entries({"askill": {"at": time.time() - aged, "value": "0.1.15"}})
     _cold_process()
     assert cached_latest("askill", probe) == "0.1.15"
     assert probe.calls == 2
+
+
+def test_a_failed_probe_never_writes_the_file() -> None:
+    """Why the same-name race is gone rather than narrowed.
+
+    Two cold processes miss the same name and both probe, outside any
+    cross-process lock, so the failure can land after the success. No
+    check-then-write can stop that — it only shrinks the window. A failure that
+    never touches the file cannot lose the race in the first place.
+    """
+
+    stale = time.time() - latest_version_cache.SUCCESS_TTL_SECONDS - 1
+    _write_entries({"askill": {"at": stale, "value": "0.1.15"}})
+    before = cache_path().read_bytes()
+    _cold_process()
+
+    # Expired, so this process really does probe — and really does fail.
+    assert cached_latest("askill", _Probe(None)) is None
+    assert cache_path().read_bytes() == before
+
+
+def test_the_memory_tier_retries_a_failure_far_sooner_than_a_success() -> None:
+    """Both TTLs still govern, in the one tier where the backoff pays for itself."""
+
+    probe = _Probe("0.1.15")
+
+    _remember("askill", age=latest_version_cache.FAILURE_TTL_SECONDS + 1, value=None)
+    assert cached_latest("askill", probe) == "0.1.15"
+
+    _remember("askill", age=latest_version_cache.FAILURE_TTL_SECONDS - 1, value=None)
+    assert cached_latest("askill", _never_probed) is None
+
+    _remember("askill", age=latest_version_cache.SUCCESS_TTL_SECONDS - 60, value="0.1.14")
+    assert cached_latest("askill", _never_probed) == "0.1.14"
+    assert probe.calls == 1
 
 
 def test_an_expired_entry_is_re_probed() -> None:
@@ -103,36 +141,18 @@ def test_a_timestamp_from_the_future_is_never_live() -> None:
     assert probe.calls == 1
 
 
-def test_a_failed_probe_never_displaces_a_live_success() -> None:
-    """Two processes miss the same name; the slower failure must not win.
+def test_a_null_answer_on_disk_is_ignored_rather_than_inherited() -> None:
+    """The rule holds in both directions: never written, so never trusted.
 
-    Both probe outside any cross-process lock, so a failure can land after a
-    success. Overwriting would cost far more than the one probe this cache is
-    willing to lose: the failure is then inherited for its own TTL, and a
-    ``latest_unavailable`` askill makes ``runtime prepare`` reinstall outright.
+    Otherwise a corrupted byte or a foreign writer could pin
+    ``latest_unavailable`` — and therefore an askill reinstall — on every cold
+    process for the whole failure TTL.
     """
 
-    _write_entries({"askill": {"at": time.time(), "value": "0.1.15"}})
-    _cold_process()
+    _write_entries({"askill": {"at": time.time(), "value": None}})
 
-    # A cold process whose own probe fails: it publishes nothing and answers
-    # with the entry that already stood, not with its own bad luck.
-    assert cached_latest("askill", _Probe(None)) == "0.1.15"
-
+    assert cached_latest("askill", _Probe("0.1.15")) == "0.1.15"
     assert _persisted()["entries"]["askill"]["value"] == "0.1.15"
-    _cold_process()
-    assert cached_latest("askill", _never_probed) == "0.1.15"
-
-
-def test_a_failed_probe_still_replaces_a_success_that_has_expired() -> None:
-    """Preserving knowledge, not preserving whichever string got there first."""
-
-    expired = time.time() - latest_version_cache.SUCCESS_TTL_SECONDS - 1
-    _write_entries({"askill": {"at": expired, "value": "0.1.15"}})
-    _cold_process()
-
-    assert cached_latest("askill", _Probe(None)) is None
-    assert _persisted()["entries"]["askill"]["value"] is None
 
 
 def test_entries_for_other_dependencies_survive_a_write() -> None:
@@ -172,6 +192,23 @@ def test_entries_for_other_dependencies_survive_a_write() -> None:
 def test_an_unusable_cache_file_costs_a_probe_and_nothing_else(content) -> None:
     cache_path().parent.mkdir(parents=True, exist_ok=True)
     cache_path().write_text(content, encoding="utf-8")
+    probe = _Probe("0.1.15")
+
+    assert cached_latest("askill", probe) == "0.1.15"
+    assert probe.calls == 1
+    assert _persisted()["entries"]["askill"]["value"] == "0.1.15"
+
+
+def test_bytes_that_are_not_a_document_cost_a_probe_and_nothing_else() -> None:
+    """Not one more entry in an enumeration — the property the loader promises.
+
+    A non-UTF-8 file raises ``UnicodeDecodeError`` rather than
+    ``JSONDecodeError``, which is exactly the member a hand-written list of
+    failure modes was always going to be missing.
+    """
+
+    cache_path().parent.mkdir(parents=True, exist_ok=True)
+    cache_path().write_bytes(b'{"schema_version": 1, "entries": {"\xff\xfe": 0}}')
     probe = _Probe("0.1.15")
 
     assert cached_latest("askill", probe) == "0.1.15"

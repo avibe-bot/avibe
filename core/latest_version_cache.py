@@ -14,12 +14,26 @@ reinstalling askill — about 30 seconds of network to land the version already 
 disk. So persisting the answer across processes matters more for the failures it
 prevents than for the round trip it skips.
 
-The cache is two tiers over one policy. Memory answers a warm process; the file
-answers a cold one; a miss in both probes and writes through to each. Failures
-are cached too, on a much shorter TTL, because a probe that just failed is the
-one most likely to fail again — but only where there is no live success to keep.
-A failed probe reports this process's luck reaching the registry, not what the
-registry publishes, so it may fill a gap and never overwrite knowledge.
+The cache is two tiers holding different things. The file tier holds *answers*,
+so a cold process inherits what a previous one paid GitHub for. A failed probe
+stops at the memory tier, which is the tier that needs it: a long-running
+service polling a dead registry should back off, a fresh CLI process has nothing
+to back off from.
+
+Keeping failures off disk is also what removes the interesting race rather than
+narrowing it. Two processes missing the same name both probe, outside any
+cross-process lock, and no check-then-write can stop a slower failure from
+landing on a fresh success — a guard only shrinks the window. A failure that
+never reaches the file cannot overwrite anything, so every remaining
+read-modify-write race is success-over-success, where the loser costs one extra
+probe.
+
+Inheriting a failure was never worth that window anyway: it does not avoid the
+fallback it looks like it avoids. A process reading a cached ``None`` reports
+``latest_unavailable`` and reinstalls askill; a process that re-probes might find
+the blip over instead. Persisting the failure turns "maybe" into "certainly
+reinstall" to save one HTTP request against a budget that, in the only case this
+arises, is already exhausted.
 
 Nothing here is authoritative. Every entry is a best-effort answer with an
 expiry, and a caller that reads a stale or absent one gets the same behaviour it
@@ -48,8 +62,9 @@ __all__ = ["cache_path", "cached_latest"]
 SCHEMA_VERSION = 1
 
 SUCCESS_TTL_SECONDS = 3600.0
-#: Failed lookups (network down, registry hiccup, rate limit) re-probe sooner so
-#: a transient outage doesn't pin "—" for the full hour.
+#: Governs the memory tier only. A failed lookup (network down, registry hiccup,
+#: rate limit) re-probes sooner so a transient outage doesn't pin "—" for the
+#: full hour, and never outlives the process that had the bad luck.
 FAILURE_TTL_SECONDS = 120.0
 
 
@@ -82,13 +97,19 @@ def _read_file() -> dict[str, _Entry]:
     may be an older or newer build, and may have died mid-write on a machine
     without atomic renames. Every failure mode collapses to the same answer:
     fewer entries, one more probe.
+
+    So the except clause names that property rather than the ways it has broken
+    so far: ``ValueError`` covers both ``json.JSONDecodeError`` and the
+    ``UnicodeDecodeError`` that non-UTF-8 bytes raise, and whatever the next
+    decoder raises for bytes that are not a document. An enumeration here reads
+    as complete and is not — it was already missing the second of those two.
     """
 
     try:
         raw = json.loads(cache_path().read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         logger.debug("Latest-version cache unreadable: %s", exc)
         return {}
     if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
@@ -105,35 +126,34 @@ def _read_file() -> dict[str, _Entry]:
         value = entry.get("value")
         if not isinstance(at, (int, float)) or isinstance(at, bool):
             continue
-        if value is not None and not isinstance(value, str):
+        # The file tier holds answers, in both directions: a null is not
+        # something this version writes, so it is not something it trusts.
+        # Corruption must not pin ``latest_unavailable`` on every cold process.
+        if not isinstance(value, str) or not value:
             continue
         out[name] = _Entry(float(at), value)
     return out
 
 
-def _persist(name: str, entry: _Entry) -> _Entry:
-    """Publish *entry* for *name*, and answer with whichever entry now stands.
+def _persist(name: str, entry: _Entry) -> None:
+    """Write *entry* through to disk, leaving the other names alone.
 
-    Read-modify-write with no cross-process lock: two processes updating two
-    different dependencies at the same instant can drop one of the two entries.
-    The cost of that loss is one extra probe on the next run, which is cheaper
-    than a lock file that every CLI invocation would have to acquire.
+    A failed probe stops here, at the one place that can enforce it: whatever a
+    caller hands over, only answers reach the file. That is what makes the
+    same-name race disappear instead of narrow (see the module docstring), and
+    it is not the caller's rule to remember.
 
-    That tolerance has exactly one exception, and it is why this returns an
-    entry instead of nothing. Two processes missing the *same* name both probe,
-    and if the successful one lands first the slower failure would overwrite it
-    — a loss that does not cost one probe but a whole ``FAILURE_TTL_SECONDS``
-    window of ``latest_unavailable``, which for askill is not a slow path but a
-    forced ~30s reinstall. So a failure may fill a gap and never displace a live
-    success, and a process whose own probe lost still answers with the better
-    entry rather than the one it happens to hold.
+    What remains is a read-modify-write with no cross-process lock, so two
+    processes publishing two *different* dependencies at the same instant can
+    drop one of the two entries. That costs one extra probe on the next run,
+    which is cheaper than a lock file every CLI invocation would have to
+    acquire — and with failures excluded, the same-name collision is now
+    success-over-success, where either winner is a correct answer.
     """
 
-    persisted = _read_file()
     if entry.value is None:
-        standing = persisted.get(name)
-        if standing is not None and standing.value is not None and standing.is_live(entry.at):
-            return standing
+        return
+    persisted = _read_file()
     persisted[name] = entry
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -145,7 +165,6 @@ def _persist(name: str, entry: _Entry) -> _Entry:
         # A read-only or full state directory must not break a version lookup;
         # the caller still has its answer, it just won't outlive this process.
         logger.debug("Latest-version cache not persisted: %s", exc)
-    return entry
 
 
 def cached_latest(name: str, fetch: Callable[[], str | None]) -> str | None:
@@ -168,7 +187,8 @@ def cached_latest(name: str, fetch: Callable[[], str | None]) -> str | None:
             _MEMORY[name] = persisted
         return persisted.value
 
-    standing = _persist(name, _Entry(time.time(), fetch()))
+    entry = _Entry(time.time(), fetch())
     with _LOCK:
-        _MEMORY[name] = standing
-    return standing.value
+        _MEMORY[name] = entry
+    _persist(name, entry)
+    return entry.value
