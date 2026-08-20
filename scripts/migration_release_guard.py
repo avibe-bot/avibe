@@ -558,30 +558,13 @@ class DeclaredBodyEdit:
     reason: str
 
 
-DECLARED_BODY_EDITS: tuple[DeclaredBodyEdit, ...] = (
-    DeclaredBodyEdit(
-        revision="20260725_0037",
-        body="d56e9ae949018bb1d0adc6edc1609d2f39052eb1bf70688add968c7304f4525a",
-        reason=(
-            "The revision backfilled media_object_references by regex-scanning every agent "
-            "message for media URLs. Only that scan is gone; the DDL and the precondition "
-            "20260819_0056 relies on to prove its replay repaired anything are untouched. "
-            "Removed because no forward revision can express the "
-            "removal: 20260819_0056 replays this body, so a later revision runs after the "
-            "scan it would have to prevent, and the rows the scan writes are byte-identical "
-            "to the ones media_service.register() writes when a second session reuses a "
-            "token, so nothing downstream can delete one without deleting the other. What "
-            "the divergence costs is bounded by the read path rather than argued: the table "
-            "only ever widens access, vibe/ui_server.py falls back to the media row's own "
-            "session and scope when the reference set is empty, and the owner short-circuit "
-            "returns before consulting it at all -- so a row the scan would have written is "
-            "at worst a 404 for a non-owner holding partial project access, never a leak. "
-            "The scan is also already inert wherever it can still run: a fresh install "
-            "crosses this revision with media_objects and messages empty, and a database "
-            "that already crossed it is stamped and never reruns it."
-        ),
-    ),
-)
+#: Empty is the steady state, not an omission. An entry lives here only between the
+#: edit and the release that ships it, and ``spent_body_edit_declarations`` reports it
+#: the moment the baseline moves past -- which is what stops the list from accumulating
+#: into the standing allowlist the rest of this module refuses to keep. The reason text
+#: goes with it: the release it justified is out, so the argument now belongs to the
+#: history of that release rather than to a live guard.
+DECLARED_BODY_EDITS: tuple[DeclaredBodyEdit, ...] = ()
 
 
 def _declared_body_edits() -> dict[str, DeclaredBodyEdit]:
