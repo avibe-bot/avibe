@@ -246,6 +246,23 @@ describe('ShowPageSharingSettings', () => {
     });
   });
 
+  it('keeps the audience list open with empty-state copy when a directory query matches nothing', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    const input = await openAudience();
+    fireEvent.change(input, { target: { value: 'zzz-no-match' } });
+    expect(await screen.findByRole('listbox', { name: 'People and group suggestions' })).toBeTruthy();
+    expect(screen.getByText('No matching person or group. Type a full email to add it.')).toBeTruthy();
+    expect(screen.queryAllByRole('option')).toHaveLength(0);
+  });
+
   it('closes the audience list when focus leaves the field from the add button', async () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({

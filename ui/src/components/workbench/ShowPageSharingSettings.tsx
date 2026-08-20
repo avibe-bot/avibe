@@ -183,7 +183,12 @@ function AudienceCombobox({
     ? { kind: 'email', value: typedEmail, label: typedEmail }
     : null;
   const options = typedOption ? [...suggestions, typedOption] : suggestions;
-  const open = focused && !disabled && (options.length > 0 || directoryLoading);
+  // A focused unmatched query (not a complete email) has zero options and is
+  // not loading, so the empty-state copy inside the listbox is unreachable
+  // unless the list stays open for that case too.
+  const open = focused && !disabled && (
+    options.length > 0 || directoryLoading || query.trim().length > 0
+  );
   const activeIndex = options.findIndex((option) => showAccessEntryKey(option) === activeKey);
   const active = activeIndex >= 0 ? options[activeIndex] : null;
 
