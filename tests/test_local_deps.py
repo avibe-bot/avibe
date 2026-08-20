@@ -875,17 +875,29 @@ def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch
     assert len(probes) == 1
 
 
-def test_installing_askill_retires_the_persisted_latest_for_the_next_process(monkeypatch):
+def test_installing_askill_keeps_the_persisted_latest_for_the_next_process(monkeypatch):
+    """An install is the one moment prepare runs most, and must not cost a probe.
+
+    Installing 0.1.14 does not change the fact that 0.1.14 is what askill
+    publishes, so the entry that justified the install is exactly what the next
+    process needs: it compares a freshly measured local version against it and
+    concludes ``up_to_date``. Retiring it here — the reflex the in-memory cache
+    this replaced had — would send every post-update ``runtime prepare`` back to
+    GitHub for a string already on disk.
+    """
+
+    installed = {"version": "0.1.13"}
     monkeypatch.setattr(
         api,
         "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": "0.1.13", "status": "ready"},
+        lambda: {"id": "askill", "installed": True, "version": installed["version"], "status": "ready"},
     )
-    monkeypatch.setattr(
-        api,
-        "ensure_askill_installed",
-        lambda force=False: {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
-    )
+
+    def _install(force=False):
+        installed["version"] = "0.1.14"
+        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
+
+    monkeypatch.setattr(api, "ensure_askill_installed", _install)
     probes = []
     monkeypatch.setattr(
         api,
@@ -896,11 +908,8 @@ def test_installing_askill_retires_the_persisted_latest_for_the_next_process(mon
     assert api.refresh_askill_if_stale()["action"] == "update"
     latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
 
-    # The entry that justified the install cannot be allowed to outlive it: a
-    # later process reading it would compare the freshly installed version
-    # against a pre-install answer.
-    assert api._cached_latest_askill() == "0.1.14"  # noqa: SLF001
-    assert len(probes) == 2
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    assert len(probes) == 1
 
 
 def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):

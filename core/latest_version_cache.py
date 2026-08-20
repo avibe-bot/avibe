@@ -17,7 +17,9 @@ prevents than for the round trip it skips.
 The cache is two tiers over one policy. Memory answers a warm process; the file
 answers a cold one; a miss in both probes and writes through to each. Failures
 are cached too, on a much shorter TTL, because a probe that just failed is the
-one most likely to fail again.
+one most likely to fail again — but only where there is no live success to keep.
+A failed probe reports this process's luck reaching the registry, not what the
+registry publishes, so it may fill a gap and never overwrite knowledge.
 
 Nothing here is authoritative. Every entry is a best-effort answer with an
 expiry, and a caller that reads a stale or absent one gets the same behaviour it
@@ -38,7 +40,7 @@ from config.atomic_io import write_atomic
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["cache_path", "cached_latest", "invalidate"]
+__all__ = ["cache_path", "cached_latest"]
 
 #: Bumped when the on-disk shape changes. A file written by a newer Avibe is
 #: ignored rather than guessed at, and the next write replaces it — this is a
@@ -109,21 +111,30 @@ def _read_file() -> dict[str, _Entry]:
     return out
 
 
-def _persist(name: str, entry: _Entry | None) -> None:
-    """Write *entry* for *name* through to disk, leaving other names alone.
+def _persist(name: str, entry: _Entry) -> _Entry:
+    """Publish *entry* for *name*, and answer with whichever entry now stands.
 
     Read-modify-write with no cross-process lock: two processes updating two
     different dependencies at the same instant can drop one of the two entries.
     The cost of that loss is one extra probe on the next run, which is cheaper
     than a lock file that every CLI invocation would have to acquire.
+
+    That tolerance has exactly one exception, and it is why this returns an
+    entry instead of nothing. Two processes missing the *same* name both probe,
+    and if the successful one lands first the slower failure would overwrite it
+    — a loss that does not cost one probe but a whole ``FAILURE_TTL_SECONDS``
+    window of ``latest_unavailable``, which for askill is not a slow path but a
+    forced ~30s reinstall. So a failure may fill a gap and never displace a live
+    success, and a process whose own probe lost still answers with the better
+    entry rather than the one it happens to hold.
     """
 
     persisted = _read_file()
-    if entry is None:
-        if persisted.pop(name, None) is None:
-            return
-    else:
-        persisted[name] = entry
+    if entry.value is None:
+        standing = persisted.get(name)
+        if standing is not None and standing.value is not None and standing.is_live(entry.at):
+            return standing
+    persisted[name] = entry
     payload = {
         "schema_version": SCHEMA_VERSION,
         "entries": {key: {"at": item.at, "value": item.value} for key, item in persisted.items()},
@@ -134,6 +145,7 @@ def _persist(name: str, entry: _Entry | None) -> None:
         # A read-only or full state directory must not break a version lookup;
         # the caller still has its answer, it just won't outlive this process.
         logger.debug("Latest-version cache not persisted: %s", exc)
+    return entry
 
 
 def cached_latest(name: str, fetch: Callable[[], str | None]) -> str | None:
@@ -156,21 +168,7 @@ def cached_latest(name: str, fetch: Callable[[], str | None]) -> str | None:
             _MEMORY[name] = persisted
         return persisted.value
 
-    entry = _Entry(time.time(), fetch())
+    standing = _persist(name, _Entry(time.time(), fetch()))
     with _LOCK:
-        _MEMORY[name] = entry
-    _persist(name, entry)
-    return entry.value
-
-
-def invalidate(name: str) -> None:
-    """Forget *name* in both tiers, so the next lookup probes.
-
-    Called after Avibe installs a new version of a managed dependency: the entry
-    that decided to install is the one thing guaranteed to be stale afterwards,
-    and leaving it on disk would outlive the process that acted on it.
-    """
-
-    with _LOCK:
-        _MEMORY.pop(name, None)
-    _persist(name, None)
+        _MEMORY[name] = standing
+    return standing.value

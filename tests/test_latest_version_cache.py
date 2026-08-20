@@ -13,7 +13,7 @@ import time
 import pytest
 
 from core import latest_version_cache
-from core.latest_version_cache import cache_path, cached_latest, invalidate
+from core.latest_version_cache import cache_path, cached_latest
 
 
 class _Probe:
@@ -103,17 +103,36 @@ def test_a_timestamp_from_the_future_is_never_live() -> None:
     assert probe.calls == 1
 
 
-def test_invalidate_forgets_the_entry_in_both_tiers() -> None:
-    probe = _Probe("0.1.15", "0.1.16")
-    cached_latest("askill", probe)
+def test_a_failed_probe_never_displaces_a_live_success() -> None:
+    """Two processes miss the same name; the slower failure must not win.
 
-    invalidate("askill")
+    Both probe outside any cross-process lock, so a failure can land after a
+    success. Overwriting would cost far more than the one probe this cache is
+    willing to lose: the failure is then inherited for its own TTL, and a
+    ``latest_unavailable`` askill makes ``runtime prepare`` reinstall outright.
+    """
 
-    assert "askill" not in _persisted()["entries"]
-    assert cached_latest("askill", probe) == "0.1.16"
+    _write_entries({"askill": {"at": time.time(), "value": "0.1.15"}})
     _cold_process()
-    assert cached_latest("askill", probe) == "0.1.16"
-    assert probe.calls == 2
+
+    # A cold process whose own probe fails: it publishes nothing and answers
+    # with the entry that already stood, not with its own bad luck.
+    assert cached_latest("askill", _Probe(None)) == "0.1.15"
+
+    assert _persisted()["entries"]["askill"]["value"] == "0.1.15"
+    _cold_process()
+    assert cached_latest("askill", _never_probed) == "0.1.15"
+
+
+def test_a_failed_probe_still_replaces_a_success_that_has_expired() -> None:
+    """Preserving knowledge, not preserving whichever string got there first."""
+
+    expired = time.time() - latest_version_cache.SUCCESS_TTL_SECONDS - 1
+    _write_entries({"askill": {"at": expired, "value": "0.1.15"}})
+    _cold_process()
+
+    assert cached_latest("askill", _Probe(None)) is None
+    assert _persisted()["entries"]["askill"]["value"] is None
 
 
 def test_entries_for_other_dependencies_survive_a_write() -> None:
@@ -126,15 +145,18 @@ def test_entries_for_other_dependencies_survive_a_write() -> None:
     assert cached_latest("askill", _never_probed) == "0.1.15"
     assert set(_persisted()["entries"]) == {"askill", "opencode"}
 
-    invalidate("opencode")
+    # opencode expires and is re-probed; the rewrite that publishes its new
+    # answer must carry askill's untouched entry along with it.
+    _write_entries(
+        {
+            "askill": _persisted()["entries"]["askill"],
+            "opencode": {"at": time.time() - latest_version_cache.SUCCESS_TTL_SECONDS - 1, "value": "1.2.3"},
+        }
+    )
+    _cold_process()
+    assert cached_latest("opencode", _Probe("1.2.4")) == "1.2.4"
     _cold_process()
     assert cached_latest("askill", _never_probed) == "0.1.15"
-
-
-def test_invalidating_an_absent_name_does_not_create_a_file() -> None:
-    invalidate("never-cached")
-
-    assert not cache_path().exists()
 
 
 @pytest.mark.parametrize(

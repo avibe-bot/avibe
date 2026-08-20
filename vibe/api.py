@@ -8206,9 +8206,13 @@ def refresh_askill_if_stale() -> dict:
     result["action"] = "update"
     result["from_version"] = status.get("version")
     result["latest_version"] = latest
-    # The entry that decided to install is stale the moment the install lands,
-    # and it now outlives this process — so drop it from disk too.
-    latest_version_cache.invalidate(_ASKILL_CACHE_KEY)
+    # Deliberately no cache invalidation here, unlike the in-memory cache this
+    # replaced. The entry says which version askill *publishes*, and installing
+    # that version does not change the answer — it makes it the one a later
+    # ``askill_update_status`` needs, to compare a freshly measured local version
+    # against and conclude ``up_to_date``. Dropping it would send the next
+    # ``runtime prepare`` back to GitHub for a string we still hold, in the one
+    # window (right after an update) where prepare runs most often.
     return result
 
 
