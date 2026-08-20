@@ -24,7 +24,6 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-from core.session_lifecycle import TURN_LIFECYCLE_SNAPSHOT_KEY
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -313,17 +312,40 @@ class MessageHandler(BaseHandler):
 
         self._memory_capture_registration_open = False
 
-    async def handle_user_message(self, context: MessageContext, message: str):
+    async def handle_user_message(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        lifecycle_snapshot: object | None = None,
+    ):
         """Process regular human-originated messages and route to configured agent."""
-        await self._handle_turn(context, message, source=self.TURN_SOURCE_HUMAN)
+        await self._handle_turn(
+            context,
+            message,
+            source=self.TURN_SOURCE_HUMAN,
+            lifecycle_snapshot=lifecycle_snapshot,
+        )
 
-    async def handle_scheduled_message(self, context: MessageContext, message: str, parsed_session_key=None):
+    async def handle_scheduled_message(
+        self,
+        context: MessageContext,
+        message: str,
+        parsed_session_key=None,
+        *,
+        lifecycle_snapshot: object | None = None,
+    ):
         """Process a scheduler-originated turn through the shared turn pipeline."""
         if parsed_session_key is not None:
             payload = dict(context.platform_specific or {})
             payload["parsed_session_key"] = parsed_session_key
             context.platform_specific = payload
-        return await self._handle_turn(context, message, source=self.TURN_SOURCE_SCHEDULED)
+        return await self._handle_turn(
+            context,
+            message,
+            source=self.TURN_SOURCE_SCHEDULED,
+            lifecycle_snapshot=lifecycle_snapshot,
+        )
 
     async def _prepare_turn_context(self, context: MessageContext, source: str) -> MessageContext:
         payload = dict(context.platform_specific or {})
@@ -380,7 +402,14 @@ class MessageHandler(BaseHandler):
             )
             return False
 
-    async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
+    async def _handle_turn(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        source: str,
+        lifecycle_snapshot: object | None = None,
+    ) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
@@ -488,16 +517,15 @@ class MessageHandler(BaseHandler):
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             memory_session_id = base_session_id
+            memory_session_snapshot: object | None = None
+            if is_human:
+                memory_session_snapshot = (
+                    lifecycle_snapshot
+                    if lifecycle_snapshot is not None
+                    else self._memory_session_lifecycle_snapshot(memory_session_id)
+                )
+            lifecycle_snapshot = None
             payload = dict(context.platform_specific or {})
-            snapshotted_lifecycle = payload.pop(
-                TURN_LIFECYCLE_SNAPSHOT_KEY,
-                None,
-            )
-            memory_session_snapshot = (
-                snapshotted_lifecycle
-                if snapshotted_lifecycle is not None
-                else self._memory_session_lifecycle_snapshot(memory_session_id)
-            )
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
             payload["scheduled_anchor_required"] = self.session_handler.should_allocate_scheduled_anchor(
@@ -515,6 +543,7 @@ class MessageHandler(BaseHandler):
                     memory_session_id,
                     expected_snapshot=memory_session_snapshot,
                 )
+                memory_session_snapshot = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -1041,6 +1070,7 @@ class MessageHandler(BaseHandler):
                             "Memory capture task could not be scheduled",
                             exc_info=True,
                         )
+                memory_session_snapshot = None
 
             if durable_ingress_enabled and not durable_delivery_owned:
                 assert durable_dispatch_text is not None

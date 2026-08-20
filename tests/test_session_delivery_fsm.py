@@ -35,7 +35,6 @@ from core.runtime_activation import (
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
-    TURN_LIFECYCLE_SNAPSHOT_KEY,
     DeliveryRequest,
     DeliveryResult,
     SessionTurnManager,
@@ -120,9 +119,12 @@ def _memory_facts_controller():
 
 
 def _complete_capture_admission(context: MessageContext) -> None:
-    """Guard that durable dispatch no longer carries the retired fence lease."""
+    """Guard that durable dispatch carries no lifecycle state in its JSON bag."""
 
-    assert "_turn_lifecycle_admission" not in (context.platform_specific or {})
+    payload = context.platform_specific or {}
+    assert "_turn_lifecycle_admission" not in payload
+    assert "_turn_lifecycle_snapshot" not in payload
+    json.dumps(payload)
 
 
 def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
@@ -246,16 +248,17 @@ async def test_completed_memory_lifecycle_state_does_not_accumulate(managers) ->
 
 @pytest.mark.anyio
 async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> None:
+    """Scenario: MEMORY-INDEP-010."""
+
     manager, _other, _engine, _engine_b, _starts = managers
     handler = _capture_handler(manager)
     capture_entered = asyncio.Event()
     release_capture = asyncio.Event()
     lifecycle_entered = asyncio.Event()
 
-    async def run_turn(_session_id, context, _text, **_kwargs):
-        expected_snapshot = context.platform_specific[
-            TURN_LIFECYCLE_SNAPSHOT_KEY
-        ]
+    async def run_turn(_session_id, context, _text, **kwargs):
+        _complete_capture_admission(context)
+        expected_snapshot = kwargs["lifecycle_snapshot"]
 
         async def capture() -> None:
             capture_entered.set()

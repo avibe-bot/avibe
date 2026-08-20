@@ -11,6 +11,7 @@ capability:
     - tests/test_memory_slice3.py
     - tests/test_controller_dispatch_loop.py
     - tests/test_native_session_providers.py
+    - tests/test_core_services_dispatch.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
@@ -19,6 +20,7 @@ contract:
   imports: shared_delivery_and_handler_imports_stay_behind_leaf_boundaries
   retention: settled_lifecycle_and_archive_authorization_state_is_released
   scheduling: capture_setup_failure_is_best_effort
+  transient_dispatch: lifecycle_snapshots_never_enter_platform_payloads_or_waiters
 status_legend:
   covered: executable evidence exists
 scenarios:
@@ -76,3 +78,15 @@ scenarios:
     kind: guardrail
     layer: contract
     test: tests/test_native_session_providers.py::test_native_session_lightweight_imports_do_not_require_sqlite
+  - id: MEMORY-INDEP-010
+    name: Lifecycle snapshots cross dispatch outside the platform JSON payload
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_session_lifecycle_waits_for_admitted_turn_capture
+  - id: MEMORY-INDEP-011
+    name: Streaming waiters release lifecycle snapshots after handler admission
+    status: covered
+    kind: guardrail
+    layer: contract
+    test: tests/test_core_services_dispatch.py::test_streaming_dispatch_releases_lifecycle_snapshot_after_handler_returns

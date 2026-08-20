@@ -89,7 +89,6 @@ from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
 )
-from core.session_lifecycle import TURN_LIFECYCLE_SNAPSHOT_KEY
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -4245,9 +4244,6 @@ class SessionTurnManager:
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
-            resolved.platform_specific[TURN_LIFECYCLE_SNAPSHOT_KEY] = (
-                lifecycle_snapshot
-            )
             resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
@@ -4310,6 +4306,9 @@ class SessionTurnManager:
                 logical_turn_id=turn_id,
                 delivery_id=str((delivery or {}).get("id") or "") or None,
                 durable_preallocated=True,
+                lifecycle_snapshot=(
+                    lifecycle_snapshot if source == SOURCE_HUMAN else None
+                ),
             )
             return True
         except Exception:
@@ -7203,6 +7202,7 @@ class SessionTurnManager:
         logical_turn_id: str | None = None,
         delivery_id: str | None = None,
         durable_preallocated: bool = False,
+        lifecycle_snapshot: object | None = None,
     ) -> None:
         """Start a fire-and-forget turn and HOLD it open until it settles.
 
@@ -7236,6 +7236,7 @@ class SessionTurnManager:
         context.platform_specific["turn_token"] = logical_turn_id
 
         async def _runner() -> None:
+            nonlocal lifecycle_snapshot
             cancelled = False
             failed = False
             prewrite_refused = False
@@ -7260,7 +7261,12 @@ class SessionTurnManager:
                         evidence_kind="terminal_run_before_native_dispatch",
                     )
                     return
-                outcome = await dispatch_turn_with_outcome(
+                snapshot_options = (
+                    {"lifecycle_snapshot": lifecycle_snapshot}
+                    if lifecycle_snapshot is not None
+                    else {}
+                )
+                dispatch = dispatch_turn_with_outcome(
                     self.controller,
                     context,
                     text,
@@ -7274,7 +7280,11 @@ class SessionTurnManager:
                     # slot would free + a Chat send could preempt the still-running
                     # scheduled turn (Codex P2).
                     on_chunk=self._noop_chunk,
+                    **snapshot_options,
                 )
+                snapshot_options.clear()
+                lifecycle_snapshot = None
+                outcome = await dispatch
                 settled_by = outcome.settled_by
                 definitive_prewrite_exit = outcome.backend_dispatch_attempted is False
                 current = self.in_flight.get(str(session_id or ""))
