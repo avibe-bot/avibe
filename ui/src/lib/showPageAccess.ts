@@ -1,4 +1,4 @@
-import type { ResourceAccessLevel } from '@/features/permissions/types';
+import type { PermissionsResponse, ResourceAccessLevel } from '@/features/permissions/types';
 export type ShowPageAccess = {
   ok: true;
   mode: 'unmanaged' | 'personal' | 'organization' | 'organization_pending' | 'configuration_unavailable';
@@ -22,12 +22,25 @@ export type ShowPageAccessProbe =
 
 export type ShowAccessMode = 'private' | 'limited' | 'public';
 
+/** A `limited` audience is a heterogeneous set: an email, an Organization group,
+ *  or the page's own Organization. The three kinds are peers — any hit admits a
+ *  read-only `/p` visitor, and none of them supersedes or dedupes another. */
+export type ShowAccessEntryKind = 'email' | 'group' | 'organization';
+
+export type ShowAccessEntry = {
+  kind: ShowAccessEntryKind;
+  value: string;
+};
+
 export type ShowAccess = {
   page_id: string;
   access_mode: ShowAccessMode;
   share_id: string | null;
   revision: number;
+  /** Pre-A1 backends only report the email audience. Absent `access_entries`,
+   *  this list is read as the email entries so email sharing keeps working. */
   normalized_emails: string[];
+  access_entries?: ShowAccessEntry[];
 };
 
 export type ShowAccessSettingsResult = {
@@ -38,6 +51,9 @@ export type ShowAccessApplyRequest = {
   expected_revision: number;
   target_access_mode: ShowAccessMode;
   target_share_id: string | null;
+  target_entries: ShowAccessEntry[];
+  /** Email projection of `target_entries`, kept so a backend that has not yet
+   *  adopted the heterogeneous contract still applies the email audience. */
   target_emails: string[];
 };
 
@@ -46,7 +62,7 @@ export type ShowAccessApplyResult = {
   show_access: ShowAccess;
 };
 
-export const SHOW_ACCESS_EMAIL_MAX_COUNT = 64;
+export const SHOW_ACCESS_ENTRY_MAX_COUNT = 64;
 const SHOW_ACCESS_EMAIL_PATTERN = /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const ASCII_SURROUNDING_WHITESPACE = /^[\t\n\f\r\v ]+|[\t\n\f\r\v ]+$/g;
 
@@ -60,28 +76,163 @@ export function normalizeShowAccessEmail(raw: string): string | null {
 }
 
 export function normalizeShowAccessEmails(emails: string[]): string[] | null {
-  if (emails.length > SHOW_ACCESS_EMAIL_MAX_COUNT) return null;
+  if (emails.length > SHOW_ACCESS_ENTRY_MAX_COUNT) return null;
   const normalized = emails.map(normalizeShowAccessEmail);
   if (normalized.some((email) => email === null)) return null;
   return [...new Set(normalized as string[])].sort();
 }
 
+const ENTRY_KIND_RANK: Record<ShowAccessEntryKind, number> = {
+  organization: 0,
+  group: 1,
+  email: 2,
+};
+
+export function showAccessEntryKey(entry: ShowAccessEntry): string {
+  return `${entry.kind}:${entry.value}`;
+}
+
+export function showAccessEntriesKey(entries: ShowAccessEntry[]): string {
+  return entries.map(showAccessEntryKey).join('\u0000');
+}
+
+/** Canonical audience order: the Organization entry, then groups, then emails.
+ *  The wire form has to be stable so a draft comparison never reports a change
+ *  the user did not make. */
+export function canonicalShowAccessEntries(entries: ShowAccessEntry[]): ShowAccessEntry[] {
+  const seen = new Set<string>();
+  const unique: ShowAccessEntry[] = [];
+  for (const entry of entries) {
+    const key = showAccessEntryKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ kind: entry.kind, value: entry.value });
+  }
+  return unique.sort((left, right) => (
+    ENTRY_KIND_RANK[left.kind] - ENTRY_KIND_RANK[right.kind]
+    || left.value.localeCompare(right.value)
+  ));
+}
+
+export function showAccessEntriesOf(saved: ShowAccess): ShowAccessEntry[] {
+  return canonicalShowAccessEntries(
+    saved.access_entries
+      ?? saved.normalized_emails.map((value) => ({ kind: 'email' as const, value })),
+  );
+}
+
+/** Adds one entry. At most one Organization entry can exist, so a second one
+ *  replaces the first instead of accumulating a set the backend would reject. */
+export function withShowAccessEntry(
+  entries: ShowAccessEntry[],
+  entry: ShowAccessEntry,
+): ShowAccessEntry[] {
+  const kept = entry.kind === 'organization'
+    ? entries.filter((current) => current.kind !== 'organization')
+    : entries;
+  return canonicalShowAccessEntries([...kept, entry]);
+}
+
+export function withoutShowAccessEntry(
+  entries: ShowAccessEntry[],
+  entry: ShowAccessEntry,
+): ShowAccessEntry[] {
+  const removed = showAccessEntryKey(entry);
+  return canonicalShowAccessEntries(
+    entries.filter((current) => showAccessEntryKey(current) !== removed),
+  );
+}
+
+export function showAccessTargetEntries(
+  mode: ShowAccessMode,
+  entries: ShowAccessEntry[],
+): ShowAccessEntry[] {
+  return mode === 'limited' ? canonicalShowAccessEntries(entries) : [];
+}
+
 export function showAccessTargetEmails(
   mode: ShowAccessMode,
-  emails: string[],
+  entries: ShowAccessEntry[],
 ): string[] {
-  return mode === 'limited' ? [...new Set(emails)].sort() : [];
+  return showAccessTargetEntries(mode, entries)
+    .filter((entry) => entry.kind === 'email')
+    .map((entry) => entry.value);
+}
+
+/** The Organization directory the audience combobox searches. `null` means this
+ *  Avibe has no Organization (Personal), which is what hides the Organization
+ *  toggle and group search — Personal pages can only list emails. */
+export type ShowAccessDirectory = {
+  organization_id: string;
+  organization_name: string;
+  groups: { id: string; name: string }[];
+  emails: string[];
+};
+
+export function showAccessDirectoryOf(
+  permissions: PermissionsResponse,
+): ShowAccessDirectory | null {
+  const organization = permissions.projection.instance.organization;
+  if (!organization) return null;
+  return {
+    organization_id: organization.id,
+    organization_name: organization.name,
+    groups: permissions.projection.directory.groups
+      .filter((group) => group.archived_at === null)
+      .map((group) => ({ id: group.id, name: group.name })),
+    emails: permissions.projection.directory.members
+      .map((member) => normalizeShowAccessEmail(member.email))
+      .filter((email): email is string => email !== null),
+  };
+}
+
+export type ShowAccessSuggestion = {
+  kind: 'group' | 'email';
+  value: string;
+  label: string;
+};
+
+export const SHOW_ACCESS_SUGGESTION_LIMIT = 8;
+const SHOW_ACCESS_GROUP_SUGGESTION_LIMIT = 4;
+
+/** Search over the Organization directory. Groups keep the first slots so a
+ *  large member list can never hide them; `truncated` lets the UI say results
+ *  were dropped instead of silently showing a partial list. */
+export function showAccessSuggestions(
+  directory: ShowAccessDirectory | null,
+  query: string,
+  selected: ShowAccessEntry[],
+): { suggestions: ShowAccessSuggestion[]; truncated: boolean } {
+  if (!directory) return { suggestions: [], truncated: false };
+  const taken = new Set(selected.map(showAccessEntryKey));
+  const needle = query.trim().toLowerCase();
+  const matches = (...fields: string[]) => (
+    needle.length === 0 || fields.some((field) => field.toLowerCase().includes(needle))
+  );
+  const groups: ShowAccessSuggestion[] = directory.groups
+    .filter((group) => !taken.has(`group:${group.id}`) && matches(group.name, group.id))
+    .map((group) => ({ kind: 'group', value: group.id, label: group.name }));
+  const people: ShowAccessSuggestion[] = directory.emails
+    .filter((email) => !taken.has(`email:${email}`) && matches(email))
+    .map((email) => ({ kind: 'email', value: email, label: email }));
+  const shownGroups = groups.slice(0, SHOW_ACCESS_GROUP_SUGGESTION_LIMIT);
+  const shownPeople = people.slice(0, SHOW_ACCESS_SUGGESTION_LIMIT - shownGroups.length);
+  return {
+    suggestions: [...shownGroups, ...shownPeople],
+    truncated: shownGroups.length < groups.length || shownPeople.length < people.length,
+  };
 }
 
 export function showAccessDraftChanged(
   saved: ShowAccess,
   mode: ShowAccessMode,
   shareId: string | null,
-  emails: string[],
+  entries: ShowAccessEntry[],
 ): boolean {
   return saved.access_mode !== mode
     || saved.share_id !== shareId
-    || saved.normalized_emails.join('\u0000') !== showAccessTargetEmails(mode, emails).join('\u0000');
+    || showAccessEntriesKey(showAccessEntriesOf(saved))
+      !== showAccessEntriesKey(showAccessTargetEntries(mode, entries));
 }
 
 function isShowPageAccess(value: unknown): value is ShowPageAccess {

@@ -28,8 +28,6 @@ const api = {
   getShowPageAccess: vi.fn(),
   getShowAccessSettings: vi.fn(),
   applyShowAccess: vi.fn(),
-  listOrganizationResources: vi.fn(),
-  listOrganizationGroups: vi.fn(),
   setShowPageAvailability: vi.fn(),
 };
 
@@ -168,7 +166,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     });
   });
 
-  it('keeps Link access usable while Organization access is still loading', async () => {
+  it('gives an Organization page one sharing axis and no Resource policy block', async () => {
     const organizationAccess = showPageAccess({
       mode: 'organization',
       ownership_status: 'unchanged',
@@ -213,13 +211,16 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
     expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
-    expect(screen.getByText('Loading Organization access…')).toBeTruthy();
     expect(api.getShowAccessSettings).toHaveBeenCalledWith('ses-1');
-    expect(permissionsApi.getPermissions).toHaveBeenCalledOnce();
-    expect(permissionsApi.getResourceAccess).toHaveBeenCalledWith({
-      resource_kind: 'show_page',
-      resource_id: 'ses-1',
-    });
+    // The Organization axis and its Resource sync/ACK status are gone.
+    expect(screen.queryByText('Organization access')).toBeNull();
+    expect(screen.queryByText('Loading Organization access…')).toBeNull();
+    expect(screen.queryByText(/has not acknowledged the latest policy/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+    expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
+    expect(permissionsApi.updateResourceAccess).not.toHaveBeenCalled();
+    // Private needs no audience, so not even the directory is read.
+    expect(permissionsApi.getPermissions).not.toHaveBeenCalled();
     const popover = document.querySelector('.overflow-y-auto');
     expect(popover?.classList.contains('max-h-[var(--radix-popover-content-available-height)]')).toBe(true);
   });
@@ -354,7 +355,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     expect(screen.queryByDisplayValue(/\/p\/stable-link\/$/)).toBeNull();
   });
 
-  it('keeps the online toggle and custom link out while showing Organization access', async () => {
+  it('shares an Organization page through the same Limited audience as any other', async () => {
     const organizationAccess = showPageAccess({
       mode: 'organization',
       ownership_status: 'unchanged',
@@ -365,14 +366,40 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
       can_manage: true,
       can_publish_public: true,
     });
-    const pending = new Promise(() => undefined);
-    permissionsApi.getPermissions.mockReturnValue(pending);
-    permissionsApi.getResourceAccess.mockReturnValue(pending);
+    permissionsApi.getPermissions.mockResolvedValue({
+      ok: true,
+      source: 'live',
+      offline: false,
+      cached_at: null,
+      projection: {
+        schema_version: 1,
+        instance: {
+          id: 'inst-1',
+          organization: { id: 'org-1', name: 'Acme' },
+          access_mode: 'allowlist',
+          permission_authority: 'cloud',
+          local_mutation_allowed: false,
+          authorization_revision: 2,
+        },
+        capabilities: [],
+        access: { owner: { email: null, role: 'owner' }, entries: [] },
+        directory: {
+          members: [],
+          groups: [{ id: 'grp-eng', name: 'Engineering', archived_at: null }],
+        },
+        projects: [],
+        policy_sync: {
+          status: 'in_sync',
+          projects: { active: 0, error: 0, offline: 0, applying: 0, in_sync: 0 },
+          resources: { active: 0, error: 0, offline: 0, applying: 0, in_sync: 0 },
+        },
+      },
+    });
     api.getShowPageAccess.mockResolvedValue(organizationAccess);
     api.getShowPage.mockResolvedValue({
       session_id: 'ses-1',
-      visibility: 'private',
-      active_url: '/show/ses-1/',
+      visibility: 'limited',
+      active_url: '/p/stable-link/',
       share_id: 'stable-link',
       url_available: true,
       offline: false,
@@ -381,10 +408,14 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: {
         page_id: 'ses-1',
-        access_mode: 'private',
+        access_mode: 'limited',
         share_id: 'stable-link',
         revision: 0,
-        normalized_emails: [],
+        normalized_emails: ['guest@example.com'],
+        access_entries: [
+          { kind: 'group', value: 'grp-eng' },
+          { kind: 'email', value: 'guest@example.com' },
+        ],
       },
     });
 
@@ -399,11 +430,18 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
-    expect(screen.getByText('Organization access')).toBeTruthy();
-    expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
-    expect(screen.queryByText('Page online')).toBeNull();
-    expect(api.setShowPageAvailability).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: 'Access: Limited' })).toBeTruthy();
+    // Custom-link editing is no longer withheld from Organization pages.
+    expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
+      'stable-link',
+    );
+    // Group, email, and the Organization switch are peers in one audience list.
+    expect(await screen.findByRole('switch', { name: 'This Organization' })).toBeTruthy();
+    expect(screen.getByText('Engineering')).toBeTruthy();
+    expect(screen.getByText('guest@example.com')).toBeTruthy();
+    expect(screen.queryByText('Organization access')).toBeNull();
+    expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
+    expect(permissionsApi.updateResourceAccess).not.toHaveBeenCalled();
   });
 
   it('does not mount Organization access for a normal Personal Avibe', async () => {
@@ -454,7 +492,9 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
   });
 
-  it('shows a Personal ownership conflict through the Workspace control', async () => {
+  it('does not resurrect an ownership-domain block on a Personal conflict', async () => {
+    // Ownership conflict used to open the Resource-policy control. Sharing no
+    // longer depends on ownership, so the conflict adds no second block at all.
     const conflict = showPageAccess({
       mode: 'personal',
       ownership_status: 'conflict',
@@ -483,10 +523,12 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    expect(await screen.findByText('This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.')).toBeTruthy();
-    expect(screen.queryByText('This Show Page belongs to a Personal Avibe.')).toBeNull();
+    await waitFor(() => expect(api.getShowPage).toHaveBeenCalledWith('ses-1'));
+    expect(screen.queryByText(/bound to a different ownership domain/)).toBeNull();
+    expect(screen.queryByText('Organization access')).toBeNull();
     expect(permissionsApi.getPermissions).not.toHaveBeenCalled();
     expect(permissionsApi.getResourceAccess).not.toHaveBeenCalled();
+    expect(permissionsApi.updateResourceAccess).not.toHaveBeenCalled();
   });
 
   it('keeps explicit custom-link saving while online and Organization controls stay out', async () => {
@@ -547,6 +589,7 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
         expected_revision: 0,
         target_access_mode: 'public',
         target_share_id: 'new-link',
+        target_entries: [],
         target_emails: [],
       });
     });
@@ -601,8 +644,6 @@ describe('ShowPageShareControl request surface', () => {
     'getShowPage',
     'getShowPageAccess',
     'getShowAccessSettings',
-    'listOrganizationResources',
-    'listOrganizationGroups',
   ]);
 
   const mutatingCallsSoFar = () => Object.entries(api)

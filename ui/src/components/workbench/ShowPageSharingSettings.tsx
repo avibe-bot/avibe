@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import {
+  Building2,
   Check,
   ChevronDown,
   Globe2,
   Loader2,
   LockKeyhole,
+  Mail,
   Plus,
   RefreshCw,
   Users,
@@ -16,20 +18,33 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Switch } from '@/components/ui/switch';
 import { useApi } from '@/context/ApiContext';
+import { getPermissions } from '@/features/permissions/api';
 import {
   normalizeShowAccessEmail,
+  showAccessDirectoryOf,
   showAccessDraftChanged,
+  showAccessEntriesKey,
+  showAccessEntriesOf,
+  showAccessEntryKey,
+  showAccessSuggestions,
   showAccessTargetEmails,
-  SHOW_ACCESS_EMAIL_MAX_COUNT,
+  showAccessTargetEntries,
+  withoutShowAccessEntry,
+  withShowAccessEntry,
+  SHOW_ACCESS_ENTRY_MAX_COUNT,
   type ShowAccess,
+  type ShowAccessDirectory,
+  type ShowAccessEntry,
   type ShowAccessMode,
+  type ShowAccessSuggestion,
 } from '@/lib/showPageAccess';
 import { isValidShareId, SHARE_ID_MAX_LENGTH } from '@/lib/showPageLinks';
 
 type Gate = 'idle' | 'loading' | 'ready' | 'conflict' | 'share_id_taken' | 'invalid' | 'error';
 
-const normalizedSet = (emails: string[]): string[] => [...new Set(emails)].sort();
+type DirectoryGate = 'idle' | 'loading' | 'ready' | 'unavailable';
 
 const MODE_ICONS = {
   private: LockKeyhole,
@@ -121,20 +136,200 @@ function AccessModeSelect({
   );
 }
 
+/** The audience field. Focusing or clicking it opens the Organization directory
+ *  (members + groups); a partial query narrows it; anything that normalizes to an
+ *  email can be typed in full. The dropdown is rendered in flow — not in a
+ *  portal — because this field itself lives inside the share popover, where a
+ *  nested portal would fight it for focus and dismissal. */
+function AudienceCombobox({
+  disabled,
+  directoryLoading,
+  suggestions,
+  truncated,
+  placeholder,
+  query,
+  invalid,
+  onQueryChange,
+  onSelect,
+  onSubmitTypedEmail,
+}: {
+  disabled: boolean;
+  directoryLoading: boolean;
+  suggestions: ShowAccessSuggestion[];
+  truncated: boolean;
+  placeholder: string;
+  query: string;
+  invalid: boolean;
+  onQueryChange: (value: string) => void;
+  onSelect: (suggestion: ShowAccessSuggestion) => void;
+  onSubmitTypedEmail: () => void;
+}) {
+  const { t } = useTranslation();
+  const listId = useId();
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [focused, setFocused] = useState(false);
+  // The keyboard cursor tracks an option KEY, not an index: the option list is
+  // recomputed from the query on every keystroke, so an index would silently
+  // point at a different row (and a reset effect would cascade renders).
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+
+  const typedEmail = normalizeShowAccessEmail(query);
+  const typedOption: ShowAccessSuggestion | null = typedEmail
+    && !suggestions.some((option) => option.kind === 'email' && option.value === typedEmail)
+    ? { kind: 'email', value: typedEmail, label: typedEmail }
+    : null;
+  const options = typedOption ? [...suggestions, typedOption] : suggestions;
+  const open = focused && !disabled && (options.length > 0 || directoryLoading);
+  const activeIndex = options.findIndex((option) => showAccessEntryKey(option) === activeKey);
+  const active = activeIndex >= 0 ? options[activeIndex] : null;
+
+  const moveActive = (delta: number) => {
+    if (!options.length) return;
+    const next = activeIndex < 0
+      ? (delta > 0 ? 0 : options.length - 1)
+      : (activeIndex + delta + options.length) % options.length;
+    setActiveKey(showAccessEntryKey(options[next]));
+  };
+
+  const commit = (option: ShowAccessSuggestion) => {
+    setActiveKey(null);
+    onSelect(option);
+  };
+
+  return (
+    <div ref={containerRef} className="relative w-full max-w-[17.5rem]">
+      <div className="flex items-start gap-1.5">
+        <div className="min-w-0 flex-1">
+          <Input
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={open ? listId : undefined}
+            aria-autocomplete="list"
+            aria-label={t('chat.showPage.shareAudience')}
+            aria-invalid={invalid || undefined}
+            autoComplete="off"
+            spellCheck={false}
+            value={query}
+            disabled={disabled}
+            placeholder={placeholder}
+            className={clsx('h-8 text-xs', invalid && 'border-destructive')}
+            onFocus={() => setFocused(true)}
+            onClick={() => setFocused(true)}
+            onBlur={(event) => {
+              // Clicking an option or the add button moves focus inside the field;
+              // only leaving the field entirely closes the list.
+              if (containerRef.current?.contains(event.relatedTarget as Node | null)) return;
+              setFocused(false);
+              setActiveKey(null);
+            }}
+            onChange={(event) => {
+              setFocused(true);
+              setActiveKey(null);
+              onQueryChange(event.target.value);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setFocused(false);
+                setActiveKey(null);
+                return;
+              }
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                if (!options.length) return;
+                event.preventDefault();
+                setFocused(true);
+                moveActive(event.key === 'ArrowDown' ? 1 : -1);
+                return;
+              }
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              if (active) {
+                commit(active);
+                return;
+              }
+              onSubmitTypedEmail();
+            }}
+          />
+        </div>
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          className="size-8 shrink-0"
+          disabled={disabled || !query}
+          onClick={onSubmitTypedEmail}
+          aria-label={t('chat.showPage.addEmail')}
+        >
+          <Plus className="size-3.5" />
+        </Button>
+      </div>
+
+      {open ? (
+        <div
+          id={listId}
+          role="listbox"
+          aria-label={t('chat.showPage.shareAudienceOptions')}
+          className="absolute left-0 top-9 z-50 max-h-44 w-[calc(100%-2.375rem)] overflow-y-auto rounded-md border border-border bg-background p-1 shadow-lg"
+        >
+          {directoryLoading ? (
+            <div className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] text-muted">
+              <Loader2 className="size-3 animate-spin" />
+              {t('chat.showPage.loadingShareDirectory')}
+            </div>
+          ) : null}
+          {options.map((option, index) => {
+            const OptionIcon = option.kind === 'group' ? Users : Mail;
+            return (
+              <button
+                key={showAccessEntryKey(option)}
+                type="button"
+                role="option"
+                aria-selected={index === activeIndex}
+                // Keeps the field from blurring before the click lands.
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => commit(option)}
+                className={clsx(
+                  'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs transition-colors',
+                  index === activeIndex ? 'bg-mint/[0.1]' : 'hover:bg-foreground/[0.05]',
+                )}
+              >
+                <OptionIcon className="size-3.5 shrink-0 text-muted" />
+                <span className="min-w-0 flex-1 truncate text-foreground">{option.label}</span>
+                {option.kind === 'group' ? (
+                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted">
+                    {t('chat.showPage.shareGroupBadge')}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+          {!directoryLoading && options.length === 0 ? (
+            <p className="px-2 py-1.5 text-[11px] leading-snug text-muted">
+              {t('chat.showPage.shareSuggestionEmpty')}
+            </p>
+          ) : null}
+          {truncated ? (
+            <p className="px-2 py-1.5 text-[11px] leading-snug text-muted">
+              {t('chat.showPage.shareSuggestionNarrow')}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ShowPageSharingSettings({
   active,
   canManage,
   sessionId,
   onApplied,
   ownerWindowId,
-  showCustomLink = true,
 }: {
   active: boolean;
   canManage: boolean;
   sessionId: string;
   onApplied?: (showAccess: ShowAccess) => void;
   ownerWindowId?: string;
-  showCustomLink?: boolean;
 }) {
   const { t } = useTranslation();
   const api = useApi();
@@ -142,13 +337,16 @@ export function ShowPageSharingSettings({
   const [saved, setSaved] = useState<ShowAccess | null>(null);
   const [mode, setMode] = useState<ShowAccessMode>('private');
   const [shareId, setShareId] = useState('');
-  const [emails, setEmails] = useState<string[]>([]);
-  const [emailDraft, setEmailDraft] = useState('');
+  const [entries, setEntries] = useState<ShowAccessEntry[]>([]);
+  const [query, setQuery] = useState('');
   const [emailInvalid, setEmailInvalid] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [directory, setDirectory] = useState<ShowAccessDirectory | null>(null);
+  const [directoryGate, setDirectoryGate] = useState<DirectoryGate>('idle');
   const generationRef = useRef(0);
   const savingRef = useRef(false);
   const savedRef = useRef<ShowAccess | null>(null);
+  const directoryRequestedRef = useRef(false);
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
@@ -159,8 +357,8 @@ export function ShowPageSharingSettings({
       setSaved(showAccess);
       setMode(showAccess.access_mode);
       if (!preserveShareIdDraft) setShareId(showAccess.share_id ?? '');
-      setEmails(showAccess.normalized_emails);
-      setEmailDraft('');
+      setEntries(showAccessEntriesOf(showAccess));
+      setQuery('');
       setEmailInvalid(false);
     },
     [sessionId],
@@ -190,11 +388,14 @@ export function ShowPageSharingSettings({
     setSaved(null);
     setMode('private');
     setShareId('');
-    setEmails([]);
-    setEmailDraft('');
+    setEntries([]);
+    setQuery('');
     setEmailInvalid(false);
     setSaving(false);
     setGate('idle');
+    setDirectory(null);
+    setDirectoryGate('idle');
+    directoryRequestedRef.current = false;
     if (active && canManage) void load();
     return () => {
       generationRef.current += 1;
@@ -202,36 +403,73 @@ export function ShowPageSharingSettings({
     };
   }, [active, canManage, load, sessionId]);
 
+  // The Organization directory is only needed to search an audience, so it is
+  // read when Limited is actually in play. A failure degrades to email-only
+  // entry instead of blocking the audience the owner can still type out.
+  // The "already requested" latch is a ref, not the gate state: keying it off
+  // the gate would let this effect's own `loading` write re-run and cancel the
+  // request it just started.
+  useEffect(() => {
+    if (!active || !canManage || mode !== 'limited' || directoryRequestedRef.current) return;
+    directoryRequestedRef.current = true;
+    const generation = generationRef.current;
+    setDirectoryGate('loading');
+    void (async () => {
+      try {
+        const permissions = await getPermissions();
+        if (generation !== generationRef.current) return;
+        const next = showAccessDirectoryOf(permissions);
+        setDirectory(next);
+        setDirectoryGate(next ? 'ready' : 'unavailable');
+      } catch {
+        if (generation !== generationRef.current) return;
+        setDirectory(null);
+        setDirectoryGate('unavailable');
+      }
+    })();
+  }, [active, canManage, mode]);
+
   const normalizedShareId = shareId.trim() || null;
   const sharedMode = mode === 'limited' || mode === 'public';
   const shareIdInvalid = sharedMode && (!normalizedShareId || !isValidShareId(normalizedShareId));
   const accessDirty = Boolean(
-    saved && showAccessDraftChanged(saved, mode, saved.share_id, emails),
+    saved && showAccessDraftChanged(saved, mode, saved.share_id, entries),
   );
   const shareIdDirty = Boolean(saved && normalizedShareId !== saved.share_id);
-  const emailLimitReached = emails.length >= SHOW_ACCESS_EMAIL_MAX_COUNT;
+  const entryLimitReached = entries.length >= SHOW_ACCESS_ENTRY_MAX_COUNT;
   const editable = canManage && gate !== 'loading' && !saving;
+  const lastEntryPinned = mode === 'limited' && entries.length <= 1;
+
+  const { suggestions, truncated } = useMemo(
+    () => showAccessSuggestions(directory, query, entries),
+    [directory, entries, query],
+  );
+  const organizationEntry = entries.find((entry) => entry.kind === 'organization') ?? null;
+  const organizationId = organizationEntry?.value ?? directory?.organization_id ?? null;
+  const groupName = (groupId: string) => (
+    directory?.groups.find((group) => group.id === groupId)?.name ?? groupId
+  );
 
   const commit = async (
     nextMode: ShowAccessMode,
     nextShareId: string,
-    nextEmails: string[],
+    nextEntries: ShowAccessEntry[],
     preserveShareIdDraftOnConflict = false,
     preserveShareIdDraftOnSuccess = preserveShareIdDraftOnConflict,
   ) => {
     const current = savedRef.current;
     const targetShareId = nextShareId.trim() || null;
-    const nextTargetEmails = showAccessTargetEmails(nextMode, nextEmails);
+    const targetEntries = showAccessTargetEntries(nextMode, nextEntries);
     const nextInvalid =
       (nextMode !== 'private' && (!targetShareId || !isValidShareId(targetShareId)))
-      || (nextMode === 'limited' && nextTargetEmails.length === 0);
+      || (nextMode === 'limited' && targetEntries.length === 0);
     if (
       !current
       || savingRef.current
       || nextInvalid
       || !canManage
       || gate === 'loading'
-      || !showAccessDraftChanged(current, nextMode, targetShareId, nextEmails)
+      || !showAccessDraftChanged(current, nextMode, targetShareId, nextEntries)
     ) {
       return;
     }
@@ -246,7 +484,8 @@ export function ShowPageSharingSettings({
         expected_revision: current.revision,
         target_access_mode: nextMode,
         target_share_id: targetShareId,
-        target_emails: nextTargetEmails,
+        target_entries: targetEntries,
+        target_emails: showAccessTargetEmails(nextMode, nextEntries),
       });
       if (result.show_access.page_id !== requestSessionId) {
         throw new Error('ShowAccess page identity mismatch');
@@ -288,41 +527,57 @@ export function ShowPageSharingSettings({
     if (!editable || nextMode === mode) return;
     setMode(nextMode);
     setEmailInvalid(false);
-    if (nextMode === 'limited' && emails.length === 0) return;
-    void commit(nextMode, savedRef.current?.share_id ?? shareId, emails, shareIdDirty);
+    if (nextMode === 'limited' && entries.length === 0) return;
+    void commit(nextMode, savedRef.current?.share_id ?? shareId, entries, shareIdDirty);
   };
 
-  const addEmail = () => {
-    if (!editable || emailLimitReached) return;
-    const normalized = normalizeShowAccessEmail(emailDraft);
+  const applyEntries = (nextEntries: ShowAccessEntry[]) => {
+    if (showAccessEntriesKey(nextEntries) === showAccessEntriesKey(entries)) return;
+    setEntries(nextEntries);
+    if (mode === 'limited') {
+      void commit(mode, savedRef.current?.share_id ?? shareId, nextEntries, shareIdDirty);
+    }
+  };
+
+  const addEntry = (entry: ShowAccessEntry) => {
+    if (!editable || entryLimitReached) return;
+    setQuery('');
+    setEmailInvalid(false);
+    applyEntries(withShowAccessEntry(entries, entry));
+  };
+
+  const submitTypedEmail = () => {
+    if (!editable || entryLimitReached) return;
+    const normalized = normalizeShowAccessEmail(query);
     if (!normalized) {
       setEmailInvalid(true);
       return;
     }
-    const nextEmails = normalizedSet([...emails, normalized]);
-    setEmails(nextEmails);
-    setEmailDraft('');
-    setEmailInvalid(false);
-    if (mode === 'limited') {
-      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, shareIdDirty);
-    }
+    addEntry({ kind: 'email', value: normalized });
   };
 
-  const removeEmail = (email: string) => {
-    if (!editable || (mode === 'limited' && emails.length <= 1)) return;
-    const nextEmails = emails.filter((value) => value !== email);
-    setEmails(nextEmails);
-    if (mode === 'limited') {
-      void commit(mode, savedRef.current?.share_id ?? shareId, nextEmails, shareIdDirty);
+  const removeEntry = (entry: ShowAccessEntry) => {
+    if (!editable || lastEntryPinned) return;
+    applyEntries(withoutShowAccessEntry(entries, entry));
+  };
+
+  const toggleOrganization = (next: boolean) => {
+    if (!editable || !organizationId) return;
+    if (next) {
+      addEntry({ kind: 'organization', value: organizationId });
+      return;
     }
+    removeEntry({ kind: 'organization', value: organizationId });
   };
 
   const saveShareId = () => {
     if (!editable || shareIdInvalid) return;
-    void commit(mode, shareId, emails, true, false);
+    void commit(mode, shareId, entries, true, false);
   };
 
   if (!canManage) return null;
+
+  const audienceVariant = directory ? 'organization' : 'email';
 
   return (
     <div className="space-y-2.5">
@@ -336,7 +591,7 @@ export function ShowPageSharingSettings({
         </div>
       ) : saved ? (
         <>
-          {showCustomLink && sharedMode ? (
+          {sharedMode ? (
             <section
               className="space-y-1.5"
               aria-label={t('showPages.shareId.label')}
@@ -372,7 +627,7 @@ export function ShowPageSharingSettings({
                       disabled={
                         !editable
                         || shareIdInvalid
-                        || (mode === 'limited' && emails.length === 0)
+                        || (mode === 'limited' && entries.length === 0)
                       }
                       onClick={saveShareId}
                       aria-label={t('common.save')}
@@ -395,10 +650,7 @@ export function ShowPageSharingSettings({
 
           <section
             aria-label={t('chat.showPage.sharingAccess')}
-            className={clsx(
-              'space-y-2.5',
-              showCustomLink && sharedMode && 'border-t border-border pt-3',
-            )}
+            className={clsx('space-y-2.5', sharedMode && 'border-t border-border pt-3')}
           >
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -429,7 +681,7 @@ export function ShowPageSharingSettings({
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] font-medium text-foreground">
-                    {t('chat.showPage.limitedEmails')}
+                    {t('chat.showPage.shareAudience')}
                   </span>
                   {saved.access_mode === 'limited' && !accessDirty && !saving ? (
                     <span className="flex items-center gap-1 text-[11px] text-mint-ink">
@@ -438,79 +690,104 @@ export function ShowPageSharingSettings({
                     </span>
                   ) : null}
                 </div>
-                <div className="flex w-full max-w-[17.5rem] items-start gap-1.5">
-                  <div className="min-w-0 flex-1">
-                    <Input
-                      type="email"
-                      value={emailDraft}
-                      disabled={!editable || emailLimitReached}
-                      onChange={(event) => {
-                        setEmailDraft(event.target.value);
-                        setEmailInvalid(false);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter') return;
-                        event.preventDefault();
-                        addEmail();
-                      }}
-                      placeholder={t('chat.showPage.emailPlaceholder')}
-                      aria-label={t('chat.showPage.limitedEmails')}
-                      aria-invalid={emailInvalid || undefined}
-                      className={clsx('h-8 text-xs', emailInvalid && 'border-destructive')}
-                    />
-                    {emailInvalid ? (
-                      <p className="mt-1 text-[11px] text-destructive-ink">
-                        {t('chat.showPage.emailInvalid')}
-                      </p>
-                    ) : null}
-                  </div>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="outline"
-                    className="size-8 shrink-0"
-                    disabled={!editable || !emailDraft || emailLimitReached}
-                    onClick={addEmail}
-                    aria-label={t('chat.showPage.addEmail')}
-                  >
-                    <Plus className="size-3.5" />
-                  </Button>
-                </div>
-                {emails.length ? (
-                  <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-                    {emails.map((email) => {
-                      const lastLimitedEmail = mode === 'limited' && emails.length === 1;
-                      return (
-                        <span
-                          key={email}
-                          className="inline-flex h-7 max-w-full items-center gap-1 rounded-md border border-border bg-foreground/[0.04] pl-2.5 pr-1 text-[11px] text-foreground"
-                        >
-                          <span className="min-w-0 truncate font-mono">{email}</span>
-                          <Button
-                            type="button"
-                            size="icon"
-                            variant="ghost"
-                            className="size-5 shrink-0"
-                            disabled={!editable || lastLimitedEmail}
-                            onClick={() => removeEmail(email)}
-                            aria-label={t('chat.showPage.removeEmail', { email })}
-                            title={lastLimitedEmail
-                              ? t('chat.showPage.keepOneLimitedEmail')
-                              : t('chat.showPage.removeEmail', { email })}
-                          >
-                            <X className="size-3" />
-                          </Button>
-                        </span>
-                      );
-                    })}
-                  </div>
-                ) : (
+
+                <AudienceCombobox
+                  disabled={!editable || entryLimitReached}
+                  directoryLoading={directoryGate === 'loading'}
+                  suggestions={suggestions}
+                  truncated={truncated}
+                  placeholder={t(`chat.showPage.shareAudiencePlaceholder.${audienceVariant}`)}
+                  query={query}
+                  invalid={emailInvalid}
+                  onQueryChange={(value) => {
+                    setQuery(value);
+                    setEmailInvalid(false);
+                  }}
+                  onSelect={(suggestion) => addEntry({
+                    kind: suggestion.kind,
+                    value: suggestion.value,
+                  })}
+                  onSubmitTypedEmail={submitTypedEmail}
+                />
+                {emailInvalid ? (
                   <p className="text-[11px] text-destructive-ink">
-                    {t('chat.showPage.limitedEmailRequired')}
+                    {t('chat.showPage.emailInvalid')}
                   </p>
-                )}
+                ) : null}
+
+                {/* One flat audience: the Organization switch sits at the top of
+                    the very list it belongs to, level with the group and email
+                    entries it neither replaces nor absorbs. */}
+                <div className="max-h-40 space-y-1 overflow-y-auto">
+                  {organizationId ? (
+                    <div className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-foreground/[0.03] px-2 py-1.5">
+                      <Building2 className="size-3.5 shrink-0 text-cyan-ink" />
+                      <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
+                        {directory?.organization_name
+                          ? t('chat.showPage.shareOrganizationNamed', {
+                            name: directory.organization_name,
+                          })
+                          : t('chat.showPage.shareOrganizationGeneric')}
+                      </span>
+                      <Switch
+                        checked={Boolean(organizationEntry)}
+                        disabled={!editable || (Boolean(organizationEntry) && lastEntryPinned)}
+                        onCheckedChange={toggleOrganization}
+                        label={t('chat.showPage.shareOrganizationGeneric')}
+                      />
+                    </div>
+                  ) : null}
+
+                  {entries.filter((entry) => entry.kind !== 'organization').map((entry) => {
+                    const label = entry.kind === 'group' ? groupName(entry.value) : entry.value;
+                    const EntryIcon = entry.kind === 'group' ? Users : Mail;
+                    return (
+                      <div
+                        key={showAccessEntryKey(entry)}
+                        className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-foreground/[0.03] px-2 py-1.5"
+                      >
+                        <EntryIcon className="size-3.5 shrink-0 text-muted" />
+                        <span
+                          className={clsx(
+                            'min-w-0 flex-1 truncate text-[11px] text-foreground',
+                            entry.kind === 'email' && 'font-mono',
+                          )}
+                        >
+                          {label}
+                        </span>
+                        {entry.kind === 'group' ? (
+                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted">
+                            {t('chat.showPage.shareGroupBadge')}
+                          </span>
+                        ) : null}
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="size-5 shrink-0"
+                          disabled={!editable || lastEntryPinned}
+                          onClick={() => removeEntry(entry)}
+                          aria-label={t('chat.showPage.removeShareEntry', { label })}
+                          title={lastEntryPinned
+                            ? t('chat.showPage.keepOneShareEntry')
+                            : t('chat.showPage.removeShareEntry', { label })}
+                        >
+                          <X className="size-3" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {entries.length === 0 ? (
+                  <p className="text-[11px] text-destructive-ink">
+                    {t('chat.showPage.shareAudienceRequired')}
+                  </p>
+                ) : null}
                 <p className="text-[11px] text-muted">
-                  {t('chat.showPage.limitedEmailHint', { count: SHOW_ACCESS_EMAIL_MAX_COUNT })}
+                  {t(`chat.showPage.shareAudienceHint.${audienceVariant}`, {
+                    count: SHOW_ACCESS_ENTRY_MAX_COUNT,
+                  })}
                 </p>
               </div>
             ) : null}

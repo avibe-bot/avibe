@@ -5,6 +5,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
+import type { PermissionsResponse } from '../../features/permissions/types';
 import type { ShowAccess, ShowAccessApplyResult } from '../../lib/showPageAccess';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
 
@@ -13,12 +14,20 @@ const api = {
   applyShowAccess: vi.fn(),
 };
 
+const getPermissions = vi.fn();
+
 vi.mock('../../context/ApiContext', () => ({
   useApi: () => api,
 }));
 
 vi.mock('@/context/ApiContext', () => ({
   useApi: () => api,
+}));
+
+// A1/A2 have not landed, so the Organization directory is the only permissions
+// read this control makes. It is never a show_page Resource request.
+vi.mock('@/features/permissions/api', () => ({
+  getPermissions: (...args: unknown[]) => getPermissions(...args),
 }));
 
 const i18n = createInstance();
@@ -38,9 +47,49 @@ const showAccess = (overrides: Partial<ShowAccess> = {}): ShowAccess => ({
   ...overrides,
 });
 
+const permissions = (
+  organization: { id: string; name: string } | null,
+): PermissionsResponse => ({
+  ok: true,
+  source: 'live',
+  offline: false,
+  cached_at: null,
+  projection: {
+    schema_version: 1,
+    instance: {
+      id: 'inst-1',
+      organization,
+      access_mode: 'allowlist',
+      permission_authority: 'cloud',
+      local_mutation_allowed: false,
+      authorization_revision: 3,
+    },
+    capabilities: [],
+    access: { owner: { email: null, role: 'owner' }, entries: [] },
+    directory: {
+      members: [
+        { id: 'u1', email: 'alice@example.com', organization_role: 'member', group_ids: [] },
+        { id: 'u2', email: 'bob@example.com', organization_role: 'member', group_ids: [] },
+      ],
+      groups: [
+        { id: 'grp-eng', name: 'Engineering', archived_at: null },
+        { id: 'grp-old', name: 'Legacy', archived_at: '2026-01-01T00:00:00Z' },
+      ],
+    },
+    projects: [],
+    policy_sync: {
+      status: 'in_sync',
+      projects: { active: 0, error: 0, offline: 0, applying: 0, in_sync: 0 },
+      resources: { active: 0, error: 0, offline: 0, applying: 0, in_sync: 0 },
+    },
+  },
+});
+
+const ORGANIZATION = permissions({ id: 'org-1', name: 'Acme' });
+const PERSONAL = permissions(null);
+
 const settings = (
   sessionId = 'ses-1',
-  showCustomLink = true,
   onApplied?: (showAccess: ShowAccess) => void,
 ) => (
   <I18nextProvider i18n={i18n}>
@@ -48,22 +97,28 @@ const settings = (
       active
       canManage
       sessionId={sessionId}
-      showCustomLink={showCustomLink}
       onApplied={onApplied}
     />
   </I18nextProvider>
 );
 const renderSettings = (
   sessionId = 'ses-1',
-  showCustomLink = true,
   onApplied?: (showAccess: ShowAccess) => void,
 ) => (
-  render(settings(sessionId, showCustomLink, onApplied))
+  render(settings(sessionId, onApplied))
 );
 
 const chooseMode = async (name: 'Private' | 'Limited' | 'Fully public') => {
   fireEvent.click(await screen.findByRole('button', { name: /Access:/ }));
   fireEvent.click(screen.getByRole('option', { name: new RegExp(name) }));
+};
+
+const audience = async () => screen.findByRole('combobox', { name: 'People with access' });
+
+const openAudience = async () => {
+  const input = await audience();
+  fireEvent.focus(input);
+  return input;
 };
 
 afterEach(() => {
@@ -72,43 +127,122 @@ afterEach(() => {
 });
 
 describe('ShowPageSharingSettings', () => {
-  it('uses semantic icons instead of radio controls for the three access modes', async () => {
+  it('offers exactly the three sharing tiers in order, with no second access axis', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     renderSettings();
 
     const trigger = await screen.findByRole('button', { name: 'Access: Private' });
     expect(trigger.className).toContain('w-40');
-    expect(trigger.className).not.toContain('w-full');
     expect(screen.queryAllByRole('radio')).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Access: Private' }));
+    fireEvent.click(trigger);
 
-    expect(screen.getByRole('option', { name: /Private/ })).toBeTruthy();
-    expect(screen.getByRole('option', { name: /Limited/ })).toBeTruthy();
-    expect(screen.getByRole('option', { name: /Fully public/ })).toBeTruthy();
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'PrivateOnly you can access this page',
+      'LimitedOnly people in the list can access',
+      'Fully publicAnyone can access without signing in',
+    ]);
     expect(document.querySelector('[data-access-icon="private"]')).toBeTruthy();
     expect(document.querySelector('[data-access-icon="limited"]')).toBeTruthy();
     expect(document.querySelector('[data-access-icon="public"]')).toBeTruthy();
+    // The Organization axis is gone: no second access block, no sync/ACK status.
+    expect(screen.queryByText('Organization access')).toBeNull();
+    expect(screen.queryByText(/has not acknowledged the latest policy/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
   });
 
-  it('saves a Limited audience as soon as an email is added', async () => {
+  it('starts an Organization page as Private with no audience field', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.queryByRole('combobox', { name: 'People with access' })).toBeNull();
+    expect(screen.queryByRole('switch')).toBeNull();
+    // Private is not a shared mode, so nothing reads the directory yet.
+    expect(getPermissions).not.toHaveBeenCalled();
+  });
+
+  it('starts a Personal page as Private too', async () => {
+    api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(PERSONAL);
+    renderSettings();
+
+    expect(await screen.findByRole('button', { name: 'Access: Private' })).toBeTruthy();
+    expect(screen.queryByRole('combobox', { name: 'People with access' })).toBeNull();
+  });
+
+  it('opens the directory on focus and lets a group be picked straight from it', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        access_entries: [{ kind: 'email', value: 'guest@example.com' }],
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({
         access_mode: 'limited',
         revision: 1,
         normalized_emails: ['guest@example.com'],
+        access_entries: [
+          { kind: 'group', value: 'grp-eng' },
+          { kind: 'email', value: 'guest@example.com' },
+        ],
+      }),
+    });
+    renderSettings();
+    await waitFor(() => expect(getPermissions).toHaveBeenCalledTimes(1));
+
+    const input = await openAudience();
+    expect(input.getAttribute('aria-expanded')).toBe('true');
+    const options = await waitFor(() => screen.getAllByRole('option'));
+    // Groups and people are searchable side by side; an archived group is not.
+    expect(options.map((option) => option.textContent)).toEqual([
+      'EngineeringGroup',
+      'alice@example.com',
+      'bob@example.com',
+    ]);
+    fireEvent.click(screen.getByRole('option', { name: /Engineering/ }));
+
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [
+        { kind: 'group', value: 'grp-eng' },
+        { kind: 'email', value: 'guest@example.com' },
+      ],
+      // The email projection keeps a pre-A1 backend applying the email audience.
+      target_emails: ['guest@example.com'],
+    });
+  });
+
+  it('narrows the directory from a half-typed query and still accepts any typed email', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({ access_mode: 'limited' }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({
+        access_mode: 'limited',
+        revision: 1,
+        normalized_emails: ['outsider@partner.dev'],
+        access_entries: [{ kind: 'email', value: 'outsider@partner.dev' }],
       }),
     });
     renderSettings();
 
-    await chooseMode('Limited');
-    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
-    const emailInput = screen.getByRole('textbox', { name: 'People with access' });
-    expect(emailInput.parentElement?.parentElement?.className).toContain('max-w-[17.5rem]');
-    fireEvent.change(emailInput, {
-      target: { value: ' Guest@Example.COM ' },
-    });
+    const input = await openAudience();
+    fireEvent.change(input, { target: { value: 'eng' } });
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(1));
+    expect(screen.getByRole('option', { name: /Engineering/ })).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: ' Outsider@Partner.DEV ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
 
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
@@ -116,12 +250,158 @@ describe('ShowPageSharingSettings', () => {
       expected_revision: 0,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
+      target_entries: [{ kind: 'email', value: 'outsider@partner.dev' }],
+      target_emails: ['outsider@partner.dev'],
+    });
+  });
+
+  it('keeps the Organization switch and the narrower entries as peers', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+        access_entries: [
+          { kind: 'group', value: 'grp-eng' },
+          { kind: 'email', value: 'guest@example.com' },
+        ],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({
+        access_mode: 'limited',
+        revision: 1,
+        normalized_emails: ['guest@example.com'],
+        access_entries: [
+          { kind: 'organization', value: 'org-1' },
+          { kind: 'group', value: 'grp-eng' },
+          { kind: 'email', value: 'guest@example.com' },
+        ],
+      }),
+    });
+    renderSettings();
+
+    const toggle = await screen.findByRole('switch', { name: 'This Organization' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText('This Organization (Acme)')).toBeTruthy();
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    // Turning the Organization on supersedes nothing: the group and the email stay.
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [
+        { kind: 'organization', value: 'org-1' },
+        { kind: 'group', value: 'grp-eng' },
+        { kind: 'email', value: 'guest@example.com' },
+      ],
       target_emails: ['guest@example.com'],
     });
+    await waitFor(() => {
+      expect((screen.getByRole('switch', { name: 'This Organization' }))
+        .getAttribute('aria-checked')).toBe('true');
+    });
+    expect(screen.getByText('Engineering')).toBeTruthy();
+    expect(screen.getByText('guest@example.com')).toBeTruthy();
+  });
+
+  it('gives a Personal page an email-only audience', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(PERSONAL);
+    renderSettings();
+    await waitFor(() => expect(getPermissions).toHaveBeenCalledTimes(1));
+
+    const input = await openAudience();
+    expect(input.getAttribute('placeholder')).toBe('name@example.com');
+    expect(screen.getByText('Enter an email and press Enter to add · up to 64')).toBeTruthy();
+    // No Organization to share with, so no switch and nothing to search.
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.queryByRole('option')).toBeNull();
+    expect(screen.getByText('guest@example.com')).toBeTruthy();
+  });
+
+  it('degrades to email-only entry when the directory cannot be read', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockRejectedValue(new Error('permissions offline'));
+    renderSettings();
+    await waitFor(() => expect(getPermissions).toHaveBeenCalledTimes(1));
+
+    const input = await openAudience();
+    expect((input as HTMLInputElement).disabled).toBe(false);
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.getByText('guest@example.com')).toBeTruthy();
+  });
+
+  it('rejects an unusable typed audience without calling the API', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(PERSONAL);
+    renderSettings();
+
+    const input = await audience();
+    fireEvent.change(input, { target: { value: 'not-an-email' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(await screen.findByText('Enter a valid email address.')).toBeTruthy();
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+  });
+
+  it('disables new audience input at the entry limit', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: Array.from({ length: 64 }, (_, index) => `guest-${index}@example.com`),
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    const input = await audience();
+    expect((input as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText(
+      'Pick a person or group, or type any email · up to 64',
+    )).toBeTruthy();
+  });
+
+  it('does not allow removing the last entry while Limited is selected', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    const remove = await screen.findByRole('button', { name: 'Remove guest@example.com' });
+    expect((remove as HTMLButtonElement).disabled).toBe(true);
+    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last entry');
+    // The same guard covers an Organization that is the only entry left.
+    expect((await screen.findByRole('switch', { name: 'This Organization' })).getAttribute(
+      'aria-checked',
+    )).toBe('false');
   });
 
   it('saves a direct mode change without an Apply button', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({ access_mode: 'public', revision: 1 }),
@@ -129,9 +409,7 @@ describe('ShowPageSharingSettings', () => {
     renderSettings();
 
     await chooseMode('Limited');
-    fireEvent.change(screen.getByRole('textbox', { name: 'People with access' }), {
-      target: { value: 'unfinished@example.com' },
-    });
+    fireEvent.change(await audience(), { target: { value: 'unfinished@example.com' } });
     await chooseMode('Fully public');
 
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
@@ -139,37 +417,10 @@ describe('ShowPageSharingSettings', () => {
       expected_revision: 0,
       target_access_mode: 'public',
       target_share_id: 'stable-link',
+      target_entries: [],
       target_emails: [],
     });
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
-  });
-
-  it('disables new Limited email input at the audience limit', async () => {
-    api.getShowAccessSettings.mockResolvedValue({
-      show_access: showAccess({
-        access_mode: 'limited',
-        normalized_emails: Array.from({ length: 64 }, (_, index) => `guest-${index}@example.com`),
-      }),
-    });
-    renderSettings();
-
-    const input = await screen.findByRole('textbox', { name: 'People with access' });
-    expect((input as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText('Enter an email and press Enter to add · up to 64')).toBeTruthy();
-  });
-
-  it('does not allow removing the last email while Limited is selected', async () => {
-    api.getShowAccessSettings.mockResolvedValue({
-      show_access: showAccess({
-        access_mode: 'limited',
-        normalized_emails: ['guest@example.com'],
-      }),
-    });
-    renderSettings();
-
-    const remove = await screen.findByRole('button', { name: 'Remove guest@example.com' });
-    expect((remove as HTMLButtonElement).disabled).toBe(true);
-    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last email');
   });
 
   it('reloads the latest access snapshot without dropping a custom-link draft after a CAS conflict', async () => {
@@ -183,6 +434,7 @@ describe('ShowPageSharingSettings', () => {
       .mockResolvedValueOnce({
         show_access: showAccess({ access_mode: 'public', revision: 3 }),
       });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'conflict',
       show_access: showAccess({ access_mode: 'limited', revision: 2 }),
@@ -209,6 +461,7 @@ describe('ShowPageSharingSettings', () => {
       .mockResolvedValueOnce({
         show_access: showAccess({ access_mode: 'public', revision: 2, share_id: 'server-link' }),
       });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'conflict',
       show_access: showAccess({ access_mode: 'public', revision: 1, share_id: 'other-link' }),
@@ -237,6 +490,7 @@ describe('ShowPageSharingSettings', () => {
       .mockResolvedValueOnce({
         show_access: showAccess({ access_mode: 'public', revision: 2, share_id: 'server-link' }),
       });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'conflict',
       show_access: showAccess({ access_mode: 'limited', revision: 1 }),
@@ -263,6 +517,7 @@ describe('ShowPageSharingSettings', () => {
       .mockResolvedValueOnce({
         show_access: showAccess({ access_mode: 'public', revision: 2, share_id: 'server-link' }),
       });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockRejectedValueOnce(new Error('network unavailable'));
     renderSettings();
 
@@ -284,6 +539,7 @@ describe('ShowPageSharingSettings', () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({ access_mode: 'public' }),
     });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'share_id_taken',
       show_access: showAccess({ access_mode: 'public' }),
@@ -292,7 +548,6 @@ describe('ShowPageSharingSettings', () => {
     const input = await screen.findByRole('textbox', { name: 'Custom link' });
 
     expect(screen.getByText('Custom link')).toBeTruthy();
-    expect(input.parentElement?.className).toContain('max-w-[17.5rem]');
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
     fireEvent.change(input, { target: { value: 'taken-link' } });
     fireEvent.blur(input);
@@ -311,6 +566,7 @@ describe('ShowPageSharingSettings', () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({ access_mode: 'public' }),
     });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({ access_mode: 'public', revision: 1, share_id: 'canonical-link' }),
@@ -332,12 +588,13 @@ describe('ShowPageSharingSettings', () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({ access_mode: 'public' }),
     });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     let resolveApply = (_result: ShowAccessApplyResult) => undefined;
     api.applyShowAccess.mockReturnValue(new Promise<ShowAccessApplyResult>((resolve) => {
       resolveApply = resolve;
     }));
     const onApplied = vi.fn();
-    const view = renderSettings('ses-1', true, onApplied);
+    const view = renderSettings('ses-1', onApplied);
     const input = await screen.findByRole('textbox', { name: 'Custom link' });
 
     fireEvent.change(input, { target: { value: 'new-link' } });
@@ -367,6 +624,7 @@ describe('ShowPageSharingSettings', () => {
         normalized_emails: ['first@example.com'],
       }),
     });
+    getPermissions.mockResolvedValue(PERSONAL);
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({
@@ -379,9 +637,7 @@ describe('ShowPageSharingSettings', () => {
 
     const customLink = await screen.findByRole('textbox', { name: 'Custom link' });
     fireEvent.change(customLink, { target: { value: 'unsaved-link' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'People with access' }), {
-      target: { value: 'second@example.com' },
-    });
+    fireEvent.change(await audience(), { target: { value: 'second@example.com' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
 
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
@@ -389,6 +645,10 @@ describe('ShowPageSharingSettings', () => {
       expected_revision: 0,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
+      target_entries: [
+        { kind: 'email', value: 'first@example.com' },
+        { kind: 'email', value: 'second@example.com' },
+      ],
       target_emails: ['first@example.com', 'second@example.com'],
     });
     expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
@@ -397,18 +657,9 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   });
 
-  it('can hide custom-link editing when embedded in the share popover', async () => {
-    api.getShowAccessSettings.mockResolvedValue({
-      show_access: showAccess({ access_mode: 'public' }),
-    });
-    renderSettings('ses-1', false);
-
-    expect(await screen.findByRole('button', { name: 'Access: Fully public' })).toBeTruthy();
-    expect(screen.queryByRole('textbox', { name: 'Custom link' })).toBeNull();
-  });
-
-  it('rejects a mismatched result identity without adopting its email list', async () => {
+  it('rejects a mismatched result identity without adopting its audience', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(ORGANIZATION);
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({
@@ -433,6 +684,7 @@ describe('ShowPageSharingSettings', () => {
         share_id: sessionId === 'ses-1' ? 'first-link' : 'second-link',
       }),
     }));
+    getPermissions.mockResolvedValue(ORGANIZATION);
     let resolveApply = (_result: ShowAccessApplyResult) => undefined;
     api.applyShowAccess.mockReturnValue(new Promise<ShowAccessApplyResult>((resolve) => {
       resolveApply = resolve;

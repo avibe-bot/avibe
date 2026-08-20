@@ -3624,53 +3624,31 @@
         "limited": "Only people in the list can access",
         "public": "Anyone can access without signing in"
       },
-      "limitedEmails": "People with access",
-      "limitedEmailRequired": "Add at least one email address.",
-      "limitedEmailHint": "Enter an email and press Enter to add · up to {{count}}",
-      "keepOneLimitedEmail": "Switch to Private to remove the last email",
+      "shareAudience": "People with access",
+      "shareAudienceOptions": "People and group suggestions",
+      "shareAudiencePlaceholder": {
+        "organization": "Search people or groups, or type an email",
+        "email": "name@example.com"
+      },
+      "shareAudienceHint": {
+        "organization": "Pick a person or group, or type any email · up to {{count}}",
+        "email": "Enter an email and press Enter to add · up to {{count}}"
+      },
+      "shareAudienceRequired": "Add at least one person, group, or Organization.",
+      "shareOrganizationGeneric": "This Organization",
+      "shareOrganizationNamed": "This Organization ({{name}})",
+      "shareGroupBadge": "Group",
+      "shareSuggestionEmpty": "No matching person or group. Type a full email to add it.",
+      "shareSuggestionNarrow": "More results — keep typing to narrow them down.",
+      "loadingShareDirectory": "Loading Organization directory…",
+      "removeShareEntry": "Remove {{label}}",
+      "keepOneShareEntry": "Switch to Private to remove the last entry",
       "sharingErrors": {
         "conflict": "Link access changed elsewhere. The latest version has been loaded.",
-        "invalid": "Review the mode, link, and email list.",
+        "invalid": "Review the mode, link, and access list.",
         "error": "Link access could not be loaded."
       },
-      "workspaceAccess": "Organization access",
-      "workspaceAccessDesc": "Controls authenticated access inside this Organization. Link access remains separate.",
-      "loadingWorkspaceAccess": "Loading Organization access…",
-      "workspacePersonal": "This Show Page belongs to a Personal Avibe.",
-      "workspaceUnmanaged": "Organization access is unavailable until this Avibe is paired.",
-      "workspacePending": "Organization ownership is known, but its exact binding is temporarily unavailable. Access remains private.",
-      "workspaceConfigurationUnavailable": "Organization access cannot be verified while Avibe configuration is unavailable. Access remains private.",
-      "workspaceOwnershipConflict": "This Show Page is bound to a different ownership domain. Access remains private until the conflict is resolved.",
-      "workspaceModes": {
-        "private": "Private",
-        "organization": "Organization members",
-        "scope": "Selected groups"
-      },
-      "workspaceHelp": {
-        "private": "Only the page owner and Instance Owner can use it.",
-        "public": "Authenticated members of this Organization can use it.",
-        "scope": "Only members of the selected Organization groups can use it."
-      },
-      "workspaceGroups": "Organization groups",
-      "workspaceArchived": "Archived",
-      "workspaceNoGroups": "No active groups are available.",
-      "workspaceGroupRequired": "Select at least one group.",
-      "workspaceRevisionConflict": "Organization access changed elsewhere. Your draft was kept on the latest revision.",
-      "workspaceOffline": "The last known Organization policy is shown while Permissions is offline. Editing is disabled.",
-      "workspaceReadOnly": "Avibe Cloud owns this Organization policy. Edit it in Avibe Cloud.",
-      "workspaceOwnerOnly": "Only the Instance Owner can change Organization access.",
-      "workspaceLoadError": "Organization access could not be loaded.",
-      "workspaceNarrowTitle": "Narrow Organization access?",
-      "workspaceNarrowBody": "Some people may lose access as soon as this policy is applied.",
-      "applyWorkspaceAccess": "Apply",
-      "workspaceSync": {
-        "pending": "The policy is waiting for this Avibe to apply it.",
-        "offline": "This Avibe has not acknowledged the latest policy.",
-        "error": "The latest policy could not be applied."
-      },
-      "emailPlaceholder": "name@example.com",
       "addEmail": "Add email",
-      "removeEmail": "Remove {{email}}",
       "emailInvalid": "Enter a valid email address.",
       "accessLoadError": "Access details could not be loaded. Sharing changes are disabled.",
       "availability": "Page online",
