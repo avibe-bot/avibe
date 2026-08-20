@@ -1903,7 +1903,13 @@ def test_pair_aborts_when_legacy_provenance_cannot_be_read(monkeypatch, tmp_path
     config.save()
     original = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
 
-    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: _pair_redeem_response())
+    redeem_calls: list[str] = []
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        redeem_calls.append(url)
+        return _pair_redeem_response()
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
     monkeypatch.setattr(
         remote_access,
         "_run_pending_deferred_context_migration",
@@ -1922,6 +1928,7 @@ def test_pair_aborts_when_legacy_provenance_cannot_be_read(monkeypatch, tmp_path
     assert result["ok"] is False
     assert result["error"] == "pairing_provenance_unavailable"
     assert saves == []
+    assert redeem_calls == []
     assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
 
 
@@ -1935,7 +1942,13 @@ def test_pair_aborts_when_pending_migration_fails(monkeypatch, tmp_path) -> None
     config.save()
     original = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
 
-    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: _pair_redeem_response())
+    redeem_calls: list[str] = []
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        redeem_calls.append(url)
+        return _pair_redeem_response()
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
     monkeypatch.setattr(
         remote_access,
         "_run_pending_deferred_context_migration",
@@ -1953,6 +1966,7 @@ def test_pair_aborts_when_pending_migration_fails(monkeypatch, tmp_path) -> None
     assert result["ok"] is False
     assert result["error"] == "pairing_provenance_unavailable"
     assert saves == []
+    assert redeem_calls == []
     assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
 
 
@@ -1999,6 +2013,11 @@ def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tm
 
 
 def test_pair_returns_structured_error_when_backend_request_fails(monkeypatch) -> None:
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")))
 
     result = remote_access.pair("vrp_test", "https://backend.test")
@@ -2012,6 +2031,11 @@ def test_pair_preserves_backend_error_response(monkeypatch) -> None:
     def fake_request(*args, **kwargs):
         raise remote_access.BackendRequestError(400, {"error": "invalid_pairing_key"})
 
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "_json_request", fake_request)
 
     result = remote_access.pair("vrp_test", "https://backend.test")

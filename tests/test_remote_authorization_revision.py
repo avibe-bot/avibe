@@ -574,6 +574,115 @@ def test_stale_cross_process_kind_response_cannot_reverse_durable_generation(
     assert after["instance_kind"] == "organization"
 
 
+def test_stale_write_is_refused_under_cross_process_config_lock(tmp_path):
+    """Two threads contend on config_file_lock; the stale writer must abort.
+
+    This is the real cross-process lock boundary (the same lock V2Config.save
+    uses), not the in-process epoch.
+    """
+
+    from config.v2_config import config_file_lock
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    observed = remote_access_authorization_service.current_instance_binding_generation()
+    # flock is process-level, so two threads in one process cannot actually
+    # block each other on config_file_lock. Model the cross-process race as:
+    # snapshot generation, then a controller advance under that lock, then a
+    # stale persist that must CAS-fail against the durable generation.
+    with config_file_lock():
+        remote_access._transition_instance_binding(
+            instance_id="inst_123",
+            instance_kind="organization",
+        )
+        config.remote_access.vibe_cloud.instance_kind = "organization"
+        config.save()
+    controller_generation = (
+        remote_access_authorization_service.current_instance_binding_generation()
+    )
+    stale_ok = remote_access._persist_instance_kind(
+        "inst_123",
+        "personal",
+        expected_binding_generation=observed,
+    )
+
+    assert stale_ok is False
+    assert controller_generation > observed
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    after = remote_access_authorization_service.load_instance_binding_state()
+    assert after is not None
+    assert after["instance_kind"] == "organization"
+    assert after["generation"] == controller_generation
+
+
+def test_stale_denied_response_does_not_recreate_revoked_row(monkeypatch, tmp_path):
+    """A 403 captured before a transition must not recreate a revoked row."""
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    observed = remote_access_authorization_service.current_instance_binding_generation()
+    real_generation = remote_access_authorization_service.current_instance_binding_generation
+    calls = {"n": 0}
+
+    def deny_after_transition(_config, _method, _suffix, payload, **kwargs):
+        remote_access._transition_instance_binding(
+            instance_id="inst_123",
+            instance_kind="personal",
+        )
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    def generation(*, ensure: bool = True) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return observed
+        return real_generation(ensure=ensure)
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny_after_transition)
+    monkeypatch.setattr(
+        remote_access_authorization_service,
+        "current_instance_binding_generation",
+        generation,
+    )
+
+    result = remote_access._fetch_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        observed_revision=41,
+    )
+
+    assert result.state == "unavailable"
+    assert result.reason == "instance_binding_changed"
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    if stored is not None:
+        assert stored.get("authorization_state") != "revoked"
+
+
 def test_exact_show_page_grants_survive_a_kind_transition_but_not_a_repair(tmp_path):
     """Show Page grants are their own scope, bound to the instance that issued them."""
 

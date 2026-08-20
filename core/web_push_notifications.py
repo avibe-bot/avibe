@@ -109,6 +109,15 @@ def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> s
 
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     instance_kind = str(getattr(cloud, "instance_kind", "") or "")
+    if instance_kind in {"personal", "organization"}:
+        from storage import remote_access_authorization_service
+
+        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=str(getattr(cloud, "instance_id", "") or ""),
+            instance_kind=instance_kind,
+            ensure=False,
+        ):
+            instance_kind = ""
     if instance_kind == "organization":
         return "organization"
     if instance_kind == "personal":
@@ -231,6 +240,22 @@ def _evaluate_record_authorization(
             reason="paired configuration could not be read; instance binding cannot be validated",
         )
     paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    if paired_kind in {"personal", "organization"}:
+        from storage import remote_access_authorization_service
+
+        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=_paired_instance_id(config),
+            instance_kind=paired_kind,
+            ensure=False,
+        ):
+            return OwnerAuthorizationDecision(
+                user_key=user_key,
+                policy=policy,
+                context=None,
+                authorized=False,
+                disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+                reason="durable instance binding is not ready",
+            )
     if (
         paired_kind in {"personal", "organization"}
         and cloud is not None

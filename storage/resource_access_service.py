@@ -362,6 +362,15 @@ def resource_user_context_from_metadata(
         return None
     if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE and configured is not None:
         paired_instance_id, paired_kind = configured
+        from storage import remote_access_authorization_service
+
+        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=paired_instance_id,
+            instance_kind=paired_kind,
+            ensure=False,
+        ):
+            # Kind is not yet reconciled; do not project a Personal bypass.
+            return None
         if context.instance_kind is not None and (
             not paired_instance_id or not paired_kind
         ):

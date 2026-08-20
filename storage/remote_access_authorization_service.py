@@ -746,3 +746,31 @@ def current_instance_binding_generation(*, ensure: bool = True) -> int:
         return int(state.get("generation") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def binding_is_ready_for_pairing(
+    *,
+    instance_id: str | None,
+    instance_kind: str | None,
+    ensure: bool = False,
+) -> bool:
+    """True only when the durable binding is ready for this pairing.
+
+    A missing row is a legacy install and stays compatible. Once a row
+    exists, ``reconciling`` / ``invalid`` / mismatched identity means the
+    kind is unavailable to every consumer until reconciliation succeeds.
+    """
+
+    state = load_instance_binding_state(ensure=ensure)
+    if state is None:
+        return True
+    if state.get("state") != INSTANCE_BINDING_STATE_READY:
+        return False
+    current_id = (instance_id or "").strip()
+    current_kind = instance_kind if instance_kind in {"personal", "organization"} else None
+    return (
+        bool(current_id)
+        and state.get("instance_id") == current_id
+        and state.get("instance_kind") == current_kind
+        and current_kind is not None
+    )

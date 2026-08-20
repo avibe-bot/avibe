@@ -670,6 +670,42 @@ def test_deferred_context_from_previous_pairing_is_rejected(monkeypatch, tmp_pat
     assert not resource_access_service.metadata_allows_harness_runtime(metadata)
 
 
+def test_deferred_context_does_not_project_personal_bypass_while_reconciling(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Non-interactive metadata must fail closed while the binding is reconciling."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "current-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    from storage import remote_access_authorization_service
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="current-instance",
+        instance_kind="personal",
+    )
+
+    personal_context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="current-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, personal_context)
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
 @pytest.mark.parametrize("pairing_state", ["disabled", "unreadable", "partial"])
 def test_explicit_deferred_context_requires_current_pairing(
     monkeypatch,
