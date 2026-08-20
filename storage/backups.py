@@ -22,6 +22,13 @@ JSON_STATE_BACKUP_RETENTION = 3
 SQLITE_BACKUP_RETENTION = 2
 BACKUP_MANIFEST_VERSION = 1
 
+#: The name a restore gives the database it takes out of service, inside the
+#: backup directory it restored from. That directory is the record of "we rolled
+#: back to this point", so the database rolled back FROM belongs beside it -- and
+#: living inside the window means the existing bound already covers it, instead
+#: of a second growth path needing rules of its own.
+REPLACED_DATABASE_NAME = "vibe.sqlite.replaced"
+
 _JSON_BACKUP_RE = re.compile(
     r"^sqlite-state-migration-(?P<timestamp>\d{8}T\d{6}Z)(?:-(?P<suffix>\d+))?$"
 )
@@ -284,6 +291,50 @@ def next_backup_sequence(backups_dir: Path) -> int:
         if candidate.sequence is not None
     ]
     return max(recorded, default=-1) + 1
+
+
+def find_restorable_backup(backups_dir: Path, *, written_at_or_after: int) -> Path | None:
+    """The rollback point taken after a caller's own earlier observation, if any.
+
+    The other half of `next_backup_sequence`: a caller reads that number before
+    handing the database to code it does not trust, and reads it back through
+    here afterwards. Any backup numbered at or above it was written after the
+    observation, so this answers "did a migration episode begin while I was
+    watching, and where is its rollback point" without consulting a clock, a
+    revision stamp, or anything the watched code reported about itself. Those
+    were all tried and are all labels: two attempts can leave a stamp and a
+    schema identical while the rows differ, and a clock corrected backwards
+    between two attempts dates the later copy first.
+
+    The answer is the NEWEST such copy, which is the one closest to the data the
+    machine actually had: every attempt copies the database as it stood before
+    its own migration, so an older copy discards whatever was committed between
+    the attempts. It is not certified undamaged -- an attempt that commits rows
+    and then fails leaves them in the next attempt's copy -- and nothing here can
+    certify one, for the reason `_kept_within_position` gives: which copy at a
+    position is the good one cannot be decided from the position. So the
+    automatic answer loses no data, and the first copy at that position stays in
+    the window for an operator who has diagnosed the damage and wants to go
+    further back by hand.
+
+    Backups with no recorded number are never eligible. One was written by a
+    release that did not have the field, which places it before any observation
+    this release could have made.
+    """
+
+    # Filtering on a recorded sequence also guarantees a directory backup with a
+    # readable `vibe.sqlite`: only `_directory_candidate` reads the field, and it
+    # only returns a sqlite candidate when that file is present.
+    candidates = [
+        candidate
+        for candidate in _managed_candidates(backups_dir)
+        if candidate.kind == "sqlite"
+        and candidate.sequence is not None
+        and candidate.sequence >= written_at_or_after
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate.written_order).root
 
 
 def _remove_candidate(candidate: _BackupCandidate) -> bool:
@@ -579,3 +630,250 @@ def create_sqlite_migration_backup(
     # would not count itself against the bound.
     prune_state_backups(target_root, json_retention=None, protect=backup_dir)
     return backup_dir
+
+
+def _duplicate_file(source: Path, destination: Path) -> None:
+    """Copy `source` to `destination` without a window where only one copy exists.
+
+    By link where the filesystem allows it, by copy where it does not.
+    """
+
+    try:
+        os.link(source, destination)
+    except OSError:
+        logger.debug("Hard link unavailable for %s; copying it to %s instead", source, destination, exc_info=True)
+        shutil.copy2(str(source), str(destination))
+
+
+def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path | None:
+    """Put `replacement` at the live path, keeping all of what was there.
+
+    Displacing the old generation and installing the new one are one operation
+    because the invariant is one: at every instant a failure can be observed, the
+    live path holds a database together with the sidecars that belong to it.
+    Split across two functions, neither owns that -- the displacement ends with
+    the live log already cleared and the caller has not yet renamed anything into
+    place, so an interrupted install leaves a database missing its own committed
+    tail, and no amount of care in either half closes a gap that exists between
+    them.
+
+    The write-ahead log and shared-memory sidecars move with the displaced
+    database, and that is not tidiness: a `-wal` left behind belongs to the
+    generation being displaced, and SQLite would replay it into the restored
+    database and call the result recovered. Moving them under the displaced
+    database's own name keeps them where SQLite will find them for it instead.
+
+    That rule is about the name, not about the database, so it holds equally
+    when there is no database to displace. Sidecars are therefore collected
+    before the two paths divide, and every path out of here clears the live name
+    of sidecars it did not bring with it.
+
+    A previous displacement into this same rollback point is replaced, but only
+    once the new one is whole on disk -- staged under its own name, then renamed
+    over. The bound has to come from somewhere: a full copy of the database per
+    rollback attempt is the growth `prune_state_backups` exists to prevent. But
+    the copy being dropped is a working database an operator may still need, and
+    deleting it to make room for one not yet written trades a bounded directory
+    for a window in which neither generation is anywhere.
+
+    Nothing leaves the live path until the displaced generation is whole under
+    its own name, and that ordering is the whole design rather than a detail of
+    it. This runs to free the live pathname for a restore that is itself the
+    recovery from a failure, so its own failure has to leave the machine no worse
+    than it found it: on any error the live database is still there, still with
+    its own write-ahead log, and still the database it was. Every step before the
+    commit therefore duplicates rather than moves -- by link where the filesystem
+    allows it, by copy where it does not, which costs a transient second copy on
+    a cross-filesystem layout and is the price of not having a window where the
+    only copy is in flight.
+    """
+
+    sidecar_suffixes = ("-wal", "-shm")
+
+    def sidecars_of(base: Path) -> tuple[Path, ...]:
+        return tuple(base.with_name(base.name + suffix) for suffix in sidecar_suffixes)
+
+    live_sidecars = [
+        sidecar for sidecar in sidecars_of(db_path) if sidecar.is_file() and not sidecar.is_symlink()
+    ]
+
+    if not db_path.exists():
+        # Nothing to displace, but the sidecars are not therefore nothing. A
+        # migration that removed the database and left its log behind leaves a
+        # log belonging to a generation that no longer exists anywhere, and
+        # SQLite pairs a log with a database by name -- it validates the log's
+        # own checksum chain, not the database it came from. Renaming the
+        # rollback point in over that name hands the failed generation's tail to
+        # the older database and SQLite replays it, which puts back precisely
+        # what the rollback exists to remove.
+        #
+        # So the same rule the displacing branch enforces below applies here,
+        # for the same reason and by the same call: whatever arrives under this
+        # name must not inherit sidecars that are not its own. They are unlinked
+        # rather than archived because a log without its database is not
+        # recoverable evidence -- its pages need that database's header to mean
+        # anything -- while a log kept beside a name is a log something can
+        # still be paired with later.
+        for orphan in live_sidecars:
+            orphan.unlink(missing_ok=True)
+        os.replace(replacement, db_path)
+        return None
+
+    replaced = into / REPLACED_DATABASE_NAME
+    staging = into / f"{REPLACED_DATABASE_NAME}.incoming"
+
+    for stale in (staging, *sidecars_of(staging)):
+        stale.unlink(missing_ok=True)
+
+    duplications: list[tuple[Path, Path]] = [(db_path, staging)]
+    for suffix in sidecar_suffixes:
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar in live_sidecars:
+            duplications.append((sidecar, staging.with_name(staging.name + suffix)))
+
+    for source, destination in duplications:
+        _duplicate_file(source, destination)
+
+    # The previous displacement's sidecars go first and its database last. A
+    # database briefly without its write-ahead log is still that database; a
+    # write-ahead log briefly without its database is a log SQLite would replay
+    # into whatever arrives under that name next.
+    for stale_sidecar in sidecars_of(replaced):
+        stale_sidecar.unlink(missing_ok=True)
+    os.replace(staging, replaced)
+    try:
+        for suffix in sidecar_suffixes:
+            staged_sidecar = staging.with_name(staging.name + suffix)
+            if staged_sidecar.exists():
+                os.replace(staged_sidecar, replaced.with_name(replaced.name + suffix))
+    except OSError:
+        # Three files cannot be renamed atomically, so one instant is unavoidable:
+        # the displaced database is committed and its write-ahead log is not. What
+        # that instant holds is a complete database as of its last checkpoint --
+        # readable, self-consistent, and missing only what the failed release
+        # committed after it. Not torn, but quieter than it should be, so it is
+        # said out loud and the log is left where it can still be recovered by
+        # hand.
+        #
+        # Neither other ordering is available. Renaming the log in first pairs
+        # generation N+1's log with generation N's database, which is the one
+        # pairing SQLite will silently replay into corruption. Unlinking the
+        # displaced database to keep the set whole-or-absent destroys BOTH
+        # generations, because the rename above has already consumed the previous
+        # displacement -- `test_no_rename_a_swap_performs_can_cost_the_live_generation`
+        # fails on exactly that, which is how this comment came to be written.
+        logger.warning(
+            "Displaced database %s committed without its %s sidecars; it is complete only to its "
+            "last checkpoint. The staged sidecars are left beside it for manual recovery.",
+            replaced.name,
+            ", ".join(sidecar_suffixes),
+            exc_info=True,
+        )
+        raise
+
+    # The displacement is made durable BEFORE the live path commits, and that
+    # ordering is the same invariant as the one above, stated against power loss
+    # instead of against an exception. A rename is visible to this process the
+    # moment it returns and durable only once its directory is synced, so leaving
+    # both syncs until after the live commit admits a crash that persists the new
+    # live pathname while the directory entry naming the displaced generation is
+    # still only in cache. That generation holds everything the failed release
+    # committed and exists nowhere else -- the rollback point is a copy of an
+    # older database, not of this one -- so losing it is the one loss this whole
+    # function is built to prevent.
+    for displaced in (replaced, *sidecars_of(replaced)):
+        if displaced.is_file():
+            _fsync_file(displaced)
+    _fsync_directory(into)
+
+    # Only now does anything leave the live path, and only the sidecars: the
+    # displaced generation already holds its own copy of them, and the database
+    # arriving under this name must not inherit them. The database itself stays
+    # until the rename below replaces it.
+    #
+    # The unlinks happen inside the guard, not ahead of it. Removing the log and
+    # removing the shared-memory file are two calls, so a failure of the second
+    # would leave the live database at its own path with its log already gone --
+    # complete only to its last checkpoint, and silently so, because the restore
+    # raises and an operator reasonably reads a failed restore as "nothing moved".
+    # The recovery below is the same answer for a failed unlink as for a failed
+    # rename, so it covers both rather than only the one that was thought of
+    # first.
+    try:
+        for sidecar in live_sidecars:
+            sidecar.unlink(missing_ok=True)
+        os.replace(replacement, db_path)
+    except Exception:
+        # The live generation goes back exactly as it was. Its database never
+        # left this path; its log did, and the displaced copy is where it is, so
+        # it is put back before the failure surfaces -- otherwise a restore that
+        # failed would still have cost the machine everything that database
+        # committed since its last checkpoint.
+        for sidecar in live_sidecars:
+            displaced_sidecar = replaced.with_name(replaced.name + sidecar.name[len(db_path.name) :])
+            if not displaced_sidecar.is_file():
+                continue
+            try:
+                _duplicate_file(displaced_sidecar, sidecar)
+            except OSError:
+                logger.warning("Failed to restore %s after an interrupted database swap", sidecar, exc_info=True)
+        raise
+    return replaced
+
+
+def restore_sqlite_backup(backup_dir: Path, db_path: Path) -> Path | None:
+    """Put a rollback point back into service, destroying nothing.
+
+    A restore is a swap, never an overwrite. The database it takes out of service
+    holds whatever the version being rolled back from committed before it failed,
+    and that is the only copy of that data anywhere; a restore that dropped it
+    would make the recovery step the unrecoverable one. It is moved into the
+    rollback point's own directory and its path is returned, for the caller to
+    record where an operator will look for it.
+
+    The rollback point itself is also left intact. Its copy is read, not moved:
+    the restore's own outcome can be the bad one, and the same point has to still
+    be there to reach for again.
+
+    The replacement is copied and verified BEFORE anything about the live
+    database changes. Every cheaper order ends the same way -- a rollback point
+    that turns out to be unreadable, discovered after the working database is
+    already gone, leaving the machine with no database rather than a failed
+    rollback.
+
+    Restoring does not grow the backup window, so it does not prune: it adds one
+    file inside a directory the window already counts, and that directory's
+    eviction takes the file with it.
+    """
+
+    source_db = backup_dir.expanduser().resolve() / "vibe.sqlite"
+    target = db_path.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(target.name + ".restoring")
+    staged_paths = (staged, *(staged.with_name(staged.name + suffix) for suffix in ("-wal", "-shm")))
+
+    for stale in staged_paths:
+        stale.unlink(missing_ok=True)
+    try:
+        with sqlite3.connect(f"{source_db.as_uri()}?mode=ro", uri=True) as source:
+            with sqlite3.connect(staged) as destination:
+                source.backup(destination)
+                destination.execute("PRAGMA journal_mode = DELETE")
+                check = destination.execute("PRAGMA quick_check").fetchone()
+                if check != ("ok",):
+                    raise sqlite3.DatabaseError(f"SQLite rollback point quick_check failed: {check!r}")
+        os.chmod(staged, 0o600)
+        _fsync_file(staged)
+    except Exception:
+        for stale in staged_paths:
+            stale.unlink(missing_ok=True)
+        raise
+
+    replaced = _swap_live_database(target, staged, into=source_db.parent)
+    # Only the live directory, because the swap already synced the rollback point
+    # it displaced into -- it has to, in the middle of its own sequence rather
+    # than after it, and a second sync out here would suggest the ordering is
+    # decided in two places when the whole reason that function exists is that it
+    # is decided in one.
+    _fsync_directory(target.parent)
+    return replaced

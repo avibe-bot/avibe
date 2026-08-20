@@ -757,3 +757,391 @@ def test_background_store_schema_upgrade_uses_migration_backup(tmp_path: Path) -
 
     backups = list((db_path.parent / "backups").glob("avibe-sqlite-migration-*"))
     assert len(backups) == 1
+
+
+def test_a_rollback_point_is_offered_only_when_it_was_written_after_the_observation(tmp_path: Path) -> None:
+    # The pair `next_backup_sequence` / `find_restorable_backup` exists to answer
+    # one question -- did the code I just handed the database to migrate it, and
+    # where is the copy it took first -- using only numbers this side wrote and
+    # read. Stated as that property over an arbitrary run of copies rather than
+    # as a list of the cases, because the cases the earlier designs died on were
+    # all cases nobody had listed: a stamp and a schema that stay put across a
+    # migration that commits rows and then fails, and a clock corrected backwards
+    # between two attempts.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the observation')")
+
+    before = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    watermark = backups.next_backup_sequence(backups_dir)
+
+    # Nothing has been written since the watermark was read, so there is nothing
+    # to put back -- the same answer a restart that failed before starting the
+    # new version has to get.
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark) is None
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("update payload set value = 'committed by the first attempt'")
+    first_attempt = create_sqlite_migration_backup(
+        db_path, backups_dir=backups_dir, now=datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc)
+    )
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark) == first_attempt
+
+    # A retry, dated BEFORE the attempt it follows. The answer moves to it anyway:
+    # it holds the rows the first attempt committed, and the earlier copy would
+    # silently discard them.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("insert into payload (value) values ('committed, then the attempt failed')")
+    retry = create_sqlite_migration_backup(
+        db_path, backups_dir=backups_dir, now=datetime(2026, 8, 6, 11, 0, tzinfo=timezone.utc)
+    )
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark) == retry
+    # And the copy from before the window is never the answer, at any watermark
+    # at or above it: it predates the observation, so restoring it would throw
+    # away work this rollback was never asked about.
+    assert before != retry
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=watermark + 1) == retry
+
+
+def test_a_copy_written_before_the_counter_existed_is_never_offered(tmp_path: Path) -> None:
+    # A copy carrying no number was written by a release that did not have one,
+    # which places it before any observation this release could have made. Offering
+    # it would restore a database from an unknown point in the past and report it
+    # as the rollback for this upgrade.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('from before the counter')")
+
+    from_the_previous_release = _as_pre_sequence_backup(
+        create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    )
+
+    assert from_the_previous_release.exists()
+    assert backups.next_backup_sequence(backups_dir) == 0
+    assert backups.find_restorable_backup(backups_dir, written_at_or_after=0) is None
+
+
+def test_restoring_a_rollback_point_destroys_neither_side(tmp_path: Path) -> None:
+    # A restore is a swap, and the property is that both sides survive it. The
+    # database being rolled back FROM is the only copy of whatever the failing
+    # version committed, and the restore's own outcome can turn out to be the bad
+    # one, so neither the live database nor the rollback point may be consumed to
+    # produce the other.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    point_contents = _db_contents(rollback_point / "vibe.sqlite")
+
+    # The failing version migrates: new schema, new rows, new stamp.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table added_by_the_new_version (value text)")
+        conn.execute("insert into payload (value) values ('written by the new version')")
+    _stamp(db_path, "20260819_0051")
+    forward_contents = _db_contents(db_path)
+
+    replaced = backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert _db_contents(db_path) == point_contents
+    assert replaced == rollback_point / backups.REPLACED_DATABASE_NAME
+    assert _db_contents(replaced) == forward_contents
+    assert _db_contents(rollback_point / "vibe.sqlite") == point_contents
+    assert oct(db_path.stat().st_mode)[-3:] == "600"
+
+
+def test_a_restore_leaves_no_journal_from_the_displaced_generation(tmp_path: Path) -> None:
+    # The sidecars are not tidiness. A `-wal` left beside the restored file
+    # belongs to the database that was displaced, and SQLite would replay it into
+    # the restored one and call the result consistent -- a rollback that reports
+    # success while handing back the schema it was rolling back from.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    point_contents = _db_contents(rollback_point / "vibe.sqlite")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("create table added_by_the_new_version (value text)")
+    assert db_path.with_name(db_path.name + "-wal").exists()
+
+    replaced = backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert not db_path.with_name(db_path.name + "-wal").exists()
+    assert not db_path.with_name(db_path.name + "-shm").exists()
+    assert _db_contents(db_path) == point_contents
+    # Moved rather than deleted: the displaced generation keeps its own log, so
+    # what the new version committed is still readable beside it.
+    assert replaced is not None and replaced.exists()
+
+
+def test_a_restore_over_a_missing_database_leaves_no_orphan_journal(tmp_path: Path) -> None:
+    # Same rule, on the branch that has nothing to displace. A migration can end
+    # with the live name holding no database and its log still beside it, and a
+    # log is paired to a database by name -- SQLite validates the log's own
+    # checksum chain, not the database it was written for. Renaming the rollback
+    # point in over that name therefore hands the failed generation's tail to the
+    # older database, and SQLite replays it and reports a recovered database:
+    # back comes exactly what the rollback was removing, in the one code path
+    # that only ever runs when something has already gone wrong.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    point_contents = _db_contents(rollback_point / "vibe.sqlite")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("create table added_by_the_new_version (value text)")
+    orphans = [db_path.with_name(db_path.name + suffix) for suffix in ("-wal", "-shm")]
+    assert [orphan.name for orphan in orphans if orphan.exists()] == [orphan.name for orphan in orphans]
+    db_path.unlink()
+
+    replaced = backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert replaced is None
+    assert [orphan.name for orphan in orphans if orphan.exists()] == []
+    assert _db_contents(db_path) == point_contents
+
+
+def test_a_restore_that_cannot_be_staged_leaves_the_database_alone(tmp_path: Path) -> None:
+    # The replacement is copied and verified before anything about the live
+    # database changes, so a rollback point that turns out to be unreadable costs
+    # nothing. The alternative -- displace first, then discover it -- leaves the
+    # machine with no database at all, which is the failure this whole change
+    # exists to prevent.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('the only copy')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+    live_contents = _db_contents(db_path)
+
+    (rollback_point / "vibe.sqlite").write_bytes(b"not a database at all")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        backups.restore_sqlite_backup(rollback_point, db_path)
+
+    assert _db_contents(db_path) == live_contents
+    assert not (rollback_point / backups.REPLACED_DATABASE_NAME).exists()
+    assert not db_path.with_name(db_path.name + ".restoring").exists()
+
+
+def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path: Path) -> None:
+    # A displaced database is a full copy, so it needs a bound like every other
+    # copy in this directory. It gets the one that already exists by living inside
+    # the rollback point it came from: a second restore to the same point replaces
+    # the first displacement instead of accumulating beside it, and pruning the
+    # point takes it along. Otherwise a machine retrying an upgrade adds one copy
+    # of the database per attempt -- the exact growth this window was bounded to
+    # stop.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+
+    for attempt in ("first attempt", "second attempt"):
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("insert into payload (value) values (?)", (attempt,))
+        backups.restore_sqlite_backup(rollback_point, db_path)
+
+    displaced = [path.name for path in rollback_point.iterdir() if backups.REPLACED_DATABASE_NAME in path.name]
+    assert displaced == [backups.REPLACED_DATABASE_NAME]
+    # The last attempt's database is the one kept, and it is the one that held
+    # the most work.
+    assert ("second attempt",) in _db_contents(rollback_point / backups.REPLACED_DATABASE_NAME)[1][1]
+
+
+@pytest.mark.parametrize("linking_available", [True, False], ids=["same-filesystem", "cross-filesystem"])
+def test_no_rename_a_swap_performs_can_cost_the_live_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linking_available: bool
+) -> None:
+    # The property: at no point during a restore does the machine have no
+    # database, and no copy of anyone's data is destroyed before its replacement
+    # is complete. Both are claims about the instants in between, so the test
+    # interrupts the swap at the instants they can be violated -- a rename that
+    # fails, which is what a crash, a full disk, or a killed process looks like
+    # from here.
+    #
+    # Every rename it performs, not the first one. Failing only the earliest is
+    # how a swap passed this while its LAST rename ran with the live log already
+    # deleted: everything the database had committed since its last checkpoint
+    # was gone the moment that rename failed, and no assertion here was looking.
+    # So the restore runs once per rename, with that rename failing, and the loop
+    # ends when there is no rename left to fail -- which makes the coverage
+    # complete by construction rather than by a list someone has to maintain.
+    #
+    # Run on both filesystem layouts, because the property is about the machine
+    # and not about the fast path. A state directory on its own mount refuses the
+    # hard link, and an implementation that answers that refusal by MOVING the
+    # live database has already broken the property before anything fails: from
+    # then until the rename, `vibe.sqlite` does not exist. That is not a rarity
+    # to accept -- it is the recovery step of a failed upgrade, running on a
+    # machine that is already down.
+    real_replace = os.replace
+    real_link = os.link
+
+    def refuse_link(*args, **kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    renames = 0
+    while True:
+        renames += 1
+        root = tmp_path / f"failing-rename-{renames}"
+        root.mkdir()
+        db_path = root / "vibe.sqlite"
+        _stamp(db_path, "20260806_0047")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("create table payload (value text)")
+            conn.execute("insert into payload (value) values ('before the upgrade')")
+        rollback_point = create_sqlite_migration_backup(db_path, backups_dir=root / "backups")
+        if not linking_available:
+            monkeypatch.setattr(backups.os, "link", refuse_link)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("insert into payload (value) values ('first attempt')")
+        backups.restore_sqlite_backup(rollback_point, db_path)
+        displaced = rollback_point / backups.REPLACED_DATABASE_NAME
+        assert ("first attempt",) in _db_contents(displaced)[1][1]
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("insert into payload (value) values ('second attempt')")
+        # A write-ahead log belonging to the live generation, which the swap has
+        # to take a copy of and only then clear: it is the file SQLite would
+        # otherwise replay into whatever database arrives under this name next,
+        # and it holds everything committed since the last checkpoint.
+        db_path.with_name(db_path.name + "-wal").write_bytes(b"live write-ahead log")
+
+        countdown = [renames]
+
+        def fail_the_nth_rename(src, dst, *args, _countdown=countdown, **kwargs):
+            _countdown[0] -= 1
+            if _countdown[0] == 0:
+                raise OSError(errno.EIO, "interrupted")
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(backups.os, "replace", fail_the_nth_rename)
+        try:
+            backups.restore_sqlite_backup(rollback_point, db_path)
+            interrupted = False
+        except OSError:
+            interrupted = True
+        finally:
+            monkeypatch.setattr(backups.os, "replace", real_replace)
+            monkeypatch.setattr(backups.os, "link", real_link)
+
+        if not interrupted:
+            # This restore had fewer renames left than the one being failed, so
+            # every rename the swap performs has now been failed exactly once.
+            break
+
+        # The database the machine is running on is still there, still complete,
+        # and still with the write-ahead log that holds the rest of it.
+        assert db_path.exists()
+        assert ("second attempt",) in _db_contents(db_path)[1][1]
+        assert db_path.with_name(db_path.name + "-wal").read_bytes() == b"live write-ahead log"
+        # And whatever the rollback point holds under the displaced name is a
+        # whole generation: the previous displacement until the new one is
+        # complete on disk, the new one after that. Which of the two depends on
+        # how far the swap got, and both are complete answers. What would not be
+        # is a displacement deleted to make room for one that never landed.
+        assert displaced.is_file()
+        assert _db_contents(displaced)[1][1] in (
+            [("before the upgrade",), ("first attempt",)],
+            [("before the upgrade",), ("second attempt",)],
+        )
+
+    # The database out, its log out, the replacement in. Asserted so that a swap
+    # rewritten to do less can no longer satisfy the loop above by having nothing
+    # left to interrupt.
+    assert renames > 3
+
+
+def test_the_displaced_generation_is_durable_before_the_live_path_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same invariant as the test above, stated against power loss instead of
+    # against an exception. A rename is visible to this process the moment it
+    # returns and durable only once its directory is synced, so the two are
+    # different instants and a crash can land between them. If both syncs waited
+    # until after the live commit, a machine losing power there would come back
+    # with the restored database at the live path and the directory entry naming
+    # the displaced generation still only in cache -- and that generation holds
+    # everything the failed release committed and exists nowhere else, because the
+    # rollback point is a copy of an OLDER database, not of that one.
+    #
+    # Read back from what the swap actually did rather than from a list of files
+    # to check: every rename into the rollback point must be durable before the
+    # live rename, whichever renames those turn out to be. A sidecar added later
+    # is covered without editing this test, which is the point -- the `-shm` and
+    # `-wal` pair is a SQLite detail that has changed before.
+    db_path = tmp_path / "vibe.sqlite"
+    backups_dir = tmp_path / "backups"
+    _stamp(db_path, "20260806_0047")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table payload (value text)")
+        conn.execute("insert into payload (value) values ('before the upgrade')")
+    rollback_point = create_sqlite_migration_backup(db_path, backups_dir=backups_dir)
+
+    # A live generation with a write-ahead log, so the swap has sidecars to
+    # displace and not just the database.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("insert into payload (value) values ('written by the new version')")
+    assert db_path.with_name(db_path.name + "-wal").exists()
+
+    real_replace = os.replace
+    journal: list[tuple[str, Path]] = []
+
+    def record_replace(src, dst, *args, **kwargs):
+        result = real_replace(src, dst, *args, **kwargs)
+        journal.append(("rename", Path(dst)))
+        return result
+
+    def record_fsync_file(path: Path) -> None:
+        journal.append(("sync file", Path(path)))
+
+    def record_fsync_directory(path: Path) -> None:
+        journal.append(("sync dir", Path(path)))
+
+    monkeypatch.setattr(backups.os, "replace", record_replace)
+    monkeypatch.setattr(backups, "_fsync_file", record_fsync_file)
+    monkeypatch.setattr(backups, "_fsync_directory", record_fsync_directory)
+
+    backups.restore_sqlite_backup(rollback_point, db_path)
+
+    live_commit = journal.index(("rename", db_path))
+    into_the_point = [
+        path for operation, path in journal[:live_commit] if operation == "rename" and path.parent == rollback_point
+    ]
+    # The swap displaced something, so the ordering below is a claim about real
+    # renames rather than a vacuous one over an empty list.
+    assert into_the_point
+
+    for displaced in into_the_point:
+        assert journal.index(("sync file", displaced)) < live_commit
+    assert journal.index(("sync dir", rollback_point)) < live_commit
+    # And the directory sync comes after the renames it is there to persist:
+    # syncing it earlier records entries that do not exist yet.
+    assert journal.index(("sync dir", rollback_point)) > max(journal.index(("rename", path)) for path in into_the_point)

@@ -208,6 +208,14 @@ def main():
         signal.signal(signal.SIGTERM, _handle_shutdown)
         signal.signal(signal.SIGINT, _handle_shutdown)
 
+        # Readiness is published from inside `controller.run()`, by the code that
+        # reaches it. Announcing it from here was announcing something this
+        # function has not observed: `run()` still has to build the event loop,
+        # start the checkpoint service, schedule the internal server and get the
+        # IM runtime onto its thread, and it catches its own failures and returns,
+        # so the process exits through the ordinary path. A watcher that saw
+        # `running` in that window read a release dying in its own startup as an
+        # upgrade that worked.
         try:
             controller.run()
         finally:

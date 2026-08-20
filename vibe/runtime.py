@@ -1,3 +1,4 @@
+import calendar
 import getpass
 import ipaddress
 import json
@@ -16,6 +17,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 import psutil
 
@@ -37,6 +39,16 @@ SHUTDOWN_INTENT_TTL_SECONDS = 30
 SHUTDOWN_INTENT_ENV = "VIBE_REQUIRE_SHUTDOWN_INTENT"
 SERVICE_LOCK_READY_TIMEOUT_SECONDS = 5.0
 SERVICE_SLOW_START_TIMEOUT_SECONDS = 120.0
+
+#: The service takes the lock before it migrates the database and builds its
+#: controller, because both of those have to be done under the exclusion the lock
+#: provides. So the lock marks the START of startup, not the end of it, and the
+#: record it writes says which of the two the holder has reached. Anything asking
+#: "is this instance up" has to wait for the second one: a migration that fails
+#: kills the holder, and a watcher that stopped at the lock has already recorded
+#: a success by then.
+SERVICE_PHASE_STARTING = "starting"
+SERVICE_PHASE_RUNNING = "running"
 
 
 def get_package_root() -> Path:
@@ -81,6 +93,41 @@ def get_service_main_path() -> Path:
 
     # Fallback to development path
     return dev_main_path
+
+
+class ServiceLauncher(NamedTuple):
+    """The install that a service or UI process should be started from.
+
+    One value rather than an ambient fact, because there is exactly one case
+    where the answer is not "this process" and it is the case that matters: a
+    rollback that crosses the `vibe-remote` -> `avibe-os` tool rename reinstalls
+    into a different directory than the one the rolling-back process is running
+    out of. Every spawn site read `sys.executable` for itself, so the reinstall
+    succeeded and the failed release was started again -- twice over, since the
+    service and the UI each read it separately and would otherwise have to be
+    fixed separately, and a third spawn site would have to be found and fixed
+    again.
+
+    The interpreter and the entry point travel together because they are one
+    install. Pairing an interpreter with another install's entry point runs the
+    replaced release's code under the replacement's imports, which is neither
+    generation and is the failure this exists to avoid.
+    """
+
+    python: str
+    main: str
+
+
+def current_service_launcher() -> ServiceLauncher:
+    """The install THIS process is running from.
+
+    The default for every spawn, so nothing changes for the ordinary restart:
+    the interpreter that is running is the one that should run the next
+    generation. Only a rollback overrides it, and only because by then this
+    process is no longer the install being started.
+    """
+
+    return ServiceLauncher(python=sys.executable, main=str(get_service_main_path()))
 
 
 def get_working_dir() -> Path:
@@ -254,6 +301,12 @@ def acquire_service_instance_lock() -> None:
         holder_pid = _lock_file_pid(lock_file)
         lock_file.close()
         raise ServiceAlreadyRunningError(lock_path=lock_path, holder_pid=holder_pid)
+    _write_service_instance_lock_record(lock_file, SERVICE_PHASE_STARTING)
+    paths.get_runtime_pid_path().write_text(str(os.getpid()), encoding="utf-8")
+    _SERVICE_INSTANCE_LOCK_HANDLE = lock_file
+
+
+def _write_service_instance_lock_record(lock_file, phase: str) -> None:
     lock_file.seek(0)
     lock_file.truncate()
     lock_file.write(
@@ -263,7 +316,7 @@ def acquire_service_instance_lock() -> None:
                 "instance_id": uuid.uuid4().hex,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "started_at": process_create_time(os.getpid()),
-                "phase": "running",
+                "phase": phase,
                 "command": get_process_command(os.getpid()),
             },
             indent=2,
@@ -274,8 +327,78 @@ def acquire_service_instance_lock() -> None:
         os.fsync(lock_file.fileno())
     except OSError:
         logger.debug("Failed to fsync service instance lock", exc_info=True)
-    paths.get_runtime_pid_path().write_text(str(os.getpid()), encoding="utf-8")
-    _SERVICE_INSTANCE_LOCK_HANDLE = lock_file
+
+
+def mark_service_instance_started() -> None:
+    """Record that this service is past startup and into its normal life.
+
+    Called once the database is migrated and the controller is built -- the last
+    point at which a new release can still fail structurally, and so the first
+    point at which "the upgrade worked" is a statement about anything. Whoever
+    started this process is waiting on exactly this write; until it lands, a
+    watcher only knows the lock was taken.
+
+    Rewrites the record through the handle that holds the lock, so the fact and
+    the lock cannot come apart: the kernel drops the lock when this process dies,
+    taking the claim with it.
+    """
+
+    lock_file = _SERVICE_INSTANCE_LOCK_HANDLE
+    if lock_file is None:
+        return
+    _write_service_instance_lock_record(lock_file, SERVICE_PHASE_RUNNING)
+
+
+def read_service_instance_lock_record() -> dict | None:
+    """The service lock record as written by its holder, or None if unreadable."""
+    try:
+        payload = json.loads(get_service_lock_path().read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def service_instance_started(pid: int) -> bool:
+    """Whether the service running as ``pid`` has reported it finished starting.
+
+    Keyed on the pid, because the record is the one thing here the holder does not
+    write atomically with the lock: between taking the lock and rewriting the
+    record, the file still holds whatever the PREVIOUS holder last said, and that
+    is a finished startup. The previous holder's pid is in it too, so requiring
+    the two to agree is what keeps a departed instance's record from answering for
+    this one.
+
+    A release that predates the phase distinction wrote ``running`` when it took
+    the lock, so it reads as started immediately. That is the behavior this
+    replaced, kept deliberately: it is what a rollback target on an older version
+    can offer, and demanding a write it will never make would turn every rollback
+    into a reported failure.
+    """
+
+    record = read_service_instance_lock_record()
+    if record is None:
+        return False
+    return record.get("pid") == pid and record.get("phase") == SERVICE_PHASE_RUNNING
+
+
+def service_instance_still_starting(pid: int) -> bool:
+    """Whether ``pid``'s own record says it is still on its way up.
+
+    The mirror of :func:`service_instance_started`, and deliberately not its
+    negation. That one asks whether a new generation PROVED it works, so a
+    missing or unreadable record has to count as no proof. This one is read by
+    everything that reports a state word to a human, where the same absence means
+    only that nothing here knows -- and answering ``starting`` on no evidence
+    would leave a service whose lock record was lost looking stuck forever.
+
+    So only the holder's own record, naming this pid and this phase, moves the
+    word off ``running``. Anything less says what it has always said.
+    """
+
+    record = read_service_instance_lock_record()
+    if record is None:
+        return False
+    return record.get("pid") == pid and record.get("phase") == SERVICE_PHASE_STARTING
 
 
 def release_service_instance_lock() -> None:
@@ -773,22 +896,31 @@ def verified_service_running() -> bool:
     start, and a restart record describing that failure must not be demoted to
     history because the wreckage is still running.
 
-    The held lock *is* that fact, so this asks for nothing else. Reading the holder
-    pid out of the lock record and requiring it to parse would be strictly weaker
-    than the signal already in hand: the record is written just after the lock is
-    taken, so a service caught in that window -- or one whose record was corrupted
-    -- holds the lock while answering no pid, and calling that "no service" both
-    contradicts the lock and disagrees with ``start_service``, which refuses on
-    ``lock_available`` alone and does not care whether a holder pid could be read.
-    A dead holder cannot keep the lock either, since the kernel drops it when the
-    process goes, so liveness needs no separate check.
+    That argument does not stop at the lock, and this function used to. A process
+    that acquired the lock and never finished starting is not a working service
+    either -- it is the same failed start one step further along, since the lock is
+    taken BEFORE the database is migrated and the controller built. So the holder
+    must also have published ``SERVICE_PHASE_RUNNING``. Without that, a release
+    that hangs in its migration holds the lock forever and reads as healthy, which
+    is precisely the state the upgrade rollback exists to end.
 
-    Cheap by construction: one open and one non-blocking lock attempt, and unlike
-    the broader probe it never scans the process table.
+    A dead holder cannot keep the lock, since the kernel drops it when the process
+    goes, so liveness needs no separate check beyond that.
+
+    This is the one owner of "does this instance have a working service".
+    ``service_instance_lock_available`` owns the different question ``start_service``
+    asks -- whether anything at all would block a second start -- and callers must
+    not mix them: a holder mid-startup blocks a start AND is not yet running, and
+    both answers are correct for their own question.
+
+    Cheap by construction: one open, one non-blocking lock attempt, and one small
+    read, and unlike the broader probe it never scans the process table.
     """
 
-    lock_available, _holder_pid = service_instance_lock_available()
-    return not lock_available
+    lock_available, holder_pid = service_instance_lock_available()
+    if lock_available:
+        return False
+    return holder_pid is not None and service_instance_started(holder_pid)
 
 
 def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERVICE_SLOW_START_TIMEOUT_SECONDS) -> bool:
@@ -1187,28 +1319,112 @@ def _pid_mismatches_service(pid: int) -> bool:
     return not _command_looks_like_service_entry(command, cwd=cwd)
 
 
-def render_status(*, detect_extra_processes: bool = True):
-    status = read_status()
+class ServiceState(NamedTuple):
+    """What this data dir's service is doing right now."""
+
+    state: str
+    detail: str
+    service_pid: int | None
+    owner_pid: int | None
+    extra_pids: list[int]
+
+    @property
+    def running(self) -> bool:
+        return self.state in {"running", "degraded"}
+
+
+def resolve_service_state(*, detect_extra_processes: bool = True) -> ServiceState:
+    """The one answer to what state word describes this instance's service.
+
+    Everything that reports or records that word asks here, because the word is
+    the same fact each time and every place that derived it independently got the
+    same case wrong: the lock is taken BEFORE the database is migrated and the
+    controller is built, so its holder occupies this instance long before it can
+    serve anything. Reading that occupancy as `running` is how a release that
+    hung in its migration read as healthy for eight days with nobody served.
+
+    `starting` is therefore a state of its own rather than a shade of running:
+    something is here, it holds the lock, and it is not serving. `degraded` stays
+    what it was -- a service process holding no lock, which is a different fault
+    with a different repair.
+
+    Only a record that positively says so produces `starting`, never the absence
+    of one saying otherwise. This function reports; it does not adjudicate. A
+    machine that lost its lock record has a service on it either way, and telling
+    its owner it is starting -- forever, since nothing will ever write the record
+    it is waiting for -- trades a stuck instance that reads healthy for a healthy
+    instance that reads stuck.
+    """
+
     owner_pid = resolve_service_owner_pid(include_starting=False)
     extra_pids: list[int] = []
     if detect_extra_processes:
         extra_pids = extra_service_process_pids(owner_pid=owner_pid)
-    running = bool(owner_pid or extra_pids)
     if owner_pid:
-        status["state"] = "running"
-        status["service_pid"] = owner_pid
+        detail = f"pid={owner_pid}"
         if extra_pids:
-            status["detail"] = f"pid={owner_pid}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
-        else:
-            status["detail"] = f"pid={owner_pid}"
-    elif extra_pids:
-        status["state"] = "degraded"
-        status["service_pid"] = extra_pids[0]
-        status["detail"] = f"lockless service process detected pid={extra_pids[0]}"
-    elif status.get("state") in {"running", "degraded"}:
-        status["state"] = "stopped"
-        status["detail"] = "process not running"
-        status["service_pid"] = None
+            detail = f"{detail}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
+        if service_instance_still_starting(owner_pid):
+            return ServiceState("starting", f"{detail} has not finished starting", owner_pid, owner_pid, extra_pids)
+        return ServiceState("running", detail, owner_pid, owner_pid, extra_pids)
+    if extra_pids:
+        return ServiceState(
+            "degraded",
+            f"lockless service process detected pid={extra_pids[0]}",
+            extra_pids[0],
+            None,
+            extra_pids,
+        )
+    return ServiceState("stopped", "process not running", None, None, [])
+
+
+def _starting_record_outlived_its_start(status: dict) -> bool:
+    """Whether a persisted `starting` has outlived the start it describes.
+
+    `starting` survives a resolved `stopped` on purpose: between the spawn and
+    the moment the child takes the instance lock there is a window where nothing
+    resolves as running, and reporting that window as `stopped` would make every
+    healthy start look like a failure. But unlike `setup` and `error`, `starting`
+    is a claim about a process that is expected to arrive, so it holds only for
+    as long as that arrival is still possible. `wait_for_service_ready` gives up
+    after SERVICE_SLOW_START_TIMEOUT_SECONDS; past that same deadline a
+    `starting` record no longer describes a machine coming up, it describes one
+    that died on the way -- which is the exact failure this change exists to stop
+    reporting as healthy.
+    """
+
+    updated_at = status.get("updated_at")
+    if not isinstance(updated_at, str):
+        return True
+    try:
+        written_at = calendar.timegm(time.strptime(updated_at, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        # Every status write stamps `updated_at`, so a record without a readable
+        # one cannot be dated at all. Treat it as expired rather than as fresh:
+        # an undatable `starting` that is believed lasts forever, and the whole
+        # point of the deadline is that this state must not be permanent.
+        return True
+    return time.time() - written_at > SERVICE_SLOW_START_TIMEOUT_SECONDS
+
+
+def render_status(*, detect_extra_processes: bool = True):
+    status = read_status()
+    resolved = resolve_service_state(detect_extra_processes=detect_extra_processes)
+    owner_pid = resolved.owner_pid
+    extra_pids = resolved.extra_pids
+    running = resolved.running
+    # A resolved `stopped` does not overwrite a persisted `setup`, `starting` or
+    # `error`: those describe a machine with nothing running on purpose, and this
+    # function reports what is running, not what was meant to. `starting` is the
+    # exception with a deadline -- see above -- because it is the only one of the
+    # three that describes something in flight.
+    overwritable = {"running", "degraded"}
+    if status.get("state") == "starting" and _starting_record_outlived_its_start(status):
+        overwritable.add("starting")
+    if resolved.state != "stopped" or status.get("state") in overwritable:
+        status["state"] = resolved.state
+        status["detail"] = resolved.detail
+        status["service_pid"] = resolved.service_pid
     if extra_pids:
         status["extra_service_pids"] = extra_pids
     else:
@@ -1253,6 +1469,31 @@ def _raise_service_start_not_ready(pid: int, *, timeout: float) -> None:
         )
     _clear_service_pid_reservation(pid)
     raise RuntimeError(f"Vibe service process pid={pid} did not acquire the service lock")
+
+
+def _raise_service_started_but_never_ran(pid: int, *, timeout: float) -> None:
+    """The service was identified and never reported itself up.
+
+    Kept apart from :func:`_raise_service_start_not_ready` because the two are
+    different failures that used to be reported as one. That one means nothing
+    on this machine ever claimed to be the service. This one is the incident
+    behind the rollback work: something did claim it, took the lock, and then
+    died or hung inside its own startup -- which is exactly how an upgrade to a
+    release that cannot start looks from outside, and saying "did not acquire
+    the service lock" about it sends whoever reads the log looking for a lock
+    contention that is not there.
+    """
+
+    owner_pid = resolve_service_owner_pid() or pid
+    if not pid_alive(owner_pid):
+        _clear_service_pid_reservation(owner_pid)
+        raise RuntimeError(f"Vibe service process pid={owner_pid} exited while starting up")
+    if service_instance_still_starting(owner_pid):
+        raise RuntimeError(
+            f"Vibe service process pid={owner_pid} acquired the service lock but did not "
+            f"finish starting within {timeout:.0f} seconds"
+        )
+    _raise_service_start_not_ready(owner_pid, timeout=timeout)
 
 
 # --- cgroup resource-governance bootstrap -----------------------------------
@@ -1465,18 +1706,38 @@ def _wait_for_scoped_service_pid(spawn_pid: int, timeout: float) -> int | None:
 def wait_for_service_ready(
     spawn_pid: int, timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS
 ) -> int | None:
-    """Wait until the service is lock-verified and return the authoritative owner pid.
+    """Wait until the service has finished starting and return its owner pid.
 
-    Unlike ``wait_for_service_pid()``, which only confirms a *specific* pid, this
-    resolves the real ``service.lock`` holder: if the pid handed back by
-    ``start_service()`` was a launcher/wrapper that never takes the lock (e.g. a
-    surviving ``systemd-run`` parent under some host configuration), this adopts
-    and returns the live lock holder instead of waiting forever on a pid that can
-    never be recorded. Returns the resolved owner pid, or ``None`` if no owner
-    became ready within ``timeout``. In the common case ``spawn_pid`` already IS
-    the owner and this behaves like ``wait_for_service_pid`` returning that pid.
+    Two questions, in order. WHICH process is the service: unlike
+    ``wait_for_service_pid()``, which only confirms a *specific* pid, this
+    resolves the real ``service.lock`` holder, so a pid handed back by
+    ``start_service()`` that was a launcher/wrapper never taking the lock (e.g. a
+    surviving ``systemd-run`` parent under some host configuration) is replaced by
+    the live owner instead of waited on forever. Then: is that process UP --
+    ``SERVICE_PHASE_RUNNING``, which it publishes after migrating the database and
+    building its controller.
+
+    The second question is the one a caller acting on the answer needs. The lock
+    is taken before the migration runs, so a holder can own the lock and then die
+    on it; anything that stopped at the lock reports a healthy start and leaves.
+    That is the whole shape of an upgrade taking an instance dark.
+
+    Returns the resolved owner pid, or ``None`` if none finished starting within
+    ``timeout`` -- including when the owner dies while starting, which is that
+    failure arriving early rather than as a timeout.
     """
-    return _wait_for_scoped_service_pid(spawn_pid, timeout)
+    deadline = time.monotonic() + timeout
+    owner_pid = _wait_for_scoped_service_pid(spawn_pid, timeout)
+    if owner_pid is None:
+        return None
+    while True:
+        if service_instance_started(owner_pid):
+            return owner_pid
+        if not pid_alive(owner_pid):
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
 
 
 def _start_scoped_service_result(
@@ -1527,7 +1788,67 @@ def start_service(
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
     memory_ui_secret: str | None = None,
-):
+    launcher: ServiceLauncher | None = None,
+) -> int:
+    """Start the service and return the pid, by default only once it is up.
+
+    Two questions, and this function exists because they were being answered by
+    the same value. WHICH process is the service is settled below, by taking the
+    spawn lock, reconciling the pid file against the live lock holder and
+    launching if nobody holds it. WHETHER that process is up is settled here,
+    once, for every way the answer can be reached.
+
+    The split is the fix. `_resolve_service_pid()` has seven places it can hand a
+    pid back -- a recorded pid file, a lock holder whose command does not match,
+    a scoped launch adopting its owner, a fresh spawn taking the lock -- and only
+    one of them ever waited for the running phase. Every other caller of
+    `wait_for_ready=True` got "the lock was taken", which is the state an
+    instance is in when the release that took it is about to die on its own
+    migration. The Dashboard recorded that as a started service and the doctor
+    recorded it as a successful repair, both correctly trusting the parameter.
+
+    Waiting out here also takes the wait off the spawn lock, where a slow start
+    used to block every other caller for the length of it.
+
+    Both phases spend one deadline, not one each. `SERVICE_SLOW_START_TIMEOUT_SECONDS`
+    is the budget for a service starting, and taking the lock and reaching the
+    serving state are two phases of that single event -- so passing the constant
+    to each in turn let a start that is slow in both cost a caller twice the
+    number the configuration states, on the Dashboard and doctor paths where
+    someone is waiting for the answer. Measuring from here also makes the bound
+    mean what it says whichever of `_resolve_service_pid`'s several returns
+    produced the pid, including the ones that did no waiting at all.
+    """
+
+    deadline = time.monotonic() + SERVICE_SLOW_START_TIMEOUT_SECONDS
+    pid = _resolve_service_pid(
+        wait_for_ready=wait_for_ready,
+        initial_ready_timeout=initial_ready_timeout,
+        memory_ui_secret=memory_ui_secret,
+        launcher=launcher,
+    )
+    if not wait_for_ready:
+        return pid
+    ready_pid = wait_for_service_ready(pid, timeout=max(0.0, deadline - time.monotonic()))
+    if ready_pid is None:
+        _raise_service_started_but_never_ran(pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+    return ready_pid
+
+
+def _resolve_service_pid(
+    *,
+    wait_for_ready: bool,
+    initial_ready_timeout: float,
+    memory_ui_secret: str | None,
+    launcher: ServiceLauncher | None,
+) -> int:
+    """Which process is the service, starting one if nothing holds the lock.
+
+    Answers only that. Whether the process it names has finished starting is
+    `start_service()`'s to establish -- see its docstring for why that is not
+    left to the individual returns below.
+    """
+
     from storage.migrations import guard_source_checkout_default_state_bootstrap
     from core.memory.ui_access import process_ui_read_secret
 
@@ -1546,15 +1867,12 @@ def start_service(
                     if service_pid_recorded(existing_pid):
                         return existing_pid
                     if _pid_reservation_is_fresh(pid_path, existing_pid):
-                        if not wait_for_ready:
-                            return existing_pid
-                        ready_pid = wait_for_service_ready(
-                            existing_pid,
-                            timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS,
-                        )
-                        if ready_pid is not None:
-                            return ready_pid
-                        _raise_service_start_not_ready(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+                        # A reservation this recent names the service whether or
+                        # not it is up yet, so the question is answered. Waiting
+                        # for the running phase used to happen here, and only
+                        # here, which is precisely why every other return below
+                        # answered a question it had not asked.
+                        return existing_pid
                     logger.warning(
                         "Ignoring stale service pid file pid=%s because it never acquired the service lock",
                         existing_pid,
@@ -1587,7 +1905,7 @@ def start_service(
         if extra_pids:
             raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=extra_pids[0])
 
-        main_path = get_service_main_path()
+        launcher = launcher or current_service_launcher()
         scope_prefix = maybe_systemd_scope_prefix()
         if scope_prefix:
             logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
@@ -1597,7 +1915,7 @@ def start_service(
             else {}
         )
         process = spawn_service_background_process(
-            [*scope_prefix, sys.executable, str(main_path)],
+            [*scope_prefix, launcher.python, launcher.main],
             "service_stdout.log",
             "service_stderr.log",
             env={
@@ -1759,6 +2077,7 @@ def start_ui(
     *,
     wait_for_ready: bool = True,
     memory_ui_secret: str | None = None,
+    launcher: ServiceLauncher | None = None,
 ):
     from core.memory.ui_access import process_ui_read_secret
 
@@ -1786,6 +2105,10 @@ def start_ui(
                 )
         pid_path.unlink(missing_ok=True)
 
+    # Named entry point, not a body of code: whatever release the launcher's
+    # interpreter belongs to supplies its own `run_ui_server`. A rollback that
+    # sent source text across the generation boundary would run the replacement's
+    # idea of startup inside the replaced install.
     command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
     spawn_kwargs = (
         {"memory_ui_secret": memory_ui_secret}
@@ -1793,7 +2116,7 @@ def start_ui(
         else {}
     )
     pid = spawn_background(
-        [sys.executable, "-c", command],
+        [(launcher or current_service_launcher()).python, "-c", command],
         pid_path,
         "ui_stdout.log",
         "ui_stderr.log",

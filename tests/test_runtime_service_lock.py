@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -22,8 +23,20 @@ class RuntimeServiceLockTests(unittest.TestCase):
         # pin it off here. The scoped path has its own dedicated tests.
         self._no_scope = patch("vibe.runtime.maybe_systemd_scope_prefix", return_value=[])
         self._no_scope.start()
+        # Every test in this class asks WHICH process is the service -- reuse a
+        # recorded pid, ignore an unrelated one, refuse a second instance. None of
+        # them asks whether that process finished starting, and they mock the pid
+        # into existence without a lock record for it to report through, so the
+        # readiness gate `start_service()` now applies would wait out its full
+        # timeout on a process that does not exist. Stubbing it to the pid it was
+        # handed keeps these tests on the public entry point while confining them
+        # to their own question; the gate itself is covered by
+        # `ServiceReadinessGateTests` below, which deliberately does not stub it.
+        self._ready = patch("vibe.runtime.wait_for_service_ready", side_effect=lambda pid, timeout=None: pid)
+        self._ready.start()
 
     def tearDown(self):
+        self._ready.stop()
         self._no_scope.stop()
         self._extra_service_pids.stop()
 
@@ -299,9 +312,16 @@ class RuntimeServiceLockTests(unittest.TestCase):
                                     pid = runtime.start_service()
 
             self.assertEqual(pid, 78901)
-            wait_for_ready.assert_called_once_with(
-                67890,
-                timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+            # Which pid the adopted scope is waited on is this test's subject.
+            # How long it may be waited on is not a constant any more but what
+            # the one start budget has left once the lock phase is done, so the
+            # bound is asserted as a bound; `ServiceReadinessGateTests` pins how
+            # it is spent.
+            wait_for_ready.assert_called_once()
+            self.assertEqual(wait_for_ready.call_args.args, (67890,))
+            self.assertLessEqual(
+                wait_for_ready.call_args.kwargs["timeout"],
+                runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
             )
             spawn_background.assert_not_called()
 
@@ -703,17 +723,25 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
             self.assertFalse(runtime.current_process_owns_service_instance())
 
-    def test_verified_service_running_follows_the_lock_not_the_lock_record(self):
-        """The held lock is the fact; a readable holder pid is not required.
+    def test_a_working_service_is_a_held_lock_plus_the_holders_own_report(self):
+        """"Something is holding the lock" is not "this instance has a service".
 
-        ``start_service`` refuses on ``lock_available`` alone and does not care
-        whether a holder pid can be read, so the doctor predicate that decides
-        whether an instance has a working service has to agree with it. Corrupting
-        the record while the lock stays held is the state where those two can
-        disagree: it is what a service looks like in the window between taking the
-        lock and writing its record, and answering "no service is running" there
-        would report downtime for a running instance and prescribe a start that
-        cannot succeed.
+        The lock is taken before the database is migrated, so every failed
+        migration passes through a state where it is held by a process that will
+        never serve anything. That state is what the incident looked like, and a
+        predicate that answers "running" there is the reason a dark instance was
+        reported healthy -- so the holder's own claim to have finished starting is
+        part of the fact, not a detail of it.
+
+        An unreadable record while the lock is held reads as not running for the
+        same reason: nothing has claimed to have started. It is indistinguishable
+        from the mid-startup window, and calling that window "running" is exactly
+        the mistake. The bounded wait, not this predicate, is what tells a slow
+        start from a stuck one.
+
+        ``service_instance_lock_available`` still answers the different question
+        ``start_service`` asks -- whether anything at all would block a second
+        start -- and stays true to the lock alone.
         """
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -729,15 +757,367 @@ class RuntimeServiceLockTests(unittest.TestCase):
 
                         runtime.acquire_service_instance_lock()
                         try:
+                            self.assertFalse(runtime.verified_service_running())
+                            self.assertFalse(runtime.service_instance_lock_available()[0])
+
+                            runtime.mark_service_instance_started()
                             self.assertTrue(runtime.verified_service_running())
 
                             lock_path.write_text("", encoding="utf-8")
                             self.assertIsNone(runtime.service_instance_lock_available()[1])
-                            self.assertTrue(runtime.verified_service_running())
+                            self.assertFalse(runtime.service_instance_lock_available()[0])
+                            self.assertFalse(runtime.verified_service_running())
                         finally:
                             runtime.release_service_instance_lock()
 
                         self.assertFalse(runtime.verified_service_running())
+
+    def test_holding_the_lock_is_not_yet_having_started(self):
+        """Two different facts, and the gap between them is where upgrades fail.
+
+        The lock is taken before the database is migrated, so a holder can be
+        mid-startup or already dead from a migration it never finished. Only the
+        holder can say which, and it says so by rewriting its own record through
+        the handle that holds the lock -- so the claim cannot outlive the process,
+        and cannot be read off a record the PREVIOUS holder left behind.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                        runtime.acquire_service_instance_lock()
+                        try:
+                            self.assertFalse(runtime.service_instance_started(os.getpid()))
+
+                            runtime.mark_service_instance_started()
+                            self.assertTrue(runtime.service_instance_started(os.getpid()))
+                            # Someone else's startup, reported by a record this
+                            # process happens to be able to read.
+                            self.assertFalse(runtime.service_instance_started(os.getpid() + 1))
+                        finally:
+                            runtime.release_service_instance_lock()
+
+    def test_a_release_that_never_reported_startup_reads_as_started(self):
+        """What a rollback target on an older version can offer, kept working.
+
+        Releases predating this distinction wrote ``running`` when they took the
+        lock and never wrote again. Demanding the second write of them would make
+        every rollback report a failed start for a service that is up.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "service.lock"
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "phase": "running"}), encoding="utf-8")
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                self.assertTrue(runtime.service_instance_started(os.getpid()))
+
+    def test_every_reporter_says_starting_while_the_lock_holder_is_still_starting(self):
+        """One machine, one word, whichever reporter is asked for it.
+
+        The lock is taken before the database is migrated, so between the two a
+        holder occupies this instance without serving anybody. Everything that
+        reports that machine has to say so -- `vibe status`, the dashboard reading
+        the same payload, and the repair that PERSISTS the word for later readers
+        alike. Each of them deriving it separately is one fact with three answers,
+        and an instance stuck in its migration reading `running` for eight days is
+        what the wrong answer cost.
+
+        Asserted over the reporters together rather than one test each, because
+        the property is that they agree: a fourth reporter written to derive its
+        own word is the bug returning, and it belongs here where the reason is
+        written down.
+        """
+
+        from vibe import cli
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+            status_path = runtime_dir / "status.json"
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.get_runtime_status_path", return_value=status_path):
+                        with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                            runtime.acquire_service_instance_lock()
+                            try:
+                                self.assertEqual(runtime.resolve_service_state().state, "starting")
+                                self.assertFalse(runtime.resolve_service_state().running)
+
+                                payload = json.loads(runtime.render_status())
+                                self.assertEqual(payload["state"], "starting")
+                                self.assertFalse(payload["running"])
+                                self.assertEqual(payload["service_pid"], os.getpid())
+
+                                cli._write_refreshed_runtime_status()
+                                self.assertEqual(runtime.read_status()["state"], "starting")
+
+                                # And all three again once the holder reports it
+                                # got through startup: the word follows the
+                                # machine rather than latching to either answer.
+                                runtime.mark_service_instance_started()
+                                self.assertEqual(runtime.resolve_service_state().state, "running")
+                                self.assertTrue(json.loads(runtime.render_status())["running"])
+                                cli._write_refreshed_runtime_status()
+                                self.assertEqual(runtime.read_status()["state"], "running")
+                            finally:
+                                runtime.release_service_instance_lock()
+
+    def test_only_a_record_saying_so_moves_the_word_off_running(self):
+        """`starting` is claimed by evidence, never inferred from its absence.
+
+        The distinction matters because the record is not the only thing that can
+        be missing -- it can be lost, truncated, or left behind by a holder that
+        is gone. Reading any of those as `starting` would tell the owner of a
+        working machine that it is coming up, forever, since nothing will ever
+        write the record that answer waits for. That trades a stuck instance
+        reading healthy for a healthy instance reading stuck, which is the same
+        bug pointed the other way.
+
+        `service_instance_started` takes the opposite default on purpose: it asks
+        whether a new generation PROVED it works, and there an absent record is
+        an absent proof.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "service.lock"
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.resolve_service_owner_pid", return_value=4242):
+                    self.assertEqual(runtime.resolve_service_state().state, "running")
+
+                    lock_path.write_text(json.dumps({"pid": 4242, "phase": "starting"}), encoding="utf-8")
+                    self.assertEqual(runtime.resolve_service_state().state, "starting")
+
+                    # Someone else's startup, in a record this instance happens
+                    # to be able to read.
+                    lock_path.write_text(json.dumps({"pid": 4243, "phase": "starting"}), encoding="utf-8")
+                    self.assertEqual(runtime.resolve_service_state().state, "running")
+
+
+class ReadinessWaitIsNeverOptionalTests(unittest.TestCase):
+    """The class of bug this closes, stated once instead of caught once per site.
+
+    Three separate starters had each decided for themselves that a recorded pid
+    meant the wait could be skipped, and each was wrong in the same way, and each
+    cost its own review round. The mistake is available to every future starter
+    for as long as the two predicates sit next to each other, so it is worth a
+    test rather than three fixes: a fourth one written the same way fails here,
+    where the reason is written down, instead of in an incident.
+
+    Stated as the property -- no starter makes the wait conditional on the lock --
+    rather than as the list of starters, so a module added later is covered
+    without editing this.
+    """
+
+    PRODUCTION_MODULES = (
+        Path(__file__).resolve().parents[1] / "vibe" / "runtime.py",
+        Path(__file__).resolve().parents[1] / "vibe" / "cli.py",
+        Path(__file__).resolve().parents[1] / "vibe" / "restart_supervisor.py",
+        Path(__file__).resolve().parents[1] / "scripts" / "incus_regression_supervisor.py",
+    )
+
+    def test_no_starter_makes_the_readiness_wait_conditional_on_the_lock(self):
+        import ast
+
+        for module in self.PRODUCTION_MODULES:
+            tree = ast.parse(module.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.If):
+                    continue
+                if "service_pid_recorded" not in ast.dump(node.test):
+                    continue
+                guarded = [*node.body, *node.orelse]
+                waits = [
+                    child
+                    for branch in guarded
+                    for child in ast.walk(branch)
+                    if isinstance(child, ast.Call) and getattr(child.func, "attr", None) == "wait_for_service_ready"
+                ]
+                self.assertEqual(
+                    waits,
+                    [],
+                    f"{module.name}:{node.lineno} waits for readiness only when the lock says so; "
+                    "the lock is taken before the database is migrated, so that is the case the "
+                    "wait exists for",
+                )
+
+
+class ServiceReadinessGateTests(unittest.TestCase):
+    """What `start_service(wait_for_ready=True)` is allowed to hand back.
+
+    The parameter has always promised readiness, and `_resolve_service_pid()` has
+    seven places it can name a pid -- a recorded pid file, a lock holder whose
+    command does not match this install, a scoped launch adopting its owner, a
+    fresh spawn that took the lock. Exactly one of them ever waited for the
+    running phase. Every other one answered "the lock was taken", which is the
+    state an instance is in while the release that took it is dying on its own
+    migration, so the Dashboard recorded a started service and the doctor
+    recorded a successful repair, both correctly trusting the parameter.
+
+    The property is that the promise is kept however the pid was reached, and it
+    is asserted in two halves that are complete together: the gate holds for the
+    situations below, and the structural test proves there is no way to reach a
+    pid that skips it.
+    """
+
+    def setUp(self):
+        self._extra_service_pids = patch("vibe.runtime.extra_service_process_pids", return_value=[])
+        self._extra_service_pids.start()
+        self._no_scope = patch("vibe.runtime.maybe_systemd_scope_prefix", return_value=[])
+        self._no_scope.start()
+        # A stuck start is the case under test, so the wait has to be allowed to
+        # run out. Two tenths of a second rather than the shipped two minutes.
+        self._short_wait = patch("vibe.runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS", 0.2)
+        self._short_wait.start()
+
+    def tearDown(self):
+        self._short_wait.stop()
+        self._no_scope.stop()
+        self._extra_service_pids.stop()
+
+    def _start_with_phase(self, phase: str, *, already_recorded: bool):
+        """Run the real `start_service()` against a lock record saying `phase`.
+
+        `already_recorded` picks the situation: a service this machine already
+        knows about, or one spawned here. Both used to return on the lock alone.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_dir = Path(tmpdir) / "runtime"
+            runtime_dir.mkdir(parents=True)
+            lock_path = runtime_dir / "service.lock"
+            pid_path = runtime_dir / "vibe.pid"
+            pid = 12345
+            lock_path.write_text(json.dumps({"pid": pid, "phase": phase}), encoding="utf-8")
+            if already_recorded:
+                pid_path.write_text(str(pid), encoding="utf-8")
+
+            def fake_spawn(args, stdout_name, stderr_name, env=None, **kwargs):
+                return SimpleNamespace(pid=pid, poll=lambda: None)
+
+            with patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path):
+                with patch("vibe.runtime.paths.get_runtime_pid_path", return_value=pid_path):
+                    with patch("vibe.runtime.paths.ensure_data_dirs", return_value=None):
+                        with patch("vibe.runtime.pid_alive", return_value=True):
+                            with patch("vibe.runtime.service_pid_recorded", return_value=True):
+                                with patch(
+                                    "vibe.runtime.get_process_command",
+                                    return_value=f"{sys.executable} {runtime.get_service_main_path()}",
+                                ):
+                                    with patch(
+                                        "vibe.runtime.service_instance_lock_available", return_value=(True, None)
+                                    ):
+                                        with patch(
+                                            "vibe.runtime.spawn_service_background_process", side_effect=fake_spawn
+                                        ):
+                                            with patch("vibe.runtime.wait_for_service_pid", return_value=True):
+                                                return runtime.start_service()
+
+    def test_a_service_that_only_took_the_lock_is_not_a_started_service(self):
+        for already_recorded in (True, False):
+            with self.subTest(already_recorded=already_recorded):
+                with self.assertRaises(RuntimeError) as raised:
+                    self._start_with_phase("starting", already_recorded=already_recorded)
+                # And says so. Reporting this as "did not acquire the service
+                # lock" sent whoever read the log looking for a lock contention
+                # that was never there.
+                self.assertIn("did not finish starting", str(raised.exception))
+
+    def test_a_service_that_reported_itself_up_is_returned(self):
+        for already_recorded in (True, False):
+            with self.subTest(already_recorded=already_recorded):
+                self.assertEqual(self._start_with_phase("running", already_recorded=already_recorded), 12345)
+
+    def _start_against_a_lock_phase_lasting(self, seconds: float):
+        """Run `start_service()` with the phases on a clock this test drives.
+
+        Returns the timeout the readiness phase was handed, so the assertion is
+        about the bound itself rather than about how long the test took.
+        """
+
+        clock = {"now": 1000.0}
+        handed: list[float] = []
+
+        def slow_resolve(**kwargs):
+            clock["now"] += seconds
+            return 12345
+
+        def record_timeout(pid, timeout=None):
+            handed.append(timeout)
+            return pid
+
+        with patch("vibe.runtime.time", SimpleNamespace(monotonic=lambda: clock["now"])):
+            with patch("vibe.runtime._resolve_service_pid", side_effect=slow_resolve):
+                with patch("vibe.runtime.wait_for_service_ready", side_effect=record_timeout):
+                    pid = runtime.start_service()
+
+        self.assertEqual(pid, 12345)
+        self.assertEqual(len(handed), 1)
+        return handed[0]
+
+    def test_the_two_start_phases_spend_one_budget_between_them(self):
+        """A start is one event, so it costs the caller one timeout.
+
+        `SERVICE_SLOW_START_TIMEOUT_SECONDS` is what the configuration says a
+        service is allowed to take to start. Taking the spawn lock and reaching
+        the serving state are two phases of that one event, so handing the
+        constant to each in turn made a start that is slow in both cost twice
+        the stated number -- on the Dashboard and doctor paths, where someone is
+        waiting for the answer.
+        """
+
+        # The budget is 0.2s here (see setUp); the lock phase eats three
+        # quarters of it, so the readiness phase may have the rest and no more.
+        self.assertAlmostEqual(self._start_against_a_lock_phase_lasting(0.15), 0.05)
+
+    def test_a_lock_phase_that_spends_the_whole_budget_leaves_nothing_to_wait_with(self):
+        """And the remainder floors at zero rather than going negative.
+
+        A negative timeout is not a shorter wait; depending on what receives it
+        it is an error or an unbounded one, which would put the doubled wait
+        back in a less visible form.
+        """
+
+        self.assertEqual(self._start_against_a_lock_phase_lasting(0.5), 0.0)
+
+    def test_nothing_reaches_a_service_pid_without_passing_the_gate(self):
+        """The other half: no shipped caller can route around `start_service()`.
+
+        `_resolve_service_pid()` answers only which process is the service, and
+        the gate is applied to its result once. That split is worth nothing if a
+        caller can take the unguarded answer, so the property is that nobody
+        does -- checked by looking, so that a caller written later fails here
+        rather than on someone's instance. A resolution path added inside
+        `_resolve_service_pid()` then inherits the gate by construction, which is
+        the arrangement that was missing when six of its returns did not.
+        """
+
+        import ast
+
+        repo_root = Path(__file__).resolve().parents[1]
+        callers = {}
+        for root in ("main.py", "config", "core", "modules", "storage", "vibe", "scripts"):
+            target = repo_root / root
+            for source in [target] if target.is_file() else sorted(target.rglob("*.py")):
+                tree = ast.parse(source.read_text(encoding="utf-8"))
+                calls = sum(
+                    1
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) == "_resolve_service_pid"
+                )
+                if calls:
+                    callers[source.relative_to(repo_root).as_posix()] = calls
+
+        self.assertEqual(callers, {"vibe/runtime.py": 1})
 
 
 if __name__ == "__main__":

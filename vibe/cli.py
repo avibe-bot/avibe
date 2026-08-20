@@ -1242,29 +1242,42 @@ def _restart_state_items() -> list[dict]:
     # dir, which is the right question for refusing a second start and the wrong
     # one here: a pid reserved by a process that never acquired the lock is the
     # wreckage of a failed start, not a recovery, and reading it as one would
-    # suppress the very failure it came from. What that leaves is a stray process
-    # `start_service` refuses to start past, because it asks the broad question --
-    # so the action has to cover it, and `_service_lifecycle_items` cannot be the
-    # one to do that here: its extra-process item is behind `--deep` and the
-    # default run is exactly where a reader of this lands.
+    # suppress the very failure it came from. Nor does holding the lock make a
+    # process a service, because the lock is taken before the database is
+    # migrated -- the generation that hung mid-migration in #1567 held it for
+    # eight days -- so the owner also requires the holder's own published start.
+    #
+    # What that leaves the reader is a process `start_service` refuses to start
+    # past, because it asks the broad question -- so the action has to cover it,
+    # and `_service_lifecycle_items` cannot be the one to do that here: its
+    # extra-process item is behind `--deep` and the default run is exactly where a
+    # reader of this lands.
     #
     # Which is the whole discipline for the text below. Every sentence of procedure
     # is a claim about control flow this item does not own, and each one is
     # separately falsifiable: earlier revisions deferred to an item that is not
     # rendered by default, and then told the reader to start again after a repair
-    # that starts the service itself. So it names the two commands, in order, and
+    # that starts the service itself. So it names each command once, in order, and
     # says the one thing the reader cannot see -- that the repair brings the
     # service up -- because that is what stops them from running start twice and
-    # reading `ServiceAlreadyRunningError` as a failed recovery. Anything beyond
-    # that is a prediction, and the commands report their own outcomes.
+    # reading `ServiceAlreadyRunningError` as a failed recovery.
+    #
+    # The occupier decides which command, and only one of them can be prescribed
+    # blind: `duplicate-service-processes` stops what the scan sees beside the lock
+    # owner, so it reaches a holder whose record answers no pid and skips one that
+    # answers its own -- and a holder stuck mid-startup is exactly the second kind.
+    # `vibe stop` is what covers that one. Anything beyond naming both is a
+    # prediction, and the commands report their own outcomes.
     if payload.get("ok") is False and not runtime.verified_service_running():
         _add_doctor_item(
             items,
             "fail",
             f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
             "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
-            "service already running, the failed restart left a process holding no lock: run "
-            "`vibe doctor repair duplicate-service-processes`, which stops it and brings the service up.",
+            "service already running, the failed generation is still occupying this instance: run "
+            "`vibe doctor repair duplicate-service-processes`, which stops a process holding no lock and "
+            "brings the service up, or `vibe stop` if the failed process holds the lock itself, and then "
+            "repeat the start above.",
             code="runtime.restart_failed",
         )
         return items
@@ -11820,19 +11833,13 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
 
 
 def _write_refreshed_runtime_status() -> None:
+    # Asked, not re-derived. A repair that wrote its own idea of the state word
+    # would be the second place deciding one fact -- and the one that persists
+    # it, so a lock holder still migrating would be recorded as `running` and
+    # every later reader would inherit that answer instead of measuring.
     status = runtime.read_status()
-    ui_pid = status.get("ui_pid")
-    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
-    extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
-    if owner_pid:
-        detail = f"pid={owner_pid}"
-        if extra_pids:
-            detail = f"{detail}; extra_service_pids={','.join(map(str, extra_pids))}"
-        runtime.write_status("running", detail, owner_pid, ui_pid)
-    elif extra_pids:
-        runtime.write_status("degraded", f"lockless service process detected pid={extra_pids[0]}", extra_pids[0], ui_pid)
-    else:
-        runtime.write_status("stopped", "process not running", None, ui_pid)
+    resolved = runtime.resolve_service_state()
+    runtime.write_status(resolved.state, resolved.detail, resolved.service_pid, status.get("ui_pid"))
 
 
 def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
@@ -12317,20 +12324,31 @@ def cmd_start():
             language = normalize_language(getattr(config, "language", None))
             print(i18n_t("memory.cli.partialRestartWarning", language))
             print("")
-    service_ready = runtime.service_pid_recorded(service_pid)
-    if not service_ready:
+    # The WAIT below is asked unconditionally. The predicate that used to guard
+    # it is the lock, which is taken before the database is migrated -- so it is
+    # already true of a process that has not finished starting and may never, and
+    # guarding with it skipped the wait in exactly the case the wait exists for.
+    # Nothing is paid for asking: a service that is up answers on the first probe.
+    #
+    # The provisional "starting" WRITE is guarded, and the difference is the
+    # point: `write_status` carries `started_at` forward only across consecutive
+    # `running` writes, so announcing a transition for a service this command did
+    # not start resets its recorded uptime to now and briefly shows a starting
+    # service to every status consumer. `vibe start` against a live instance is
+    # idempotent and must stay observably so.
+    if not service_reused:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
-        # Resolve the authoritative service.lock holder rather than waiting on the
-        # raw pid start_service handed back: under a delegated user scope that pid
-        # can be a launcher that never takes the lock, so wait_for_service_ready
-        # adopts and returns the real owner instead of stalling the full timeout.
-        resolved_pid = runtime.wait_for_service_ready(
-            service_pid,
-            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-        )
-        if resolved_pid is not None:
-            service_pid = resolved_pid
-            service_ready = True
+    # The wait resolves the authoritative service.lock holder rather than waiting
+    # on the raw pid start_service handed back: under a delegated user scope that
+    # pid can be a launcher that never takes the lock, so wait_for_service_ready
+    # adopts and returns the real owner instead of stalling the full timeout.
+    resolved_pid = runtime.wait_for_service_ready(
+        service_pid,
+        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+    )
+    service_ready = resolved_pid is not None
+    if resolved_pid is not None:
+        service_pid = resolved_pid
     if service_ready:
         runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
     elif runtime.pid_alive(service_pid):
@@ -14036,6 +14054,7 @@ def cmd_upgrade():
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        rollback_to=plan.rollback_to,
                     )
                 except Exception as exc:
                     print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
@@ -14433,13 +14452,11 @@ def build_parser():
         default=0,
         help="Schedule the restart to run asynchronously after N seconds, then exit immediately.",
     )
-    supervisor_parser = subparsers.add_parser("__restart-supervisor", help=argparse.SUPPRESS)
-    supervisor_parser.add_argument("--job-id", required=True)
-    supervisor_parser.add_argument("--delay-seconds", type=_non_negative_float, default=0)
-    supervisor_parser.add_argument("--trigger", default="cli")
-    supervisor_parser.add_argument("--scope", default="all", choices=("all", "service"))
-    supervisor_parser.add_argument("--vibe-path")
-    supervisor_parser.add_argument("--prepare-show-runtime", action="store_true")
+    # `__restart-supervisor` is deliberately absent here. It is never typed: this
+    # program spawns it, and `vibe/restart_supervisor.py` owns both the argv it
+    # builds and the parser that reads it back. Restating those flags here made
+    # this parser a second, silently authoritative owner -- and the one that runs
+    # first. See `_dispatch_restart_supervisor`.
     subparsers.add_parser("status", help="Show service status")
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -16139,8 +16156,32 @@ def build_parser():
     return parser
 
 
+def _dispatch_restart_supervisor(argv: list[str]) -> int:
+    """Hand a spawned restart job's own argv straight to its own parser.
+
+    `__restart-supervisor` is not a command a person types; `schedule_restart`
+    builds this argv and `vibe/restart_supervisor.py` parses it back. Declaring
+    those flags on the top-level parser as well made two owners for one command,
+    with a hand-copied translation between them -- and the top-level one runs
+    first, so a flag added only to the supervisor's parser was not merely
+    unavailable, it was rejected. That is how the rollback flags shipped dead:
+    every unit test called `restart_supervisor.main([...])` directly, and the one
+    path that goes through this file was the one path nothing exercised.
+
+    Passing the tail through leaves a single parser for the command, so the two
+    can no longer disagree.
+    """
+
+    from vibe.restart_supervisor import main as restart_supervisor_main
+
+    return restart_supervisor_main(argv)
+
+
 def main():
     cache_running_vibe_path()
+    argv = sys.argv[1:]
+    if argv and argv[0] == "__restart-supervisor":
+        sys.exit(_dispatch_restart_supervisor(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 
@@ -16150,24 +16191,6 @@ def main():
         sys.exit(cmd_start())
     if args.command == "restart":
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
-    if args.command == "__restart-supervisor":
-        from vibe.restart_supervisor import main as restart_supervisor_main
-
-        sys.exit(
-            restart_supervisor_main(
-                [
-                    "--job-id",
-                    args.job_id,
-                    "--delay-seconds",
-                    str(args.delay_seconds),
-                    "--trigger",
-                    args.trigger,
-                    *(["--scope", args.scope] if args.scope != "all" else []),
-                    *(["--prepare-show-runtime"] if args.prepare_show_runtime else []),
-                    *(["--vibe-path", args.vibe_path] if args.vibe_path else []),
-                ]
-            )
-        )
     if args.command == "status":
         sys.exit(cmd_status())
     if args.command == "memory":
