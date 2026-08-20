@@ -167,6 +167,7 @@ function AudienceCombobox({
   const { t } = useTranslation();
   const listId = useId();
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const [focused, setFocused] = useState(false);
   // The keyboard cursor tracks an option KEY, not an index: the option list is
   // recomputed from the query on every keystroke, so an index would silently
@@ -199,6 +200,17 @@ function AudienceCombobox({
       : (activeIndex + delta + options.length) % options.length;
     setActiveKey(showAccessEntryKey(options[next]));
   };
+
+  const activateAt = (index: number) => {
+    if (!options.length) return;
+    setActiveKey(showAccessEntryKey(options[index]));
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.querySelector<HTMLElement>('[data-active="true"]');
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [activeKey, open]);
 
   const commit = (option: ShowAccessSuggestion) => {
     setActiveKey(null);
@@ -260,6 +272,13 @@ function AudienceCombobox({
                 moveActive(event.key === 'ArrowDown' ? 1 : -1);
                 return;
               }
+              if (event.key === 'Home' || event.key === 'End') {
+                if (!options.length) return;
+                event.preventDefault();
+                setFocused(true);
+                activateAt(event.key === 'Home' ? 0 : options.length - 1);
+                return;
+              }
               if (event.key !== 'Enter') return;
               event.preventDefault();
               if (active) {
@@ -286,6 +305,7 @@ function AudienceCombobox({
       {open ? (
         <div
           id={listId}
+          ref={listRef}
           role="listbox"
           aria-label={t('chat.showPage.shareAudienceOptions')}
           className="absolute left-0 top-9 z-50 max-h-44 w-[calc(100%-2.375rem)] overflow-y-auto rounded-md border border-border bg-background p-1 shadow-lg"
@@ -305,8 +325,10 @@ function AudienceCombobox({
                 type="button"
                 role="option"
                 aria-selected={index === activeIndex}
+                data-active={index === activeIndex}
                 // Keeps the field from blurring before the click lands.
                 onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setActiveKey(showAccessEntryKey(option))}
                 onClick={() => commit(option)}
                 className={clsx(
                   'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs transition-colors',
@@ -816,7 +838,7 @@ export function ShowPageSharingSettings({
                 ) : null}
                 <p className="text-[11px] text-muted">
                   {t(`chat.showPage.shareAudienceHint.${audienceVariant}`, {
-                    count: SHOW_ACCESS_ENTRY_MAX_COUNT,
+                    limit: SHOW_ACCESS_ENTRY_MAX_COUNT,
                   })}
                 </p>
               </div>

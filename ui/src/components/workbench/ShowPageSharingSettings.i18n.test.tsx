@@ -91,6 +91,12 @@ describe('Show Page sharing copy', () => {
       expect(enKeys).not.toContain(retired);
       expect(zhKeys).not.toContain(retired);
     }
+    // `limit` is an interpolation slot, not i18next's reserved `count` plural
+    // selector — using `count` can drop the string in CI even when local tests pass.
+    expect(en.chat.showPage.shareAudienceHint.organization).toContain('{{limit}}');
+    expect(en.chat.showPage.shareAudienceHint.email).toContain('{{limit}}');
+    expect(JSON.stringify(en.chat.showPage.shareAudienceHint)).not.toContain('{{count}}');
+    expect(JSON.stringify(zh.chat.showPage.shareAudienceHint)).not.toContain('{{count}}');
   });
 
   it.each([

@@ -3631,8 +3631,8 @@
         "email": "name@example.com"
       },
       "shareAudienceHint": {
-        "organization": "可选择成员、群组，或输入任意邮箱 · 最多 {{count}} 项",
-        "email": "输入邮箱后按回车添加 · 最多 {{count}} 项"
+        "organization": "可选择成员、群组，或输入任意邮箱 · 最多 {{limit}} 项",
+        "email": "输入邮箱后按回车添加 · 最多 {{limit}} 项"
       },
       "shareAudienceRequired": "请至少添加一个访问对象。",
       "shareOrganizationGeneric": "本组织",

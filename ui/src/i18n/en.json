@@ -3631,8 +3631,8 @@
         "email": "name@example.com"
       },
       "shareAudienceHint": {
-        "organization": "Pick a person or group, or type any email · up to {{count}}",
-        "email": "Enter an email and press Enter to add · up to {{count}}"
+        "organization": "Pick a person or group, or type any email · up to {{limit}}",
+        "email": "Enter an email and press Enter to add · up to {{limit}}"
       },
       "shareAudienceRequired": "Add at least one person, group, or Organization.",
       "shareOrganizationGeneric": "This Organization",

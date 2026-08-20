@@ -270,7 +270,7 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.queryAllByRole('option')).toHaveLength(0);
   });
 
-  it('exposes the keyboard-active suggestion through aria-activedescendant', async () => {
+  it('keeps the audience combobox keyboard cursor queryable for assistive tech and scrolling', async () => {
     api.getShowAccessSettings.mockResolvedValue({
       show_access: showAccess({
         access_mode: 'limited',
@@ -278,22 +278,47 @@ describe('ShowPageSharingSettings', () => {
       }),
     });
     getPermissions.mockResolvedValue(ORGANIZATION);
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
     renderSettings();
 
-    const input = await openAudience();
-    const engineering = await screen.findByRole('option', { name: /Engineering/ });
-    expect(input.getAttribute('aria-activedescendant')).toBeNull();
+    try {
+      const input = await openAudience();
+      const list = await screen.findByRole('listbox', { name: 'People and group suggestions' });
+      const engineering = await screen.findByRole('option', { name: /Engineering/ });
+      const alice = screen.getByRole('option', { name: 'alice@example.com' });
+      const bob = screen.getByRole('option', { name: 'bob@example.com' });
+      const activeOption = () => list.querySelector('[data-active="true"]');
 
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    expect(engineering.getAttribute('id')).toBeTruthy();
-    expect(input.getAttribute('aria-activedescendant')).toBe(engineering.getAttribute('id'));
-    expect(engineering.getAttribute('aria-selected')).toBe('true');
+      expect(input.getAttribute('aria-activedescendant')).toBeNull();
+      expect(activeOption()).toBeNull();
 
-    fireEvent.keyDown(input, { key: 'ArrowDown' });
-    const alice = screen.getByRole('option', { name: 'alice@example.com' });
-    expect(input.getAttribute('aria-activedescendant')).toBe(alice.getAttribute('id'));
-    expect(alice.getAttribute('aria-selected')).toBe('true');
-    expect(engineering.getAttribute('aria-selected')).toBe('false');
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      expect(engineering.getAttribute('id')).toBeTruthy();
+      expect(activeOption()).toBe(engineering);
+      expect(engineering.getAttribute('aria-selected')).toBe('true');
+      expect(input.getAttribute('aria-activedescendant')).toBe(engineering.getAttribute('id'));
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+
+      fireEvent.mouseEnter(alice);
+      expect(activeOption()).toBe(alice);
+      expect(alice.getAttribute('aria-selected')).toBe('true');
+      expect(engineering.getAttribute('aria-selected')).toBe('false');
+      expect(input.getAttribute('aria-activedescendant')).toBe(alice.getAttribute('id'));
+
+      fireEvent.keyDown(input, { key: 'End' });
+      expect(activeOption()).toBe(bob);
+      expect(bob.getAttribute('aria-selected')).toBe('true');
+      expect(input.getAttribute('aria-activedescendant')).toBe(bob.getAttribute('id'));
+
+      fireEvent.keyDown(input, { key: 'Home' });
+      expect(activeOption()).toBe(engineering);
+      expect(engineering.getAttribute('aria-selected')).toBe('true');
+      expect(input.getAttribute('aria-activedescendant')).toBe(engineering.getAttribute('id'));
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
   });
 
   it('closes the audience list when focus leaves the field from the add button', async () => {
@@ -441,14 +466,16 @@ describe('ShowPageSharingSettings', () => {
 
     const input = await audience();
     expect((input as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText(
-      'Pick a person or group, or type any email · up to 64',
-    )).toBeTruthy();
-    // The Organization switch is also at the cap, so it cannot silently add a
-    // 65th entry; an existing Organization row would still be removable.
+    // Directory-backed copy only appears after getPermissions lands; asserting
+    // the organization hint too early races the email-only fallback that CI
+    // still shows on first paint.
     expect(
       (await screen.findByRole('switch', { name: 'This Organization' }) as HTMLButtonElement).disabled,
     ).toBe(true);
+    expect(screen.getByText((content) => (
+      content.includes('Pick a person or group, or type any email')
+      && content.includes('64')
+    ))).toBeTruthy();
   });
 
   it('does not allow removing the last entry while Limited is selected', async () => {
