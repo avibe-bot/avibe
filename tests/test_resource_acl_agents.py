@@ -635,6 +635,76 @@ def test_only_owner_can_create_or_import_agents(monkeypatch, tmp_path) -> None:
         store.close()
 
 
+def _create_acl_principal(role: str, *, organization: bool) -> resource_access_service.ResourceUserContext:
+    if organization:
+        return _organization_context(f"{role}-org", instance_role=role)
+    return resource_access_service.ResourceUserContext(
+        subject=f"{role}-personal",
+        email=f"{role}-personal@example.com",
+        instance_role=role,
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+
+def test_agent_create_registers_acl_for_every_creating_subject(monkeypatch, tmp_path) -> None:
+    """Create-path ACL follows the creating subject, not org membership.
+
+    Seed every existing instance role on Personal (email) and Organization so a
+    later create path cannot skip the policy for a newly admitted principal.
+    Organization *use* of another member's private Agent stays denied.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        created: list[tuple[resource_access_service.ResourceUserContext, VibeAgent]] = []
+        for organization in (False, True):
+            for role in ("viewer", "editor", "member", "owner"):
+                context = _create_acl_principal(role, organization=organization)
+                name = f"{role}-{'org' if organization else 'personal'}-agent"
+                if not context.can_manage_agents:
+                    with pytest.raises(VibeAgentAccessError):
+                        store.create(name=name, backend="codex", user_context=context)
+                    continue
+                agent = store.create(name=name, backend="codex", user_context=context)
+                created.append((context, agent))
+                with store.engine.connect() as connection:
+                    policy = resource_access_service.get_resource_policy(
+                        "agent",
+                        agent.id,
+                        connection=connection,
+                    )
+                assert policy is not None
+                assert policy["owner_user_id"] == context.subject
+                assert policy["access_level"] == "private"
+                if organization:
+                    assert policy["organization_id"] == context.organization_id
+                else:
+                    assert not policy["organization_id"]
+                visible = {item.id for item in store.list_agents(user_context=context)}
+                assert agent.id in visible
+
+        org_member = next(ctx for ctx, _agent in created if ctx.instance_role == "member" and ctx.organization_id)
+        personal_member_agent = next(
+            agent for ctx, agent in created if ctx.instance_role == "member" and not ctx.organization_id
+        )
+        org_member_agent = next(
+            agent for ctx, agent in created if ctx.instance_role == "member" and ctx.organization_id
+        )
+        org_editor = _create_acl_principal("editor", organization=True)
+        org_visible = {item.id for item in store.list_agents(user_context=org_editor)}
+        assert org_member_agent.id not in org_visible
+        personal_visible = {
+            item.id
+            for item in store.list_agents(user_context=_create_acl_principal("editor", organization=False))
+        }
+        assert personal_member_agent.id not in personal_visible
+        assert org_member.can_manage_agents
+    finally:
+        store.close()
+
+
 def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_before_dispatch(
     monkeypatch,
     tmp_path,

@@ -920,7 +920,11 @@ class VibeAgentStore:
         try:
             with self.engine.begin() as conn:
                 conn.execute(agents.insert().values(**self._values(agent)))
-                if source != "builtin" and context.is_active_organization_member and context.subject:
+                # Register a private ACL for any creating subject, including a
+                # Personal/email member. Organization *use* still follows the
+                # stored policy; omitting the row hid the Agent from its creator
+                # because missing-policy fails closed for non-owners.
+                if source != "builtin" and context.subject:
                     resource_access_service.ensure_resource_policy(
                         conn,
                         resource_kind="agent",
