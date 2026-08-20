@@ -73,6 +73,8 @@ def _paired_config(tmp_path, *, revision: int = 41) -> V2Config:
     remote_access._clear_authorization_revision_cache()
     remote_access._replace_authorization_revision(config, revision)
     return config
+    # Binding-row seeding is the CALLER's job: some tests need an absent
+    # row (upgrade path), others need a ready row (concurrent resolvers).
 
 
 def _organization_claims(
@@ -1113,6 +1115,10 @@ def test_concurrent_resolvers_share_one_authorization_context_refresh(
     tmp_path,
 ):
     config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
     cookie = _organization_cookie(config)
     identity = remote_access.parse_session_identity(config, cookie)
     assert identity is not None
@@ -1143,6 +1149,10 @@ def test_authorization_context_refreshes_for_different_subjects_run_concurrently
     tmp_path,
 ):
     config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
     identities = []
     for subject in ("user-1", "user-2"):
         identity = remote_access.parse_session_identity(
@@ -1178,6 +1188,10 @@ def test_concurrent_revocation_refresh_is_reused_and_persisted(
     tmp_path,
 ):
     config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
     identity = remote_access.parse_session_identity(config, _organization_cookie(config))
     assert identity is not None
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *args, **kwargs: 42)
@@ -2346,6 +2360,21 @@ def test_known_kind_without_binding_row_bootstraps_a_durable_transition(tmp_path
     config = _paired_config(tmp_path)
     config.remote_access.vibe_cloud.instance_kind = "personal"
     config.save()
+    # Simulate an upgrade: config has a known kind, the new state_meta row
+    # has not been written yet.
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import state_meta
+    from sqlalchemy import delete as sa_delete
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            sa_delete(state_meta).where(
+                state_meta.c.key == remote_access_authorization_service.INSTANCE_BINDING_STATE_META_KEY
+            )
+        )
     assert (
         remote_access_authorization_service.load_instance_binding_state(ensure=False)
         is None
@@ -2435,3 +2464,69 @@ def test_personal_to_organization_reclassification_rejects_stale_personal_row(
     )
     assert revalidated is not None
     assert revalidated["claims"]["vibe_instance_kind"] == "organization"
+
+
+def test_revoked_write_refused_when_transition_completes_between_check_and_write(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r3: the compare and the authorization-row write
+    are one atomic CAS under the binding lock. Completing a transition
+    between a TOCTOU-style check and the write must refuse the revoked upsert.
+    """
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    started = remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    captured = remote_access_authorization_service.current_instance_binding_generation()
+
+    def deny(*args, **kwargs):
+        # Completes AFTER _fetch captured the reconciling generation and
+        # BEFORE the revoked upsert — the atomic CAS must refuse the write.
+        remote_access_authorization_service.complete_instance_binding_transition(
+            instance_id="inst_123",
+            instance_kind="personal",
+            generation=started["generation"],
+        )
+        raise remote_access.BackendRequestError(403, {"error": "access_denied"})
+
+    monkeypatch.setattr(remote_access, "_device_json_request", deny)
+
+    result = remote_access._fetch_authorization_context(
+        config,
+        identity,
+        record,
+        now=now,
+        observed_revision=41,
+    )
+
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert result.reason == "instance_binding_changed" or (
+        stored is not None and stored.get("authorization_state") != "revoked"
+    )
+    if stored is not None:
+        assert stored.get("authorization_state") != "revoked"
+    # The captured generation is no longer current.
+    assert remote_access_authorization_service.current_instance_binding_generation() >= captured

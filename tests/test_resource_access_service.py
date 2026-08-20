@@ -479,6 +479,17 @@ def test_deferred_personal_context_keeps_instance_kind(monkeypatch, tmp_path) ->
     config.remote_access.vibe_cloud.instance_kind = "personal"
     config.remote_access.vibe_cloud.instance_secret = "instance-secret"
     config.save()
+    from storage import remote_access_authorization_service as _auth
+
+    started = _auth.begin_instance_binding_transition(
+        instance_id="personal-instance",
+        instance_kind="personal",
+    )
+    _auth.complete_instance_binding_transition(
+        instance_id="personal-instance",
+        instance_kind="personal",
+        generation=started["generation"],
+    )
 
     context = resource_access_service.ResourceUserContext(
         subject="personal-user",
@@ -1196,6 +1207,21 @@ def _paired_cloud_config(
     cloud.instance_kind = instance_kind
     cloud.instance_secret = instance_secret
     config.save()
+    if enabled and instance_id and instance_kind in {"personal", "organization"}:
+        # T5: a known configured kind is ready only with a validated durable
+        # row. Tests that construct a pairing this way must look like an
+        # already-bootstrapped install, not an upgrade with a missing row.
+        from storage import remote_access_authorization_service
+
+        started = remote_access_authorization_service.begin_instance_binding_transition(
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+        )
+        remote_access_authorization_service.complete_instance_binding_transition(
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+            generation=started["generation"],
+        )
     return config
 
 
@@ -1700,5 +1726,107 @@ def test_migration_defers_to_a_disagreeing_durable_binding_row(
         assert marker["instance_id"] == "same-instance"
         snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
         assert "vibe_instance_kind" not in snapshot
+    finally:
+        engine.dispose()
+
+
+def test_recovered_config_is_unavailable_and_does_not_seal_legacy_snapshots(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r3: a recovered/defaulted V2Config.load() (broken
+    JSON, load_warnings set) is UNAVAILABLE, never authoritative UNPAIRED.
+    Repairing the config later must still be able to migrate the snapshots.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = _paired_cloud_config(tmp_path)
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+
+        class Recovered:
+            load_warnings = ("invalid json recovered to defaults",)
+            class remote_access:
+                class vibe_cloud:
+                    instance_id = ""
+                    instance_kind = ""
+                    enabled = False
+                    @staticmethod
+                    def runtime_credentials():
+                        return None
+
+        monkeypatch.setattr(V2Config, "load", staticmethod(lambda: Recovered()))
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            counts = _migration_counts(_run_sqlite_data_migrations(connection))
+            marker = _stored_migration_marker(connection)
+
+        assert _migration_counts(counts) == _EMPTY_MIGRATION_COUNTS
+        # No terminal seal was written.
+        if marker is not None:
+            payload = json.loads(marker)
+            assert payload.get("state") != "sealed_unattributed"
+
+        # Repair: restore a real pairing and migrate.
+        monkeypatch.undo()
+        monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+        _paired_cloud_config(tmp_path)
+        with engine.begin() as connection:
+            repaired = _migration_counts(_run_sqlite_data_migrations(connection))
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+        snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+        assert snapshot["vibe_instance_id"] == "same-instance"
+        assert snapshot["vibe_instance_kind"] == "personal"
+        assert repaired.get("legacy_deferred_definitions", 0) >= 1
+    finally:
+        engine.dispose()
+
+
+def test_gate_under_writer_lock_does_not_open_a_second_write_connection(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r3: resource_user_context_from_metadata is called
+    while a queued-delivery transaction already holds reserve_write_lock.
+    Bootstrap must not open a second write connection (it would time out
+    and permanently retire the delivery as unauthorized).
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        from storage.agent_session_rows import reserve_write_lock
+
+        metadata = {
+            resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+                "sub": "legacy-user",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+                "vibe_instance_id": "same-instance",
+                "vibe_instance_kind": "personal",
+                "claims_issued_at": 1_700_000_000,
+            }
+        }
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            # Absent binding row + known kind: the gate must fail closed
+            # WITHOUT opening a second writer, and without raising.
+            context = resource_access_service.resource_user_context_from_metadata(metadata)
+            # Fail-closed is acceptable; a timeout / deadlock is not.
+            assert context is None or context.instance_id == "same-instance"
     finally:
         engine.dispose()
