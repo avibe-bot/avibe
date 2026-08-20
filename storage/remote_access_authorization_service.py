@@ -631,6 +631,7 @@ def reconcile_instance_binding(
     reconcile: Callable[[], Any] | None = None,
     previous_instance_id: str | None = None,
     preserve_show_page: bool = True,
+    hold_config_lock: bool = True,
 ) -> dict[str, Any]:
     """Run one serialized identity transition and publish ``ready`` last.
 
@@ -643,26 +644,61 @@ def reconcile_instance_binding(
         instance_id=instance_id,
         instance_kind=instance_kind,
     )
+    # Canonical lock order (C2): SQLite initialization FIRST, then the
+    # cross-process config lock. Never acquire config_file_lock while
+    # ensure_sqlite_state / migration.lock may still be needed.
     _ensure_sqlite_state()
-    with _binding_file_lock():
+
+    def run() -> dict[str, Any]:
         engine = get_cached_sqlite_engine()
-        with engine.begin() as conn:
-            transition = _begin_instance_binding_transition_locked(
-                conn,
+        with _binding_file_lock():
+            return _reconcile_instance_binding_locked(
+                engine,
                 instance_id=instance_id,
                 instance_kind=instance_kind,
+                reconcile=reconcile,
+                previous_instance_id=previous_instance_id,
+                preserve_show_page=preserve_show_page,
             )
-            previous = transition.get("previous")
-            previous_id = previous.get("instance_id") if isinstance(previous, Mapping) else None
-            if previous_instance_id and previous_instance_id != instance_id:
-                previous_id = previous_instance_id
-            preserve = preserve_show_page and previous_id in {None, instance_id}
-            invalidated = _invalidate_instance_binding_authorizations_locked(
+
+    if not hold_config_lock:
+        return run()
+    from config.v2_config import config_file_lock
+
+    with config_file_lock():
+        return run()
+
+
+def _reconcile_instance_binding_locked(
+    engine,
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+    reconcile: Callable[[], Any] | None,
+    previous_instance_id: str | None,
+    preserve_show_page: bool,
+) -> dict[str, Any]:
+    with engine.begin() as conn:
+        transition = _begin_instance_binding_transition_locked(
+            conn,
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+        )
+        previous = transition.get("previous")
+        previous_id = previous.get("instance_id") if isinstance(previous, Mapping) else None
+        if previous_instance_id and previous_instance_id != instance_id:
+            previous_id = previous_instance_id
+        preserve = preserve_show_page and previous_id in {None, instance_id}
+        invalidated = (
+            _invalidate_instance_binding_authorizations_locked(
                 conn,
                 instance_id=instance_id,
                 previous_instance_id=previous_id,
                 preserve_show_page=preserve,
-            ) if transition["changed"] else 0
+            )
+            if transition["changed"]
+            else 0
+        )
 
         if not transition["changed"]:
             return {
@@ -672,47 +708,48 @@ def reconcile_instance_binding(
                 "invalidated": 0,
             }
 
-        try:
-            if reconcile is not None:
-                reconcile()
-        except Exception as exc:
-            return {
-                **transition,
-                "ok": False,
-                "ready": False,
-                "invalidated": invalidated,
-                "error": str(exc),
-            }
+    try:
+        if reconcile is not None:
+            reconcile()
+    except Exception as exc:
+        return {
+            **transition,
+            "ok": False,
+            "ready": False,
+            "invalidated": invalidated,
+            "error": str(exc),
+        }
 
-        if instance_kind is None:
-            return {
-                **transition,
-                "ok": True,
-                "ready": False,
-                "invalidated": invalidated,
-                "pending": True,
-            }
-        with engine.begin() as conn:
-            completed = _complete_instance_binding_transition_locked(
-                conn,
-                instance_id=instance_id,
-                instance_kind=instance_kind,
-                generation=transition["generation"],
-            )
-        if not completed:
-            return {
-                **transition,
-                "ok": False,
-                "ready": False,
-                "invalidated": invalidated,
-                "error": "binding_generation_changed",
-            }
+    if instance_kind is None:
         return {
             **transition,
             "ok": True,
-            "ready": True,
+            "ready": False,
             "invalidated": invalidated,
+            "pending": True,
         }
+
+    with engine.begin() as conn:
+        completed = _complete_instance_binding_transition_locked(
+            conn,
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+            generation=transition["generation"],
+        )
+    if not completed:
+        return {
+            **transition,
+            "ok": False,
+            "ready": False,
+            "invalidated": invalidated,
+            "error": "binding_generation_changed",
+        }
+    return {
+        **transition,
+        "ok": True,
+        "ready": True,
+        "invalidated": invalidated,
+    }
 
 
 def instance_binding_generation(
@@ -764,13 +801,17 @@ def binding_is_ready_for_pairing(
     state = load_instance_binding_state(ensure=ensure)
     if state is None:
         return True
+    if state.get("state") in {INSTANCE_BINDING_STATE_RECONCILING, INSTANCE_BINDING_STATE_INVALID}:
+        return False
     if state.get("state") != INSTANCE_BINDING_STATE_READY:
         return False
     current_id = (instance_id or "").strip()
     current_kind = instance_kind if instance_kind in {"personal", "organization"} else None
+    if current_kind is None:
+        # Legacy/invalid no-kind pairing stays usable (fail-open).
+        return True
     return (
         bool(current_id)
         and state.get("instance_id") == current_id
         and state.get("instance_kind") == current_kind
-        and current_kind is not None
     )
