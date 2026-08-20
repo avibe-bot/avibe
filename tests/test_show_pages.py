@@ -16,6 +16,8 @@ from core.show_pages import (
     ShowPageError,
     ShowPageStore,
     limited_show_access_admits,
+    limited_show_access_grant,
+    limited_show_access_grant_is_current,
     parse_show_access_apply_request,
     show_access_payload,
     _default_index_html,
@@ -1186,6 +1188,53 @@ def test_limited_show_access_admits_any_matching_entry() -> None:
         entries=access.entries,
     )
     assert not limited_show_access_admits(private, _visitor(email="guest@example.com"))
+
+
+def test_limited_show_access_grant_names_the_matched_entry_and_is_rechecked() -> None:
+    """A grant is a whole audience entry, and it lasts exactly as long as it does.
+
+    Persisting the matched entry is what keeps a resumed visitor's proof
+    bounded: whatever the identity provider claims, what outlives the match is
+    one entry the audience's own write caps already bound.
+    """
+
+    entries = (
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    access = _limited_access(*entries)
+    member = dict(
+        organization_id="org-1",
+        organization_member_id="mem-1",
+        organization_role="member",
+    )
+    visitors = (
+        _visitor(email="guest@example.com"),
+        _visitor(email="other@example.com", group_ids=frozenset({"group-7"}), **member),
+        _visitor(email="other@example.com", **member),
+    )
+
+    for entry, visitor in zip(entries, visitors, strict=True):
+        grant = limited_show_access_grant(access, visitor)
+        assert grant == entry
+        # The grant holds while its entry is in the audience...
+        assert limited_show_access_grant_is_current(access, grant)
+        # ...and ends the moment that entry is withdrawn, even when the rest of
+        # the audience is untouched.
+        remaining = _limited_access(*(other for other in entries if other != entry))
+        assert not limited_show_access_grant_is_current(remaining, grant)
+
+    assert limited_show_access_grant(access, _visitor(email="other@example.com")) is None
+    assert not limited_show_access_grant_is_current(access, None)
+    private = ShowAccess(
+        page_id="ses-admit",
+        access_mode="private",
+        share_id="share-admit",
+        revision=1,
+        entries=entries,
+    )
+    assert not limited_show_access_grant_is_current(private, entries[0])
 
 
 def test_limited_show_access_organization_block_is_fail_closed() -> None:

@@ -17,9 +17,12 @@ from jwt.exceptions import PyJWKClientConnectionError
 
 from config.v2_config import V2Config
 from core.show_pages import (
+    ACCESS_ENTRY_KIND_EMAIL,
+    ACCESS_ENTRY_KINDS,
     SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH,
     SHOW_ACCESS_ORGANIZATION_ROLES,
     SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT,
+    ShowAccessEntry,
     ShowAccessVisitor,
     normalize_show_access_email,
     validate_share_id,
@@ -61,6 +64,11 @@ _ORGANIZATION_CLAIM_NAMES = (
     "organization_role",
     "group_ids",
 )
+_GRANT_CLAIM_NAMES = (
+    "grant_kind",
+    "grant_value",
+    "grant_organization_id",
+)
 
 
 @dataclass(frozen=True)
@@ -97,19 +105,11 @@ class ShowGuestLease:
     page_id: str
     share_id: str
     normalized_email: str
-    organization: ShowIdentityOrganization | None = None
-
-    def visitor(self) -> ShowAccessVisitor:
-        organization = self.organization
-        if organization is None:
-            return ShowAccessVisitor(normalized_email=self.normalized_email)
-        return ShowAccessVisitor(
-            normalized_email=self.normalized_email,
-            organization_id=organization.organization_id,
-            organization_member_id=organization.organization_member_id,
-            organization_role=organization.organization_role,
-            group_ids=organization.group_ids,
-        )
+    # The audience entry that admitted this browser, re-checked against the
+    # page's current access on every later request. The visitor's group list
+    # never enters the cookie: it is bounded only by the identity provider,
+    # while one entry is bounded by SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH.
+    grant: ShowAccessEntry | None = None
 
 
 def _b64url_encode(value: bytes) -> str:
@@ -450,25 +450,36 @@ def _parse_show_identity_organization(claims: dict[str, Any]) -> ShowIdentityOrg
     )
 
 
-def _organization_lease_payload(organization: ShowIdentityOrganization) -> dict[str, Any]:
-    return {
-        "organization_id": organization.organization_id,
-        "organization_member_id": organization.organization_member_id,
-        "organization_role": organization.organization_role,
-        "group_ids": sorted(organization.group_ids),
+def _grant_lease_payload(grant: ShowAccessEntry) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "grant_kind": grant.kind,
+        "grant_value": grant.value,
     }
+    if grant.organization_id is not None:
+        payload["grant_organization_id"] = grant.organization_id
+    return payload
 
 
-def _parse_lease_organization(payload: dict[str, Any]) -> ShowIdentityOrganization | None:
-    present = [name for name in _ORGANIZATION_CLAIM_NAMES if name in payload]
+def _parse_lease_grant(payload: dict[str, Any], *, normalized_email: str) -> ShowAccessEntry | None:
+    present = [name for name in _GRANT_CLAIM_NAMES if name in payload]
     if not present:
-        return None
-    if set(present) != set(_ORGANIZATION_CLAIM_NAMES):
+        # A lease minted before grants were recorded proves only the email it
+        # already carries, which is exactly the entry it was admitted by.
+        if not normalized_email:
+            raise ShowIdentityError("invalid_lease")
+        return ShowAccessEntry(kind=ACCESS_ENTRY_KIND_EMAIL, value=normalized_email)
+    kind = payload.get("grant_kind")
+    value = _optional_organization_identifier(payload.get("grant_value"))
+    organization_id = _optional_organization_identifier(payload.get("grant_organization_id"))
+    if kind not in ACCESS_ENTRY_KINDS or value is None:
         raise ShowIdentityError("invalid_lease")
-    try:
-        return _parse_show_identity_organization(payload)
-    except ShowIdentityError as exc:
-        raise ShowIdentityError("invalid_lease") from exc
+    if (kind == ACCESS_ENTRY_KIND_EMAIL) != (organization_id is None):
+        # Email entries are never organization-scoped; group and organization
+        # entries always are.
+        raise ShowIdentityError("invalid_lease")
+    if kind == ACCESS_ENTRY_KIND_EMAIL and value != normalized_email:
+        raise ShowIdentityError("invalid_lease")
+    return ShowAccessEntry(kind=kind, value=value, organization_id=organization_id)
 
 
 def consume_verified_show_identity(
@@ -507,7 +518,7 @@ def make_show_guest_lease(
     page_id: str,
     share_id: str,
     normalized_email: str,
-    organization: ShowIdentityOrganization | None = None,
+    grant: ShowAccessEntry | None = None,
 ) -> str:
     # Deliberately a browser-session lease: access changes govern new
     # admissions without interrupting a page the user already opened.
@@ -518,13 +529,20 @@ def make_show_guest_lease(
         "normalized_email": normalize_show_access_email(normalized_email),
         "lease_id": secrets.token_urlsafe(18),
     }
-    if organization is not None:
-        payload.update(_organization_lease_payload(organization))
-    return _encode_signed_payload(
+    if grant is not None:
+        payload.update(_grant_lease_payload(grant))
+    token = _encode_signed_payload(
         _lease_secret(config),
         _LEASE_PREFIX,
         payload,
     )
+    if len(token.encode("utf-8")) > MAX_STATE_BYTES:
+        # The reader rejects an oversized token, so minting one would admit the
+        # visitor at the callback and then reject every later request. Every
+        # field above is individually bounded, so this is unreachable; keep it
+        # as the mechanical guarantee that what we mint is what we can read.
+        raise ShowIdentityError("identity_unavailable")
+    return token
 
 
 def read_show_guest_lease(
@@ -547,7 +565,7 @@ def read_show_guest_lease(
         "lease_id",
     }
     extra = set(payload) - required
-    if extra and extra != set(_ORGANIZATION_CLAIM_NAMES):
+    if not extra <= set(_GRANT_CLAIM_NAMES):
         raise ShowIdentityError("invalid_lease")
     if not required.issubset(payload):
         raise ShowIdentityError("invalid_lease")
@@ -571,14 +589,12 @@ def read_show_guest_lease(
         raise ShowIdentityError("invalid_lease")
     try:
         normalized_email = normalize_show_access_email(payload.get("normalized_email"))
-        organization = _parse_lease_organization(payload)
-    except ShowIdentityError:
-        raise
+        grant = _parse_lease_grant(payload, normalized_email=normalized_email)
     except Exception as exc:
         raise ShowIdentityError("invalid_lease") from exc
     return ShowGuestLease(
         page_id=page_id,
         share_id=share_id,
         normalized_email=normalized_email,
-        organization=organization,
+        grant=grant,
     )

@@ -8,6 +8,11 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from core.show_pages import (
+    ACCESS_ENTRY_KINDS,
+    SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH,
+    ShowAccessEntry,
+)
 from tests.ui_server_test_helpers import _save_config
 from vibe import show_identity
 
@@ -305,20 +310,61 @@ def test_show_identity_assertion_accepts_complete_organization_block(monkeypatch
     assert visitor.has_organization_block
     assert visitor.group_ids == frozenset({"group-7", "group-8"})
 
+    # The lease records the entry that admitted the visitor, never the
+    # membership list that matched it.
+    grant = ShowAccessEntry(kind="group", value="group-7", organization_id="org-1")
     token = show_identity.make_show_guest_lease(
         config,
         page_id="page-1",
         share_id="shared-page",
         normalized_email=identity.normalized_email,
-        organization=identity.organization,
+        grant=grant,
     )
     lease = show_identity.read_show_guest_lease(
         config,
         token,
         expected_share_id="shared-page",
     )
-    assert lease.organization == identity.organization
-    assert lease.visitor().group_ids == identity.organization.group_ids
+    assert lease.grant == grant
+
+
+def test_every_mintable_guest_lease_stays_readable(monkeypatch, tmp_path):
+    """Whatever ``make_show_guest_lease`` writes, ``read_show_guest_lease`` reads.
+
+    The lease is a cookie with a hard reader budget, so any field the writer
+    can grow past that budget is an admission loop: the callback sets the
+    cookie and the very next request rejects it. Seed every bounded field at
+    its maximum instead of listing the sizes that happen to fit today, so a
+    field widened later fails here rather than in a visitor's browser.
+    """
+
+    config = _identity_config(monkeypatch, tmp_path)
+    longest_value = "g" * SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH
+    longest_email = "e" * (SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH - len("@example.com")) + "@example.com"
+    grants = [None] + [
+        ShowAccessEntry(
+            kind=kind,
+            value=longest_email if kind == "email" else longest_value,
+            organization_id=None if kind == "email" else longest_value,
+        )
+        for kind in ACCESS_ENTRY_KINDS
+    ]
+
+    for grant in grants:
+        token = show_identity.make_show_guest_lease(
+            config,
+            page_id="s" * 128,
+            share_id="shared-page",
+            normalized_email=longest_email,
+            grant=grant,
+        )
+        assert len(token.encode("utf-8")) <= show_identity.MAX_STATE_BYTES
+        lease = show_identity.read_show_guest_lease(
+            config,
+            token,
+            expected_share_id="shared-page",
+        )
+        assert lease.grant == (grant or ShowAccessEntry(kind="email", value=longest_email))
 
 
 def test_show_identity_assertion_rejects_a_partial_organization_block(monkeypatch, tmp_path):

@@ -21,6 +21,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from config import paths
 from core.show_pages import (
+    SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH,
+    SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT,
     SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS,
     VISIBILITIES,
     ShowPageError,
@@ -1500,11 +1502,17 @@ def test_limited_show_page_admits_group_and_organization_entries_readonly(
     finally:
         store.close()
 
+    # A full-size membership list: admission must survive it on every request
+    # after the callback, not just the callback itself.
     organization = show_identity.ShowIdentityOrganization(
         organization_id="org-1",
         organization_member_id="mem-1",
         organization_role="member",
-        group_ids=frozenset({"group-7"}),
+        group_ids=frozenset({"group-7"})
+        | {
+            f"group-{index}-{'x' * (SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH - 16)}"
+            for index in range(SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT - 1)
+        },
     )
     manager = _FakeShowRuntimeManager(
         body=(

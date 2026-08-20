@@ -61,9 +61,10 @@ ORGANIZATION_ACCESS_ENTRY_KINDS = (
 # Active-member roles the show-identity organization block may assert. A
 # missing or unknown role is fail-closed for group and organization entries.
 SHOW_ACCESS_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
-# Bound the assertion's group list so a lease cookie cannot grow without
-# limit. It is independent of SHOW_ACCESS_GROUP_MAX_COUNT (how many groups a
-# page may grant).
+# Bound the group list one assertion may claim, so matching a visitor stays a
+# bounded amount of work. It is independent of SHOW_ACCESS_GROUP_MAX_COUNT (how
+# many groups a page may grant), and the list is never persisted: what outlives
+# the match is the single matched entry.
 SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT = 256
 SHOW_ACCESS_EMAIL_MAX_COUNT = 64
 SHOW_ACCESS_GROUP_MAX_COUNT = 64
@@ -225,22 +226,30 @@ class ShowAccessVisitor:
         )
 
 
-def limited_show_access_admits(access: ShowAccess, visitor: ShowAccessVisitor) -> bool:
-    """Admit a Limited visitor when any audience entry matches.
+def limited_show_access_grant(
+    access: ShowAccess,
+    visitor: ShowAccessVisitor,
+) -> ShowAccessEntry | None:
+    """Return the audience entry that admits a Limited visitor, if any.
 
     The three kinds are peers and OR-ed: an email hit, a group intersection,
     or active membership of the page's organization. Every hit is read-only;
     this function does not grant HMR, annotations, or Agent. Group and
     organization entries fail closed when the visitor has no organization
     block, including a block for a different organization.
+
+    The matched entry -- not the visitor's membership list -- is what a caller
+    persists to re-check a later request: one entry is bounded by the same
+    per-entry write caps the audience already enforces, while a membership
+    list is bounded only by the identity provider.
     """
 
     if access.access_mode != ACCESS_MODE_LIMITED:
-        return False
+        return None
     for entry in access.entries:
         if entry.kind == ACCESS_ENTRY_KIND_EMAIL:
             if visitor.normalized_email and visitor.normalized_email == entry.value:
-                return True
+                return entry
             continue
         if not visitor.has_organization_block:
             continue
@@ -249,15 +258,43 @@ def limited_show_access_admits(access: ShowAccess, visitor: ShowAccessVisitor) -
                 entry.organization_id == visitor.organization_id
                 and entry.value in visitor.group_ids
             ):
-                return True
+                return entry
         elif entry.kind == ACCESS_ENTRY_KIND_ORGANIZATION:
             if (
                 entry.value == visitor.organization_id
                 and entry.organization_id == visitor.organization_id
                 and visitor.organization_role in SHOW_ACCESS_ORGANIZATION_ROLES
             ):
-                return True
-    return False
+                return entry
+    return None
+
+
+def limited_show_access_admits(access: ShowAccess, visitor: ShowAccessVisitor) -> bool:
+    """Whether any Limited audience entry admits this visitor."""
+
+    return limited_show_access_grant(access, visitor) is not None
+
+
+def limited_show_access_grant_is_current(
+    access: ShowAccess,
+    grant: ShowAccessEntry | None,
+) -> bool:
+    """Whether a previously matched entry is still in the Limited audience.
+
+    Re-checking the grant instead of re-running the match keeps a resumed
+    visitor's proof bounded. It is fail-closed and self-healing: withdrawing
+    the entry ends the grant immediately, and a visitor who still matches some
+    other entry is re-admitted through a fresh identity round trip.
+    """
+
+    if grant is None or access.access_mode != ACCESS_MODE_LIMITED:
+        return False
+    return any(
+        entry.kind == grant.kind
+        and entry.value == grant.value
+        and entry.organization_id == grant.organization_id
+        for entry in access.entries
+    )
 
 
 @dataclass(frozen=True)

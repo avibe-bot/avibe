@@ -13039,12 +13039,22 @@ def _show_access_visitor_from_context(context: Any):
     )
 
 
-def _limited_show_access_admits(access: Any, visitor: Any) -> bool:
-    from core.show_pages import limited_show_access_admits
+def _limited_show_access_grant(access: Any, visitor: Any):
+    from core.show_pages import limited_show_access_grant
 
-    return access is not None and visitor is not None and limited_show_access_admits(
-        access, visitor
-    )
+    if access is None or visitor is None:
+        return None
+    return limited_show_access_grant(access, visitor)
+
+
+def _limited_show_access_admits(access: Any, visitor: Any) -> bool:
+    return _limited_show_access_grant(access, visitor) is not None
+
+
+def _limited_show_access_grant_is_current(access: Any, grant: Any) -> bool:
+    from core.show_pages import limited_show_access_grant_is_current
+
+    return access is not None and limited_show_access_grant_is_current(access, grant)
 
 
 def _show_limited_viewer_is_allowed(
@@ -14903,11 +14913,12 @@ async def complete_show_identity_login():
                     _show_identity_error_status(exc.reason),
                 )
             return redirect(state.return_target, code=303)
+        grant = _limited_show_access_grant(access, identity.visitor())
         if (
             access.access_mode != "limited"
             or page.visibility != "limited"
             or access.share_id != state.share_id
-            or not _limited_show_access_admits(access, identity.visitor())
+            or grant is None
         ):
             return _show_identity_not_found_response()
 
@@ -14926,7 +14937,7 @@ async def complete_show_identity_login():
             page_id=page.session_id,
             share_id=state.share_id,
             normalized_email=identity.normalized_email,
-            organization=identity.organization,
+            grant=grant,
         )
         response = redirect(state.return_target, code=303)
         response.set_cookie(
@@ -15032,7 +15043,7 @@ async def serve_public_show_page(share_id, asset_path):
                 and page.visibility == "limited"
                 and access.access_mode == "limited"
                 and access.share_id == share_id
-                and _limited_show_access_admits(access, lease.visitor())
+                and _limited_show_access_grant_is_current(access, lease.grant)
             )
             if not lease_is_current:
                 current_limited_binding = (
