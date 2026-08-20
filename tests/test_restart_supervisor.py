@@ -198,12 +198,12 @@ def test_legacy_upgrade_target_recovers_from_ui_only_process(monkeypatch, tmp_pa
     metadata_dir.mkdir()
     (metadata_dir / "METADATA").write_text("Name: vibe-remote\nVersion: 2.9.4\n", encoding="utf-8")
 
-    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 999)
     monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: 456)
     monkeypatch.setattr(
         runtime,
         "get_process_command",
-        lambda pid: f'{python_path} -c "from vibe.ui_server import run_ui_server; run_ui_server()"',
+        lambda pid: None if pid == 999 else f'{python_path} -c "from vibe.ui_server import run_ui_server; run_ui_server()"',
     )
     monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "2.9.4")
 
@@ -229,6 +229,30 @@ def test_service_launcher_from_process_strips_windows_quotes(monkeypatch, tmp_pa
     target = restart_supervisor._service_launcher_from_process(123)
 
     assert target == runtime.ServiceLauncher(python=str(python_path), main=str(service_main))
+
+
+def test_legacy_upgrade_without_target_leaves_packaged_runtime_running(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda **kwargs: pytest.fail("a legacy upgrade without a target must not stop the runtime"),
+    )
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="job-legacy-no-target",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+    )
+
+    assert rc == 2
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["state"] == "failed"
+    assert "existing runtime was left running" in status["error"]
 
 
 def test_failed_legacy_upgrade_uses_discovered_target_for_rollback(monkeypatch, tmp_path):
@@ -529,6 +553,7 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor, "get_restart_command", lambda vibe_path=None: ["/bin/vibe"])
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
     monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
+    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="source"))
 
     def fake_run(command, **kwargs):
         calls.append(("run", command))

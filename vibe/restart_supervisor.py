@@ -25,6 +25,7 @@ from config import paths
 # is pure stdlib, so paying for it on every restart costs nothing.
 from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
+from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
@@ -272,7 +273,7 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
     if trigger != "upgrade":
         return None
     service_pid = _read_recorded_pid()
-    ui_pid = _read_recorded_ui_pid() if service_pid is None else None
+    ui_pid = _read_recorded_ui_pid()
     launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid, ui_pid=ui_pid)
     version = _running_ui_version()
     package = _launcher_package_name(launcher, version=version)
@@ -785,6 +786,7 @@ def _run_restart_job(
 
     rollback_target_source = "explicit" if rollback_to else None
     rollback_discovery_error: str | None = None
+    legacy_target_required = trigger == "upgrade" and get_build_identity().kind == "package"
     if rollback_to is None and trigger == "upgrade":
         try:
             rollback_to = _discover_legacy_upgrade_target(trigger=trigger, vibe_path=vibe_path)
@@ -792,8 +794,8 @@ def _run_restart_job(
                 rollback_target_source = "running_service"
         except Exception as exc:
             # Older releases do not know how to carry a target. Discovery is a
-            # compatibility aid, not a reason to turn an ordinary restart into
-            # a new failure; the original upgrade failure remains authoritative.
+            # compatibility aid; if it cannot identify one, the job fails closed
+            # before stopping the old runtime rather than creating a dark one.
             rollback_discovery_error = str(exc)
 
     with log_path.open("a", encoding="utf-8") as log:
@@ -900,6 +902,13 @@ def _run_restart_job(
             _write_status(payload)
             write("restart job started after delay")
             restart_started_at = time.monotonic()
+
+        if legacy_target_required and rollback_to is None:
+            return fail(
+                "legacy upgrade rollback target unavailable; existing runtime was left running",
+                2,
+                started_at=restart_started_at,
+            )
 
         write("stopping UI and service" if restart_ui else "stopping service (Web UI kept running)")
         stop_runtime_started_at = time.monotonic()
