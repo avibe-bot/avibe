@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { isBoundaryMessage, isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
+import { messageTypeNames, specFor } from './messageTypes';
 
 describe('isTranscriptMessage', () => {
   it('shows the rows the transcript has always shown, and hides process log', () => {
@@ -84,5 +85,13 @@ describe('isBoundaryMessage', () => {
     expect(isBoundaryMessage({ type: 'output' })).toBe(true);
     expect(isBoundaryMessage({ type: 'result', metadata: { detached: true } })).toBe(true);
     expect(isBoundaryMessage({ type: 'result' })).toBe(false);
+  });
+
+  it('keeps every status-rendered type in its notification family when detached', () => {
+    const statusTypes = messageTypeNames().filter((type) => specFor(type).render === 'status');
+    expect(statusTypes.length).toBeGreaterThan(0);
+    for (const type of statusTypes) {
+      expect(isBoundaryMessage({ type, metadata: { detached: true } }), type).toBe(false);
+    }
   });
 });

@@ -38,6 +38,12 @@ describe('chatRowKind', () => {
     expect(row({ author: 'agent', type: 'result', metadata: { detached: true } })).toEqual({ kind: 'boundary' });
   });
 
+  it('keeps detached failure notifications in the notify family', () => {
+    for (const type of ['notify', 'error']) {
+      expect(row({ author: 'agent', type, metadata: { detached: true } }), type).toEqual({ kind: 'notify' });
+    }
+  });
+
   it('draws an annotation card for both directions', () => {
     expect(chatRowKind(FORWARD)).toEqual({
       kind: 'annotation',

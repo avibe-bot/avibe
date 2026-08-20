@@ -272,6 +272,22 @@ describe('nonterminal Agent output', () => {
       expect(markup).not.toContain('bg-mint/[0.09]');
     }
   });
+
+  it('keeps a detached backend failure in the status presentation', () => {
+    const message = {
+      ...agentWithQuickReplies(),
+      type: 'notify',
+      content: {},
+      metadata: { detached: true, event: 'backend_failure' },
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={message} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('lucide-bell');
+    expect(markup).toContain('bg-gold/[0.08]');
+    expect(markup).not.toContain('lucide-bot');
+  });
 });
 
 // ── Codex review #3 (ChatPage.tsx:2540) ───────────────────────────────────────

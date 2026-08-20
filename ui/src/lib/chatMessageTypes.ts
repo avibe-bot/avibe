@@ -25,11 +25,13 @@ type TerminalMessageCandidate = {
   metadata?: Record<string, unknown> | null;
 };
 
-// A phase boundary never settles the current Turn. ``metadata.detached`` keeps
-// rows written by older servers on the same contract even when their stored type
-// was still ``result`` / ``error``.
+const isDetachedMessage = (message: TerminalMessageCandidate): boolean => message.metadata?.detached === true;
+
+// A phase boundary uses the muted Agent presentation. The detached-result case
+// keeps rows written by older servers on that presentation; notification types
+// remain status pills even when detached.
 export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean =>
-  specFor(message.type).activityRole === 'boundary' || message.metadata?.detached === true;
+  specFor(message.type).activityRole === 'boundary' || (message.type === 'result' && isDetachedMessage(message));
 
 type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
 
@@ -39,7 +41,9 @@ type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string
 // a turn for specific metadata events (``notify`` + ``backend_failure``).
 export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): boolean => {
   if (message.author !== 'agent') return false;
-  if (isBoundaryMessage(message)) return false;
+  // Detached output belongs to another lifecycle and can never settle the
+  // current Turn, regardless of which visual family renders it.
+  if (isDetachedMessage(message) || isBoundaryMessage(message)) return false;
   const spec = specFor(message.type);
   if (spec.transcript && spec.activityRole === 'terminal') return true;
   const event = message.metadata?.event;
