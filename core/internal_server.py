@@ -36,7 +36,6 @@ import os
 import re
 import socket
 import stat
-import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -48,6 +47,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from config.atomic_io import write_atomic
 from core.memory.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
@@ -2300,38 +2300,22 @@ def _write_internal_server_status(
 ) -> None:
     """Persist internal-server lifecycle state for the out-of-process CLI."""
 
-    target = paths.get_internal_server_status_path()
+    payload: dict[str, str] = {
+        "state": state,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if error is not None:
+        payload["error"] = error
+    if detail is not None:
+        payload["detail"] = detail
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "state": state,
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        if error is not None:
-            payload["error"] = error
-        if detail is not None:
-            payload["detail"] = detail
-        file_descriptor, temporary_name = tempfile.mkstemp(
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
+        # Compact: the CLI polls this, nobody reads it by eye. Losing the write is
+        # survivable — the status file is a courtesy to an out-of-process reader,
+        # not something the server's own lifecycle depends on.
+        write_atomic(
+            paths.get_internal_server_status_path(),
+            json.dumps(payload, separators=(",", ":")),
         )
-        temporary = Path(temporary_name)
-        try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(file_descriptor, 0o600)
-            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream, separators=(",", ":"))
-            file_descriptor = -1
-            os.replace(temporary, target)
-        except Exception:
-            if file_descriptor >= 0:
-                try:
-                    os.close(file_descriptor)
-                except OSError:
-                    pass
-            temporary.unlink(missing_ok=True)
-            raise
     except OSError:
         logger.warning("could not persist internal dispatch server status", exc_info=True)
 

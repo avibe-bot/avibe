@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -26,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.platform_registry import PLATFORM_REGISTRY
 from config.v2_config import (
     DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS,
@@ -1381,16 +1381,7 @@ class ScheduledTaskStore:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"tasks": [task.to_dict() for task in self.list_tasks()]}
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.path.parent,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(self.path)
+        write_atomic(self.path, json.dumps(payload, indent=2))
         self._signature = _path_signature(self.path)
 
     def list_tasks(self) -> list[ScheduledTask]:
@@ -2261,16 +2252,7 @@ class TaskExecutionStore:
                 },
             }
         )
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.completed_dir,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(self.completed_dir / path.name)
+        write_atomic(self.completed_dir / path.name, json.dumps(payload, indent=2))
         path.unlink(missing_ok=True)
         return status
 
@@ -2336,16 +2318,7 @@ class TaskExecutionStore:
         if not isinstance(payload, dict):
             return False
         payload.update({"pid": os.getpid(), "started_at": now, "updated_at": now})
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.processing_dir,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(processing_path)
+        write_atomic(processing_path, json.dumps(payload, indent=2))
         return True
 
     def record_command_worker(
@@ -2407,16 +2380,7 @@ class TaskExecutionStore:
             metadata[key] = dict(value)
         payload["metadata"] = metadata
         payload["updated_at"] = _utc_now_iso()
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.processing_dir,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(processing_path)
+        write_atomic(processing_path, json.dumps(payload, indent=2))
         return True
 
     def list_running_command_workers(self) -> list[dict[str, Any]]:
@@ -2493,16 +2457,7 @@ class TaskExecutionStore:
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.pending_dir,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(request.to_dict(), handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(path)
+        write_atomic(path, json.dumps(request.to_dict(), indent=2))
         return request
 
     def enqueue_task_run(
@@ -3179,16 +3134,7 @@ class TaskExecutionStore:
                     "updated_at": now,
                 }
             )
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=path.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(path)
+            write_atomic(path, json.dumps(payload, indent=2))
             return
 
     def mark_callback_pending(self, run_id: str) -> None:
@@ -3214,16 +3160,7 @@ class TaskExecutionStore:
                     "updated_at": now,
                 }
             )
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=path.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(path)
+            write_atomic(path, json.dumps(payload, indent=2))
             return
 
     def list_runs_page(
@@ -3345,16 +3282,7 @@ class TaskExecutionStore:
                 }
             )
             completed_path = self._request_path(run_id, state="completed")
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.completed_dir,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(completed_path)
+            write_atomic(completed_path, json.dumps(payload, indent=2))
             pending_path.unlink(missing_ok=True)
             return True
 
@@ -3374,16 +3302,7 @@ class TaskExecutionStore:
                     "updated_at": now,
                 }
             )
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.processing_dir,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(processing_path)
+            write_atomic(processing_path, json.dumps(payload, indent=2))
             return True
         return False
 
@@ -3425,16 +3344,7 @@ class TaskExecutionStore:
                 }
             )
             completed_path = self._request_path(run_id, state="completed")
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.completed_dir,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                tmp_path = Path(handle.name)
-            tmp_path.replace(completed_path)
+            write_atomic(completed_path, json.dumps(payload, indent=2))
             if state != "completed":
                 source_path.unlink(missing_ok=True)
             return True
@@ -3607,16 +3517,7 @@ class TaskExecutionStore:
                 ),
                 **({"escalation_run_id": escalation_run_id} if escalation_run_id else {}),
             }
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self.completed_dir,
-            suffix=".tmp",
-            delete=False,
-            encoding="utf-8",
-        ) as handle:
-            json.dump(payload, handle, indent=2)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(completed_path)
+        write_atomic(completed_path, json.dumps(payload, indent=2))
         processing_path.unlink(missing_ok=True)
         return terminal_status
 

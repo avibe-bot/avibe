@@ -1413,18 +1413,26 @@ def test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them() 
     assert owner.index("wire_state.observe(") < owner.index("prelude.write(")
 
 
-def test_model_hub_state_documents_have_one_atomic_replacement_owner() -> None:
+def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
     """Review 4965677908: a failed replacement must not leave a temp file behind.
 
     Cleanup is unobservable from outside — the writers swallow ``OSError`` so a
     full disk cannot break metering — so it cannot be maintained one collection
     at a time. A module that spells its own temporary file is a second owner of
     the property, whether or not it remembers the cleanup.
+
+    Stated as "nobody here re-implements it" rather than "exactly ``state_file``
+    implements it": the owner has since moved out of this package entirely, into
+    ``config.atomic_io``, and naming the owner made this guard fail for the one
+    change that satisfied it best.
     """
 
-    owners = set()
-    for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
-        text = module.read_text(encoding="utf-8")
-        if any(marker in text for marker in ("tempfile", "os.replace", "os.rename")):
-            owners.add(module.name)
-    assert owners == {"state_file.py"}
+    second_owners = {
+        module.name
+        for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py"))
+        if any(
+            marker in module.read_text(encoding="utf-8")
+            for marker in ("tempfile", "os.replace", "os.rename")
+        )
+    }
+    assert second_owners == set()

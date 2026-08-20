@@ -3,11 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import multiprocessing as mp
+import os
 from typing import Any
 
 import pytest
 import requests
 
+from config import atomic_io
 from config.v2_config import (
     AgentsConfig,
     RemoteAccessConfig,
@@ -665,7 +667,7 @@ def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeyp
     cache = json.loads(permissions._cache_path().read_text(encoding="utf-8"))  # noqa: SLF001
     assert "must-not-persist" not in json.dumps(cache)
     assert cache["projection"]["debug"] == {"note": "kept"}
-    if permissions.os.name == "posix":
+    if os.name == "posix":
         assert permissions._cache_path().stat().st_mode & 0o777 == 0o600  # noqa: SLF001
 
     monkeypatch.setattr(
@@ -682,7 +684,7 @@ def test_permissions_offline_cache_is_sanitized_and_exact_instance_bound(monkeyp
 
 
 def test_permissions_cache_remains_atomic_without_os_fchmod(monkeypatch) -> None:
-    monkeypatch.delattr(permissions.os, "fchmod", raising=False)
+    monkeypatch.delattr(atomic_io.os, "fchmod", raising=False)
     projection = _complete_projection()
     config = _config()
     monkeypatch.setattr(
@@ -700,7 +702,7 @@ def test_permissions_cache_remains_atomic_without_os_fchmod(monkeypatch) -> None
     newer = _complete_projection()
     newer["instance"]["authorization_revision"] = 4
     monkeypatch.setattr(
-        permissions.os,
+        atomic_io.os,
         "replace",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
     )

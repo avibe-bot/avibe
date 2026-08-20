@@ -24,6 +24,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from config.atomic_io import write_atomic
+
 logger = logging.getLogger(__name__)
 
 # A TOML "bare key" is the unquoted form — anything outside this character
@@ -252,24 +254,6 @@ def _dump_toml(data: Dict[str, Any]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _atomic_write(path: Path, content: str, *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    try:
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:  # pragma: no cover - best effort cleanup
-                pass
-    try:
-        path.chmod(mode)
-    except OSError as exc:  # pragma: no cover - non-POSIX
-        logger.debug("chmod %s failed: %s", path, exc)
-
-
 def apply_codex_auth(
     *,
     auth_mode: str,
@@ -479,8 +463,8 @@ def apply_codex_auth(
     if not providers:
         toml_data.pop("model_providers", None)
 
-    _atomic_write(auth_path, json.dumps(auth_data, indent=2) + "\n", mode=0o600)
-    _atomic_write(config_path, _dump_toml(toml_data), mode=0o600)
+    write_atomic(auth_path, json.dumps(auth_data, indent=2) + "\n")
+    write_atomic(config_path, _dump_toml(toml_data))
     return {"notices": notices}
 
 

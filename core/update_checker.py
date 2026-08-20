@@ -13,7 +13,6 @@ import calendar
 import json
 import logging
 import re
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import UpdateConfig
 from config.v2_settings import _infer_channel_platform
 from core.handlers.admin_notifications import delivery_succeeded, resolve_admin_target, send_admin_text
@@ -178,10 +178,9 @@ class UpdateState:
             return cls()
 
     def save(self) -> None:
-        """Save state atomically using temp file + rename."""
+        """Persist update state; a failure here must never break the caller."""
         try:
             path = self._get_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "notified_version": self.notified_version,
                 "notified_at": self.notified_at,
@@ -192,13 +191,7 @@ class UpdateState:
                 "blocked_auto_update_at": self.blocked_auto_update_at,
                 "blocked_auto_update_current_version": self.blocked_auto_update_current_version,
             }
-            # Atomic write: write to temp file, then rename
-            with tempfile.NamedTemporaryFile(
-                mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8"
-            ) as f:
-                json.dump(data, f, indent=2)
-                temp_path = Path(f.name)
-            temp_path.replace(path)
+            write_atomic(path, json.dumps(data, indent=2))
         except Exception as e:
             logger.warning(f"Failed to save update state: {e}")
 
@@ -1126,13 +1119,7 @@ class UpdateChecker:
     @staticmethod
     def _write_update_marker_payload(data: dict[str, Any]) -> None:
         marker_path = paths.get_state_dir() / "pending_update_notification.json"
-        marker_path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w", dir=marker_path.parent, suffix=".tmp", delete=False, encoding="utf-8"
-        ) as f:
-            json.dump(data, f)
-            temp_path = Path(f.name)
-        temp_path.replace(marker_path)
+        write_atomic(marker_path, json.dumps(data))
 
     def _record_post_update_admin_progress(
         self,

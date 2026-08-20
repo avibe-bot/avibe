@@ -20,6 +20,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from core import latest_version_cache
 from vibe import api
 
 
@@ -846,6 +847,60 @@ def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeyp
     assert out["ok"] is True
     assert out["reason"] == "up_to_date"
     assert "action" not in out
+
+
+def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch):
+    # The waste this closes: ``vibe runtime prepare`` is a fresh process on every
+    # install, upgrade, regression sync, and tenant update, and each one used to
+    # spend a GitHub request re-learning askill's newest release. That request
+    # comes out of the unauthenticated 60/hour/IP budget, and exhausting it makes
+    # the latest lookup fail, which makes prepare reinstall askill outright.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+
+    assert len(probes) == 1
+
+
+def test_installing_askill_retires_the_persisted_latest_for_the_next_process(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
+    )
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["action"] == "update"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+
+    # The entry that justified the install cannot be allowed to outlive it: a
+    # later process reading it would compare the freshly installed version
+    # against a pre-install answer.
+    assert api._cached_latest_askill() == "0.1.14"  # noqa: SLF001
+    assert len(probes) == 2
 
 
 def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 import threading
 import time
 import urllib.error
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from config import paths
+from config.atomic_io import write_atomic
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
 from vibe.codex_config import get_codex_home
 
@@ -586,16 +586,7 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
 
 
 def _write_cached_remote_payload(payload: dict[str, Any]) -> None:
-    cache_path = get_cached_catalog_path()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{cache_path.name}.", suffix=".tmp", dir=str(cache_path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        Path(tmp_name).replace(cache_path)
-    finally:
-        Path(tmp_name).unlink(missing_ok=True)
+    write_atomic(get_cached_catalog_path(), json.dumps(payload, indent=2, sort_keys=True) + "\n")
     with _REMOTE_LOCK:
         _REMOTE_MEMORY_CACHE.clear()
         _REMOTE_MEMORY_CACHE.update(payload)

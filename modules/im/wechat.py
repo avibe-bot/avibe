@@ -27,6 +27,7 @@ from .base import (
     InlineKeyboard,
     MessageContext,
 )
+from config.atomic_io import write_atomic
 from config.paths import get_state_dir
 from vibe.i18n import t as i18n_t
 from vibe.proxy import resolve_proxy
@@ -1659,16 +1660,7 @@ class WeChatBot(BaseIMClient):
                     if token
                 },
             }
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=path.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-                temp_path = Path(handle.name)
-            temp_path.replace(path)
+            write_atomic(path, json.dumps(payload, ensure_ascii=False))
         except Exception as exc:
             logger.warning("Failed to save WeChat context tokens: %s", exc)
 

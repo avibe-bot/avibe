@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
 from typing import Any, Iterator
 
+from config.atomic_io import write_atomic
 from core.dependency_network import (
     dependency_error_details,
     dependency_error_message,
@@ -728,7 +729,7 @@ class ManagedRuntimeManager:
         if cache_remote:
             cached_manifest = self._remote_manifest_cache_path()
             try:
-                write_bytes_atomic(cached_manifest, payload)
+                write_atomic(cached_manifest, payload)
             except OSError:
                 logger.warning("Failed to cache %s manifest", self.spec.runtime_id, exc_info=True)
         return manifest
@@ -1179,15 +1180,7 @@ def env_flag_enabled(name: str, *, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def write_bytes_atomic(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(path)
-
-
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    # ``sort_keys`` keeps the manifest and install-state files diffable across
+    # runs; the swap itself belongs to ``write_atomic``.
+    write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")

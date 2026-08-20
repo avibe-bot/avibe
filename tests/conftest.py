@@ -161,6 +161,22 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_latest_version_cache():
+    """Keep the process-lifetime version cache from crossing test boundaries.
+
+    Its file tier already lands in each test's isolated home, but the memory
+    tier is module state: one test's probe answer would otherwise satisfy the
+    next test's lookup, and which test that is depends on the shuffle order.
+    """
+
+    from core import latest_version_cache
+
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001
+    yield
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001
+
+
+@pytest.fixture(autouse=True)
 def _seed_sqlite_state_template(
     request: pytest.FixtureRequest,
     _isolate_vibe_remote_home,

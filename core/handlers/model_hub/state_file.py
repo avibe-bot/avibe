@@ -2,57 +2,33 @@
 
 Five collections persist under the state directory — resolution events, source
 provenance, credential revocations, OAuth flow bindings, token usage — and every
-one of them wants the same three things: the parent directory to exist, one
-compact credential-free JSON encoding, and a replacement that either lands whole
-or leaves the previous document exactly as it was.
+one of them wants the same compact credential-free JSON encoding. That encoding
+is what this module still owns; the atomic replacement underneath it belongs to
+``config.atomic_io``, which every other state writer in Avibe shares.
 
-Each of them used to spell that out for itself, in the same seven lines. Which is
-how one temp file that outlived a failed write was really five latent orphans in
-one directory: the writers deliberately swallow ``OSError`` so metering and event
-recording cannot be broken by a full disk, and nothing downstream would ever
-notice the residue. A bounded ledger whose state directory grows without bound is
-not bounded.
+Each of the five used to spell the whole thing out for itself, in the same seven
+lines. Which is how one temp file that outlived a failed write was really five
+latent orphans in one directory: the writers deliberately swallow ``OSError`` so
+metering and event recording cannot be broken by a full disk, and nothing
+downstream would ever notice the residue. A bounded ledger whose state directory
+grows without bound is not bounded.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-STATE_FILE_MODE = 0o600
+from config.atomic_io import write_atomic
 
 
 def write_state_document(path: Path, payload: Any) -> None:
     """Replace ``path`` with ``payload`` as one compact owner-only JSON document.
 
-    The temporary file is removed unless the replacement itself succeeded, so an
-    encoding, ``fsync``, ``chmod``, or rename that raises costs the caller the
-    write it was already prepared to lose and nothing else.
+    Compact and ``ensure_ascii=False``: these documents are machine-read ledgers
+    that routinely carry non-ASCII model and source names, so escaping them buys
+    nothing and costs bytes on every append.
     """
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    handle = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False,
-    )
-    temporary = Path(handle.name)
-    replaced = False
-    try:
-        with handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, STATE_FILE_MODE)
-        os.replace(temporary, path)
-        replaced = True
-    finally:
-        if not replaced:
-            with suppress(OSError):
-                temporary.unlink()
+    write_atomic(path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))

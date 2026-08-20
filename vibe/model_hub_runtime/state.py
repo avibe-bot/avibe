@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import shutil
 import stat
-import tempfile
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
 
 
@@ -457,20 +456,10 @@ class EngineStateStore:
 
     @classmethod
     def _secure_write_json(cls, path: Path, payload: dict[str, Any]) -> None:
+        # The file is 0600 by ``write_atomic``; the directory is this store's own
+        # concern, since it holds the engine's secrets alongside its state.
         cls._ensure_private_dir(path.parent)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.chmod(0o600)
-            temporary.replace(path)
-            path.chmod(0o600)
-        finally:
-            temporary.unlink(missing_ok=True)
+        write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")
 
     @staticmethod
     def _ensure_private_dir(path: Path) -> None:
