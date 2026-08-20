@@ -2447,6 +2447,122 @@ def test_delete_against_a_remote_keeps_the_local_metadata(
     assert payload["worktrees"] == {slug: row}
 
 
+def _delete_args(slug: str, **overrides) -> argparse.Namespace:
+    fields = {
+        "target": "worktree",
+        "slug": slug,
+        "env_file": None,
+        "host_port": None,
+        "ui_host": "127.0.0.1",
+        "ui_port": 5123,
+        "worktree_port_start": 15200,
+        "worktree_port_end": 15399,
+        "dry_run": False,
+        "remote": None,
+        "yes": True,
+    }
+    fields.update(overrides)
+    return argparse.Namespace(**fields)
+
+
+def test_deleting_a_slug_another_run_holds_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live run owns its slug, so a delete of it stops instead of taking half of it.
+
+    The half is what makes this worth refusing rather than racing. An `up`
+    reserves under this lock and builds for minutes inside it, so a delete
+    arriving in that window finds no objects to remove and would remove the row
+    anyway -- and `complete` will not restore a row that is no longer the one its
+    run reserved, so the environment would finish built, untracked, with its host
+    port free for the next slug to take.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".runtime" / "incus-regression").mkdir(parents=True)
+    slug = "held-by-someone-else"
+    row = {"path": str(repo), "project": f"avr-wt-{slug}", "instance": f"avibe-wt-{slug}", "host_port": 15211}
+    mapping_path = repo / ".runtime" / "incus-regression" / "worktrees.json"
+    mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": {slug: row}}), encoding="utf-8")
+    commands = []
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        def run(self, command, *, check=True, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda _repo_root, _env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+
+    with incus_regression.target_update_lock(repo, None, f"avr-wt-{slug}", dry_run=False):
+        with pytest.raises(incus_regression.RegressionError) as excinfo:
+            incus_regression.cmd_delete(_delete_args(slug))
+
+    assert "Another run holds the regression update lock" in str(excinfo.value)
+    assert commands == []
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {slug: row}
+
+
+def test_delete_holds_the_slug_lock_across_the_objects_and_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stated as "the lock is held while each half changes", not as where the `with` sits.
+
+    Both halves are one change to what the slug names, so an interruption between
+    them is what has to be impossible -- an environment removed with its row kept
+    strands a port, and a row removed with the environment kept hides one. The
+    probe is the same one `reconcile` uses, which cannot be satisfied by holding
+    the lock somewhere nearby: `flock` conflicts with this process too, so it
+    answers for the moment it is asked.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".runtime" / "incus-regression").mkdir(parents=True)
+    slug = "deleted-under-lock"
+    project = f"avr-wt-{slug}"
+    row = {"path": str(repo), "project": project, "instance": f"avibe-wt-{slug}", "host_port": 15212}
+    mapping_path = repo / ".runtime" / "incus-regression" / "worktrees.json"
+    mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": {slug: row}}), encoding="utf-8")
+    observed = []
+
+    def held() -> bool:
+        return incus_regression.target_run_in_flight(repo, None, project)
+
+    class ProbingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        def run(self, command, *, check=True, **kwargs):
+            observed.append(("objects", held()))
+            return subprocess.CompletedProcess(command, 0)
+
+    forget = incus_regression.WorktreeMetadata.forget
+
+    def probing_forget(self, slugs):
+        observed.append(("row", held()))
+        return forget(self, slugs)
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda _repo_root, _env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", ProbingRunner)
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "forget", probing_forget)
+
+    assert incus_regression.cmd_delete(_delete_args(slug)) == 0
+
+    assert observed == [("objects", True), ("objects", True), ("row", True)]
+    # Not vacuous: the same probe is False once the command has released it.
+    assert held() is False
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {}
+
+
 def test_metadata_about_another_daemon_neither_reads_nor_writes_the_local_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

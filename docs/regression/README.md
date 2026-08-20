@@ -185,7 +185,13 @@ is worse than keeping a row nobody needs:
   named by the daemon and the project, so a `--remote` run is never read as the
   local environment of the same name — before it writes the row and holds it until
   the environment is built, so `reconcile` answers the question by trying to take
-  the same lock. Nothing a run writes
+  the same lock. Every command that changes what a slug names holds it, not just
+  `up`: a `delete` takes it across removing the objects and forgetting the row,
+  and stops rather than waiting when somebody else has it. Those two halves are
+  one change, and a delete that split them around a live `up` would remove
+  nothing — the objects do not exist yet — drop that run's reservation anyway,
+  and leave the finished environment untracked with its host port free for the
+  next slug. Nothing a run writes
   could answer it. A record over-reports — a run killed outright leaves its own
   behind — and under-reports, since a run from an older checkout writes no field
   a newer `reconcile` would recognise; a lock does neither, because the kernel

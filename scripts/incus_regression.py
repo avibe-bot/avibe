@@ -316,13 +316,34 @@ def target_lock_path(repo_root: Path, remote: str | None, project: str) -> Path:
 
 
 @contextmanager
-def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry_run: bool):
+def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry_run: bool, blocking: bool = True):
     """Serialize runs against one environment, and say so to `reconcile`.
 
     Keyed on the daemon and the project name rather than on a resolved target,
     because that is the whole key: a caller can name the lock before it has asked
     the mapping for a port, which is what lets the port be allocated inside the
     lock that protects it.
+
+    Which commands have to hold it is a property of the environment rather than
+    of any one of them, so it is written here instead of at each call site. Every
+    command that changes what a slug names -- its Incus objects, its row, or both
+    -- holds it: `up` from before it reserves until after it stamps the row,
+    `delete` across removing the objects and forgetting the row. `reconcile` is
+    the one command that drops rows without holding it, and deliberately: it
+    exists to observe whoever else holds it, so taking it would answer its own
+    question. Nothing else belongs to the class. `down`, `status`, `logs` and
+    `shell` cannot break what the lock protects -- that a row reserves a host
+    port exactly while its environment exists or is being built -- because none
+    of them creates, destroys or forgets either half; a `down` that interrupts a
+    build makes that `up` fail, and its reservation gives the row back.
+
+    `blocking=False` is for a caller whose answer to "somebody else holds this"
+    is to stop rather than to wait. The acquire is then both the proof that
+    nobody holds it and the protection, which is the only order with no window
+    between the two -- the same reason `target_run_in_flight` trusts a lock it
+    took itself and nothing else. Waiting would also be a new reading of a held
+    lock: every other reader treats one as a live run whose slug it must leave
+    alone, and behind an `up` that is stuck it would never return.
     """
     if dry_run or fcntl is None:
         yield
@@ -331,7 +352,19 @@ def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as fh:
         print(f"Acquiring regression update lock: {lock_path}")
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        if blocking:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        else:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Only contention is turned into this message. Any other way the
+                # lock can fail is re-raised as itself, because a wrong
+                # explanation of a real fault costs more than no explanation.
+                raise RegressionError(
+                    f"Another run holds the regression update lock for {remote_ref(remote, project)}: {lock_path}\n"
+                    "It is building or removing that environment right now. Wait for it to finish, or stop it, then retry."
+                ) from None
         try:
             yield
         finally:
@@ -339,7 +372,13 @@ def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry
 
 
 def target_run_in_flight(repo_root: Path, remote: str | None, project: str) -> bool:
-    """Whether some live process is updating `project` on `remote` right now.
+    """Whether some live process is changing `project` on `remote` right now.
+
+    Changing, not building: a `delete` holds the same lock while it removes the
+    environment and its row, and a row kept for the moment that takes is a row
+    its holder is about to drop itself. Either way the answer is the same one,
+    which is why the question is about the lock and not about what its holder
+    intends.
 
     Asked of the kernel rather than of `worktrees.json`, because no field a run
     writes can answer it. A record lies in both directions: a run that dies
@@ -2581,24 +2620,36 @@ def cmd_down(args: argparse.Namespace) -> int:
 def cmd_delete(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
-    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
-    if target.target == MASTER_TARGET and not args.yes:
+    if args.target == MASTER_TARGET and not args.yes:
         raise RegressionError("Deleting the master regression environment requires --yes.")
     if not args.dry_run:
         require_incus()
-    runner = Runner(dry_run=args.dry_run)
-    runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False)
-    runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False)
-    if target.target == WORKTREE_TARGET and not args.dry_run:
-        metadata = WorktreeMetadata(repo_root, args.remote)
-        metadata.forget([target.slug])
-        if not metadata.owned:
-            # The row describes a slug and host port on this machine, and this
-            # deletion happened somewhere else, so `forget` above did nothing.
-            # Saying so is all that is left to the caller: a slug used on both
-            # daemons would otherwise lose its local port reservation the moment
-            # the remote copy was removed, and lose it silently.
-            print(f"Kept the local metadata for {target.slug}: it describes the local Incus daemon, not remote {args.remote}.")
+    # Removing the objects and forgetting the row are one change to what this
+    # slug names, so both happen under the environment's update lock -- the same
+    # one `up` holds from before it writes its row until after it stamps it.
+    # Without it, a delete landing while an `up` builds deletes nothing, because
+    # the objects do not exist yet, drops that run's reservation anyway, and
+    # leaves the finished environment with no row and its host port free for the
+    # next slug: `complete` will not restore a row that is no longer the one its
+    # run reserved. Naming the lock needs only the identity, as in `up`, so the
+    # target is resolved inside it and nothing about this slug is read outside.
+    slug = target_slug(args, repo_root)
+    lock_project = project_name_for(args.target, slug)
+    with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run, blocking=False):
+        target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, slug=slug)
+        runner = Runner(dry_run=args.dry_run)
+        runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False)
+        runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False)
+        if target.target == WORKTREE_TARGET and not args.dry_run:
+            metadata = WorktreeMetadata(repo_root, args.remote)
+            metadata.forget([target.slug])
+            if not metadata.owned:
+                # The row describes a slug and host port on this machine, and this
+                # deletion happened somewhere else, so `forget` above did nothing.
+                # Saying so is all that is left to the caller: a slug used on both
+                # daemons would otherwise lose its local port reservation the moment
+                # the remote copy was removed, and lose it silently.
+                print(f"Kept the local metadata for {target.slug}: it describes the local Incus daemon, not remote {args.remote}.")
     return 0
 
 
