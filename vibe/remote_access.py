@@ -1591,19 +1591,35 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
             return {"ok": False, "error": "remote_status_not_configured"}
         if urllib.parse.urlsplit(cloud.backend_url).scheme.lower() != "https":
             return {"ok": False, "error": "remote_status_backend_url_invalid"}
+        from storage import remote_access_authorization_service
+
+        request_instance_id = str(cloud.instance_id)
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         payload = {
             "instance_secret": cloud.instance_secret,
             **runtime_status_payload(config, event=event, last_error=last_error),
         }
         result = _json_request(
-            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{cloud.instance_id}/runtime-status",
+            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
             payload,
             timeout=5.0,
         )
         _replace_active_hostnames(config, result.get("active_hostnames"))
         reported_kind = _normalized_instance_kind(result.get("instance_kind"))
         if reported_kind is not None:
-            _persist_instance_kind(cloud.instance_id, reported_kind, reconcile=True)
+            # Capture-before-IO: overlapping heartbeats can arrive out of
+            # order. A late Personal response must CAS-fail against a newer
+            # Organization generation rather than rewrite the live binding.
+            _persist_instance_kind(
+                request_instance_id,
+                reported_kind,
+                reconcile=True,
+                expected_binding_generation=request_binding_generation,
+            )
         return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "error": "remote_status_report_failed", "detail": str(exc)}
@@ -5643,6 +5659,13 @@ def resolve_current_authorization(
         if isinstance(stored_claims, Mapping):
             stored_kind = _normalized_instance_kind(stored_claims.get("vibe_instance_kind"))
     is_exact_show_page = _is_exact_show_page_grant(identity, record)
+    kindless_current_needs_refresh = (
+        not is_exact_show_page
+        and instance_kind is not None
+        and stored_kind is None
+        and record is not None
+        and record.get("authorization_state") == "current"
+    )
     kind_mismatch = (
         not is_exact_show_page
         and (
@@ -5657,6 +5680,7 @@ def resolve_current_authorization(
                 and record is not None
                 and record.get("authorization_state") == "stale"
             )
+            or kindless_current_needs_refresh
         )
     )
     if kind_mismatch:
