@@ -54,6 +54,26 @@ def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=T
     )
 
 
+def _fake_pinned_install(calls, installs, *, pin: str = "vibe-remote==3.0.10"):
+    """Record only the rollback's pinned install, never host process-table probes.
+
+    Patching ``restart_supervisor.subprocess.run`` replaces the stdlib function
+    for every importer. Rollback then inspects leftover pids through
+    ``get_process_command``, which shells out to ``ps -p <pid>``. Capturing that
+    probe as ``installs[0]`` makes the pin assertion fail on whatever pid the
+    host happens to have live.
+    """
+
+    def run(command, **_kwargs):
+        argv = list(command)
+        if any(pin in str(part) for part in argv):
+            calls.append("install")
+            installs.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return run
+
+
 def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -864,16 +884,11 @@ def _upgrade_restart_that_dies_after_migrating(
         observed_by_the_rolled_back_version.append(_payload_rows(db_path))
         return _fake_start_runtime([], service_pid=222, ui_pid=333)
 
-    def run(command, **_kwargs):
-        calls.append("install")
-        installs.append(list(command))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor.subprocess, "run", run)
+    monkeypatch.setattr(restart_supervisor.subprocess, "run", _fake_pinned_install(calls, installs))
     monkeypatch.setattr(runtime, "verified_service_running", lambda: service_running)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout=None: pid)
     # The machine as this failure actually leaves it: the version that died in
@@ -1053,16 +1068,18 @@ def test_a_service_that_took_the_lock_and_then_died_is_rolled_back(monkeypatch, 
         alive[pid] = False
         return pid == 444
 
-    def run(command, **_kwargs):
-        calls.append("install")
-        installs.append(list(command))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", start)
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor.subprocess, "run", run)
+    monkeypatch.setattr(restart_supervisor.subprocess, "run", _fake_pinned_install(calls, installs))
+    # The failed generation is gone: nothing of it is still holding the database
+    # open. Stated here rather than left to the host's real process table, which
+    # a test may not read and must never depend on -- the sibling helper already
+    # isolates this, and without it ``ps -p 444`` (a pid this test invented)
+    # lands in the shared ``subprocess.run`` mock as a fake install.
+    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", list)
+    monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", lambda *args, **kwargs: False)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: alive.get(pid, False))
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(runtime, "service_instance_started", started)
