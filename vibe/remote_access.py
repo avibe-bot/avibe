@@ -1762,7 +1762,7 @@ def _persist_instance_kind(
     reconcile: bool = False,
     expected_binding_generation: int | None = None,
     expected_binding_epoch: int | None = None,
-) -> bool:
+) -> bool | int:
     """Persist kind + reconcile under one cross-process critical section (C2).
 
     Lock order is owned by reconcile_instance_binding: SQLite init, then
@@ -1803,7 +1803,7 @@ def _persist_instance_kind(
             ensure=False,
         )
         if previous_kind == instance_kind and already_ready:
-            return True
+            return current_generation
         if previous_kind != instance_kind:
             live_generation = (
                 remote_access_authorization_service.current_instance_binding_generation(
@@ -1847,7 +1847,14 @@ def _persist_instance_kind(
                 return False
             if persisted_generation < int(expected_binding_generation):
                 return False
-        return bool(transition.get("ok") and (transition.get("ready") or instance_kind is None))
+        if not (transition.get("ok") and (transition.get("ready") or instance_kind is None)):
+            return False
+        try:
+            return int(transition.get("generation"))
+        except (TypeError, ValueError):
+            return remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
 
 
 def mint_cloud_token(
@@ -4937,14 +4944,15 @@ def _store_scoped_authorization(
         stored_claims["vibe_instance_kind"] = persisted_kind
     scope_kind, scope_ref = _authorization_scope(config, stored_claims)
     if expected_binding_generation is None and scope_kind != "show_page":
-        try:
-            expected_binding_generation = (
-                remote_access_authorization_service.current_instance_binding_generation(
-                    ensure=False
-                )
-            )
-        except Exception:
-            expected_binding_generation = None
+        # Recapturing live generation here is the TOCTOU: a transition can
+        # complete between the caller's persist-kind CAS and this write, and
+        # the recaptured gen would let a stale response resurrect a current
+        # row. Callers that produced claims via network/IO must pass the
+        # generation they captured BEFORE that IO. Local cookie/legacy paths
+        # capture immediately before this call.
+        raise remote_access_authorization_service.InstanceBindingChangedError(
+            "expected_binding_generation_required"
+        )
     return remote_access_authorization_service.upsert_scoped(
         reference=reference,
         instance_id=str(config.remote_access.vibe_cloud.instance_id),
@@ -4979,6 +4987,13 @@ def make_session_cookie(
         except ValueError as exc:
             raise OAuthCodeExchangeError("stale_authorization_revision") from exc
     stored_claims = {**validated_claims, "claims_issued_at": issued_at}
+    from storage import remote_access_authorization_service
+
+    request_binding_generation = (
+        remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    )
     reference = _store_scoped_authorization(
         config,
         reference=None,
@@ -4987,6 +5002,7 @@ def make_session_cookie(
         claims=stored_claims,
         authorization_state="current",
         checked_at=issued_at,
+        expected_binding_generation=request_binding_generation,
     )
     payload = {
         "email": email,
@@ -5160,6 +5176,11 @@ def _load_authorization_record(
     if existing is not None:
         return existing
     try:
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         stored_reference = _store_scoped_authorization(
             config,
             reference=None,
@@ -5168,6 +5189,7 @@ def _load_authorization_record(
             claims=claims,
             authorization_state="current",
             checked_at=checked_at,
+            expected_binding_generation=request_binding_generation,
         )
         return remote_access_authorization_service.load_reference_record(
             reference=stored_reference,
@@ -5333,7 +5355,7 @@ def _fetch_authorization_context(
     except Exception:
         logger.warning("remote instance kind persistence failed", exc_info=True)
         persisted = False
-    if not persisted:
+    if persisted is False:
         live_state = remote_access_authorization_service.load_instance_binding_state(
             ensure=False
         )
@@ -5363,6 +5385,11 @@ def _fetch_authorization_context(
             authorization_state="current",
             checked_at=now,
             instance_kind=instance_kind,
+            expected_binding_generation=(
+                int(persisted)
+                if not isinstance(persisted, bool)
+                else request_binding_generation
+            ),
         )
         refreshed_record = remote_access_authorization_service.load_reference_record(
             reference=reference,
@@ -5370,6 +5397,8 @@ def _fetch_authorization_context(
             subject=subject,
             now=now,
         )
+    except remote_access_authorization_service.InstanceBindingChangedError:
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
     except Exception:
         logger.warning("remote authorization context persistence failed", exc_info=True)
         return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
@@ -5811,8 +5840,15 @@ def renew_session_cookie(
     current = int(time.time()) if now is None else now
     reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
     if not isinstance(reference, str):
+        from storage import remote_access_authorization_service
+
         claims = _authorization_claims_from_payload(payload)
         checked_at = int(payload.get("claims_issued_at", payload.get("iat", current)))
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         reference = _store_scoped_authorization(
             config,
             reference=None,
@@ -5821,6 +5857,7 @@ def renew_session_cookie(
             claims=claims,
             authorization_state="current",
             checked_at=checked_at,
+            expected_binding_generation=request_binding_generation,
         )
     browser_session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if not isinstance(browser_session_id, str):

@@ -323,7 +323,7 @@ def test_organization_to_personal_reclassification_revalidates_before_the_bypass
     assert admitted is not None
     assert admitted["authorization_state"] == "current"
 
-    assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True) is True
+    assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
 
     reclassified = V2Config.load()
     assert reclassified.remote_access.vibe_cloud.instance_kind == "personal"
@@ -724,7 +724,7 @@ def test_exact_show_page_grants_survive_a_kind_transition_but_not_a_repair(tmp_p
     )
     assert instance_identity is not None
 
-    assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True) is True
+    assert remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
 
     reclassified = V2Config.load()
     show_page = remote_access_authorization_service.load_scoped(
@@ -2426,7 +2426,7 @@ def test_personal_to_organization_reclassification_rejects_stale_personal_row(
     assert stored["claims"]["vibe_instance_kind"] == "personal"
 
     # Controller heartbeat reclassifies Personal -> Organization.
-    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True) is True
+    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True)
     reclassified = V2Config.load()
     assert reclassified.remote_access.vibe_cloud.instance_kind == "organization"
 
@@ -2680,7 +2680,7 @@ def test_refresh_cache_does_not_serve_personal_payload_after_org_reclassificatio
     assert first.policy == "personal"
     first_calls = len(calls)
 
-    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True) is True
+    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True)
     reclassified = V2Config.load()
     second = remote_access.resolve_current_authorization(reclassified, identity)
     assert second.policy != "personal" or second.current is False or second.refreshed is True
@@ -2735,4 +2735,72 @@ def test_in_flight_auth_during_same_instance_kind_transition_is_binding_changed(
     )
     later = remote_access.resolve_current_authorization(V2Config.load(), identity)
     assert later.reason != "authorization_refresh_backoff"
+    assert remote_access_authorization_service.current_instance_binding_generation() > captured
+
+
+def test_successful_context_store_refused_when_generation_advances_after_persist_kind(
+    monkeypatch,
+    tmp_path,
+):
+    """Class close: every authorization-row write carries the REQUEST generation.
+
+    persist-kind CAS succeeds at request gen; a peer then completes a
+    transition (gen advances) before store. Recapturing live generation
+    would let the stale 200 resurrect a current row. Store must refuse.
+    """
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    original_state = record.get("authorization_state")
+    captured = remote_access_authorization_service.current_instance_binding_generation()
+
+    original_store = remote_access._store_scoped_authorization
+    advanced = {"done": False}
+
+    def store_after_peer_transition(*args, **kwargs):
+        if not advanced["done"]:
+            advanced["done"] = True
+            remote_access._persist_instance_kind("inst_123", "personal", reconcile=True)
+        return original_store(*args, **kwargs)
+
+    monkeypatch.setattr(remote_access, "_store_scoped_authorization", store_after_peer_transition)
+    monkeypatch.setattr(
+        remote_access,
+        "_device_json_request",
+        lambda _c, _m, _s, payload, **k: _authorization_context_response(
+            config, payload, revision=41, instance_kind="organization"
+        ),
+    )
+    result = remote_access._fetch_authorization_context(
+        config, identity, record, now=now, observed_revision=41
+    )
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert result.reason == "instance_binding_changed"
+    assert result.current is False
+    if stored is not None:
+        # Must not resurrect a current Organization row under the new Personal binding.
+        if stored.get("authorization_state") == "current":
+            claims = stored.get("claims") or {}
+            assert claims.get("vibe_instance_kind") != "organization" or (
+                stored.get("authorization_state") == original_state
+            )
     assert remote_access_authorization_service.current_instance_binding_generation() > captured
