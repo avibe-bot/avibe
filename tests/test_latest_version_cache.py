@@ -296,6 +296,34 @@ def test_an_unforeseen_entry_failure_still_costs_only_a_probe(monkeypatch) -> No
     assert probe.calls == 1
 
 
+def test_an_answer_is_timestamped_when_the_question_was_asked() -> None:
+    """What bounds the one race this file still permits, so it stays bounded.
+
+    Two cold processes can probe the same name across a release publication and
+    the older probe can write last, so the cache can serve the version that was
+    newest when its question was asked. That is only acceptable because the
+    entry carries *that* moment rather than the moment its answer arrived: the
+    loser of the race is by construction the process that asked earlier, so its
+    entry also expires earlier, and the cache serves exactly what a single
+    unraced probe issued at the same instant would have served.
+
+    Timestamp the answer on arrival instead and the loser looks the fresher of
+    the two, extending the stale answer past the TTL that justifies it.
+    """
+
+    def slow_probe() -> str:
+        time.sleep(0.2)
+        return "0.1.15"
+
+    asked_at = time.time()
+    cached_latest("askill", slow_probe)
+    answered_at = time.time()
+
+    at = _persisted()["entries"]["askill"]["at"]
+    assert at - asked_at < 0.1
+    assert answered_at - at >= 0.2
+
+
 def test_a_lookup_still_answers_when_the_state_directory_cannot_be_written(
     monkeypatch,
 ) -> None:

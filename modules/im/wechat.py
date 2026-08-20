@@ -417,6 +417,9 @@ class WeChatBot(BaseIMClient):
         # Context tokens per user (needed for replies)
         self._context_tokens: Dict[str, str] = {}
         self._context_token_observed_at: Dict[str, float] = {}
+        #: The token map as last successfully written to disk, so a save that
+        #: would change nothing can be skipped. See ``_save_context_tokens``.
+        self._persisted_context_tokens: Dict[str, str] = {}
         self._typing_tickets: Dict[tuple[str, str], str] = {}
 
         # getUpdates cursor
@@ -1641,12 +1644,37 @@ class WeChatBot(BaseIMClient):
 
             self._context_tokens.update(loaded_tokens)
             self._context_token_observed_at.update(loaded_observed_at)
+            # What we just read *is* what is on disk, so a restarted process
+            # seeing the same tokens again has nothing to write. Entries the
+            # loop above skipped are simply absent here, which only makes the
+            # next save happen — never makes a needed one be skipped.
+            self._persisted_context_tokens = dict(loaded_tokens)
             if loaded_tokens:
                 logger.info("Loaded persisted WeChat context tokens for %d user(s)", len(loaded_tokens))
         except Exception as exc:
             logger.warning("Failed to load WeChat context tokens: %s", exc)
 
     def _save_context_tokens(self) -> None:
+        """Persist the token map, but only when it differs from what is on disk.
+
+        This is reached from ``_process_inbound_message`` for every message
+        carrying a ``context_token``, on the single WeChat polling loop — and a
+        user's token is the same on message after message, so almost every one
+        of those calls used to rewrite a byte-identical document. That was
+        merely wasteful while the write was a bare temp-file rename; routing it
+        through ``write_atomic`` put two durability barriers in front of the
+        next message in the batch, which is a cost this cache has no use for.
+        It is re-learned from the next inbound message, so it never needed to
+        survive a power loss.
+
+        The comparison is against what was last *successfully written*, not
+        against the live map, so a failed write is retried on the next message
+        instead of being latched shut.
+        """
+
+        tokens = {user_id: token for user_id, token in self._context_tokens.items() if token}
+        if tokens == self._persisted_context_tokens:
+            return
         try:
             path = self._get_context_token_cache_path()
             payload = {
@@ -1656,13 +1684,14 @@ class WeChatBot(BaseIMClient):
                         "context_token": token,
                         "observed_at": self._context_token_observed_at.get(user_id, 0),
                     }
-                    for user_id, token in self._context_tokens.items()
-                    if token
+                    for user_id, token in tokens.items()
                 },
             }
             write_atomic(path, json.dumps(payload, ensure_ascii=False))
         except Exception as exc:
             logger.warning("Failed to save WeChat context tokens: %s", exc)
+            return
+        self._persisted_context_tokens = tokens
 
     def _remember_context_token(self, user_id: str, context_token: str) -> None:
         if not user_id or not context_token:
