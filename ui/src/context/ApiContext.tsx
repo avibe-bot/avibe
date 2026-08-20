@@ -1167,17 +1167,22 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 
 export type WorkbenchEventHandlers = {
   /**
-   * A stream is live and reaching this consumer. Every gap ends here — an
-   * error, a page that came back to a stream that could not prove it survived,
-   * a heartbeat that stopped arriving — because all of them are recovered by
-   * reconnecting, and this fires once the new subscription exists. So it is
-   * also the one place to re-read whatever this consumer keeps live off the
-   * stream, including the window between its own first read and this
-   * subscription.
+   * A stream is live and reaching this consumer, and any gap before now is
+   * over. Every gap ends here, on either of the two legs a stream is carried
+   * over: the browser socket breaking (an error, a page that came back to a
+   * stream that could not prove it survived, a heartbeat that stopped arriving)
+   * is recovered by reconnecting, and this fires once the new subscription
+   * exists; the UI server's controller bridge dropping and coming back is
+   * recovered in place, and this fires when it does. Nothing replays either
+   * gap, so this is also the one place to re-read whatever this consumer keeps
+   * live off the stream — including the window between its own first read and
+   * this subscription.
    *
-   * Consumers must not subscribe to the raw reactivation edge to find this out:
-   * a returning page whose stream never broke has missed nothing, and that
-   * verdict is made in one place. A consumer re-deriving it will drift from it.
+   * Consumers must not re-derive when a gap happened. Neither the reactivation
+   * edge nor `onEventBridgeStatus` is that signal: a returning page whose stream
+   * never broke has missed nothing, and a bridge report is a level rather than
+   * an edge. Both verdicts are made in one place, and a consumer recomputing
+   * them will drift from it.
    */
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
@@ -2627,11 +2632,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
-  const eventBridgeConnectedRef = useRef(false);
+  // The controller leg of this stream, which is the second thing that can break:
+  // the browser socket stays open and heartbeating while the UI server loses
+  // `/internal/events`, and `vibe/inbox_bridge.py` resumes the live feed without
+  // replaying what the controller published in between. `unknown` is not a third
+  // kind of outage -- it is a stream that has not heard from the leg yet, which
+  // is what keeps its first "connected" report from reading as a recovery.
+  const eventControllerLegRef = useRef<'unknown' | 'connected' | 'disconnected'>('unknown');
   // When the active stream last proved it was alive, and the cadence the server
   // said it would prove it at. Null whenever there is no stream to speak for.
   const eventHeartbeatAtRef = useRef<number | null>(null);
   const eventHeartbeatIntervalRef = useRef(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
+  // Whether this stream has ever delivered a heartbeat. A server too old to send
+  // them still completes the handshake, so without this the seeded stamp would
+  // lapse and a watchdog would recycle a perfectly healthy stream on a timer,
+  // forever. Unproven cadence means no watchdog, not a dead stream.
+  const eventHeartbeatObservedRef = useRef(false);
   // Fires when the next heartbeat is overdue. A heartbeat is a continuous clock,
   // so whoever trusts it has to keep watching it: sampling only at the moment a
   // page returns would leave a stream that dies one second later unquestioned
@@ -2828,35 +2844,44 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     eventSourceRef.current = null;
     source?.close();
     eventConnectionRef.current = null;
-    eventBridgeConnectedRef.current = false;
-    // The stamp speaks for one socket only; a later stream must earn its own.
+    eventControllerLegRef.current = 'unknown';
+    // The stamp and the cadence both speak for one socket only; a later stream
+    // must earn its own, including the right to be watched on a timer.
     eventHeartbeatAtRef.current = null;
+    eventHeartbeatObservedRef.current = false;
     clearWorkbenchHeartbeatWatchdog();
   };
 
   /**
    * The stream's own handshake, or null while events cannot reach handlers. A
-   * controller-sourced stream also needs its bridge up: the browser leg being
-   * open says nothing about the controller leg behind it.
+   * controller-sourced stream is itself the controller leg, so it is down when
+   * that leg reports down.
    */
   const workbenchEventHandshake = () => {
     const connection = eventConnectionRef.current;
     if (!connection) return null;
-    if (connection.source === 'controller' && !eventBridgeConnectedRef.current) return null;
+    if (connection.source === 'controller' && eventControllerLegRef.current !== 'connected') return null;
     return connection;
   };
 
   /**
-   * Events are flowing end to end right now, so a reconnect would close no gap
-   * and anything that happened while the page was away still arrived.
+   * Reconnecting this socket would close no gap, because it is carrying
+   * everything it can carry right now.
    *
-   * All three terms are needed. `readyState` is the browser's own transport
-   * verdict, which it revises on network changes and HTTP/2 ping timeouts. The
-   * handshake says a stream that is open can also reach handlers. Neither
-   * survives suspension: a backgrounded tab can have its socket dropped and be
-   * resumed with the connection still reported `OPEN` and no `error` ever
-   * delivered, so only a recent heartbeat distinguishes a quiet stream from
-   * that zombie.
+   * Scoped to this socket on purpose: a stream reaches the browser over two legs
+   * that fail independently, and each one is judged by whoever can see it. This
+   * is the browser leg. Reopening it cannot repair the controller leg behind the
+   * UI server -- the replacement would inherit the same severed bridge -- so the
+   * controller leg is not a term here; it announces its own recovery instead, in
+   * the `workbench.events.bridge.status` listener below.
+   *
+   * All three terms are needed for this leg. `readyState` is the browser's own
+   * transport verdict, which it revises on network changes and HTTP/2 ping
+   * timeouts. The handshake says a stream that is open can also reach handlers.
+   * Neither survives suspension: a backgrounded tab can have its socket dropped
+   * and be resumed with the connection still reported `OPEN` and no `error` ever
+   * delivered, so only a recent heartbeat distinguishes a quiet stream from that
+   * zombie.
    */
   const isWorkbenchEventStreamLive = () =>
     eventSourceRef.current?.readyState === EventSource.OPEN &&
@@ -2888,6 +2913,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   const armWorkbenchHeartbeatWatchdog = () => {
     clearWorkbenchHeartbeatWatchdog();
+    // Only a stream that has actually sent one owes another. A deadline is a
+    // claim about a cadence, so a server that never declared one cannot be held
+    // to it: against an older server -- a rollback under a tab that stayed open
+    // -- this would otherwise close a healthy stream every time the handshake
+    // stamp lapsed, forever, and charge every consumer a catch-up each round.
+    // Such a stream just stops counting as proven, which is the pre-heartbeat
+    // behavior this optimization replaces.
+    if (!eventHeartbeatObservedRef.current) return;
     const stampedAt = eventHeartbeatAtRef.current;
     if (stampedAt === null) return;
     const staleAt = stampedAt + workbenchEventStaleAfterMs(eventHeartbeatIntervalRef.current);
@@ -2960,10 +2993,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (eventSourceRef.current !== source) return;
       // A frame just arrived, which is proof of life in its own right. Seeding
       // here rather than waiting for the first heartbeat keeps a stream from
-      // reading as unproven for its first cadence. Against a server too old to
-      // send heartbeats this is the only stamp there will ever be, so its
-      // streams stop counting as proven once it lapses -- which is exactly the
-      // behavior this optimization replaces.
+      // reading as unproven for its first cadence. It is a stamp and not yet a
+      // cadence, so it starts no watchdog: what this frame proves is that the
+      // stream is alive now, not that the server will keep saying so.
       stampWorkbenchHeartbeat(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
@@ -2973,7 +3005,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           source: sourceKind,
         };
         if (sourceKind === 'controller') {
-          eventBridgeConnectedRef.current = true;
+          eventControllerLegRef.current = 'connected';
           setWorkbenchEventConnectionState('connected');
           dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: true }));
         }
@@ -2999,6 +3031,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {
         // The frame arrived, which is what matters; keep the current cadence.
       }
+      // This is the server declaring a cadence, which is what makes a deadline
+      // enforceable. Set before stamping, because stamping is what arms it.
+      eventHeartbeatObservedRef.current = true;
       stampWorkbenchHeartbeat(intervalMs);
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
@@ -3154,12 +3189,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
       getWorkbenchEventReconnectLoop().streamOpened();
-      eventBridgeConnectedRef.current = envelope.data.connected;
+      const previousLeg = eventControllerLegRef.current;
+      eventControllerLegRef.current = envelope.data.connected ? 'connected' : 'disconnected';
       setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'reconnecting');
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onEventBridgeStatus?.(envelope.data);
       });
+      // A leg that was down and is now up is a gap that just ended. The browser
+      // socket stayed open across it, so no reconnect will announce this one --
+      // but the meaning is identical, so it arrives through the same signal, and
+      // consumers need no second concept to handle it. Only from `disconnected`:
+      // a new stream's opening report is the leg's state, not a recovery, and
+      // treating it as one would charge every connect a duplicate catch-up.
+      if (previousLeg === 'disconnected' && envelope.data.connected) {
+        const connected = workbenchEventHandshake();
+        if (connected) dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
+      }
     });
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
@@ -3208,8 +3254,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Timers are not trustworthy across a hidden period -- throttled, frozen,
     // or fired while hidden and declined -- so re-establish the watch on a
     // stream that was kept rather than reasoning about which of those happened.
-    // Idempotent: it re-arms off the surviving stamp, and a recycled stream has
-    // no stamp yet and starts watching on `connected`.
+    // Idempotent: it re-arms off the surviving stamp, and declines for a stream
+    // that was recycled or never declared a cadence.
     armWorkbenchHeartbeatWatchdog();
   };
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
@@ -4154,7 +4200,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
       }
-      if (eventBridgeConnectedRef.current) {
+      if (eventControllerLegRef.current === 'connected') {
         queueMicrotask(() => {
           if (eventHandlersRef.current.has(handlers)) {
             handlers.onEventBridgeStatus?.({ connected: true });

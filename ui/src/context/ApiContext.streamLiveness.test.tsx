@@ -79,10 +79,35 @@ const Subscriber = () => {
   return null;
 };
 
+/** A heartbeat, which is also the server declaring the cadence it owes. */
+const emitHeartbeat = () => {
+  FakeEventSource.latest().emit('heartbeat', {
+    interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+  });
+};
+
+/** What the UI server reports about its own leg to the controller. */
+const emitControllerLeg = (connected: boolean) => {
+  FakeEventSource.latest().emit('workbench.events.bridge.status', {
+    type: 'workbench.events.bridge.status',
+    data: { connected },
+  });
+};
+
 /** Open a stream and complete its handshake, as a real connect would. */
-const mountConnectedStream = () => {
+const mountStream = () => {
   render(<ApiProvider><Subscriber /></ApiProvider>);
   FakeEventSource.latest().emit('connected', { sub_id: 1 });
+};
+
+/**
+ * The ordinary case: a stream that handshook and then declared its cadence.
+ * Only a server that declares one can be held to a deadline, so anything about
+ * the watchdog has to start here rather than at the handshake.
+ */
+const mountConnectedStream = () => {
+  mountStream();
+  emitHeartbeat();
 };
 
 const setVisibility = (state: 'visible' | 'hidden') => {
@@ -129,9 +154,7 @@ describe('ApiProvider workbench stream liveness', () => {
     // the handshake would have killed this stream during the second pass.
     for (let pass = 0; pass < 3; pass += 1) {
       vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
-      FakeEventSource.latest().emit('heartbeat', {
-        interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
-      });
+      emitHeartbeat();
       reactivate();
     }
     expect(FakeEventSource.instances).toHaveLength(1);
@@ -209,5 +232,67 @@ describe('ApiProvider workbench stream liveness', () => {
     reactivate();
     expect(FakeEventSource.latest().closed).toBe(false);
     expect(onConnected).toHaveBeenCalledTimes(2);
+  });
+
+  it('ends a controller-leg gap in place, without recycling the browser leg', () => {
+    mountConnectedStream();
+
+    // The leg's opening report is its state, not a recovery. A stream that just
+    // dispatched its handshake catch-up must not be charged a second one, or
+    // every connect would cost double what it saves.
+    emitControllerLeg(true);
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // While that leg is down the controller publishes into a severed bridge and
+    // nothing replays it, so this is a real gap -- one the browser socket sails
+    // straight through, heartbeating, with no error to report.
+    emitControllerLeg(false);
+    vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
+    emitHeartbeat();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    emitControllerLeg(true);
+    expect(onConnected).toHaveBeenCalledTimes(2);
+    // Reopening this socket would have inherited the same severed bridge, so the
+    // recovery is announced on the stream that stayed up rather than by making a
+    // new one.
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(FakeEventSource.latest().closed).toBe(false);
+
+    // And it is the transition that carries the meaning, every time it happens.
+    emitControllerLeg(false);
+    emitControllerLeg(true);
+    expect(onConnected).toHaveBeenCalledTimes(3);
+  });
+
+  it('never puts a stream on a deadline its server never declared', () => {
+    mountStream();
+    const legacy = FakeEventSource.latest();
+
+    // An older server -- a rollback under a tab that stayed open -- completes
+    // the handshake and then says nothing more. A deadline is a claim about a
+    // cadence, and this server made none, so there is nothing to enforce:
+    // closing it on a timer would recycle a healthy stream every stale window,
+    // forever, charging every consumer a catch-up each round.
+    vi.advanceTimersByTime(STALE_AFTER_MS * 4);
+    expect(legacy.closed).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // It still cannot vouch for a gap, so the reactivation edge recycles it --
+    // which is the pre-heartbeat behavior this optimization replaces, and no
+    // worse than it.
+    reactivate();
+    expect(legacy.closed).toBe(true);
+  });
+
+  it('puts a stream on a deadline as soon as its server declares one', () => {
+    mountStream();
+    const proven = FakeEventSource.latest();
+
+    vi.advanceTimersByTime(1_000);
+    emitHeartbeat();
+    vi.advanceTimersByTime(STALE_AFTER_MS);
+    expect(proven.closed).toBe(true);
   });
 });
