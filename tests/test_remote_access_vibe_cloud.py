@@ -3448,3 +3448,61 @@ def test_pair_refuses_to_publish_binding_for_a_replaced_instance(monkeypatch, tm
     state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
     redeemed = _pair_redeem_response()["instance_id"]
     assert state is None or state.get("instance_id") != redeemed
+
+
+def test_overlapping_heartbeat_refuses_stale_personal_kind(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r4: capture generation BEFORE the network call.
+
+    Two overlapping runtime-status requests: the newer Organization response
+    lands first; the older Personal response must CAS-fail and leave the
+    binding Organization.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "organization"},
+    )
+
+    from storage import remote_access_authorization_service
+
+    captured = remote_access_authorization_service.current_instance_binding_generation(
+        ensure=False
+    )
+    # Newer Organization heartbeat lands first.
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    # Older in-flight Personal response, captured before the Org persist,
+    # must CAS-fail against the newer generation.
+    refused = remote_access._persist_instance_kind(
+        "inst_123",
+        "personal",
+        reconcile=True,
+        expected_binding_generation=captured,
+    )
+    assert refused is False
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert state is not None
+    assert state["instance_kind"] == "organization"
+    assert state["generation"] > captured
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "organization"},
+    )
+    assert remote_access.report_runtime_status(V2Config.load())["ok"] is True
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"

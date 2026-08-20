@@ -2530,3 +2530,63 @@ def test_revoked_write_refused_when_transition_completes_between_check_and_write
         assert stored.get("authorization_state") != "revoked"
     # The captured generation is no longer current.
     assert remote_access_authorization_service.current_instance_binding_generation() >= captured
+
+
+def test_kindless_current_row_revalidates_after_known_kind_bootstrap(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r4: a released current row with no vibe_instance_kind
+    must refresh on the first request after a known-kind Personal pairing
+    bootstraps, instead of returning a kindless payload.
+    """
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert record is not None
+    claims = dict(record["claims"])
+    claims.pop("vibe_instance_kind", None)
+    remote_access_authorization_service.upsert_scoped(
+        reference=record["id"],
+        instance_id="inst_123",
+        subject="user-1",
+        email=record["email"],
+        scope_kind=record["scope_kind"],
+        scope_ref=record["scope_ref"],
+        authorization_state="current",
+        claims=claims,
+        last_checked_at=now,
+        updated_at=now,
+    )
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(config, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "personal"
+    assert len(calls) == 1
+    assert result.payload is not None
+    assert result.payload.get("vibe_instance_kind") == "personal"

@@ -103,6 +103,29 @@ def test_unbound_kindless_web_push_snapshot_is_rejected(monkeypatch, tmp_path) -
     )
 
 
+def test_unrecognized_web_push_snapshot_kind_is_rejected(tmp_path) -> None:
+    """Regression PR #1606 r4: a present-but-unrecognized kind is not a
+    no-kind legacy snapshot and must not fall through to Personal policy.
+    """
+
+    config = _paired_revision_config(41, instance_kind="personal")
+    record = _remote_authorization_record(
+        "remote:personal-user",
+        instance_id="inst-push",
+    )
+    record["vibe_instance_kind"] = "something-else"
+
+    decision = web_push_notifications._evaluate_record_authorization(
+        config,
+        "remote:personal-user",
+        record,
+    )
+
+    assert not decision.authorized
+    assert decision.disposition == web_push_notifications.WEB_PUSH_DISPOSITION_REVOKED
+    assert decision.reason == "persisted snapshot instance kind is unrecognized"
+
+
 def test_kind_specific_web_push_snapshot_requires_known_current_pairing_kind(tmp_path) -> None:
     config = _paired_revision_config(41, instance_kind="")
     record = _remote_authorization_record(

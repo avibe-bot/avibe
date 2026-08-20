@@ -1830,3 +1830,130 @@ def test_gate_under_writer_lock_does_not_open_a_second_write_connection(
             assert context is None or context.instance_id == "same-instance"
     finally:
         engine.dispose()
+
+
+def test_typed_reader_from_sqlite_migration_does_not_persist_config(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r4: the typed reader used under an open SQLite
+    writer must not persist on-load config migrations (that would invert
+    C2 lock order against a peer holding the config lock).
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    calls = {"persist": 0}
+    real_load = V2Config.load
+
+    def load_counting(*args, **kwargs):
+        persist = kwargs.get("persist_migrations", True)
+        if persist:
+            calls["persist"] += 1
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(V2Config, "load", staticmethod(load_counting))
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            _run_sqlite_data_migrations(connection)
+        assert calls["persist"] == 0
+    finally:
+        engine.dispose()
+
+
+def test_terminal_delivery_snapshots_are_left_byte_identical(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Regression PR #1606 r4: accepted/retired delivery snapshots are the
+    immutable submitted Message candidate and must not be rewritten.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        from storage.importer import _run_sqlite_data_migrations
+        from storage.models import agent_sessions, message_deliveries, scopes
+        import hashlib
+
+        snapshot = {
+            "metadata_json": json.dumps(
+                {
+                    resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+                        "sub": "legacy-user",
+                        "vibe_instance_role": "editor",
+                        "vibe_instance_access_source": "email",
+                        "claims_issued_at": 1_700_000_000,
+                    }
+                }
+            )
+        }
+        snapshot_json = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+        snapshot_sha = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        with engine.begin() as connection:
+            connection.execute(
+                scopes.insert().values(
+                    id="scope_term",
+                    platform="avibe",
+                    scope_type="project",
+                    native_id="proj_term",
+                    is_private=0,
+                    supports_threads=0,
+                    metadata_json="{}",
+                    first_seen_at="now",
+                    last_seen_at="now",
+                    updated_at="now",
+                )
+            )
+            connection.execute(
+                agent_sessions.insert().values(
+                    id="sess_term",
+                    scope_id="scope_term",
+                    title="t",
+                    status="idle",
+                    agent_backend="claude",
+                    agent_variant="default",
+                    session_anchor="anchor_term",
+                    native_session_id="native_term",
+                    created_at="now",
+                    updated_at="now",
+                    last_active_at="now",
+                    metadata_json="{}",
+                )
+            )
+            connection.execute(
+                message_deliveries.insert().values(
+                    id="del_retired",
+                    session_id="sess_term",
+                    priority="p3",
+                    state="retired",
+                    snapshot_json=snapshot_json,
+                    snapshot_sha256=snapshot_sha,
+                    dispatch_sha256=snapshot_sha,
+                    submitted_at="now",
+                    updated_at="now",
+                )
+            )
+            _run_sqlite_data_migrations(connection)
+            rows = {
+                row["id"]: row
+                for row in connection.execute(
+                    select(
+                        message_deliveries.c.id,
+                        message_deliveries.c.snapshot_json,
+                        message_deliveries.c.snapshot_sha256,
+                    )
+                ).mappings()
+            }
+        assert rows["del_retired"]["snapshot_json"] == snapshot_json
+        assert rows["del_retired"]["snapshot_sha256"] == snapshot_sha
+    finally:
+        engine.dispose()
