@@ -184,6 +184,53 @@ def test_legacy_upgrade_target_prefers_running_version_over_stale_metadata(monke
     )
 
 
+def test_legacy_upgrade_target_recovers_from_ui_only_process(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    tool_root = tmp_path / "uv" / "tools" / "vibe-remote"
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_dir = service_main.parent.parent / "vibe_remote-2.9.4.dist-info"
+    metadata_dir.mkdir()
+    (metadata_dir / "METADATA").write_text("Name: vibe-remote\nVersion: 2.9.4\n", encoding="utf-8")
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: 456)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: f'{python_path} -c "from vibe.ui_server import run_ui_server; run_ui_server()"',
+    )
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "2.9.4")
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="2.9.4",
+        package="vibe-remote",
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_service_launcher_from_process_strips_windows_quotes(monkeypatch, tmp_path):
+    python_path = tmp_path / "Program Files" / "uv" / "tools" / "avibe-os" / "Scripts" / "python.exe"
+    service_main = tmp_path / "Program Files" / "uv" / "tools" / "avibe-os" / "Lib" / "site-packages" / "vibe" / "service_main.py"
+    service_main.parent.mkdir(parents=True)
+    service_main.write_text("# old release\n", encoding="utf-8")
+    command = f'"{python_path}" "{service_main}"'
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: command)
+
+    target = restart_supervisor._service_launcher_from_process(123)
+
+    assert target == runtime.ServiceLauncher(python=str(python_path), main=str(service_main))
+
+
 def test_failed_legacy_upgrade_uses_discovered_target_for_rollback(monkeypatch, tmp_path):
     """The v3.0.12 path is recoverable even though it passed no rollback argv."""
 

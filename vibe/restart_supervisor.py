@@ -131,8 +131,22 @@ def _running_ui_version() -> str | None:
     return None
 
 
+def _launcher_from_python(python: str) -> runtime.ServiceLauncher | None:
+    """Pair an interpreter with the service entry point in its install."""
+
+    python_path = Path(python)
+    package_root = python_path.parent.parent / "lib"
+    main_candidates = sorted(package_root.glob("python*/site-packages/vibe/service_main.py"))
+    if not main_candidates:
+        package_root = python_path.parent.parent / "Lib" / "site-packages"
+        main_candidates = sorted(package_root.glob("vibe/service_main.py"))
+    if not main_candidates:
+        return None
+    return runtime.ServiceLauncher(python=python, main=str(main_candidates[0]))
+
+
 def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher | None:
-    """Read the old launcher from the still-running service command line."""
+    """Read the old launcher from a still-running service or UI command line."""
 
     if not pid:
         return None
@@ -140,7 +154,7 @@ def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher |
     if not command:
         return None
     try:
-        argv = shlex.split(command, posix=(os.name != "nt"))
+        argv = [arg.strip("\"'") for arg in shlex.split(command, posix=(os.name != "nt"))]
         if Path(argv[0]).name.lower() == "systemd-run" and "--" in argv:
             argv = argv[argv.index("--") + 1 :]
         if not argv or not Path(argv[0]).name.lower().startswith("python"):
@@ -149,23 +163,28 @@ def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher |
             (arg for arg in argv[1:] if not arg.startswith("-") and Path(arg).name in {"main.py", "service_main.py"}),
             None,
         )
-        if entry is None:
-            return None
-        return runtime.ServiceLauncher(python=argv[0], main=entry)
+        if entry is not None:
+            return runtime.ServiceLauncher(python=argv[0], main=entry)
+        # The UI is launched with ``python -c`` rather than service_main.py.
+        # Its interpreter still identifies the install that owns the old code.
+        return _launcher_from_python(argv[0])
     except (IndexError, ValueError):
         return None
 
 
-def _legacy_service_launcher(vibe_path: str | None, *, service_pid: int | None = None) -> runtime.ServiceLauncher:
+def _legacy_service_launcher(
+    vibe_path: str | None, *, service_pid: int | None = None, ui_pid: int | None = None
+) -> runtime.ServiceLauncher:
     """Recover the launcher that existed before the package-manager replace.
 
     The service command is authoritative: the normal ``~/.local/bin/vibe``
     symlink may already point at the replacement by the time this process starts.
     """
 
-    process_launcher = _service_launcher_from_process(service_pid)
-    if process_launcher is not None:
-        return process_launcher
+    for pid in (service_pid, ui_pid):
+        process_launcher = _service_launcher_from_process(pid)
+        if process_launcher is not None:
+            return process_launcher
 
     fallback = runtime.current_service_launcher()
     if not vibe_path:
@@ -178,22 +197,46 @@ def _legacy_service_launcher(vibe_path: str | None, *, service_pid: int | None =
         python_path = Path(python)
         if not python or not python_path.is_file():
             return fallback
-        package_root = python_path.parent.parent / "lib"
-        main_candidates = sorted(package_root.glob("python*/site-packages/vibe/service_main.py"))
-        if not main_candidates:
-            return fallback
-        return runtime.ServiceLauncher(python=str(python_path), main=str(main_candidates[0]))
+        return _launcher_from_python(str(python_path)) or fallback
     except (OSError, IndexError, ValueError):
         return fallback
 
 
-def _launcher_package_name(launcher: runtime.ServiceLauncher) -> str:
+def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
+    """Read all supported distributions from the launcher's site-packages."""
+
+    site_packages = Path(launcher.main).resolve().parent.parent
+    entries: list[tuple[str, str]] = []
+    try:
+        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
+            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+            name = str(payload.get("Name") or "").strip()
+            version = str(payload.get("Version") or "").strip()
+            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
+                entries.append((name, version))
+    except (OSError, UnicodeError, ValueError):
+        return []
+    return entries
+
+
+def _launcher_package_name(launcher: runtime.ServiceLauncher, *, version: str | None = None) -> str:
     """Infer the distribution name that owns a launcher when metadata is stale."""
+
+    metadata = _launcher_dist_metadata(launcher)
+    if version:
+        exact = [name for name, candidate in metadata if candidate == version]
+        if exact:
+            return exact[0]
 
     executable = launcher.python.replace("\\", "/")
     for package in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
         if f"/uv/tools/{package}/" in executable:
             return package
+    names = {name for name, _version in metadata}
+    if PACKAGE_NAME in names:
+        return PACKAGE_NAME
+    if LEGACY_PACKAGE_NAME in names:
+        return LEGACY_PACKAGE_NAME
     return installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
 
 
@@ -207,15 +250,10 @@ def _legacy_install_metadata(
     running, so unrelated metadata must never win by directory order.
     """
 
-    main = Path(launcher.main).resolve()
-    site_packages = main.parent.parent
     try:
         from vibe import __version__ as replacement_version
 
-        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
-            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
-            name = str(payload.get("Name") or "").strip()
-            version = str(payload.get("Version") or "").strip()
+        for name, version in _launcher_dist_metadata(launcher):
             if (
                 name == package_name
                 and version
@@ -234,9 +272,10 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
     if trigger != "upgrade":
         return None
     service_pid = _read_recorded_pid()
-    launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid)
-    package = _launcher_package_name(launcher)
+    ui_pid = _read_recorded_ui_pid() if service_pid is None else None
+    launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid, ui_pid=ui_pid)
     version = _running_ui_version()
+    package = _launcher_package_name(launcher, version=version)
     if version is None:
         metadata = _legacy_install_metadata(launcher, package_name=package)
         if metadata is None:
