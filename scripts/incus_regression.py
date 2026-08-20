@@ -542,15 +542,18 @@ class WorktreeMetadata:
     def reserve(self, target: RegressionTarget, *, dry_run: bool = False) -> WorktreeReservation:
         """Record the slug and its port before the environment is built.
 
-        The claim handed back knows whether this run is what brought the row into
-        existence, because that is the only condition under which releasing it
-        could be right and here is the only place it is knowable: decided under
-        the lock, by the code doing the write. A remote accessor writes nothing,
-        so its claim created nothing and has nothing to give back.
+        The row carries an opaque claim minted here and the reservation handed
+        back carries the same value, so giving the row up later can compare
+        instead of remember. It has to: `reserve` merges over whatever row it
+        finds, which is exactly how a second `up` on this slug takes a row this
+        run wrote, and the claim is what makes that takeover observable
+        afterwards. A remote accessor writes nothing, so its reservation holds no
+        claim and has nothing to give back.
         """
         reservation = WorktreeReservation(metadata=self, target=target, dry_run=dry_run)
         if dry_run or target.target != WORKTREE_TARGET:
             return reservation
+        reservation.claim = os.urandom(8).hex()
         row = {
             "path": str(self.repo_root),
             "project": target.project,
@@ -558,13 +561,9 @@ class WorktreeMetadata:
             "host_port": target.host_port,
             "reserved_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch_name(self.repo_root),
+            "claim": reservation.claim,
         }
-
-        def claim(worktrees: dict) -> None:
-            reservation.created = target.slug not in worktrees
-            worktrees.setdefault(target.slug, {}).update(row)
-
-        self.mutate(claim)
+        self.mutate(lambda worktrees: worktrees.setdefault(target.slug, {}).update(row))
         return reservation
 
     def complete(self, target: RegressionTarget) -> None:
@@ -592,6 +591,24 @@ class WorktreeMetadata:
 
         self.mutate(prune)
 
+    def release(self, target: RegressionTarget, claim: str) -> None:
+        """Drop a reservation row while it is still the one that claim wrote.
+
+        The comparison happens inside the removal's own load-modify-save, under
+        the lock, because it is a claim about the row as it is now: between
+        reserving and releasing, another `up` on this slug may have merged its
+        own row over this one and be building against it. Read the row before
+        taking the lock and this becomes the accident it exists to prevent --
+        a failing run freeing a port a live run has already reserved.
+        """
+
+        def prune(worktrees: dict) -> None:
+            row = worktrees.get(target.slug)
+            if isinstance(row, dict) and row.get("claim") == claim:
+                del worktrees[target.slug]
+
+        self.mutate(prune)
+
 
 @dataclass
 class WorktreeReservation:
@@ -603,38 +620,51 @@ class WorktreeReservation:
     still in flight -- which `reconcile` refuses to prune, by design -- so the
     host port stayed reserved until someone deleted the slug by hand.
 
-    Dropping it is only ever right under two conditions, and both live here
-    rather than in `up`, for the reason round 3 named: a question every caller has
-    to remember to ask is how a defect gets in.
+    Giving it back is only ever right while two things are true, and neither can
+    be carried here from an earlier moment -- which is the whole of what an
+    earlier draft of this class got wrong. It remembered "the row did not exist
+    when I looked", and a concurrent `up` on the same slug could take the row
+    over before the failure that consumed it. It also remembered "I am about to
+    create something", set before `ensure_project_and_instance` runs its own
+    listing, so a listing that never answered kept a row for an environment
+    nothing had begun. A remembered fact standing in for an observation is the
+    same defect twice, and every read inserted between the two moments reopens
+    it. So both are read at the moment of deciding, and both live here rather
+    than in `up`, for the reason round 3 named: a question every caller has to
+    remember to ask is how a defect gets in.
 
-    - This run must be what brought the row into existence. An `up` on an
-      environment that already had a row is re-entering a claim older than
-      itself, and releasing that would free a port a live environment is bound
-      to -- the exact accident the row exists to prevent.
-    - Nothing may hold the port yet. Once `keep` is called the daemon may hold a
-      project or an instance, and a failure from there on is a "cannot tell"
-      that resolves the same way: keep the row.
+    - The row must still be the one this reservation wrote, compared under the
+      mapping lock in the same write that removes it.
+    - The daemon must say the project is absent. Present means something may
+      already bind this port, and a listing that cannot answer is a "cannot
+      tell" resolved the way this runner resolves every other one: keep the row.
     """
 
     metadata: WorktreeMetadata
     target: RegressionTarget
     dry_run: bool = False
-    created: bool = False
-    held: bool = False
-
-    def keep(self) -> None:
-        """Declare that the claim now outlives this run, whatever happens next."""
-        self.held = True
+    claim: str | None = None
 
     def complete(self) -> None:
         """Stamp the environment as built, ending the reservation."""
         if not self.dry_run:
             self.metadata.complete(self.target)
 
-    def release(self) -> None:
-        """Give the claim back if this run is the only thing that ever held it."""
-        if self.created and not self.held:
-            self.metadata.forget([self.target.slug])
+    def release(self, runner: Runner) -> None:
+        """Give the row back if nothing came of it and nobody else has taken it."""
+        if self.claim is None:
+            return
+        try:
+            stranded = project_exists(runner, self.metadata.remote, self.target.project)
+        except BaseException:
+            # Asked while an `up` is already failing, so a daemon that cannot
+            # answer -- or a second Ctrl-C landing here -- is an ordinary way to
+            # get no answer rather than a new fault. Keeping the row is the
+            # conservative half of "cannot tell", and swallowing this is what
+            # lets the failure that started the unwind be the one that surfaces.
+            return
+        if not stranded:
+            self.metadata.release(self.target, self.claim)
 
 
 def allocate_worktree_port(
@@ -2230,9 +2260,12 @@ def cmd_up(args: argparse.Namespace) -> int:
         target = resolve_target(args, repo_root, dry_run=args.dry_run)
         metadata = WorktreeMetadata(repo_root, args.remote)
         reservation = metadata.reserve(target, dry_run=args.dry_run)
+    # Built before the attempt, not inside it: releasing the reservation asks the
+    # daemon what it holds, and a failure while acquiring the update lock would
+    # otherwise reach that handler with no runner to ask through.
+    runner = Runner(dry_run=args.dry_run)
     try:
         with target_update_lock(repo_root, target, dry_run=args.dry_run):
-            runner = Runner(dry_run=args.dry_run)
             target_exists = instance_exists(runner, args.remote, target.project, target.instance)
             if not args.dry_run and not target_exists and args.remote is None:
                 # Reached only once the daemon has enumerated its instances and this one
@@ -2250,10 +2283,6 @@ def cmd_up(args: argparse.Namespace) -> int:
                     allow_reset_paired_master=getattr(args, "allow_reset_paired_master", False),
                     remote=args.remote,
                 )
-            # Everything above only reads, so up to here a failure leaves the row
-            # as the one thing this run brought about. From here the daemon may
-            # hold a project or an instance bound to this port.
-            reservation.keep()
             ensure_project_and_instance(
                 runner,
                 target,
@@ -2308,7 +2337,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     except BaseException:
         # Not `Exception`: Ctrl-C is how an `up` is abandoned in practice, and a
         # KeyboardInterrupt would otherwise leave exactly the row this exists for.
-        reservation.release()
+        reservation.release(runner)
         raise
     print_summary(target)
     return 0

@@ -175,13 +175,17 @@ is worse than keeping a row nobody needs:
   `up` records the slug and its port before it creates the project and the
   instance, so this is what a concurrent `up` looks like from the outside. The
   reservation lasts exactly as long as the run that makes it: an `up` that fails
-  before it asks the daemon to create anything releases the row on its way out,
-  so a reservation still standing is a live `up` — or one killed outright, which
-  cannot be told apart from the first and is removed by
-  `delete --target worktree --slug <slug> --yes` like every other removal. Once
-  creation may have begun the row stays even on failure: a project or instance
-  may now bind that port, and handing it to the next `up` is worse than keeping
-  a row nobody needs.
+  gives the row back on its way out, so a reservation still standing is a live
+  `up` — or one killed outright, which cannot be told apart from the first and is
+  removed by `delete --target worktree --slug <slug> --yes` like every other
+  removal. Both conditions for giving it back are read at that moment rather
+  than remembered from an earlier one. The daemon must report no project for
+  the slug, since a project it holds may bind that port and handing the port to
+  the next `up` is worse than keeping a row nobody needs — and a listing that
+  cannot answer is an unanswered question here too, so the row stays. The row
+  must also still be the one that run wrote, because `up` merges over whatever
+  row it finds: a second `up` on the same slug takes the row over, and the first
+  one failing afterwards must not free a port the second is building on.
 - `worktrees.json` is reached only through an accessor bound to the daemon it
   describes. The file reserves host ports on this machine and records what this
   machine's daemon holds, so every read of it and every write to it is a claim

@@ -128,9 +128,11 @@ Hard rules:
   listing whose every entry was readable, that listing held neither its project
   nor its instance, and the row is not a reservation whose `up` may still be
   running. A reservation lives exactly as long as its run: an `up` that fails
-  before asking the daemon to create anything releases its own row, while one
-  that fails afterwards keeps it, because a project or instance may already bind
-  that port. `worktrees.json` is reached only through an accessor bound to the
+  gives its row back while the daemon reports no project for that slug and the
+  row is still the one that run wrote, both read at that moment rather than
+  remembered from an earlier one — so a project that may bind the port, a
+  listing that cannot answer, and a concurrent `up` that took the slug over all
+  keep the row. `worktrees.json` is reached only through an accessor bound to the
   daemon it describes — it reserves host ports on this machine and records what
   this machine's daemon holds — so a `--remote` command cannot name it and
   neither reads nor writes it: `reconcile --remote` reports the remote inventory

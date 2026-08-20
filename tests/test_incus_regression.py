@@ -3206,39 +3206,44 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     assert "updated_at" in mapping
 
 
+@pytest.mark.parametrize("holds_project", [False, True], ids=["daemon-empty", "daemon-holds-project"])
 @pytest.mark.parametrize("recorded", [False, True], ids=["new-row", "existing-row"])
 @pytest.mark.parametrize(
     "fail_at",
     ["require_runtime_seed_env", "ensure_project_and_instance", "sync_source"],
 )
-def test_up_gives_back_only_the_reservation_it_created_and_only_before_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str, recorded: bool
+def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str, recorded: bool, holds_project: bool
 ) -> None:
-    """A failed `up` drops the row only if it created it and nothing may bind it.
+    """A failed `up` drops its row exactly when the daemon holds no project for it.
 
-    Both halves are asserted as one derived expectation rather than a table of
-    steps, so the property is the assertion and a step inserted later is
-    classified by the code rather than by nobody:
+    The expectation is derived from what the daemon reports, not from a table of
+    steps, because that is the whole rule: releasing is safe while nothing binds
+    this port, and only the daemon knows. Asserting the step instead would be
+    asserting a prediction -- a run that fails inside
+    `ensure_project_and_instance` may have created the project or may have
+    failed on the listing that decides whether to, and those are opposite
+    answers from one step.
 
-    - Up to `ensure_project_and_instance` the run has only read, so the row is
-      the one thing it brought about; from that call on the daemon may hold a
-      project or an instance and releasing would hand a live environment's port
-      to the next `up`.
-    - A row that predates the run is a claim older than the run. `up` on an
-      existing environment re-enters it, so releasing there would free the port
-      of something already running -- worse than the leak being fixed.
+    The row's own age is on the same assertion for the same reason. It used to
+    decide the outcome, on the theory that a pre-existing row is a claim older
+    than the run -- but "older" was standing in for "something exists", and here
+    those come apart: a row whose environment was deleted behind the runner's
+    back is not a claim about anything, while a project the daemon holds must
+    keep its port whether this run recorded it or not.
 
     Left behind, an abandoned reservation reads as one still in flight, which
     `reconcile` refuses to prune by design, so its port stayed reserved until
     someone deleted the slug by hand.
     """
     calls = []
+    inventory = ("avr-wt-demo-branch",) if holds_project else ()
 
     class NewRunner:
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names = daemon_listing(*inventory)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3331,11 +3336,83 @@ def test_up_gives_back_only_the_reservation_it_created_and_only_before_creation(
 
     assert fail_at in calls
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
-    assert ("demo-branch" in mapping) == (recorded or "ensure_project_and_instance" in calls)
-    if recorded:
-        # Still the same claim, still holding the same port -- re-entering a
-        # reservation must not be a way to lose one.
+    assert ("demo-branch" in mapping) == holds_project
+    if holds_project:
+        # A project the daemon holds keeps its port, and `--host-port`-free
+        # reuse of a recorded one is the reason the row exists at all.
         assert mapping["demo-branch"]["host_port"] == 15200
+
+
+def test_up_leaves_behind_a_row_another_run_has_taken_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing `up` must not release a row a concurrent `up` now owns.
+
+    `reserve` merges over whatever row it finds, so two `up` commands on one slug
+    are ordered by the mapping lock and not excluded by it: the second takes the
+    row while the first is still between its reserve and its failure. Everything
+    else here says release -- the daemon reports nothing, so nothing binds the
+    port, and the first run is the one that brought the row into existence. Only
+    the claim recorded in the row says otherwise, which is why it is the row and
+    not the run that gets asked.
+    """
+    claims = []
+
+    class NewRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names = daemon_listing()
+
+        def run(self, command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout="{}")
+
+    def take_over(*call_args, **kwargs):
+        other = incus_regression.resolve_target(args, tmp_path, dry_run=False)
+        claims.append(incus_regression.WorktreeMetadata(tmp_path, None).reserve(other).claim)
+        raise RuntimeError("taken over")
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
+    monkeypatch.setattr(incus_regression, "Runner", NewRunner)
+    monkeypatch.setattr(incus_regression, "require_runtime_seed_env", take_over)
+
+    args = argparse.Namespace(
+        target="worktree",
+        slug="demo-branch",
+        host_port=None,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        force_ui=False,
+        reset_mode="none",
+    )
+
+    with pytest.raises(RuntimeError):
+        incus_regression.cmd_up(args)
+
+    mapping = json.loads(
+        (tmp_path / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8")
+    )["worktrees"]
+    assert mapping["demo-branch"]["claim"] == claims[0]
+    assert mapping["demo-branch"]["host_port"] == 15200
 
 
 def test_up_releases_its_reservation_when_the_run_is_interrupted(
