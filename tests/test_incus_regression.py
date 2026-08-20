@@ -2004,30 +2004,35 @@ def test_reconcile_lists_names_the_runner_would_not_mint_and_offers_only_runnabl
     assert payload["worktrees"] == {}
 
 
-def test_a_prune_keeps_a_row_for_its_claim_whatever_its_stamps_say(
+def test_a_prune_keeps_a_row_exactly_while_a_run_holds_its_slug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A row survives a `--yes` prune exactly while it carries a claim.
+    """A row survives a `--yes` prune exactly while its slug's lock is held.
 
     `up` records the slug and its port before it creates the project and the
-    instance, and it does not hold the mapping lock across that gap, so a row in
-    that state has no footprint yet and never had one: reading "no footprint" as
-    "stale" releases a port a live `up` is about to bind. What identifies such a
-    row is the claim its reservation left in it -- `reserve` writes one, and both
-    ends of the reservation take it away.
+    instance, so a row in that state has no footprint yet and never had one:
+    reading "no footprint" as "stale" releases a port a live `up` is about to
+    bind. What identifies such a row is not in the row. It is the update lock the
+    run holds from before it writes the row until the environment is built, which
+    the kernel drops however that run ends.
 
-    Every stamp shape is seeded against both answers rather than the two cases
-    the rule was first written from, because the rule must not read the stamps at
-    all. It used to compare them, which is wrong for more shapes than a list
-    would think to name: `reserve` merges, so a re-reserved slug keeps the
-    previous run's `updated_at`, and any clock that puts that stamp after the new
-    `reserved_at` -- one that moved backward, one machine's stamp in another's
-    file, a future-dated write -- made a live reservation read as finished and
-    its port free to hand out.
+    So every recorded shape is seeded against both answers, and only the lock is
+    allowed to move the outcome. Seeding rather than listing the exempt shapes is
+    the point: each rule that read the row was wrong about a shape its author had
+    not thought of. Comparing the two stamps was wrong for a re-reserved slug,
+    because `reserve` merges and the previous run's `updated_at` survives, so any
+    clock that put it after the new `reserved_at` read a live reservation as
+    finished. Requiring a claim was wrong for the reservation v3.0.12 writes,
+    which has no claim at all -- seeded here, since a released runner's rows are
+    a shipped shape this code has to live with.
     """
-    stamps = {
+    shapes = {
         "no stamps at all": {},
         "reserved, never completed": {"reserved_at": "2026-08-20T05:32:29.994595+00:00"},
+        "reserved by a released runner": {
+            "reserved_at": "2026-08-20T05:32:29.994595+00:00",
+            "branch": "fix/built-by-v3-0-12",
+        },
         "completed after reserving": {
             "reserved_at": "2026-08-20T05:32:29.994595+00:00",
             "updated_at": "2026-08-20T05:41:11.000000+00:00",
@@ -2045,30 +2050,42 @@ def test_a_prune_keeps_a_row_for_its_claim_whatever_its_stamps_say(
     }
 
     entries: dict[str, dict] = {}
-    held: set[str] = set()
-    for index, (shape, stamped) in enumerate(sorted(stamps.items())):
+    building: set[str] = set()
+    port = 53000
+    for index, (_shape, recorded) in enumerate(sorted(shapes.items())):
         for claimed in (True, False):
-            slug = f"{'held' if claimed else 'free'}-{index}"
-            entries[slug] = {
-                "path": str(tmp_path / "checkout"),
-                "host_port": 53000 + 2 * index + int(claimed),
-                **stamped,
-            }
-            if claimed:
-                entries[slug]["claim"] = f"claim-of-{slug}"
-                held.add(slug)
-    assert len(entries) == 2 * len(stamps) and len(held) == len(stamps)
+            for locked in (True, False):
+                slug = f"{'busy' if locked else 'idle'}-{index}-{'claimed' if claimed else 'bare'}"
+                entries[slug] = {"path": str(tmp_path / "checkout"), "host_port": port, **recorded}
+                port += 1
+                if claimed:
+                    entries[slug]["claim"] = f"claim-of-{slug}"
+                if locked:
+                    building.add(slug)
+    assert len(entries) == 4 * len(shapes) and len(building) == 2 * len(shapes)
 
     mapping_path, _ = reconcile_fixture(
         tmp_path, monkeypatch, entries=entries, projects=(), instances=()
     )
 
-    exit_code = incus_regression.cmd_reconcile(argparse.Namespace(yes=True, dry_run=False, remote=None))
-    out = capsys.readouterr().out
+    with contextlib.ExitStack() as stack:
+        for slug in sorted(building):
+            # Held from this process on purpose: `flock` belongs to the open file
+            # description, not the process, so the probe's own descriptor
+            # conflicts with these exactly as another run's would. A test that
+            # had to fork to hold a lock would be testing the fork.
+            lock_path = incus_regression.target_lock_path(
+                tmp_path / "repo", f"{incus_regression.WORKTREE_PROJECT_PREFIX}{slug}"
+            )
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = stack.enter_context(lock_path.open("w", encoding="utf-8"))
+            incus_regression.fcntl.flock(handle.fileno(), incus_regression.fcntl.LOCK_EX)
+        exit_code = incus_regression.cmd_reconcile(argparse.Namespace(yes=True, dry_run=False, remote=None))
+        out = capsys.readouterr().out
+        payload = json.loads(mapping_path.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
-    assert set(payload["worktrees"]) == held
+    assert set(payload["worktrees"]) == building
     # And each row is reported under what happened to it, so a kept one is not
     # silence and a dropped one is not a surprise. Read out of the report by
     # section rather than asserted line by line: the sections are what the
@@ -2076,7 +2093,7 @@ def test_a_prune_keeps_a_row_for_its_claim_whatever_its_stamps_say(
     reported: dict[str, set[str]] = {"kept": set(), "dropped": set()}
     section = None
     for line in out.splitlines():
-        if line.endswith("not built yet:"):
+        if line.endswith("is still holding:"):
             section = "kept"
         elif line.endswith("no longer has:"):
             section = "dropped"
@@ -2086,7 +2103,49 @@ def test_a_prune_keeps_a_row_for_its_claim_whatever_its_stamps_say(
             slug = line.strip().split()[0]
             if slug in entries:
                 reported[section].add(slug)
-    assert reported == {"kept": held, "dropped": set(entries) - held}
+    assert reported == {"kept": building, "dropped": set(entries) - building}
+
+
+def test_a_slug_is_in_flight_whenever_the_kernel_cannot_say_it_is_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a lock this probe took itself answers "nobody holds this slug".
+
+    A missing lock file is the one real absence: nothing has ever locked that
+    slug. Reading it must not create it, or the absence would be spent by the act
+    of asking. Everything else -- a lock somebody holds, a file this user cannot
+    open, a platform with no `flock` -- is a question left unanswered, and those
+    answer "held" for the same reason every unanswered question in `reconcile`
+    keeps the row.
+    """
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    lock_path = incus_regression.target_lock_path(repo, "avr-wt-demo")
+
+    assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is False
+    assert not lock_path.exists()
+
+    lock_path.parent.mkdir(parents=True)
+    with lock_path.open("w", encoding="utf-8") as handle:
+        # An `up` that ended left its lock file behind; the file is not the claim.
+        assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is False
+        incus_regression.fcntl.flock(handle.fileno(), incus_regression.fcntl.LOCK_EX)
+        assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is True
+    assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is False
+
+    real_open = os.open
+
+    def refuse(path, flags, *rest):
+        if str(path) == str(lock_path):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, flags, *rest)
+
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(incus_regression.os, "open", refuse)
+        assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is True
+
+    monkeypatch.setattr(incus_regression, "fcntl", None)
+    assert incus_regression.target_run_in_flight(repo, "avr-wt-demo") is True
 
 
 def test_reconcile_decides_under_the_mapping_lock_even_when_writing_nothing(
@@ -2150,7 +2209,11 @@ def test_a_command_takes_the_mapping_lock_only_for_the_daemon_it_describes(
     for remote in (None, "lab"):
         incus_regression.cmd_reconcile(argparse.Namespace(yes=False, dry_run=False, remote=remote))
         with pytest.raises(RuntimeError):
-            incus_regression.cmd_up(argparse.Namespace(env_file=None, dry_run=False, remote=remote))
+            # `up` names its update lock from the arguments alone, so the stub
+            # carries the identity even though the mapping is never reached.
+            incus_regression.cmd_up(
+                argparse.Namespace(env_file=None, dry_run=False, remote=remote, target="worktree", slug="demo")
+            )
 
     assert held == [True, True, False, False]
 
@@ -3161,9 +3224,21 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
     assert "write_runtime_env" in calls
 
 
-def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every row `up` writes is written under the mapping lock and its slug's lock.
+
+    Two locks, two properties. The mapping lock makes a read-modify-write of
+    `worktrees.json` atomic. The slug's update lock is what tells `reconcile` this
+    run exists at all, so a row written outside it is a row a concurrent
+    `reconcile --yes` may prune while this run is still building against it -- and
+    a second `up` on the same slug could merge its own port over this one's before
+    either had finished. Recording the depth each write saw states that as one
+    property over all writers, rather than naming the two that exist today.
+    """
     calls = []
     held = []
+    building = []
+    locked = []
     writes = []
 
     class ExistingRunner:
@@ -3192,17 +3267,20 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     original_write = incus_regression._write_worktree_mapping
 
     def recording_write(repo_root, payload):
-        writes.append(len(held))
+        writes.append((len(held), len(building)))
         original_write(repo_root, payload)
 
     monkeypatch.setattr(incus_regression, "_write_worktree_mapping", recording_write)
 
-    def target_lock(repo_root, target, *, dry_run):
+    def target_lock(repo_root, project, *, dry_run):
         class Lock:
             def __enter__(self):
                 calls.append("target_lock_enter")
+                locked.append(project)
+                building.append(project)
 
             def __exit__(self, exc_type, exc, tb):
+                building.pop()
                 calls.append("target_lock_exit")
 
         return Lock()
@@ -3274,19 +3352,22 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
 
     assert incus_regression.cmd_up(args) == 0
 
-    assert calls[:2] == ["mapping_lock_enter", "reserve_worktree_metadata"]
-    assert "target_lock_enter" in calls
+    assert calls[:3] == ["target_lock_enter", "mapping_lock_enter", "reserve_worktree_metadata"]
     # The reservation and the completion stamp are two writes, and `up` releases
-    # the lock between them, so the mapping's own writer has to take it. Asserting
-    # the depth every write saw states that as the property it is: no write to
-    # `worktrees.json` happens outside the lock, whoever performs it.
+    # the mapping lock between them, so the mapping's own writer has to take it.
+    # Both depths are asserted for every write: whoever performs it, no write to
+    # `worktrees.json` happens outside the mapping lock, and none happens outside
+    # the lock that proves this run is the one holding the slug.
     assert len(writes) == 2
-    assert all(depth >= 1 for depth in writes)
+    assert all(mapping_depth >= 1 and slug_depth >= 1 for mapping_depth, slug_depth in writes)
     payload = json.loads((tmp_path / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8"))
     mapping = payload["worktrees"]["demo-branch"]
     assert mapping["host_port"] == 15200
     assert mapping["project"] == "avr-wt-demo-branch"
     assert "updated_at" in mapping
+    # The lock is named before the row exists, so it is asserted against the row:
+    # a lock on any other name would be held while a different environment built.
+    assert locked == [mapping["project"]]
 
 
 @pytest.mark.parametrize("holds_project", [False, True], ids=["daemon-empty", "daemon-holds-project"])

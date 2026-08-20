@@ -178,27 +178,36 @@ is worse than keeping a row nobody needs:
   project nor its instance, and every entry in that listing must have been
   readable. A daemon that could not be reached, or an entry the runner could not
   identify, is an unanswered question rather than an absence, and aborts instead.
-- A row that reserves a slug whose environment is not built yet is left alone.
-  `up` records the slug and its port before it creates the project and the
-  instance, so this is what a concurrent `up` looks like from the outside. The
-  reservation lasts exactly as long as the run that makes it: an `up` that fails
-  gives the row back on its way out, so a reservation still standing is a live
-  `up` — or one killed outright, which cannot be told apart from the first and is
-  removed by `delete --target worktree --slug <slug> --yes` like every other
-  removal. Both conditions for giving it back are read at that moment rather
-  than remembered from an earlier one. The daemon must report no project for
-  the slug, since a project it holds may bind that port and handing the port to
-  the next `up` is worse than keeping a row nobody needs — and a listing that
-  cannot answer is an unanswered question here too, so the row stays. The row
-  must also still be the one that run wrote, because `up` merges over whatever
-  row it finds: a second `up` on the same slug takes the row over, and the first
-  one failing afterwards must not free a port the second is building on.
+- A row whose slug a live `up` is still holding is left alone. `up` records the
+  slug and its port before it creates the project and the instance, so this is
+  what a concurrent `up` looks like from the outside. Who holds a slug is asked
+  of the kernel, not of the file: an `up` takes that slug's update lock before it
+  writes the row and holds it until the environment is built, so `reconcile`
+  answers the question by trying to take the same lock. Nothing a run writes
+  could answer it. A record over-reports — a run killed outright leaves its own
+  behind — and under-reports, since a run from an older checkout writes no field
+  a newer `reconcile` would recognise; a lock does neither, because the kernel
+  drops it however the run ends and every version of the runner that builds a
+  worktree environment takes the same one. So an abandoned reservation is
+  reported as an environment the daemon no longer has and `--yes` prunes it,
+  while a live run's row is kept without any operator having to tell the two
+  apart. Not knowing counts as held: a platform without `flock`, or a lock file
+  that cannot be opened, keeps the row like every other unanswered question here.
+  One gap is left, and it is in older checkouts rather than in this rule: their
+  `up` writes the row and then takes the lock, so a `reconcile --yes` landing in
+  the instant between the two prunes a reservation whose build is about to start.
+  That instant is what is exposed there, not the build, and closing it would mean
+  deciding on the row's stamp again — written by a clock this command cannot
+  check, and no evidence about whether a run is live.
 
-  One opaque claim, written by the reservation and removed by whichever end of it
-  arrives, answers both "is a run holding this slug" and "is this row still
-  mine" — the two questions are the same fact, and no timestamp is compared to
-  decide either. A row that carries a claim is a reservation; a row without one
-  describes an environment that was built. `reserved_at` and `updated_at` are
+  Giving a row back at the end of a failed `up` is still worth doing — it frees
+  the port now instead of at the next `reconcile --yes` — and both of its
+  conditions are read at that moment rather than remembered from an earlier one.
+  The daemon must report no project for the slug, since a project it holds may
+  bind that port. The row must also still be the one that run wrote, which is
+  what the opaque claim in it is for: `up` merges over whatever row it finds, so
+  a later run can take the row over, and the first one failing afterwards must
+  not free a port the second is building on. `reserved_at` and `updated_at` are
   provenance for whoever reads the file, and nothing decides on them: a stamp
   written by another machine's clock, or by this one before it was corrected, is
   no evidence about whether an `up` is running right now. For the same reason a

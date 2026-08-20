@@ -285,14 +285,24 @@ def runtime_root(repo_root: Path) -> Path:
     return git_common_root(repo_root) / ".runtime" / "incus-regression"
 
 
+def target_lock_path(repo_root: Path, project: str) -> Path:
+    return runtime_root(repo_root) / "locks" / f"{project}.lock"
+
+
 @contextmanager
-def target_update_lock(repo_root: Path, target: RegressionTarget, *, dry_run: bool):
+def target_update_lock(repo_root: Path, project: str, *, dry_run: bool):
+    """Serialize runs against one environment, and say so to `reconcile`.
+
+    Keyed on the project name rather than on a resolved target, because that is
+    the whole key: a caller can name the lock before it has asked the mapping for
+    a port, which is what lets the port be allocated inside the lock that
+    protects it.
+    """
     if dry_run or fcntl is None:
         yield
         return
-    lock_dir = runtime_root(repo_root) / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{target.project}.lock"
+    lock_path = target_lock_path(repo_root, project)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as fh:
         print(f"Acquiring regression update lock: {lock_path}")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
@@ -300,6 +310,51 @@ def target_update_lock(repo_root: Path, target: RegressionTarget, *, dry_run: bo
             yield
         finally:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def target_run_in_flight(repo_root: Path, project: str) -> bool:
+    """Whether some live process is updating `project` right now.
+
+    Asked of the kernel rather than of `worktrees.json`, because no field a run
+    writes can answer it. A record lies in both directions: a run that dies
+    without unwinding leaves its own behind, and a run from a checkout that
+    predates the field writes nothing recognisable at all. The lock above cannot
+    do either. The kernel drops it when the holder exits however it exits, so it
+    cannot outlive its run, and every version of this runner that has ever built
+    a worktree environment takes it, at a path derived from the shared git common
+    root -- so this answers for an `up` started from another worktree, an older
+    checkout, or an installed release exactly as well as for one of ours. Those
+    older runs take the lock a moment after writing their row rather than before
+    it, so what is exposed there is that instant, not the build; reading the row
+    instead would mean trusting a stamp from another clock, which says nothing
+    about whether a run is live.
+
+    Not-yet-known answers in flight, as every unanswered question in `reconcile`
+    does: a platform without `flock`, a lock file this user cannot open. Only a
+    lock this call took itself proves nobody holds it.
+    """
+    if fcntl is None:
+        return True
+    lock_path = target_lock_path(repo_root, project)
+    try:
+        # Read-only, and no `mkdir`: a probe must not create the artifact whose
+        # absence is the answer. `flock` is owned by the open file description,
+        # so this conflicts with a lock held by this same process too -- the
+        # conservative side, and the only side it could safely land on.
+        fd = os.open(lock_path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        # Closing the descriptor drops whatever this probe just took, so the
+        # answer costs nothing beyond the moment it was read.
+        os.close(fd)
+    return False
 
 
 _held_mapping_locks: set[Path] = set()
@@ -581,19 +636,23 @@ class WorktreeMetadata:
         instead of remember. It has to: `reserve` merges over whatever row it
         finds, which is exactly how a second `up` on this slug takes a row this
         run wrote, and the claim is what makes that takeover observable
-        afterwards.
+        afterwards. `up` now reserves under the slug's update lock, so a takeover
+        while the first run is still building takes a platform without `flock`;
+        the claim is what keeps the property from depending on that.
 
         A claim is minted only when this run actually wrote a row, which is the
         one condition the reservation then needs: no claim covers a dry run, a
         target that owns no row, and a remote accessor that writes nothing --
         each of which used to be re-derived at every end of the reservation.
 
-        The row says a run holds this slug; it says nothing about what is built
-        there, because this run has not built it yet. `complete` owns the branch
-        and the commit for that reason: the merge means anything written here
-        lands beside the previous run's fields, and a reservation that wrote its
-        own branch produced a row reporting the new branch for an environment
-        still built from the old one's commit.
+        The row binds the slug to a port and a pair of object names; it says
+        nothing about what is built there, because this run has not built it yet,
+        and nothing about whether the run is still alive, because no field can
+        (`target_run_in_flight` is where that is asked). `complete` owns the
+        branch and the commit for the first reason: the merge means anything
+        written here lands beside the previous run's fields, and a reservation
+        that wrote its own branch produced a row reporting the new branch for an
+        environment still built from the old one's commit.
         """
         reservation = WorktreeReservation(metadata=self, target=target, dry_run=dry_run)
         if dry_run or not self.owned or target.target != WORKTREE_TARGET:
@@ -675,10 +734,13 @@ class WorktreeReservation:
     """A claim on a slug and its host port, scoped to the run that made it.
 
     `reserve` and `complete` are the two ends of an `up` that worked. This is the
-    third end, and it exists because a claim that outlives the process making it
-    is not a claim about anything: left behind, the row reads as a reservation
-    still in flight -- which `reconcile` refuses to prune, by design -- so the
-    host port stayed reserved until someone deleted the slug by hand.
+    third end: the row a failed run leaves is not wrong, only unwanted, and
+    giving it back here is what frees the host port now rather than at whatever
+    later `reconcile --yes` somebody happens to run. It is no longer the only way
+    back -- a reservation is kept alive by the update lock its run holds, and the
+    kernel drops that lock however the run ends, so an abandoned row is prunable
+    by construction -- but a port reclaimed only by a command nobody ran is a
+    port still allocated, and the next `up` on a fresh slug is what pays for it.
 
     Giving it back is only ever right while two things are true, and neither can
     be carried here from an earlier moment -- which is the whole of what an
@@ -788,6 +850,11 @@ class WorktreeEnvironment:
     other one is not a cosmetic omission: if the survivor is the convention-project
     instance, `reconcile` reports a footprint it can delete and prints no warning
     about the one it cannot reach.
+
+    `in_flight` is a field and not a property, because `entry` cannot derive it.
+    Whether a run still holds this slug is a fact about processes, so the caller
+    observes it through `target_run_in_flight` and passes it in; see that function
+    for why no recorded field is allowed to stand in for it.
     """
 
     slug: str
@@ -796,6 +863,7 @@ class WorktreeEnvironment:
     has_project: bool
     instances: tuple[ObservedInstance, ...]
     entry: dict | None
+    in_flight: bool
 
     @property
     def exists(self) -> bool:
@@ -844,26 +912,6 @@ class WorktreeEnvironment:
     def deletable_by_slug(self) -> bool:
         """Whether `delete --slug` reaches any part of this environment."""
         return self.reachable_by_slug and (self.has_project or bool(self.deletable_instances))
-
-    @property
-    def pending(self) -> bool:
-        """Whether metadata describes a reservation whose `up` has not ended.
-
-        The claim answers this, so nothing here compares stamps. `reserve`
-        records the slug and its port before the project and instance exist, and
-        mints the claim in the same row; both ends of the reservation take it
-        away again -- `complete` by replacing the row, `release` by dropping it.
-        A claim is therefore present exactly while a run holds this slug, which
-        is the question. The two wall-clock stamps were this property's first
-        implementation, from before the claim existed, and comparing them
-        answered it wrongly whenever the row carried a completion stamp older
-        than the reservation over it: a re-reserved slug (`reserve` merges, so
-        the previous run's `updated_at` survives) read as finished under a clock
-        that had moved backward, and a concurrent `reconcile --yes` was then free
-        to drop the row and release the port of an `up` still building against
-        it. The stamps stay as provenance; no decision reads them.
-        """
-        return bool((self.entry or {}).get("claim"))
 
     @property
     def footprint(self) -> str:
@@ -958,14 +1006,21 @@ def worktree_environments(runner: Runner, metadata: WorktreeMetadata) -> list[Wo
         entry = entries.get(slug)
         entry = entry if isinstance(entry, dict) else None
         instance = instance_names.get(slug, f"{WORKTREE_INSTANCE_PREFIX}{slug}")
+        project = projects.get(slug, f"{WORKTREE_PROJECT_PREFIX}{slug}")
         environments.append(
             WorktreeEnvironment(
                 slug=slug,
-                project=projects.get(slug, f"{WORKTREE_PROJECT_PREFIX}{slug}"),
+                project=project,
                 instance=instance,
                 has_project=slug in projects,
                 instances=instances.get(instance, ()),
                 entry=entry,
+                # Locks live on this machine, so they are evidence about runs
+                # started on it -- the same scope as the rows above, and the same
+                # reason. A remote daemon's environment may be built from a
+                # machine this one cannot see, and it has no local row to act on,
+                # so no answer is claimed for it.
+                in_flight=metadata.owned and target_run_in_flight(metadata.repo_root, project),
             )
         )
     return environments
@@ -995,22 +1050,38 @@ def describe_worktree_entry(entry: dict | None) -> str:
     return ", ".join(parts)
 
 
+def target_slug(args: argparse.Namespace, repo_root: Path) -> str:
+    """The slug this invocation names, without consulting the mapping.
+
+    Split out because a caller may need the environment's identity before it is
+    allowed to read ports -- `up` names its update lock from this and allocates
+    inside it. Identity is derivable from the arguments alone, so nothing here
+    touches `worktrees.json`.
+    """
+    if args.target not in TARGETS:
+        raise RegressionError(f"target must be one of: {', '.join(sorted(TARGETS))}")
+    if args.target == MASTER_TARGET:
+        return "master"
+    return worktree_slug(repo_root, args.slug)
+
+
 def resolve_target(
     args: argparse.Namespace,
     repo_root: Path,
     *,
     dry_run: bool,
     allocate_port: bool = True,
+    slug: str | None = None,
 ) -> RegressionTarget:
-    if args.target not in TARGETS:
-        raise RegressionError(f"target must be one of: {', '.join(sorted(TARGETS))}")
+    # An identity already observed is passed in rather than observed again: a
+    # slug derived from the checkout's branch is a question that can be answered
+    # twice differently, and `up` has to lock the same environment it builds.
+    slug = slug or target_slug(args, repo_root)
     ui_host = args.ui_host or host_bind_env()
     ui_port = args.ui_port
     if args.target == MASTER_TARGET:
-        slug = "master"
         host_port = args.host_port or env_int("REGRESSION_PORT") or DEFAULT_MASTER_HOST_PORT
     else:
-        slug = worktree_slug(repo_root, args.slug)
         metadata = WorktreeMetadata(repo_root, args.remote)
         host_port = args.host_port or metadata.port_for(slug)
         if host_port is None and allocate_port:
@@ -2314,15 +2385,25 @@ def cmd_up(args: argparse.Namespace) -> int:
     if not args.dry_run:
         require_incus()
     metadata = WorktreeMetadata(repo_root, args.remote)
-    with metadata.locked(dry_run=args.dry_run):
-        target = resolve_target(args, repo_root, dry_run=args.dry_run)
-        reservation = metadata.reserve(target, dry_run=args.dry_run)
+    # The lock comes before the row, because the lock is what says a run holds
+    # this slug: `reconcile` prunes a reservation whose lock nobody holds, so a
+    # row written outside it is a row that can be dropped while this run is still
+    # building against it. Naming the lock needs only the environment's identity,
+    # so the port is asked for and recorded inside the lock that protects it --
+    # picking a free port and reserving it stay one step under the mapping lock,
+    # which is why the identity is observed here and not derived from a target.
+    slug = target_slug(args, repo_root)
+    lock_project = project_name_for(args.target, slug)
     # Built before the attempt, not inside it: releasing the reservation asks the
     # daemon what it holds, and a failure while acquiring the update lock would
     # otherwise reach that handler with no runner to ask through.
     runner = Runner(dry_run=args.dry_run)
+    reservation: WorktreeReservation | None = None
     try:
-        with target_update_lock(repo_root, target, dry_run=args.dry_run):
+        with target_update_lock(repo_root, lock_project, dry_run=args.dry_run):
+            with metadata.locked(dry_run=args.dry_run):
+                target = resolve_target(args, repo_root, dry_run=args.dry_run, slug=slug)
+                reservation = metadata.reserve(target, dry_run=args.dry_run)
             target_exists = instance_exists(runner, args.remote, target.project, target.instance)
             if not args.dry_run and not target_exists and args.remote is None:
                 # Reached only once the daemon has enumerated its instances and this one
@@ -2394,7 +2475,10 @@ def cmd_up(args: argparse.Namespace) -> int:
     except BaseException:
         # Not `Exception`: Ctrl-C is how an `up` is abandoned in practice, and a
         # KeyboardInterrupt would otherwise leave exactly the row this exists for.
-        reservation.release(runner)
+        # `None` covers failing before the row was written -- resolving a target,
+        # or waiting on the update lock -- where there is nothing to give back.
+        if reservation is not None:
+            reservation.release(runner)
         raise
     print_summary(target)
     return 0
@@ -2504,9 +2588,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 
     "Already outlived" is deliberately strict: a row is dropped only when the
     daemon that owns it completed a listing, that listing held neither half of
-    the environment, and the row is not a reservation whose `up` is still
-    running. Every weaker reading of the same evidence would release a host port
-    somebody else is using.
+    the environment, and no live run holds that slug -- the last of which is
+    asked of the kernel rather than of the row, because a row cannot answer it
+    (see `target_run_in_flight`). Every weaker reading of the same evidence would
+    release a host port somebody else is using.
     """
     repo_root = current_repo_root()
     require_incus()
@@ -2520,12 +2605,12 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     remote_suffix = f" --remote {shlex.quote(args.remote)}" if args.remote else ""
     # The mapping is read, classified, and written under one lock -- taken through
     # the accessor, so it is held only when this file is what the decision is
-    # about -- and no row can be added or completed midway through. The lock alone
-    # cannot close the race, though: `up` reserves a slug and its port under this
-    # same lock and then releases it before creating the project and instance, so a
-    # reconcile running in that window legitimately sees a row with no footprint
-    # yet. Such a row identifies itself by the claim its reservation left in it and
-    # is never pruned -- see `WorktreeEnvironment.pending`.
+    # about -- and no row can be added or completed midway through. That lock is
+    # not what makes a reservation safe, though: `up` releases it as soon as the
+    # row is written and keeps building for minutes afterwards, so a reconcile in
+    # that window legitimately sees a row with no footprint yet. What protects
+    # such a row is the target update lock its run holds across the whole window,
+    # which is a live process rather than a record -- see `target_run_in_flight`.
     with metadata.locked(dry_run=False):
         environments = worktree_environments(runner, metadata)
         if not environments:
@@ -2533,8 +2618,8 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             return 0
 
         live = [env for env in environments if env.exists]
-        pending = [env for env in environments if not env.exists and env.pending]
-        forgotten = [env for env in environments if not env.exists and not env.pending]
+        in_flight = [env for env in environments if not env.exists and env.in_flight]
+        forgotten = [env for env in environments if not env.exists and not env.in_flight]
 
         if live:
             print(f"{len(live)} worktree regression environment(s) exist in {authority}:")
@@ -2591,26 +2676,21 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                 print()
                 print(f"Runner metadata is not shown: it describes the local Incus daemon, not {authority}.")
 
-        if pending:
+        if in_flight:
             if live:
                 print()
-            print(f"{len(pending)} metadata entr(ies) reserve a slug whose environment is not built yet:")
-            for env in pending:
+            print(f"{len(in_flight)} metadata entr(ies) reserve a slug an `up` is still holding:")
+            for env in in_flight:
                 print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
-            print("Left alone: a concurrent `up` may still be creating them, and their ports stay reserved.")
-            # An `up` releases its own claim on the way out, so a row can only
-            # survive here while that `up` is still running or was killed without
-            # getting to run anything. The second case cannot be told from the
-            # first, and guessing costs a live `up` its port, so the recovery is
-            # named rather than performed.
-            print(
-                "  A reservation left by an `up` that was killed outright is removed with "
-                f"`delete --target worktree --slug <slug> --yes{remote_suffix}`."
-            )
+            # No recovery to name here any more. This section is a live process
+            # holding a lock, so an `up` that was killed is not in it: the kernel
+            # dropped its lock as it died, and its row is reported below as an
+            # environment this daemon no longer has, which `--yes` prunes.
+            print("Left alone: that run holds this slug's update lock right now, and its port stays reserved.")
 
         if not forgotten:
             return 0
-        if live or pending:
+        if live or in_flight:
             print()
         # Only rows this daemon owns can reach here at all: a report about
         # another daemon annotates nothing from this file, so every slug it
