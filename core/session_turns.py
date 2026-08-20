@@ -89,15 +89,13 @@ from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
 )
+from core.session_lifecycle import TURN_LIFECYCLE_SNAPSHOT_KEY
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
     from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
-
-
-TURN_LIFECYCLE_SNAPSHOT_KEY = "_turn_lifecycle_snapshot"
 
 
 @dataclass

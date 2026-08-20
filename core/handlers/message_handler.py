@@ -24,7 +24,7 @@ from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
 )
-from core.session_turns import TURN_LIFECYCLE_SNAPSHOT_KEY
+from core.session_lifecycle import TURN_LIFECYCLE_SNAPSHOT_KEY
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext

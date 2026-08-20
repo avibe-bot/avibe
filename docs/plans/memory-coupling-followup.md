@@ -30,7 +30,9 @@ session lifecycle, startup, and shutdown independent.
 
 - Metadata leaf imports previously executed eager `core.memory` package exports
   and loaded the full store/worker/provider stack. Public exports are now lazy,
-  and subprocess contracts prove storage sees only the metadata leaf.
+  and subprocess contracts prove storage sees only the metadata leaf. The turn
+  lifecycle metadata key also lives in a dependency-free leaf so lightweight
+  handler imports do not load the session FSM or SQLite-backed storage.
 - IM attachment filtering previously reached back through `core.handlers`,
   creating a handler/session-turn import cycle. The opaque lease and descriptor
   validation primitives now live in a dependency-free core leaf.

@@ -10,12 +10,13 @@ capability:
     - tests/test_memory_admission.py
     - tests/test_memory_slice3.py
     - tests/test_controller_dispatch_loop.py
+    - tests/test_native_session_providers.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
   generation: retained_snapshot_prevents_cross_generation_attribution
   shutdown: capture_and_archive_flush_tasks_settle_before_runtime_close
-  imports: shared_delivery_modules_do_not_load_memory_implementations
+  imports: shared_delivery_and_handler_imports_stay_behind_leaf_boundaries
   retention: settled_lifecycle_and_archive_authorization_state_is_released
   scheduling: capture_setup_failure_is_best_effort
 status_legend:
@@ -69,3 +70,9 @@ scenarios:
     kind: guardrail
     layer: contract
     test: tests/test_controller_dispatch_loop.py::test_cleanup_sync_stops_watch_service_on_stopped_loop
+  - id: MEMORY-INDEP-009
+    name: Lightweight handler imports do not load the session FSM or storage
+    status: covered
+    kind: guardrail
+    layer: contract
+    test: tests/test_native_session_providers.py::test_native_session_lightweight_imports_do_not_require_sqlite
