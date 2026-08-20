@@ -59,6 +59,7 @@ from storage.session_reclaim import (
     DEFINITION_AGENT_BINDING_REVISION_KEY,
     SESSION_SETTINGS_SNAPSHOT_KEY,
 )
+from vibe.message_types import types_with
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ RUN_LAST_ACTIVITY_METADATA_KEY = "last_activity_at"
 TASK_RETIREMENT_SCHEDULE_CONSUMED = "schedule_consumed"
 TASK_RETIREMENT_SCHEDULE_MISSED = "schedule_missed"
 TASK_SCHEDULE_CONSUMED_METADATA_KEY = "task_schedule_consumed"
+_VISIBLE_MESSAGE_RECEIPT_TYPES = types_with("inboxPreview")
 
 
 def task_schedule_generation(metadata: Any) -> Optional[dict[str, str]]:
@@ -5437,7 +5439,7 @@ class SQLiteBackgroundTaskStore:
             select(literal(1))
             .select_from(messages)
             .where(messages.c.session_id == child.c.session_id)
-            .where(messages.c.type == "result")
+            .where(messages.c.type.in_(_VISIBLE_MESSAGE_RECEIPT_TYPES))
             .where(func.json_valid(messages.c.metadata_json) == 1)
             .where(
                 or_(
@@ -5576,8 +5578,9 @@ class SQLiteBackgroundTaskStore:
         their own, while a receipt in suppressed background history proves persistence,
         not visibility. This read joins the child and target Session and projects the
         state the notice lane actually needs: queued/running is pending, succeeded with
-        effective delivery evidence is sent, and every other terminal outcome releases
-        the notice as failed. All three lookups are primary-key probes in one statement.
+        an inbox-preview Message receipt or native delivery evidence is sent, and every
+        other terminal outcome releases the notice as failed. All three lookups are
+        primary-key probes in one statement.
 
         ``None`` means "no callback exists for this run" (no target session), which
         is different from a callback whose status column is empty — a target with

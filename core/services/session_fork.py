@@ -15,14 +15,13 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from config import paths
-from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
 from vibe.authorization import (
     AuthorizationContext,
     require_instance_role,
 )
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
-from vibe.message_types import spec_for, types_with
+from vibe.message_types import activity_role_for, spec_for, types_with
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 # Turn settlement is read from ``session_turns`` below, so a reply-less completion
@@ -41,6 +40,7 @@ SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _FORK_ANCHOR_TYPES = tuple(
     dict.fromkeys(
         (
@@ -126,13 +126,11 @@ class ForkSourceState:
     has_messages_after_anchor: bool = False
     has_terminal_agent_output_after_anchor: bool = False
     has_input_turn_after_anchor: bool = False
-    anchor_is_backend_failure: bool = False
+    anchor_activity_role: str = "none"
 
     @property
     def anchor_is_terminal_agent_output(self) -> bool:
-        return self.anchor_author == "agent" and (
-            self.anchor_type in TERMINAL_AGENT_OUTPUT_TYPES or self.anchor_is_backend_failure
-        )
+        return self.anchor_author == "agent" and self.anchor_activity_role == "terminal"
 
 
 @dataclass(frozen=True)
@@ -566,6 +564,14 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         ),
                     ),
                     after_anchor,
+                    ~and_(
+                        messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.detached"),
+                            0,
+                        )
+                        == 1,
+                    ),
                 )
                 .order_by(transcript_order_value().desc(), messages.c.id.desc())
                 .limit(1)
@@ -581,13 +587,11 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             )
             has_terminal_agent_output_after_anchor = (
                 latest_after_anchor_author == "agent"
-                and (
-                    latest_after_anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
-                    or is_backend_failure_notification(
-                        latest_after_anchor_type,
-                        latest_after_anchor_metadata,
-                    )
+                and activity_role_for(
+                    latest_after_anchor_type,
+                    latest_after_anchor_metadata,
                 )
+                == "terminal"
             )
             has_input_turn_after_anchor = (
                 conn.execute(
@@ -614,8 +618,8 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 has_messages_after_anchor=latest_after_anchor is not None,
                 has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
                 has_input_turn_after_anchor=has_input_turn_after_anchor,
-                anchor_is_backend_failure=is_backend_failure_notification(
-                    anchor["type"],
+                anchor_activity_role=activity_role_for(
+                    str(anchor["type"] or "").strip(),
                     _load_metadata(anchor["metadata_json"]),
                 ),
             )

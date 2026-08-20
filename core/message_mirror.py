@@ -424,11 +424,11 @@ def persist_agent_message(
                     appended_row is None
                     and native_message_id
                     and not suppress_delivery
-                    and canonical_type in {"result", "error", "notify"}
+                    and spec_for(message_type)["inboxPreview"]
                 ):
                     # The unique row may be local-only history from an earlier
                     # suppress_delivery attempt. This call occurs after the visible
-                    # result/notify send, so only now may that row become a receipt.
+                    # output send, so only now may that row become a receipt.
                     appended_row = messages_service.promote_suppressed_native_message(
                         conn,
                         platform=context.platform,

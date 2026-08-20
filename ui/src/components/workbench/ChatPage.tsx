@@ -17,7 +17,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
+import { isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -1548,11 +1548,10 @@ export const ChatPage: React.FC = () => {
         // Harness live rows can precede read-side provenance enrichment. Pull
         // the enriched REST row so trigger/source chips update without reload.
         if (needsHarnessProvenanceReconcile(msg)) void reconcile();
-        // Agent Activity: a terminal reply settles the turn → mark the generation
-        // settled and rebuild groups from storage (chip, rows, status, duration all
-        // come from the endpoint, never the lossy live buffer).
-        if (showAgentActivityRef.current && isTerminalAgentMessage(msg)) {
-          dispatchLive({ type: 'settle' });
+        // Rebuild durable Activity groups for a phase boundary, terminal reply, or
+        // detached completion. Only a terminal reply owns this live generation.
+        if (showAgentActivityRef.current && shouldRefreshAgentActivityForMessage(msg)) {
+          if (isTerminalAgentMessage(msg)) dispatchLive({ type: 'settle' });
           scheduleActivityRefresh(workingRef.current);
         }
         // Don't clear ``working`` from a result row here: with the queue, a
@@ -4306,6 +4305,7 @@ export const MessageRow = memo(function MessageRow({
   const row = chatRowKind(message);
   const isNotify = row.kind === 'notify';
   const isAgent = row.kind === 'agent';
+  const isBoundary = row.kind === 'boundary';
   // ...and, separately, who wrote it. Only the agent's own words may carry the
   // agent-authored Markdown affordances, and its reverse annotation is still its
   // own words even though a different card draws it.
@@ -4554,15 +4554,16 @@ export const MessageRow = memo(function MessageRow({
     );
   }
 
-  // ----- Agent / system: left-aligned bubble with avatar + name header -----
-  const name = isAgent
+  // ----- Agent / boundary / system: left-aligned bubble with identity header -----
+  const agentIdentity = isAgent || isBoundary;
+  const name = agentIdentity
     ? agentDisplayName || session.agent_name || message.author_name
     : message.author_name;
   return (
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{isAgent ? <Bot /> : <Info />}</RoleAvatar>
+          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <Bot /> : <Info />}</RoleAvatar>
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
         {bodyNode || attachmentsNode ? (

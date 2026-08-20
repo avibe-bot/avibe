@@ -11,8 +11,10 @@ from storage import agent_activity_service, messages_service
 from storage.models import messages
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES
 from vibe.message_types import (
+    activity_role_for,
     build_partial_index_predicate,
     input_author_type_pairs,
+    is_detached_completion,
     spec_for,
     types_with,
 )
@@ -178,6 +180,7 @@ def test_annotation_catalog_contract_is_explicit() -> None:
         "inboxPreview": False,
         "inboxSettlesReply": False,
         "activityRole": "none",
+        "detachedCompletion": False,
         "terminalWhenEvents": (),
         "unread": False,
         "webPush": False,
@@ -193,6 +196,7 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         for message_type in _catalog_types()
         if spec_for(message_type)["activityRole"] != "none"
         or spec_for(message_type)["terminalWhenEvents"]
+        or spec_for(message_type)["detachedCompletion"]
     }
     expected_relevant = (
         "user",
@@ -210,19 +214,21 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
     for message_type in _catalog_types():
         spec = spec_for(message_type)
         for event in (None, "backend_failure", "other"):
-            metadata = {"event": event} if event is not None else {}
-            legacy_expected = (
-                message_type in {"result", "error", "silent"}
-                or (message_type == "notify" and event == "backend_failure")
-            )
-            assert (
-                spec["activityRole"] == "terminal"
-                or event in spec["terminalWhenEvents"]
-            ) is legacy_expected
-            assert (
-                agent_activity_service._is_terminal(message_type, "agent", metadata)
-                is legacy_expected
-            )
+            for detached in (False, True):
+                metadata = {"detached": detached}
+                if event is not None:
+                    metadata["event"] = event
+                legacy_expected = (
+                    message_type in {"result", "error"}
+                    or (message_type == "notify" and event == "backend_failure")
+                ) and not (detached and spec["detachedCompletion"])
+                assert (
+                    activity_role_for(message_type, metadata) == "terminal"
+                ) is legacy_expected
+                assert (
+                    agent_activity_service._is_terminal(message_type, "agent", metadata)
+                    is legacy_expected
+                )
     assert not agent_activity_service._is_terminal(" result ", "agent", {})
     assert (
         agent_activity_service._terminal_status(
@@ -231,6 +237,17 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         )
         == "done"
     )
+
+
+def test_detached_completion_classification_is_catalog_owned() -> None:
+    assert types_with("detachedCompletion") == ("result", "notify", "error")
+    for message_type in _catalog_types():
+        spec = spec_for(message_type)
+        expected = "none" if spec["detachedCompletion"] else spec["activityRole"]
+        assert activity_role_for(message_type, {"detached": True}) == expected
+        assert is_detached_completion(message_type, {"detached": True}) is bool(
+            spec["detachedCompletion"]
+        )
 
 
 def test_web_push_candidate_exact_and_unread_sets_match_current_service() -> None:

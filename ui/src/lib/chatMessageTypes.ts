@@ -21,19 +21,53 @@ export const isNotifyMessageType = (type: string): boolean => specFor(type).rend
 export const isTranscriptMessage = (message: { type: string }): boolean => specFor(message.type).transcript;
 
 type TerminalMessageCandidate = {
-  author: string;
   type: string;
   metadata?: Record<string, unknown> | null;
 };
+
+export const isDetachedCompletionMessage = (message: TerminalMessageCandidate): boolean => {
+  const spec = specFor(message.type);
+  return message.metadata?.detached === true && spec.detachedCompletion;
+};
+
+const activityRoleForMessage = (
+  message: TerminalMessageCandidate,
+): ReturnType<typeof specFor>['activityRole'] => {
+  const spec = specFor(message.type);
+  if (isDetachedCompletionMessage(message)) return 'none';
+  const event = message.metadata?.event;
+  if (typeof event === 'string' && spec.terminalWhenEvents.includes(event)) return 'terminal';
+  return spec.activityRole;
+};
+
+// A phase boundary uses the muted Agent presentation. The detached-result case
+// keeps rows written by older servers on that presentation; notification types
+// remain status pills even when detached.
+export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean => {
+  const spec = specFor(message.type);
+  return spec.render === 'agent' && (
+    activityRoleForMessage(message) === 'boundary' || isDetachedCompletionMessage(message)
+  );
+};
+
+type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
 
 // A terminal reply the TRANSCRIPT shows: the catalog's terminal activity role
 // intersected with transcript visibility (``silent`` is terminal for activity
 // bookkeeping but never rendered), plus the conditional terminals that only settle
 // a turn for specific metadata events (``notify`` + ``backend_failure``).
-export const isTerminalAgentMessage = (message: TerminalMessageCandidate): boolean => {
+export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): boolean => {
   if (message.author !== 'agent') return false;
   const spec = specFor(message.type);
-  if (spec.transcript && spec.activityRole === 'terminal') return true;
-  const event = message.metadata?.event;
-  return typeof event === 'string' && spec.terminalWhenEvents.includes(event);
+  return spec.transcript && activityRoleForMessage(message) === 'terminal';
+};
+
+// Terminal replies, nonterminal phase boundaries, and detached completions all
+// require a durable Activity refresh. Only terminal replies settle the live Turn.
+export const shouldRefreshAgentActivityForMessage = (
+  message: TerminalAgentMessageCandidate,
+): boolean => {
+  if (message.author !== 'agent') return false;
+  const role = activityRoleForMessage(message);
+  return role === 'boundary' || role === 'terminal' || isDetachedCompletionMessage(message);
 };
