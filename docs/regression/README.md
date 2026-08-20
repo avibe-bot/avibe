@@ -166,12 +166,17 @@ is worse than keeping a row nobody needs:
 - A row that reserves a slug whose environment is not built yet is left alone.
   `up` records the slug and its port before it creates the project and the
   instance, so this is what a concurrent `up` looks like from the outside.
-- Only a local run writes `worktrees.json` at all. The file reserves ports on this
-  machine and describes this machine's daemon, so another daemon's inventory is no
-  evidence about those rows: `reconcile --remote` reports and never prunes, and
-  `delete --remote` removes the remote environment and says it kept the local row.
-  The `delete` commands `reconcile --remote` prints carry `--remote`, or they would
-  name the same slug on the wrong daemon.
+- `worktrees.json` is reached only through an accessor bound to the daemon it
+  describes. The file reserves host ports on this machine and records what this
+  machine's daemon holds, so every read of it and every write to it is a claim
+  about exactly one authority, and a `--remote` command has no name for it: it
+  neither reads nor writes a byte. `reconcile --remote` reports the remote
+  inventory and says once that runner metadata is not shown; `delete --remote`
+  removes the remote environment and says it kept the local row; `up --remote`
+  requires `--host-port`, because allocating from this machine's reservations is
+  no evidence about which of another daemon's ports are free. The `delete`
+  commands `reconcile --remote` prints carry `--remote`, or they would name the
+  same slug on the wrong daemon.
 
 Useful flags:
 

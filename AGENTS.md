@@ -124,9 +124,12 @@ Hard rules:
 - a metadata row is dropped only when the daemon that owns it completed a
   listing whose every entry was readable, that listing held neither its project
   nor its instance, and the row is not a reservation whose `up` may still be
-  running. `worktrees.json` reserves ports on this machine and describes this
-  machine's daemon, so only a local run writes it at all: `reconcile --remote`
-  reports and never prunes, and `delete --remote` keeps the local row
+  running. `worktrees.json` is reached only through an accessor bound to the
+  daemon it describes — it reserves host ports on this machine and records what
+  this machine's daemon holds — so a `--remote` command cannot name it and
+  neither reads nor writes it: `reconcile --remote` reports the remote inventory
+  with no local provenance, `delete --remote` keeps the local row, and
+  `up --remote` requires `--host-port`
 - never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
   Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
 - after any regression update, verify service health before reporting success

@@ -181,6 +181,7 @@ def test_worktree_target_slug_includes_path_hash(monkeypatch: pytest.MonkeyPatch
             host_port=15234,
             ui_host="127.0.0.1",
             ui_port=5123,
+            remote=None,
             worktree_port_start=15200,
             worktree_port_end=15399,
         ),
@@ -203,26 +204,90 @@ def test_explicit_worktree_slug_round_trips_generated_slug(monkeypatch: pytest.M
     assert incus_regression.worktree_slug(repo_root, generated) == generated
 
 
-def test_remote_worktree_target_skips_local_port_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remote_worktree_target_requires_an_explicit_host_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(incus_regression, "branch_name", lambda repo_root: "feature/demo")
-    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: (_ for _ in ()).throw(AssertionError("should not preflight remote ports")))
+    monkeypatch.setattr(
+        incus_regression,
+        "ensure_host_port_available",
+        lambda host, port: (_ for _ in ()).throw(AssertionError("should not preflight remote ports")),
+    )
+
+    with pytest.raises(incus_regression.RegressionError) as excinfo:
+        incus_regression.resolve_target(
+            argparse.Namespace(
+                target="worktree",
+                slug=None,
+                host_port=None,
+                ui_host="127.0.0.1",
+                ui_port=5123,
+                remote="lab",
+                worktree_port_start=15200,
+                worktree_port_end=15200,
+            ),
+            Path("/tmp/repo-a"),
+            dry_run=False,
+        )
+
+    assert "--host-port is required" in str(excinfo.value)
+
+
+def test_remote_worktree_target_uses_the_explicit_host_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit port is the only port a remote worktree gets, local row or not."""
+    runtime = tmp_path / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    (runtime / "worktrees.json").write_text(
+        json.dumps({"schema_version": 1, "worktrees": {"demo-branch": {"host_port": 15234}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
 
     target = incus_regression.resolve_target(
         argparse.Namespace(
             target="worktree",
-            slug=None,
+            slug="demo-branch",
+            host_port=15300,
+            ui_host="127.0.0.1",
+            ui_port=5123,
+            remote="lab",
+            worktree_port_start=15200,
+            worktree_port_end=15399,
+        ),
+        tmp_path,
+        dry_run=False,
+    )
+
+    assert target.host_port == 15300
+
+
+def test_remote_worktree_maintenance_target_does_not_inherit_a_local_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`status --remote` on a slug this machine also uses reports no port, not the local one."""
+    runtime = tmp_path / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    (runtime / "worktrees.json").write_text(
+        json.dumps({"schema_version": 1, "worktrees": {"demo-branch": {"host_port": 15234}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+
+    target = incus_regression.resolve_target(
+        argparse.Namespace(
+            target="worktree",
+            slug="demo-branch",
             host_port=None,
             ui_host="127.0.0.1",
             ui_port=5123,
+            remote="lab",
             worktree_port_start=15200,
-            worktree_port_end=15200,
+            worktree_port_end=15399,
         ),
-        Path("/tmp/repo-a"),
+        tmp_path,
         dry_run=False,
-        preflight_ports=False,
+        allocate_port=False,
     )
 
-    assert target.host_port == 15200
+    assert target.host_port == 0
 
 
 def test_worktree_target_reuses_mapped_port_without_allocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,6 +307,7 @@ def test_worktree_target_reuses_mapped_port_without_allocation(tmp_path: Path, m
             host_port=None,
             ui_host="127.0.0.1",
             ui_port=5123,
+            remote=None,
             worktree_port_start=15200,
             worktree_port_end=15399,
         ),
@@ -262,13 +328,13 @@ def test_worktree_maintenance_target_does_not_allocate_port(tmp_path: Path, monk
             host_port=None,
             ui_host="127.0.0.1",
             ui_port=5123,
+            remote=None,
             worktree_port_start=15200,
             worktree_port_end=15399,
         ),
         tmp_path,
         dry_run=False,
         allocate_port=False,
-        preflight_ports=False,
     )
 
     assert target.host_port == 0
@@ -1949,17 +2015,32 @@ def test_reconcile_decides_under_the_mapping_lock_even_when_writing_nothing(
     assert set(json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]) == {"gone"}
 
 
-def test_reconcile_against_a_remote_reports_without_forgetting_local_metadata(
+def test_reconcile_against_a_remote_reports_one_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # `worktrees.json` reserves ports on this machine and describes this
-    # machine's daemon. A remote's inventory says nothing about those rows, so a
-    # remote reconcile is a report -- and the delete commands it prints have to
-    # name the remote, or they would delete the same slug locally instead.
+    """A report about one daemon annotates nothing from a file about another.
+
+    `worktrees.json` reserves ports on this machine and records what this
+    machine's daemon holds, so a remote inventory and these rows are two
+    authorities. Reading them into one report attributes a local row's port,
+    branch, and commit to whatever remote environment happens to share its slug,
+    and lists local-only rows as environments the remote has lost. So the rows
+    are absent from a remote report entirely -- said once, rather than implied by
+    every line reading "no runner metadata" -- and `--yes` has nothing to drop.
+
+    The `delete` commands it prints carry `--remote`, or they would name the same
+    slug on the wrong daemon.
+    """
     mapping_path, _ = reconcile_fixture(
         tmp_path,
         monkeypatch,
-        entries={"local": {"path": str(tmp_path / "checkout"), "host_port": 52909}},
+        entries={
+            # Same slug on both daemons: the case where lending provenance across
+            # authorities produces a plausible, wrong line rather than a visible
+            # mismatch.
+            "elsewhere": {"path": str(tmp_path / "checkout"), "host_port": 52909, "branch": "local/work"},
+            "local-only": {"path": str(tmp_path / "checkout"), "host_port": 52910},
+        },
         projects=("avr-wt-elsewhere",),
         instances=({"name": "avibe-wt-elsewhere", "status": "Running"},),
     )
@@ -1971,9 +2052,12 @@ def test_reconcile_against_a_remote_reports_without_forgetting_local_metadata(
 
     assert exit_code == 0
     assert "--slug elsewhere --yes --remote lab" in out
-    assert "Not dropped: this metadata describes the local Incus daemon, not remote lab." in out
+    assert "Runner metadata is not shown: it describes the local Incus daemon, not remote lab." in out
+    assert "52909" not in out
+    assert "local/work" not in out
+    assert "local-only" not in out
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
-    assert set(payload["worktrees"]) == {"local"}
+    assert set(payload["worktrees"]) == {"elsewhere", "local-only"}
 
 
 def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2096,6 +2180,88 @@ def test_delete_against_a_remote_keeps_the_local_metadata(
     assert payload["worktrees"] == {slug: row}
 
 
+def test_metadata_about_another_daemon_neither_reads_nor_writes_the_local_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every accessor is bound to the daemon it describes, so `--remote` reaches nothing.
+
+    Stated over the accessor rather than over the commands that use it. A
+    predicate each command was expected to consult came first, and being a
+    question is what made it forgettable: `up --remote` never asked, and so it
+    reserved a host port on this machine, overwrote whatever live local row shared
+    its slug, and left that reservation behind for good. Asserting it here covers
+    every present and future caller, because the file has no other way in.
+    """
+    repo = tmp_path / "repo"
+    runtime = repo / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    mapping_path = runtime / "worktrees.json"
+    recorded = {"schema_version": 1, "worktrees": {"demo": {"host_port": 15234, "branch": "local/work"}}}
+    mapping_path.write_text(json.dumps(recorded), encoding="utf-8")
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    before = mapping_path.read_bytes()
+
+    metadata = incus_regression.WorktreeMetadata(repo, "lab")
+    target = incus_regression.RegressionTarget(
+        target="worktree",
+        slug="demo",
+        project="avr-wt-demo",
+        instance="avibe-wt-demo",
+        host_port=15234,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    assert metadata.owned is False
+    assert metadata.rows() == {}
+    assert metadata.allocated_ports() == set()
+    assert metadata.port_for("demo") is None
+
+    metadata.reserve(target)
+    metadata.complete(target)
+    metadata.forget(["demo"])
+    metadata.mutate(lambda worktrees: worktrees.clear())
+
+    assert mapping_path.read_bytes() == before
+
+    # The mirror: the same calls through the owning accessor do reach the file,
+    # so the reads and writes above are scoped by authority rather than broken.
+    owner = incus_regression.WorktreeMetadata(repo)
+    assert owner.port_for("demo") == 15234
+    owner.forget(["demo"])
+    assert json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"] == {}
+
+
+def test_the_mapping_file_has_exactly_one_way_in() -> None:
+    """`worktrees.json` is reachable only through the accessor bound to its daemon.
+
+    The enumeration is asserted rather than described, so a sixth access point
+    added outside the owner fails here instead of costing a review round. This is
+    the whole reason the authority check cannot be forgotten: a caller has no name
+    for the file, only for an accessor that already knows which daemon it is
+    evidence about.
+    """
+    import ast
+
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    owner = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "WorktreeMetadata"
+    )
+    inside = {id(node) for node in ast.walk(owner)}
+    readers = {"_load_worktree_mapping", "_write_worktree_mapping"}
+    strays = sorted(
+        {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id in readers and id(node) not in inside
+        }
+    )
+
+    assert strays == [], f"reached outside WorktreeMetadata: {strays}"
+
+
 def test_the_mapping_lock_nests_without_deadlocking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`flock` is owned by an open file description, not by a process.
 
@@ -2110,7 +2276,7 @@ def test_the_mapping_lock_nests_without_deadlocking(tmp_path: Path, monkeypatch:
     written = []
 
     with incus_regression.worktree_mapping_lock(repo, dry_run=False):
-        incus_regression.mutate_worktree_mapping(repo, lambda worktrees: worktrees.update({"nested": {"host_port": 1}}))
+        incus_regression.WorktreeMetadata(repo).mutate(lambda worktrees: worktrees.update({"nested": {"host_port": 1}}))
         written.append(json.loads((repo / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8")))
 
     assert written == [{"schema_version": 1, "worktrees": {"nested": {"host_port": 1}}}]
@@ -2153,7 +2319,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
     monkeypatch.setattr(incus_regression, "write_metadata", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", lambda *args, **kwargs: None)
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", lambda *args, **kwargs: None)
 
     args = argparse.Namespace(
         target="master",
@@ -2212,7 +2378,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         "ensure_host_port_available",
         lambda host, port: (_ for _ in ()).throw(AssertionError("should not preflight existing master instance")),
     )
-    monkeypatch.setattr(incus_regression, "reserve_worktree_mapping", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "reserve", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "stop_service_for_update", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "write_runtime_env", lambda *args, **kwargs: None)
@@ -2223,7 +2389,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
     monkeypatch.setattr(incus_regression, "write_metadata", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", lambda *args, **kwargs: None)
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", lambda *args, **kwargs: None)
 
     args = argparse.Namespace(
         target="master",
@@ -2282,7 +2448,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
     monkeypatch.setattr(incus_regression, "write_metadata", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", lambda *args, **kwargs: None)
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", lambda *args, **kwargs: None)
 
     args = argparse.Namespace(
         target="master",
@@ -2599,7 +2765,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(incus_regression, "write_metadata", record("write_metadata"))
     monkeypatch.setattr(incus_regression, "restart_and_verify", record("restart_and_verify"))
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", record("prepare_show_runtime"))
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", record("update_worktree_mapping"))
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", record("complete_worktree_metadata"))
 
     args = argparse.Namespace(
         target="master",
@@ -2670,7 +2836,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     monkeypatch.setattr(incus_regression, "write_metadata", record("write_metadata"))
     monkeypatch.setattr(incus_regression, "restart_and_verify", record("restart_and_verify"))
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", record("prepare_show_runtime"))
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", record("update_worktree_mapping"))
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", record("complete_worktree_metadata"))
 
     args = argparse.Namespace(
         target="master",
@@ -2748,7 +2914,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
     monkeypatch.setattr(incus_regression, "write_metadata", record("write_metadata"))
     monkeypatch.setattr(incus_regression, "restart_and_verify", record("restart_and_verify"))
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", record("prepare_show_runtime"))
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", record("update_worktree_mapping"))
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", record("complete_worktree_metadata"))
 
     args = argparse.Namespace(
         target="master",
@@ -2818,7 +2984,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
     monkeypatch.setattr(incus_regression, "write_metadata", record("write_metadata"))
     monkeypatch.setattr(incus_regression, "restart_and_verify", record("restart_and_verify"))
     monkeypatch.setattr(incus_regression, "prepare_show_runtime", record("prepare_show_runtime"))
-    monkeypatch.setattr(incus_regression, "update_worktree_mapping", record("update_worktree_mapping"))
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "complete", record("complete_worktree_metadata"))
 
     args = argparse.Namespace(
         target="master",
@@ -2913,14 +3079,14 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     # be free on the machine running it.
     monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
     monkeypatch.setattr(incus_regression, "worktree_mapping_lock", mapping_lock)
-    original_reserve_worktree_mapping = incus_regression.reserve_worktree_mapping
+    original_reserve = incus_regression.WorktreeMetadata.reserve
 
-    def reserve_worktree_mapping(repo_root, target):
-        calls.append("reserve_worktree_mapping")
-        original_reserve_worktree_mapping(repo_root, target)
+    def reserve(self, target):
+        calls.append("reserve_worktree_metadata")
+        original_reserve(self, target)
 
     monkeypatch.setattr(incus_regression, "target_update_lock", target_lock)
-    monkeypatch.setattr(incus_regression, "reserve_worktree_mapping", reserve_worktree_mapping)
+    monkeypatch.setattr(incus_regression.WorktreeMetadata, "reserve", reserve)
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", record("ensure_project_and_instance"))
     monkeypatch.setattr(incus_regression, "stop_service_for_update", record("stop_service_for_update"))
     monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
@@ -2962,7 +3128,7 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
 
     assert incus_regression.cmd_up(args) == 0
 
-    assert calls[:2] == ["mapping_lock_enter", "reserve_worktree_mapping"]
+    assert calls[:2] == ["mapping_lock_enter", "reserve_worktree_metadata"]
     assert "target_lock_enter" in calls
     # The reservation and the completion stamp are two writes, and `up` releases
     # the lock between them, so the mapping's own writer has to take it. Asserting

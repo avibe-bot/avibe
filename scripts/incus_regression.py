@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Container, Iterator, Sequence
+from typing import Callable, Container, Iterable, Iterator, Sequence
 
 try:
     import fcntl
@@ -446,7 +446,8 @@ def mapping_path(repo_root: Path) -> Path:
     return runtime_root(repo_root) / "worktrees.json"
 
 
-def load_worktree_mapping(repo_root: Path) -> dict:
+def _load_worktree_mapping(repo_root: Path) -> dict:
+    """Read the mapping file. Private: reach it through `WorktreeMetadata`."""
     path = mapping_path(repo_root)
     if not path.is_file():
         return {"schema_version": 1, "worktrees": {}}
@@ -462,74 +463,144 @@ def load_worktree_mapping(repo_root: Path) -> dict:
 
 
 def _write_worktree_mapping(repo_root: Path, payload: dict) -> None:
-    """Write the mapping file. Private: reach it through `mutate_worktree_mapping`."""
+    """Write the mapping file. Private: reach it through `WorktreeMetadata`."""
     path = mapping_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def mutate_worktree_mapping(repo_root: Path, mutate: Callable[[dict], None]) -> None:
-    """The only writer of `worktrees.json`: lock, load, apply, save.
+@dataclass(frozen=True)
+class WorktreeMetadata:
+    """`worktrees.json`, bound to the Incus daemon it is evidence about.
 
-    Owning the sequence here is what makes "the mapping is only ever modified
-    under the mapping lock" true by construction instead of true whenever every
-    caller remembers. One caller did not: `up` stamps completion after the
-    command has already released the lock, so that load-modify-save could
-    interleave with reconcile's, and whichever saved last erased the other --
-    restoring a row that was just pruned, or dropping the stamp that proves a
-    reservation finished and leaving the slug pending forever.
+    The file reserves host ports on this machine and records what this machine's
+    daemon holds, so every read of it and every write to it is a claim about
+    exactly one authority. Binding that authority to the accessor is what makes
+    the claim true by construction: a caller holding one of these cannot name
+    another daemon's metadata, so it cannot read or write it.
 
-    `mutate` receives the `worktrees` mapping itself, loaded inside the lock, so
-    it cannot act on a copy read before the lock was held.
+    A predicate each command was expected to consult came first, and being a
+    question is what made it forgettable. `delete --remote` and
+    `reconcile --remote` asked it; `up --remote` did not, and so a remote
+    environment reserved a host port on this machine, overwrote whatever live
+    local row shared its slug, and -- because the other two commands had learned
+    to keep the file -- left that reservation behind for good. The reads never
+    asked at all: a remote `up` took its port from a local row, and a remote
+    `reconcile` printed local provenance beside remote environments and called
+    local-only rows environments the remote had lost.
     """
-    with worktree_mapping_lock(repo_root, dry_run=False):
-        payload = load_worktree_mapping(repo_root)
-        mutate(payload.setdefault("worktrees", {}))
-        _write_worktree_mapping(repo_root, payload)
 
+    repo_root: Path
+    remote: str | None = None
 
-def owns_local_metadata(remote: str | None) -> bool:
-    """Whether an operation against this daemon may write `worktrees.json`.
+    @property
+    def owned(self) -> bool:
+        """Whether the daemon in question is the one this file describes."""
+        return self.remote is None
 
-    The mapping reserves host ports on this machine and records what this
-    machine's daemon holds, so it is evidence about exactly one authority. Every
-    command asks this single question rather than deciding for itself, because
-    deciding separately is how the same slug on two daemons came to be treated as
-    one environment: `reconcile --remote` learned not to prune, while
-    `delete --remote` went on dropping the local row for an environment it had
-    removed somewhere else entirely.
-    """
-    return remote is None
+    def rows(self) -> dict:
+        """The recorded rows, or none at all when another daemon is the subject."""
+        if not self.owned:
+            return {}
+        return _load_worktree_mapping(self.repo_root).get("worktrees") or {}
 
+    def mutate(self, mutate: Callable[[dict], None]) -> None:
+        """The only writer of `worktrees.json`: lock, load, apply, save.
 
-def allocated_worktree_ports(repo_root: Path) -> set[int]:
-    payload = load_worktree_mapping(repo_root)
-    ports: set[int] = set()
-    for item in (payload.get("worktrees") or {}).values():
+        Owning the sequence here is what makes "the mapping is only ever
+        modified under the mapping lock" true by construction instead of true
+        whenever every caller remembers. One caller did not: `up` stamps
+        completion after the command has already released the lock, so that
+        load-modify-save could interleave with reconcile's, and whichever saved
+        last erased the other -- restoring a row that was just pruned, or
+        dropping the stamp that proves a reservation finished and leaving the
+        slug pending forever.
+
+        `mutate` receives the `worktrees` mapping itself, loaded inside the
+        lock, so it cannot act on a copy read before the lock was held.
+        """
+        if not self.owned:
+            return
+        with worktree_mapping_lock(self.repo_root, dry_run=False):
+            payload = _load_worktree_mapping(self.repo_root)
+            mutate(payload.setdefault("worktrees", {}))
+            _write_worktree_mapping(self.repo_root, payload)
+
+    def allocated_ports(self) -> set[int]:
+        return {
+            item["host_port"]
+            for item in self.rows().values()
+            if isinstance(item, dict) and isinstance(item.get("host_port"), int)
+        }
+
+    def port_for(self, slug: str) -> int | None:
+        item = self.rows().get(slug)
         if isinstance(item, dict) and isinstance(item.get("host_port"), int):
-            ports.add(item["host_port"])
-    return ports
+            return item["host_port"]
+        return None
+
+    def reserve(self, target: RegressionTarget) -> None:
+        """Record the slug and its port before the environment is built."""
+        if target.target != WORKTREE_TARGET:
+            return
+        reservation = {
+            "path": str(self.repo_root),
+            "project": target.project,
+            "instance": target.instance,
+            "host_port": target.host_port,
+            "reserved_at": datetime.now(timezone.utc).isoformat(),
+            "branch": branch_name(self.repo_root),
+        }
+        self.mutate(lambda worktrees: worktrees.setdefault(target.slug, {}).update(reservation))
+
+    def complete(self, target: RegressionTarget) -> None:
+        """Stamp the environment as built, replacing the row and its `reserved_at`."""
+        if target.target != WORKTREE_TARGET:
+            return
+        row = {
+            "path": str(self.repo_root),
+            "project": target.project,
+            "instance": target.instance,
+            "host_port": target.host_port,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "branch": branch_name(self.repo_root),
+            "commit": commit_sha(self.repo_root),
+        }
+        self.mutate(lambda worktrees: worktrees.update({target.slug: row}))
+
+    def forget(self, slugs: Iterable[str]) -> None:
+        """Drop rows for environments the owning daemon no longer has."""
+        wanted = list(slugs)
+
+        def prune(worktrees: dict) -> None:
+            for slug in wanted:
+                worktrees.pop(slug, None)
+
+        self.mutate(prune)
 
 
-def allocate_worktree_port(repo_root: Path, ui_host: str, start: int, end: int, *, dry_run: bool, preflight: bool) -> int:
-    used = allocated_worktree_ports(repo_root)
+def allocate_worktree_port(
+    metadata: WorktreeMetadata, ui_host: str, start: int, end: int, *, dry_run: bool
+) -> int:
+    """Pick a free host port for an environment on the daemon `metadata` describes.
+
+    The candidate is checked against this host because it is this host that will
+    bind it. There used to be an opt-out for the remote case, where the port
+    belongs to another machine and a local check is meaningless -- but allocating
+    from local reservations was equally meaningless there, and that is now
+    refused outright, so only the owning daemon ever reaches this.
+    """
+    used = metadata.allocated_ports()
     for port in range(start, end + 1):
         if port in used:
             continue
-        if not dry_run and preflight:
+        if not dry_run:
             try:
                 ensure_host_port_available(ui_host, port)
             except RegressionError:
                 continue
         return port
     raise RegressionError(f"No available worktree regression port in range {start}-{end}.")
-
-
-def mapped_worktree_port(repo_root: Path, slug: str) -> int | None:
-    item = (load_worktree_mapping(repo_root).get("worktrees") or {}).get(slug)
-    if isinstance(item, dict) and isinstance(item.get("host_port"), int):
-        return item["host_port"]
-    return None
 
 
 def parse_metadata_timestamp(value: object) -> datetime | None:
@@ -611,11 +682,11 @@ class WorktreeEnvironment:
     def pending(self) -> bool:
         """Whether metadata describes a reservation whose `up` has not completed.
 
-        `reserve_worktree_mapping` records the slug and its port before the
+        `WorktreeMetadata.reserve` records the slug and its port before the
         project and instance are created, so this row is what a concurrent `up`
-        looks like from the outside: claimed, not yet built. Only an
-        `update_worktree_mapping` stamp that provably came later clears it -- a
-        reservation we cannot date is still a reservation.
+        looks like from the outside: claimed, not yet built. Only a
+        `WorktreeMetadata.complete` stamp that provably came later clears it --
+        a reservation we cannot date is still a reservation.
         """
         entry = self.entry or {}
         if "reserved_at" not in entry:
@@ -673,7 +744,7 @@ def worktree_instances(runner: Runner, *, remote: str | None) -> dict[str, tuple
     return {name: tuple(observed) for name, observed in instances.items()}
 
 
-def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None) -> list[WorktreeEnvironment]:
+def worktree_environments(runner: Runner, metadata: WorktreeMetadata) -> list[WorktreeEnvironment]:
     """Every worktree regression environment, enumerated from Incus and annotated by metadata.
 
     Incus is the authority on what exists; `worktrees.json` only describes what
@@ -685,8 +756,15 @@ def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None
     project was deleted while its instance survived is neither fully present nor
     absent, and reading one half as the whole answer reports the other half as
     something it never observed.
+
+    The daemon is taken from `metadata` rather than passed alongside it, so the
+    inventory and the rows annotating it cannot come from two different
+    authorities. When they did, a remote environment was annotated with the
+    local row that happened to share its slug, and local-only rows were listed
+    as environments the remote had lost.
     """
-    entries = load_worktree_mapping(repo_root).get("worktrees") or {}
+    remote = metadata.remote
+    entries = metadata.rows()
     projects = {
         name[len(WORKTREE_PROJECT_PREFIX):]
         for name in runner.names(
@@ -743,7 +821,6 @@ def resolve_target(
     repo_root: Path,
     *,
     dry_run: bool,
-    preflight_ports: bool = True,
     allocate_port: bool = True,
 ) -> RegressionTarget:
     if args.target not in TARGETS:
@@ -755,15 +832,27 @@ def resolve_target(
         host_port = args.host_port or env_int("REGRESSION_PORT") or DEFAULT_MASTER_HOST_PORT
     else:
         slug = worktree_slug(repo_root, args.slug)
-        host_port = args.host_port or mapped_worktree_port(repo_root, slug)
+        metadata = WorktreeMetadata(repo_root, args.remote)
+        host_port = args.host_port or metadata.port_for(slug)
         if host_port is None and allocate_port:
+            if not metadata.owned:
+                # The port is a "cannot tell", so it is asked for rather than
+                # guessed. Allocation reads this machine's reservations, which
+                # say nothing about which of another daemon's ports are free,
+                # and no one has asked that daemon. Answering anyway is how a
+                # remote environment came to be handed a live local
+                # environment's port.
+                raise RegressionError(
+                    f"--host-port is required for a worktree environment on remote {args.remote}.\n"
+                    "Worktree ports are allocated from this machine's metadata, which is no evidence "
+                    "about another daemon's ports."
+                )
             host_port = allocate_worktree_port(
-                repo_root,
+                metadata,
                 ui_host,
                 args.worktree_port_start,
                 args.worktree_port_end,
                 dry_run=dry_run,
-                preflight=preflight_ports,
             )
         if host_port is None:
             host_port = 0
@@ -1918,38 +2007,6 @@ def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: st
     runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime status --json", remote=remote))
 
 
-def update_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
-    if target.target != WORKTREE_TARGET:
-        return
-    row = {
-        "path": str(repo_root),
-        "project": target.project,
-        "instance": target.instance,
-        "host_port": target.host_port,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "branch": branch_name(repo_root),
-        "commit": commit_sha(repo_root),
-    }
-    mutate_worktree_mapping(repo_root, lambda worktrees: worktrees.update({target.slug: row}))
-
-
-def reserve_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
-    if target.target != WORKTREE_TARGET:
-        return
-    reservation = {
-        "path": str(repo_root),
-        "project": target.project,
-        "instance": target.instance,
-        "host_port": target.host_port,
-        "reserved_at": datetime.now(timezone.utc).isoformat(),
-        "branch": branch_name(repo_root),
-    }
-    mutate_worktree_mapping(
-        repo_root,
-        lambda worktrees: worktrees.setdefault(target.slug, {}).update(reservation),
-    )
-
-
 def cmd_doctor(args: argparse.Namespace) -> int:
     if not args.dry_run:
         require_incus()
@@ -2077,16 +2134,10 @@ def cmd_up(args: argparse.Namespace) -> int:
     loaded_env_file = load_env_file(repo_root, args.env_file)
     if not args.dry_run:
         require_incus()
-    preflight_during_target_resolution = args.remote is None and args.target != MASTER_TARGET
     with worktree_mapping_lock(repo_root, dry_run=args.dry_run):
-        target = resolve_target(
-            args,
-            repo_root,
-            dry_run=args.dry_run,
-            preflight_ports=preflight_during_target_resolution,
-        )
+        target = resolve_target(args, repo_root, dry_run=args.dry_run)
         if not args.dry_run:
-            reserve_worktree_mapping(repo_root, target)
+            WorktreeMetadata(repo_root, args.remote).reserve(target)
     with target_update_lock(repo_root, target, dry_run=args.dry_run):
         runner = Runner(dry_run=args.dry_run)
         target_exists = instance_exists(runner, args.remote, target.project, target.instance)
@@ -2157,7 +2208,7 @@ def cmd_up(args: argparse.Namespace) -> int:
         prepare_show_runtime(runner, target, remote=args.remote)
         restart_and_verify(runner, target, remote=args.remote)
         if not args.dry_run:
-            update_worktree_mapping(repo_root, target)
+            WorktreeMetadata(repo_root, args.remote).complete(target)
     print_summary(target)
     return 0
 
@@ -2175,7 +2226,7 @@ def print_summary(target: RegressionTarget) -> None:
 def cmd_status(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
-    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, preflight_ports=False)
+    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
     if not args.dry_run:
         require_incus()
     runner = Runner(dry_run=args.dry_run)
@@ -2193,7 +2244,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_logs(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
-    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, preflight_ports=False)
+    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
     if not args.dry_run:
         require_incus()
     Runner(dry_run=args.dry_run).run(
@@ -2206,7 +2257,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
 def cmd_shell(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
-    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, preflight_ports=False)
+    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
     if not args.dry_run:
         require_incus()
     Runner(dry_run=args.dry_run).run(tenant_exec(target, "exec bash -l", remote=args.remote))
@@ -2216,7 +2267,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
 def cmd_down(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
-    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, preflight_ports=False)
+    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
     if not args.dry_run:
         require_incus()
     Runner(dry_run=args.dry_run).run(incus("stop", remote_ref(args.remote, target.instance), project=target.project), check=False)
@@ -2226,7 +2277,7 @@ def cmd_down(args: argparse.Namespace) -> int:
 def cmd_delete(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
-    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, preflight_ports=False)
+    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
     if target.target == MASTER_TARGET and not args.yes:
         raise RegressionError("Deleting the master regression environment requires --yes.")
     if not args.dry_run:
@@ -2235,15 +2286,14 @@ def cmd_delete(args: argparse.Namespace) -> int:
     runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False)
     runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False)
     if target.target == WORKTREE_TARGET and not args.dry_run:
-        if owns_local_metadata(args.remote):
-            mutate_worktree_mapping(repo_root, lambda worktrees: worktrees.pop(target.slug, None))
-        else:
+        metadata = WorktreeMetadata(repo_root, args.remote)
+        metadata.forget([target.slug])
+        if not metadata.owned:
             # The row describes a slug and host port on this machine, and this
-            # deletion happened somewhere else. `reconcile --remote` already
-            # refuses to prune on a remote's inventory; deleting a remote
-            # environment is the same evidence and gets the same answer, or a
-            # slug used on both daemons loses its local port reservation the
-            # moment the remote copy is removed.
+            # deletion happened somewhere else, so `forget` above did nothing.
+            # Saying so is all that is left to the caller: a slug used on both
+            # daemons would otherwise lose its local port reservation the moment
+            # the remote copy was removed, and lose it silently.
             print(f"Kept the local metadata for {target.slug}: it describes the local Incus daemon, not remote {args.remote}.")
     return 0
 
@@ -2278,6 +2328,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     # environment as untracked metadata and offer to forget all of it. --dry-run
     # withholds the mapping write instead, which is this command's only change.
     runner = Runner(dry_run=False)
+    metadata = WorktreeMetadata(repo_root, args.remote)
     authority = f"remote {args.remote}" if args.remote else "the local Incus daemon"
     remote_suffix = f" --remote {shlex.quote(args.remote)}" if args.remote else ""
     # The mapping is read, classified, and written under one lock, so no row can
@@ -2288,7 +2339,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     # yet. Such a row identifies itself by its own stamps and is never pruned --
     # see `WorktreeEnvironment.pending`.
     with worktree_mapping_lock(repo_root, dry_run=False):
-        environments = worktree_environments(runner, repo_root, remote=args.remote)
+        environments = worktree_environments(runner, metadata)
         if not environments:
             print(f"No worktree regression environments exist in {authority}.")
             return 0
@@ -2328,6 +2379,16 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                         f"  {env.slug}: instance lives in project {item.project}, not {env.project}. "
                         "Delete by slug would not reach it; reclaim it by hand."
                     )
+            if not metadata.owned:
+                # Said once rather than implied by every environment reading
+                # "no runner metadata". `worktrees.json` records what this
+                # machine's daemon holds, so annotating another daemon's
+                # environments from it would attribute a local row's port,
+                # branch, and commit to an environment that merely shares its
+                # slug. One report, one authority; run `reconcile` with no
+                # --remote for the local rows.
+                print()
+                print(f"Runner metadata is not shown: it describes the local Incus daemon, not {authority}.")
 
         if pending:
             if live:
@@ -2341,28 +2402,20 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             return 0
         if live or pending:
             print()
+        # Only rows this daemon owns can reach here at all: a report about
+        # another daemon annotates nothing from this file, so every slug it
+        # lists came from that daemon's own projects and instances and is
+        # therefore present. The "a remote never prunes" rule needs no branch
+        # here any more; it is a consequence of who the rows belong to.
         print(f"{len(forgotten)} metadata entr(ies) describe environments {authority} no longer has:")
         for env in forgotten:
             print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
-        if not owns_local_metadata(args.remote):
-            # `worktrees.json` reserves ports on this machine and describes the
-            # environments this machine's daemon holds. A remote's inventory is
-            # no evidence about those rows, so a remote reconcile reports and
-            # never prunes.
-            print(f"Not dropped: this metadata describes the local Incus daemon, not {authority}.")
-            return 0
         if args.dry_run:
             print("Re-run with --yes to drop them and release their reserved host ports.")
             return 0
         if not args.yes:
             raise RegressionError("Dropping stale metadata entries requires --yes.")
-        slugs = [env.slug for env in forgotten]
-
-        def prune(worktrees: dict) -> None:
-            for slug in slugs:
-                worktrees.pop(slug, None)
-
-        mutate_worktree_mapping(repo_root, prune)
+        metadata.forget(env.slug for env in forgotten)
         print(f"Dropped {len(forgotten)} stale metadata entr(ies). No instance was deleted.")
         return 0
 
@@ -2370,9 +2423,10 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print commands without changing Incus.")
     # Keep --remote as an explicit escape hatch for the rare remote-ops case the
-    # docs call out. Local dev defaults to None (no remote); the remote_ref /
-    # preflight-skip machinery still keys off it, so deleting the flag would force
-    # args.remote=None always and run the host-port preflight on the wrong host.
+    # docs call out. Local dev defaults to None (no remote), and it is what names
+    # the daemon every command acts on: `remote_ref` addresses it, and
+    # `WorktreeMetadata` uses it to decide whether this machine's metadata is
+    # evidence about that daemon at all.
     parser.add_argument("--remote", help="Optional Incus remote name.")
 
 
