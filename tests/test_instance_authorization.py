@@ -22,21 +22,126 @@ def _context(role: str, *, remote: bool, source: str = "owner") -> Authorization
     )
 
 
+# Frozen master-era capability bits for editor/viewer. Seeded so a later
+# role or capability cannot silently rewrite those ranks; member is asserted
+# independently below rather than by enumerating every new key.
+_PRE_MEMBER_EDITOR_VIEWER_CAPABILITIES = {
+    "viewer": {
+        "is_instance_owner": False,
+        "can_read_instance": True,
+        "can_chat": False,
+        "can_manage_projects": False,
+        "can_manage_agents": False,
+        "can_manage_instance": False,
+        "can_use_agents": False,
+        "can_use_skills": False,
+        "can_use_vault_secrets": False,
+        "can_use_show_pages": True,
+        "can_use_terminal_files": False,
+        "can_use_terminal": False,
+        "can_use_files": False,
+        "can_use_system": False,
+    },
+    "editor": {
+        "is_instance_owner": False,
+        "can_read_instance": True,
+        "can_chat": True,
+        "can_manage_projects": False,
+        "can_manage_agents": False,
+        "can_manage_instance": False,
+        "can_use_agents": True,
+        "can_use_skills": True,
+        "can_use_vault_secrets": True,
+        "can_use_show_pages": True,
+        "can_use_terminal_files": True,
+        "can_use_terminal": True,
+        "can_use_files": True,
+        "can_use_system": False,
+    },
+}
+
+
 def test_capabilities_depend_on_instance_role_not_origin_or_membership() -> None:
-    for role in ("viewer", "editor", "owner"):
+    for role in ("viewer", "editor", "member", "owner"):
         local = _context(role, remote=False)
         remote = _context(role, remote=True, source="organization_group")
         assert local.capability_projection() == remote.capability_projection()
 
     viewer = _context("viewer", remote=True, source="organization_group")
     editor = _context("editor", remote=True, source="organization_group")
+    member = _context("member", remote=True, source="organization_group")
     owner = _context("owner", remote=True, source="organization_group")
     assert viewer.can_read_instance and not viewer.can_chat
     assert not viewer.can_use_resource("agent")
     assert editor.can_chat and editor.can_use_resource("agent")
     assert editor.can_use_files and editor.can_use_terminal
     assert not editor.can_manage_instance
+    assert member.can_manage_instance and member.can_use_system
+    assert member.has_role("editor") and member.can_use_resource("agent")
+    assert not member.can_manage_access_members
+    assert not member.is_instance_owner
     assert owner.can_manage_instance and owner.can_use_system
+    assert owner.can_manage_access_members and owner.is_instance_owner
+
+
+def test_editor_and_viewer_capabilities_match_pre_member_master() -> None:
+    """Editor/viewer bits stay bitwise-equal to master; new keys may appear."""
+
+    for role, expected in _PRE_MEMBER_EDITOR_VIEWER_CAPABILITIES.items():
+        projection = _context(role, remote=True).capability_projection()
+        for key, value in expected.items():
+            assert projection[key] is value, (role, key)
+        assert projection["can_manage_access_members"] is False
+
+
+def test_member_is_owner_minus_member_management() -> None:
+    member = _context("member", remote=True).capability_projection()
+    owner = _context("owner", remote=True).capability_projection()
+    assert set(member) == set(owner)
+    for key, value in owner.items():
+        if key in {"is_instance_owner", "can_manage_access_members"}:
+            assert member[key] is False
+        else:
+            assert member[key] is value
+
+
+def test_unknown_instance_role_fails_closed() -> None:
+    context = context_from_session_payload(
+        {
+            "sub": "user-1",
+            "vibe_instance_role": "admin",
+            "vibe_instance_access_source": "email",
+        }
+    )
+    assert context.instance_role is None
+    projection = context.capability_projection()
+    assert all(value is False for value in projection.values())
+
+
+def test_pre_member_payload_without_member_role_still_loads() -> None:
+    context = context_from_session_payload(
+        {
+            "sub": "user-1",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+        }
+    )
+    assert context.instance_role == "editor"
+    assert context.can_chat
+    assert not context.can_manage_instance
+
+
+def test_member_session_payload_is_accepted() -> None:
+    context = context_from_session_payload(
+        {
+            "sub": "user-1",
+            "vibe_instance_role": "member",
+            "vibe_instance_access_source": "email",
+        }
+    )
+    assert context.instance_role == "member"
+    assert context.can_manage_instance
+    assert not context.can_manage_access_members
 
 
 def test_organization_membership_does_not_elevate_role() -> None:
@@ -125,8 +230,12 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
         assert http_authorization_policy(method, path).minimum_role == "editor"
 
     for method, path in (("GET", "/api/future-owner-capability"), ("POST", "/api/control")):
-        assert http_authorization_policy(method, path).minimum_role == "owner"
+        assert http_authorization_policy(method, path).minimum_role == "member"
 
+    assert (
+        http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
+        == "owner"
+    )
     assert http_authorization_policy("GET", "/show/ses-1/").minimum_role == "viewer"
 
 
@@ -135,7 +244,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
 
     A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
     route must inherit the same Instance role as the rest of that capability.
-    Owner-only Agent create/import and unknown APIs stay fail-closed.
+    Agent create/import and unknown APIs fail closed to member; allowlist
+    mutation stays owner-only.
     """
 
     assert _EDITOR_HTTP_NAMESPACES == (
@@ -208,7 +318,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     for method, path in viewer_examples:
         assert http_authorization_policy(method, path).minimum_role == "viewer", path
 
-    owner_examples = (
+    member_examples = (
         ("POST", "/api/agents"),
         ("POST", "/api/agents/import"),
         ("PATCH", "/api/agents/demo"),
@@ -216,19 +326,31 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/future-owner-capability"),
         ("POST", "/api/browse"),
         ("POST", "/api/browse/mkdir"),
+        ("PUT", "/api/permissions/projects/project-1/access"),
+        ("PUT", "/api/permissions/resources/show_page/page-1/access"),
     )
-    for method, path in owner_examples:
-        assert http_authorization_policy(method, path).minimum_role == "owner", path
+    for method, path in member_examples:
+        assert http_authorization_policy(method, path).minimum_role == "member", path
+
+    assert (
+        http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
+        == "owner"
+    )
 
 
 def test_workbench_events_follow_role_boundaries() -> None:
     viewer = _context("viewer", remote=True)
     editor = _context("editor", remote=True)
+    member = _context("member", remote=True)
     owner = _context("owner", remote=True)
     assert can_receive_workbench_event(viewer, "message.new")
     assert not can_receive_workbench_event(viewer, "queue.updated")
     assert can_receive_workbench_event(editor, "queue.updated")
     assert not can_receive_workbench_event(editor, "runs.updated")
+    assert can_receive_workbench_event(member, "runs.updated")
+    assert can_receive_workbench_event(member, "definitions.updated")
+    assert can_receive_workbench_event(member, "vaults.updated")
+    assert not can_receive_workbench_event(member, "future.management.event")
     assert can_receive_workbench_event(owner, "runs.updated")
     assert not can_receive_workbench_event(viewer, "future.management.event")
 

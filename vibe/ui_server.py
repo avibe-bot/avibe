@@ -2763,7 +2763,7 @@ async def current_instance_permissions_authorized_users_put(
         from vibe import permissions
 
         authorization_context = getattr(g, "authorization_context", None)
-        if authorization_context is None or not authorization_context.can_manage_instance:
+        if authorization_context is None or not authorization_context.can_manage_access_members:
             return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         try:
             body = await starlette_request.body()

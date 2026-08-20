@@ -77,6 +77,9 @@ def test_missing_and_inherit_policies_preserve_instance_role(tmp_path) -> None:
         )
         assert result.outcome == "applied"
         assert project_access_service.get_effective_project_role(conn, editor, project["id"]) == "editor"
+        assert project_access_service.get_effective_project_role(
+            conn, _context("member"), project["id"]
+        ) == "member"
 
 
 def test_restricted_policy_matches_email_domain_and_group(tmp_path) -> None:
@@ -194,6 +197,33 @@ def test_highest_match_is_capped_by_instance_role(tmp_path) -> None:
         assert project_access_service.get_effective_project_role(
             conn, _context("editor"), project["id"]
         ) == "editor"
+        assert project_access_service.get_effective_project_role(
+            conn, _context("member"), project["id"]
+        ) == "editor"
+
+
+def test_project_binding_rejects_member_access_role(tmp_path) -> None:
+    engine, project = _engine_with_project(tmp_path)
+    with engine.begin() as conn:
+        result = project_access_service.apply_project_access_intent(
+            conn,
+            _intent(
+                project["id"],
+                1,
+                bindings=[
+                    {
+                        "principal_kind": "email",
+                        "principal_value": "member@example.com",
+                        "access_role": "member",
+                    }
+                ],
+            ),
+        )
+        policy = project_access_service.get_project_policy(conn, project["id"])
+
+    assert result.outcome == "rejected"
+    assert result.error_code == "invalid_project_access_binding"
+    assert policy is None
 
 
 def test_restricted_empty_bindings_is_owner_only(tmp_path) -> None:

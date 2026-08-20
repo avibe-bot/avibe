@@ -61,6 +61,7 @@ import type {
   AccessEntry,
   AccessRole,
   DirectoryGroup,
+  ProjectAccessRole,
   PermissionProject,
   PermissionsResponse,
   PrincipalKind,
@@ -585,6 +586,7 @@ function AccessEntryDialog({
               options={[
                 { id: 'viewer', label: t('permissions.roles.viewer') },
                 { id: 'editor', label: t('permissions.roles.editor') },
+                { id: 'member', label: t('permissions.roles.member') },
               ]}
             />
           </div>
@@ -854,7 +856,7 @@ function ProjectAccessDialog({
                       <Select
                         aria-label={t('permissions.fields.role')}
                         value={binding.access_role}
-                        onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, access_role: event.target.value as AccessRole } : item))}
+                        onChange={(event) => setBindings((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, access_role: event.target.value as ProjectAccessRole } : item))}
                       >
                         <option value="viewer">{t('permissions.roles.viewer')}</option>
                         <option value="editor">{t('permissions.roles.editor')}</option>
@@ -892,6 +894,8 @@ function ProjectAccessDialog({
 export function PermissionsPage() {
   const { t } = useTranslation();
   const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
+  const canManageProjectAccess = capabilities.can_manage_instance;
   const [state, setState] = useState<PageState>({ kind: 'loading' });
   const [tab, setTab] = useState<'access' | 'projects'>('access');
   const [editingAccess, setEditingAccess] = useState<string | null | undefined>(undefined);
@@ -1074,10 +1078,11 @@ export function PermissionsPage() {
   const { response } = state;
   const projection = response.projection;
   const groups = projection.directory.groups;
-  const editable = capabilities.can_manage_instance
-    && projection.instance.local_mutation_allowed
+  const mutationAllowed = projection.instance.local_mutation_allowed
     && projection.capabilities.includes('instance.permissions.mutate')
     && !response.offline;
+  const accessMembersEditable = canManageAccessMembers && mutationAllowed;
+  const projectAccessEditable = canManageProjectAccess && mutationAllowed;
   const applying = projectionIsApplying(response);
   const instanceName = projection.instance.name?.trim() || t('permissions.currentInstance');
   const instanceInitial = Array.from(instanceName)[0]?.toUpperCase() || 'A';
@@ -1122,7 +1127,7 @@ export function PermissionsPage() {
   };
 
   const removeAccess = async () => {
-    if (!editable || removingAccess === null || removalInstanceId === null) return;
+    if (!accessMembersEditable || removingAccess === null || removalInstanceId === null) return;
     if (removalRefreshRequired) {
       await refreshRemovalConflict();
       return;
@@ -1227,7 +1232,9 @@ export function PermissionsPage() {
           title={t('permissions.states.cloudTitle')}
           body={t('permissions.states.cloudBody')}
         />
-      ) : !editable ? (
+      ) : tab === 'access' && !accessMembersEditable ? (
+        <Notice tone="neutral" icon={Eye} title={t('permissions.states.readOnlyTitle')} body={t('permissions.states.readOnlyBody')} />
+      ) : tab === 'projects' && !projectAccessEditable ? (
         <Notice tone="neutral" icon={Eye} title={t('permissions.states.readOnlyTitle')} body={t('permissions.states.readOnlyBody')} />
       ) : null}
 
@@ -1276,7 +1283,7 @@ export function PermissionsPage() {
               <h2 className="text-[15px] font-semibold">{t('permissions.access.title')}</h2>
               <p className="mt-0.5 text-[12px] text-muted">{t('permissions.access.description')}</p>
             </div>
-            {editable ? <Button type="button" variant="brand" size="sm" onClick={() => setEditingAccess(null)}><Plus className="size-4" />{t('permissions.actions.addAccess')}</Button> : null}
+            {accessMembersEditable ? <Button type="button" variant="brand" size="sm" onClick={() => setEditingAccess(null)}><Plus className="size-4" />{t('permissions.actions.addAccess')}</Button> : null}
           </div>
           <div className="flex items-center gap-3 rounded-lg border border-violet/35 bg-violet/10 px-4 py-3">
             <ShieldCheck className="size-5 shrink-0 text-violet-ink" />
@@ -1316,9 +1323,9 @@ export function PermissionsPage() {
                       <span className="truncate text-[12px] font-semibold">{displayPrincipal(entry.kind, entry.value, groups)}</span>
                     </div>
                     <Badge variant="secondary">{t(`permissions.principals.${entry.kind}`)}</Badge>
-                    <Badge variant={entry.role === 'editor' ? 'success' : 'secondary'}>{entry.role === 'editor' ? <Pencil className="size-3" /> : <Eye className="size-3" />}{t(`permissions.roles.${entry.role}`)}</Badge>
+                    <Badge variant={entry.role === 'viewer' ? 'secondary' : 'success'}>{entry.role === 'viewer' ? <Eye className="size-3" /> : <Pencil className="size-3" />}{t(`permissions.roles.${entry.role}`)}</Badge>
                     <div className="flex justify-end gap-1">
-                      {editable ? <><Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalInstanceId(projection.instance.id); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
+                      {accessMembersEditable ? <><Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.editAccess')} onClick={() => setEditingAccess(entryKey)}><Pencil className="size-4" /></Button><Button type="button" size="icon" variant="ghost" aria-label={t('permissions.actions.removeAccess')} onClick={() => { setRemovingAccess(entryKey); setRemovalInstanceId(projection.instance.id); setRemovalConflict(false); setRemovalRefreshRequired(false); setRemovalError(undefined); }}><Trash2 className="size-4 text-destructive-ink" /></Button></> : null}
                     </div>
                   </div>
                 );
@@ -1347,7 +1354,7 @@ export function PermissionsPage() {
                     <Badge variant={mode === 'owner_only' ? 'warning' : mode === 'restricted' ? 'info' : 'secondary'}>{mode === 'owner_only' ? <LockKeyhole className="size-3" /> : mode === 'restricted' ? <ShieldCheck className="size-3" /> : <Users className="size-3" />}{t(`permissions.projects.modes.${mode}`)}</Badge>
                     <span className="truncate text-[12px] text-muted">{mode === 'restricted' ? t('permissions.projects.bindingCount', { count: project.access.bindings.length }) : t(`permissions.projects.audience.${mode}`)}</span>
                     <SyncBadge status={project.sync.status} />
-                    {editable ? <Button type="button" size="sm" variant="outline" onClick={() => setEditingProject(project)}>{t('permissions.actions.manage')}</Button> : <span />}
+                    {projectAccessEditable ? <Button type="button" size="sm" variant="outline" onClick={() => setEditingProject(project)}>{t('permissions.actions.manage')}</Button> : <span />}
                   </div>
                 );
               })}
@@ -1360,7 +1367,7 @@ export function PermissionsPage() {
         open={editingAccess !== undefined}
         editingKey={editingAccess ?? null}
         response={response}
-        editable={editable}
+        editable={accessMembersEditable}
         onOpenChange={(open) => { if (!open) setEditingAccess(undefined); }}
         onRefresh={refreshReady}
         onSaved={(instanceId, result) => installMutationAcknowledgement(instanceId, result.instance_id, (current) => ({
@@ -1376,7 +1383,7 @@ export function PermissionsPage() {
         project={editingProject}
         instanceId={projection.instance.id}
         groups={groups}
-        editable={editable}
+        editable={projectAccessEditable}
         onOpenChange={(open) => { if (!open) setEditingProject(null); }}
         onRefresh={refreshReady}
         onSaved={(instanceId, result) => installMutationAcknowledgement(
@@ -1392,7 +1399,7 @@ export function PermissionsPage() {
         description={t('permissions.access.removeBody')}
         destructive
         confirmLabel={t('permissions.actions.removeAccess')}
-        confirmDisabled={!editable}
+        confirmDisabled={!accessMembersEditable}
         onConfirm={removeAccess}
       >
         {removalConflict ? (

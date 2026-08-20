@@ -2327,7 +2327,7 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
     )
     assert (
         http_authorization_policy("PUT", "/api/permissions/projects/project-1/access").minimum_role
-        == "owner"
+        == "member"
     )
     assert (
         http_authorization_policy(
@@ -2339,7 +2339,7 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
         http_authorization_policy(
             "PUT", "/api/permissions/resources/agent/agent-1/access"
         ).minimum_role
-        == "owner"
+        == "member"
     )
 
 
@@ -2506,6 +2506,127 @@ def test_permissions_same_origin_route_surfaces_a_changed_pairing(monkeypatch) -
         "ok": False,
         "error": "permissions_pairing_changed",
     }
+
+
+def test_member_can_manage_instance_settings_but_not_authorized_users(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    authorized_users_called = False
+    project_access_called = False
+
+    def replace(_payload):
+        nonlocal authorized_users_called
+        authorized_users_called = True
+        return {"ok": True, "instance_id": "inst-123", "entries": [], "authorization_revision": 4}
+
+    def update(_project_id, _payload):
+        nonlocal project_access_called
+        project_access_called = True
+        return {
+            "ok": True,
+            "instance_id": "inst-123",
+            "project": _complete_projection()["projects"][0],
+            "authorization_revision": 4,
+        }
+
+    monkeypatch.setattr(permissions, "replace_authorized_users", replace)
+    monkeypatch.setattr(permissions, "update_project_access", update)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "member@example.com",
+            "member-1",
+            role="member",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+
+    project_response = client.put(
+        "/api/permissions/projects/project-1/access",
+        json={
+            "mode": "inherit",
+            "bindings": [],
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    users_response = client.put(
+        "/api/permissions/authorized-users",
+        json={
+            "entries": [],
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+
+    assert project_response.status_code == 200
+    assert project_access_called is True
+    assert users_response.status_code == 403
+    assert users_response.get_json()["error"] == "instance_access_forbidden"
+    assert authorized_users_called is False
+
+
+def test_owner_can_mutate_authorized_users(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    called = False
+
+    def replace(payload):
+        nonlocal called
+        called = True
+        assert payload["entries"] == [
+            {"kind": "email", "value": "member@example.com", "role": "member"}
+        ]
+        return {
+            "ok": True,
+            "instance_id": "inst-123",
+            "entries": payload["entries"],
+            "authorization_revision": 5,
+        }
+
+    monkeypatch.setattr(permissions, "replace_authorized_users", replace)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "owner@example.com",
+            "owner-1",
+            role="owner",
+            access_source="owner",
+        ),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+    response = client.put(
+        "/api/permissions/authorized-users",
+        json={
+            "entries": [
+                {"kind": "email", "value": "member@example.com", "role": "member"}
+            ],
+            "if_match_revision": 4,
+            "if_match_instance_id": "inst-123",
+        },
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert called is True
 
 
 def test_resource_access_same_origin_routes_forward_exact_identity_and_conflict(

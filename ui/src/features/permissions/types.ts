@@ -1,4 +1,4 @@
-export type AccessRole = 'viewer' | 'editor';
+export type AccessRole = 'viewer' | 'editor' | 'member';
 export type PrincipalKind = 'email' | 'email_domain' | 'organization_group';
 export type ProjectSyncStatus = 'in_sync' | 'pending' | 'offline' | 'error' | 'deleted';
 export type ResourceAccessLevel = 'public' | 'scope' | 'private';
@@ -23,10 +23,12 @@ export type DirectoryGroup = {
   archived_at: string | null;
 };
 
+export type ProjectAccessRole = 'viewer' | 'editor';
+
 export type ProjectBinding = {
   principal_kind: PrincipalKind;
   principal_value: string;
-  access_role: AccessRole;
+  access_role: ProjectAccessRole;
 };
 
 export type PermissionProject = {

@@ -13,7 +13,7 @@ from core.inbox_events import (
 )
 
 
-INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
+INSTANCE_ROLES = frozenset({"owner", "member", "editor", "viewer"})
 INSTANCE_ACCESS_SOURCES = frozenset(
     {
         "owner",
@@ -26,7 +26,7 @@ INSTANCE_ACCESS_SOURCES = frozenset(
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 INSTANCE_KINDS = frozenset({"personal", "organization"})
-_ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+_ROLE_RANK = {"viewer": 1, "editor": 2, "member": 3, "owner": 4}
 
 
 def recognized_instance_kind(value: object) -> str | None:
@@ -52,6 +52,8 @@ def instance_kind_is_unsupported(value: object) -> bool:
     if not isinstance(value, str):
         return True
     return value.strip() not in {"", *INSTANCE_KINDS}
+
+
 _RESOURCE_USE_MINIMUM_ROLES = {
     "agent": "editor",
     "skill": "editor",
@@ -144,14 +146,18 @@ class AuthorizationContext:
 
     @property
     def can_manage_projects(self) -> bool:
-        return self.has_role("owner")
+        return self.has_role("member")
 
     @property
     def can_manage_agents(self) -> bool:
-        return self.has_role("owner")
+        return self.has_role("member")
 
     @property
     def can_manage_instance(self) -> bool:
+        return self.has_role("member")
+
+    @property
+    def can_manage_access_members(self) -> bool:
         return self.has_role("owner")
 
     def can_use_resource(self, resource_kind: str) -> bool:
@@ -184,7 +190,7 @@ class AuthorizationContext:
 
     @property
     def can_use_system(self) -> bool:
-        return self.has_role("owner")
+        return self.has_role("member")
 
     def capability_projection(self) -> dict[str, bool]:
         return {
@@ -194,6 +200,7 @@ class AuthorizationContext:
             "can_manage_projects": self.can_manage_projects,
             "can_manage_agents": self.can_manage_agents,
             "can_manage_instance": self.can_manage_instance,
+            "can_manage_access_members": self.can_manage_access_members,
             "can_use_agents": self.can_use_resource("agent"),
             "can_use_skills": self.can_use_resource("skill"),
             "can_use_vault_secrets": self.can_use_resource("vault_secret"),
@@ -340,6 +347,8 @@ def required_workbench_event_role(event_type: str) -> str:
         return "viewer"
     if event_type in _EDITOR_WORKBENCH_EVENTS:
         return "editor"
+    if event_type in _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS:
+        return "member"
     return "owner"
 
 
@@ -394,8 +403,8 @@ _VIEWER_HTTP_RULES = tuple(
 # Advertised Editor/Viewer surfaces are admitted by namespace so a newly
 # added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push route
 # inherits the same Instance role as the rest of that capability. Routes
-# that stay Owner-only — Agent create/import/update/delete, system config —
-# remain outside these prefixes and fail closed to owner.
+# that stay Owner-only — allowlist member management — are listed below.
+# Remaining unknown APIs fail closed to member, the instance-management floor.
 _EDITOR_HTTP_NAMESPACES = (
     "/api/skills",
     "/api/vault",
@@ -411,6 +420,15 @@ _VIEWER_HTTP_NAMESPACES = (
 _VIEWER_HTTP_MUTATION_RULES = (
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
+)
+
+# Member-management stays Owner-only even though instance management is now
+# rank-member. Unknown APIs inherit member; list Owner exceptions here.
+_OWNER_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("PUT", r"^/api/permissions/authorized-users$"),
+    )
 )
 
 _EDITOR_HTTP_RULES = tuple(
@@ -484,8 +502,10 @@ def http_authorization_policy(
         return HttpAuthorizationPolicy("viewer")
     if _path_in_namespaces(path, _EDITOR_HTTP_NAMESPACES):
         return HttpAuthorizationPolicy("editor")
+    if _http_rule_matches(normalized_method, path, _OWNER_HTTP_RULES):
+        return HttpAuthorizationPolicy("owner")
 
-    minimum_role = "owner"
+    minimum_role = "member"
     for rule_method, pattern in _EDITOR_HTTP_RULES:
         if normalized_method == rule_method and pattern.fullmatch(path):
             minimum_role = "editor"
@@ -503,8 +523,10 @@ def required_instance_role(method: str, path: str) -> str | None:
     """Return the minimum role for a remote HTTP request.
 
     Non-API page/static reads are handled by the authenticated shell. Unknown
-    API routes deliberately default to owner so a newly added management route
-    cannot accidentally become available to editors or viewers.
+    API routes deliberately default to member so a newly added management
+    route cannot accidentally become available to editors or viewers, while
+    member inherits today's instance-management surface. Allowlist mutation
+    stays Owner-only via ``_OWNER_HTTP_RULES``.
     """
 
     return http_authorization_policy(method, path).minimum_role
