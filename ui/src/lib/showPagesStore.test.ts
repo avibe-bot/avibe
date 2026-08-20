@@ -45,6 +45,12 @@ const deferred = <T,>() => {
 
 type EventHandlers = Parameters<ShowPagesInventoryApi['connectWorkbenchEvents']>[0];
 
+// A handshake carries the subscription it established; `null` is a gap declared
+// with no handshake behind it, which a reactivation sends in place of waiting on
+// the stream it is replacing.
+const HANDSHAKE_A = { sub_id: 1, source: 'browser' } as const;
+const HANDSHAKE_B = { sub_id: 2, source: 'browser' } as const;
+
 describe('ShowPagesInventoryStore', () => {
   it('single-flights simultaneous consumers and keeps one events subscription', async () => {
     const response = deferred<{ pages: ShowPage[] }>();
@@ -94,13 +100,12 @@ describe('ShowPagesInventoryStore', () => {
 
     const close = store.activate();
     await store.reload();
-    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
     expect(store.getSnapshot().pages).toHaveLength(1);
     close();
 
     // Still subscribed, but invalidation-only: a reconnect or a session event
     // with nobody reading must not put a request on a route that renders none.
-    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+    handlers?.onConnected?.(HANDSHAKE_A);
     handlers?.onSessionActivity?.({
       session_id: 'session-1',
       scope_id: null,
@@ -229,7 +234,19 @@ describe('ShowPagesInventoryStore', () => {
     expect(connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
 
-  it('does not refetch when the initial events connection arrives after the activation read', async () => {
+  // The property rather than a list of cases: with a consumer reading, every
+  // `onConnected` is followed by a read issued after it. No call is exempt --
+  // not this store's first handshake, not the one that follows a declared gap --
+  // because what makes a read authoritative for a subscription is having started
+  // after that subscription announced itself, and activate()'s read is issued
+  // before. Any sequence of signals therefore costs its own length in reads;
+  // a case nobody listed here obeys the same arithmetic.
+  it.each([
+    ['handshakes only', [HANDSHAKE_A, HANDSHAKE_B]],
+    ['a gap declared before any handshake', [null, HANDSHAKE_A]],
+    ['gaps only', [null, null]],
+    ['a gap between two handshakes', [HANDSHAKE_A, null, HANDSHAKE_B]],
+  ] as const)('reads again after every established subscription: %s', async (_name, signals) => {
     let handlers: EventHandlers | undefined;
     const getShowPages = vi.fn().mockResolvedValue({ pages: [page()] });
     const store = new ShowPagesInventoryStore({
@@ -242,17 +259,22 @@ describe('ShowPagesInventoryStore', () => {
 
     const release = store.activate();
     await store.reload();
-    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
-    await Promise.resolve();
     expect(getShowPages).toHaveBeenCalledTimes(1);
 
-    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
-    await store.reload();
-    expect(getShowPages).toHaveBeenCalledTimes(2);
+    let expected = 1;
+    for (const signal of signals) {
+      handlers?.onConnected?.(signal);
+      expected += 1;
+      // Asserted before any await: the signal issues the read synchronously, so
+      // a test that awaited `reload()` first would manufacture the very request
+      // it is checking for and pass against a handler that skipped the signal.
+      expect(getShowPages).toHaveBeenCalledTimes(expected);
+      await store.reload();
+    }
     release();
   });
 
-  it('reconciles a gap declared before any handshake arrives', async () => {
+  it('reads nothing for an established subscription with nobody reading', async () => {
     let handlers: EventHandlers | undefined;
     const getShowPages = vi.fn().mockResolvedValue({ pages: [page()] });
     const store = new ShowPagesInventoryStore({
@@ -263,25 +285,16 @@ describe('ShowPagesInventoryStore', () => {
       }),
     });
 
-    const release = store.activate();
+    store.activate()();
     await store.reload();
     expect(getShowPages).toHaveBeenCalledTimes(1);
 
-    // A reactivation that finds the stream unproven announces the gap itself
-    // rather than waiting on the replacement stream's handshake, so `null` can
-    // be the very first call this subscription ever sees. Swallowing it as "the
-    // initial connection" would spend the one free pass on a read activate()
-    // had already done and leave the real gap unreconciled.
+    // Revalidation waits for demand: the subscription stays open to hear
+    // invalidation, and reactivation re-reads anyway.
+    handlers?.onConnected?.(HANDSHAKE_A);
     handlers?.onConnected?.(null);
     await Promise.resolve();
-    expect(getShowPages).toHaveBeenCalledTimes(2);
-
-    // The handshake that follows is still this subscription's first, and
-    // activate() plus the line above have both already read: nothing owed.
-    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
-    await Promise.resolve();
-    expect(getShowPages).toHaveBeenCalledTimes(2);
-    release();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
   });
 
   it('withdraws a retained page immediately when access is lost', async () => {

@@ -360,16 +360,18 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(proven.closed).toBe(false);
   });
 
-  it('keeps a declared cadence when a relayed handshake carries none', () => {
+  it('keeps a declared cadence when a later handshake carries none', () => {
     mountStream();
     const declared = FakeEventSource.latest();
 
-    // The UI server relays the controller's own handshake down the same stream,
-    // and that frame speaks for the controller leg, not for this socket's
-    // cadence. Only a frame carrying a cadence may speak for one: arriving late
-    // in the window, a relayed handshake that was allowed to speak would either
-    // retire the deadline the UI server promised or push it out by a full window
-    // -- and this stream is already dead, having never sent a heartbeat.
+    // Only a frame carrying a cadence may speak for one. A `connected` without
+    // one is either an older UI server's handshake or some future producer of
+    // the same event name; arriving late in the window, one allowed to speak
+    // would either retire the deadline this server promised or push it out by a
+    // full window -- and this stream is already dead, having never sent a
+    // heartbeat. (The controller relay that first motivated this rule is gone:
+    // its frame is consumed by the bridge, which publishes the leg's status
+    // instead.)
     vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
     FakeEventSource.latest().emit('connected', { type: 'connected' });
     vi.advanceTimersByTime(1_000);
