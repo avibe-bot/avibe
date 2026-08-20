@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { isBoundaryMessage, isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
+import {
+  isAgentActivityGroupBoundaryMessage,
+  isBoundaryMessage,
+  isNotifyMessageType,
+  isTerminalAgentMessage,
+  isTranscriptMessage,
+} from './chatMessageTypes';
 import { messageTypeNames, specFor } from './messageTypes';
 
 describe('isTranscriptMessage', () => {
@@ -93,5 +99,24 @@ describe('isBoundaryMessage', () => {
     for (const type of statusTypes) {
       expect(isBoundaryMessage({ type, metadata: { detached: true } }), type).toBe(false);
     }
+  });
+});
+
+describe('isAgentActivityGroupBoundaryMessage', () => {
+  it('refreshes Activity groups for terminal replies and detached completions', () => {
+    for (const type of ['output', 'result', 'error']) {
+      expect(isAgentActivityGroupBoundaryMessage({ author: 'agent', type }), type).toBe(true);
+    }
+    for (const type of ['result', 'error', 'notify']) {
+      expect(
+        isAgentActivityGroupBoundaryMessage({ author: 'agent', type, metadata: { detached: true } }),
+        type,
+      ).toBe(true);
+    }
+  });
+
+  it('ignores non-boundary process and user rows', () => {
+    expect(isAgentActivityGroupBoundaryMessage({ author: 'agent', type: 'assistant' })).toBe(false);
+    expect(isAgentActivityGroupBoundaryMessage({ author: 'user', type: 'result' })).toBe(false);
   });
 });

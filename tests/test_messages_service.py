@@ -4,6 +4,7 @@ regress: pagination cursor and the ``mark_session_read`` boundary check.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -1286,6 +1287,7 @@ def _insert_msg(
     msg_type=None,
     msg_id=None,
     delivered_at=None,
+    metadata=None,
 ):
     """Direct insert so the test controls created_at (second-resolution) + read_at.
 
@@ -1305,7 +1307,7 @@ def _insert_msg(
             type=resolved_type,
             content_text=text,
             content_json="{}",
-            metadata_json="{}",
+            metadata_json=json.dumps(metadata or {}),
             created_at=created_at,
             updated_at=created_at,
             delivered_at=delivered_at,
@@ -1502,6 +1504,32 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
         row2 = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
     assert row2["replied"] is False
     assert row2["preview_text"] == "R2"
+
+
+def test_detached_completion_does_not_settle_current_inbox_reply(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_detached", "Detached")
+        _insert_msg(conn, scope_id, "ses_detached", "agent", "R1", "2026-05-30T10:01:00Z")
+        _insert_msg(conn, scope_id, "ses_detached", "user", "new turn", "2026-05-30T10:05:00Z")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_detached",
+            "agent",
+            "background completed",
+            "2026-05-30T10:06:00Z",
+            read=False,
+            metadata={"detached": True, "activity_id": "background-1"},
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert row["preview_text"] == "background completed"
+    assert row["unread_count"] == 1
+    assert row["replied"] is True
 
 
 def test_list_inbox_sessions_silent_completion_clears_awaiting(isolated_state):

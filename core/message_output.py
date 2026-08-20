@@ -144,18 +144,22 @@ def communication_type_for_output(
 ) -> str:
     """Classify a visible output by the lifecycle authority it actually owns.
 
-    Backends may surface a nonterminal phase or detached Activity completion
-    through their native ``result`` frame. That frame still drives internal Run
-    settlement, but it must not be persisted or streamed as a terminal transcript
-    result: only an attached output with Turn-completion authority owns that role.
+    Attached nonterminal output is persisted as ``output``. Detached completions
+    retain their ``result`` / ``error`` notification family while metadata marks
+    them as an Activity boundary without granting current-Turn completion authority.
     """
 
-    if message_type in {"result", "output"} and (
-        message_type == "output" or not output.completes_turn or output.detached
-    ):
+    if message_type == "output":
         return "output"
-    if message_type == "result" and is_error:
-        return "error"
+    if message_type == "result":
+        # Detached completion keeps its notification semantics. Lifecycle consumers
+        # derive its boundary role from metadata instead of changing its visible type.
+        if output.detached:
+            return "error" if is_error else "result"
+        if not output.completes_turn:
+            return "output"
+        if is_error:
+            return "error"
     return message_type
 
 

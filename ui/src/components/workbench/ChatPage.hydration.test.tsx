@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
     connectWorkbenchEvents: vi.fn(),
     getCachedSessionDraft: vi.fn(),
     getSession: vi.fn(),
+    getSessionActivity: vi.fn(),
+    getSessionActivityGroup: vi.fn(),
     getSessionBootstrap: vi.fn(),
     getTurnState: vi.fn(),
     getWorkbenchPrefs: vi.fn(),
@@ -19,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   events: null as null | {
     onConnected: () => void;
     onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
+    onMessageNew: (message: ReturnType<typeof projectedMessage>) => void;
     onTurnEnd: (data: { session_id: string }) => void;
   },
 }));
@@ -190,6 +193,8 @@ describe('ChatPage transcript hydration', () => {
     });
     mocks.api.getCachedSessionDraft.mockReturnValue(null);
     mocks.api.getSession.mockReturnValue(sessionRow.promise);
+    mocks.api.getSessionActivity.mockResolvedValue({ groups: [] });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({});
     mocks.api.getSessionBootstrap.mockReturnValue(bootstrap.promise);
     mocks.api.getTurnState.mockResolvedValue(idleTurnState);
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
@@ -362,5 +367,36 @@ describe('ChatPage transcript hydration', () => {
 
     await waitFor(() => expect(screen.getByText('chat.transcriptEmpty')).toBeTruthy());
     expect(screen.queryByText(projected.text)).toBeNull();
+  });
+
+  it('refreshes Agent Activity when a detached completion arrives', async () => {
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      config: { ui: { show_agent_activity: true } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalled());
+    mocks.api.getSessionActivity.mockClear();
+
+    act(() =>
+      mocks.events?.onMessageNew({
+        ...projectedMessage('detached-result', 'background completed'),
+        author: 'agent',
+        type: 'result',
+        source: 'agent',
+        metadata: { detached: true, activity_id: 'background-1' },
+      }),
+    );
+
+    await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalledTimes(1));
   });
 });

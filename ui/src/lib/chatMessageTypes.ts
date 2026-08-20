@@ -27,11 +27,23 @@ type TerminalMessageCandidate = {
 
 const isDetachedMessage = (message: TerminalMessageCandidate): boolean => message.metadata?.detached === true;
 
+const activityRoleForMessage = (
+  message: TerminalMessageCandidate,
+): ReturnType<typeof specFor>['activityRole'] => {
+  const spec = specFor(message.type);
+  if (isDetachedMessage(message) && spec.detachedBoundary) return 'boundary';
+  const event = message.metadata?.event;
+  if (typeof event === 'string' && spec.terminalWhenEvents.includes(event)) return 'terminal';
+  return spec.activityRole;
+};
+
 // A phase boundary uses the muted Agent presentation. The detached-result case
 // keeps rows written by older servers on that presentation; notification types
 // remain status pills even when detached.
-export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean =>
-  specFor(message.type).activityRole === 'boundary' || (message.type === 'result' && isDetachedMessage(message));
+export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean => {
+  const spec = specFor(message.type);
+  return activityRoleForMessage(message) === 'boundary' && spec.render === 'agent';
+};
 
 type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
 
@@ -41,11 +53,16 @@ type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string
 // a turn for specific metadata events (``notify`` + ``backend_failure``).
 export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): boolean => {
   if (message.author !== 'agent') return false;
-  // Detached output belongs to another lifecycle and can never settle the
-  // current Turn, regardless of which visual family renders it.
-  if (isDetachedMessage(message) || isBoundaryMessage(message)) return false;
   const spec = specFor(message.type);
-  if (spec.transcript && spec.activityRole === 'terminal') return true;
-  const event = message.metadata?.event;
-  return typeof event === 'string' && spec.terminalWhenEvents.includes(event);
+  return spec.transcript && activityRoleForMessage(message) === 'terminal';
+};
+
+// Both terminal replies and detached completions end one Activity group. Only
+// terminal replies settle the current Turn; callers must keep those decisions separate.
+export const isAgentActivityGroupBoundaryMessage = (
+  message: TerminalAgentMessageCandidate,
+): boolean => {
+  if (message.author !== 'agent') return false;
+  const role = activityRoleForMessage(message);
+  return role === 'boundary' || role === 'terminal';
 };

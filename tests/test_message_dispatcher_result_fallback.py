@@ -161,7 +161,14 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
                 MessageOutput(completes_turn=True, detached=True),
                 is_error=True,
             ),
-            "output",
+            "error",
+        )
+        self.assertEqual(
+            communication_type_for_output(
+                "result",
+                MessageOutput(completes_turn=True, detached=True),
+            ),
+            "result",
         )
         self.assertEqual(
             communication_type_for_output(
@@ -424,7 +431,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_service.release_runtime_turn.assert_not_called()
         turn_chunk.assert_not_awaited()
         persist.assert_called_once()
-        self.assertEqual(persist.call_args.args[1], "output")
+        self.assertEqual(persist.call_args.args[1], "result")
         self.assertEqual(persist.call_args.kwargs["metadata"]["activity_id"], "task-1")
         self.assertTrue(persist.call_args.kwargs["metadata"]["detached"])
 

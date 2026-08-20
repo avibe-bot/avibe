@@ -42,7 +42,7 @@ from sqlalchemy import func, select
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
 from storage.models import message_deliveries, session_turns
-from vibe.message_types import spec_for, types_with
+from vibe.message_types import activity_role_for, spec_for, types_with
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
 # demand; covering the most-recent MESSAGE_SCAN_LIMIT transcript messages (and
@@ -61,6 +61,7 @@ _TRANSCRIPT_ACTIVITY_TYPES = tuple(
     for message_type in types_with("transcript")
     if spec_for(message_type)["activityRole"] != "none"
     or spec_for(message_type)["terminalWhenEvents"]
+    or spec_for(message_type)["detachedBoundary"]
 )
 _NON_TRANSCRIPT_START_TYPES = tuple(
     message_type
@@ -134,11 +135,10 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     """
     if author != "agent":
         return False
-    spec = spec_for(msg_type if isinstance(msg_type, str) else "")
-    return (
-        spec["activityRole"] == "terminal"
-        or (metadata or {}).get("event") in spec["terminalWhenEvents"]
-    )
+    return activity_role_for(
+        msg_type if isinstance(msg_type, str) else "",
+        metadata,
+    ) == "terminal"
 
 
 def _outcome_status(terminal_outcome: Any) -> str:
@@ -263,7 +263,10 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         mtype = msg.get("type")
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
-        activity_role = spec_for(mtype if isinstance(mtype, str) else "")["activityRole"]
+        activity_role = activity_role_for(
+            mtype if isinstance(mtype, str) else "",
+            metadata,
+        )
         accepted_role = accepted_roles.get(str(msg.get("id") or ""))
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
@@ -313,7 +316,11 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 # rather than the marker itself; ``terminal_status`` is resolved here so
                 # ``notify`` failure/normal is decided with its metadata in hand.
                 "is_silent": False,
-                "terminal_status": _terminal_status(mtype, metadata) if kind == "terminal" else None,
+                "terminal_status": (
+                    _terminal_status(mtype, metadata)
+                    if kind in {"boundary", "terminal"}
+                    else None
+                ),
             }
         )
     # Bound events to the scanned message window: in a long session the 500-message
@@ -485,7 +492,7 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 groups.append(
                     _make_group(
                         pending,
-                        status="done",
+                        status=item["terminal_status"],
                         anchor_id=item["id"],
                         anchor_position="before",
                         open_turn=False,
