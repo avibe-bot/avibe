@@ -44,10 +44,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -90,26 +91,62 @@ def cache_path() -> Path:
     return paths.get_state_dir() / "latest_versions.json"
 
 
+def _entry_from(raw: Any) -> _Entry | None:
+    """Turn one untrusted mapping into an answer, or into nothing. Never raises.
+
+    The guard is the boundary, not a list of the ways parsing has gone wrong so
+    far. Two review rounds each supplied the next member of such a list — a
+    non-UTF-8 file raising ``UnicodeDecodeError`` where only ``JSONDecodeError``
+    was expected, then ``float(10**400)`` raising ``OverflowError``, which is an
+    ``ArithmeticError`` and so was outside the widened ``ValueError`` too. A
+    third enumeration would predict a fourth round.
+
+    So this function owns the whole conversion, and its contract is a property:
+    whatever the file says, the caller gets an ``_Entry`` it can use or ``None``.
+    A field check added later inherits that, instead of needing its own
+    ``except``.
+
+    The explicit checks above the guard are still worth their lines, because
+    they reject values that do *not* raise: ``inf`` and ``NaN`` survive a JSON
+    round trip, compare false against every TTL, and would then be written back
+    out as the non-standard ``Infinity``/``NaN`` tokens. And a null value is not
+    something this version writes, so it is not something it trusts — corruption
+    must not pin ``latest_unavailable`` on every cold process.
+    """
+
+    try:
+        if not isinstance(raw, dict):
+            return None
+        at = raw.get("at")
+        value = raw.get("value")
+        if isinstance(at, bool) or not isinstance(at, (int, float)):
+            return None
+        if not isinstance(value, str) or not value:
+            return None
+        at = float(at)
+        if not math.isfinite(at):
+            return None
+        return _Entry(at, value)
+    except Exception as exc:
+        logger.debug("Latest-version cache entry unusable: %s", exc)
+        return None
+
+
 def _read_file() -> dict[str, _Entry]:
     """Load the persisted entries, discarding anything we cannot trust.
 
     A cache file is written by whichever Avibe process got there first, which
     may be an older or newer build, and may have died mid-write on a machine
     without atomic renames. Every failure mode collapses to the same answer:
-    fewer entries, one more probe.
-
-    So the except clause names that property rather than the ways it has broken
-    so far: ``ValueError`` covers both ``json.JSONDecodeError`` and the
-    ``UnicodeDecodeError`` that non-UTF-8 bytes raise, and whatever the next
-    decoder raises for bytes that are not a document. An enumeration here reads
-    as complete and is not — it was already missing the second of those two.
+    fewer entries, one more probe — per entry, so one unreadable name never
+    costs its neighbours their answers.
     """
 
     try:
         raw = json.loads(cache_path().read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError) as exc:
+    except Exception as exc:
         logger.debug("Latest-version cache unreadable: %s", exc)
         return {}
     if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
@@ -120,18 +157,11 @@ def _read_file() -> dict[str, _Entry]:
 
     out: dict[str, _Entry] = {}
     for name, entry in entries.items():
-        if not isinstance(name, str) or not isinstance(entry, dict):
+        if not isinstance(name, str):
             continue
-        at = entry.get("at")
-        value = entry.get("value")
-        if not isinstance(at, (int, float)) or isinstance(at, bool):
-            continue
-        # The file tier holds answers, in both directions: a null is not
-        # something this version writes, so it is not something it trusts.
-        # Corruption must not pin ``latest_unavailable`` on every cold process.
-        if not isinstance(value, str) or not value:
-            continue
-        out[name] = _Entry(float(at), value)
+        parsed = _entry_from(entry)
+        if parsed is not None:
+            out[name] = parsed
     return out
 
 

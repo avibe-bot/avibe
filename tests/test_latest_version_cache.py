@@ -8,12 +8,18 @@ again, exactly as a fresh ``vibe runtime prepare`` would.
 from __future__ import annotations
 
 import json
+import math
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from core import latest_version_cache
 from core.latest_version_cache import cache_path, cached_latest
+
+
+class _NovelFailure(Exception):
+    """An exception type no hand-written list of failure modes could contain."""
 
 
 class _Probe:
@@ -46,6 +52,12 @@ def _remember(name: str, *, age: float, value: str | None) -> None:
 
 def _persisted() -> dict:
     return json.loads(cache_path().read_text(encoding="utf-8"))
+
+
+def _not_json(token: str) -> float:
+    """Refuse the tokens Python emits but the JSON grammar does not contain."""
+
+    raise AssertionError(f"the cache file must be readable by any JSON parser, found {token!r}")
 
 
 def test_a_second_process_inherits_the_answer_without_probing() -> None:
@@ -223,6 +235,10 @@ def test_bytes_that_are_not_a_document_cost_a_probe_and_nothing_else() -> None:
         {"at": True, "value": "0.1.15"},
         {"at": 0, "value": {"nested": "junk"}},
         "not-a-mapping",
+        # Raises rather than mismatches: ``float`` of an integer this large is an
+        # ``OverflowError``, which is an ``ArithmeticError`` and so slips past any
+        # guard written in terms of ``ValueError``.
+        {"at": int("9" * 400), "value": "0.1.15"},
     ],
 )
 def test_an_unusable_entry_is_skipped_without_discarding_its_neighbours(entry) -> None:
@@ -231,6 +247,53 @@ def test_an_unusable_entry_is_skipped_without_discarding_its_neighbours(entry) -
 
     assert cached_latest("opencode", _never_probed) == "1.2.3"
     assert cached_latest("askill", _Probe("0.1.15")) == "0.1.15"
+
+
+@pytest.mark.parametrize("at", [float("inf"), float("nan")])
+def test_a_timestamp_that_is_not_a_number_never_reaches_the_file_again(at) -> None:
+    """The file this process writes has to stay readable by every other reader.
+
+    ``inf`` and ``NaN`` neither raise nor mismatch: they survive a JSON round
+    trip and merely compare false against every TTL, so simply skipping the
+    lookup looks like enough. It is not, because publishing *another* name
+    rewrites the whole file, and ``json.dumps`` renders them as the bare
+    ``Infinity``/``NaN`` tokens that are not JSON. One poisoned neighbour then
+    costs every stricter reader the entire file instead of one entry.
+    """
+
+    expired = time.time() - latest_version_cache.SUCCESS_TTL_SECONDS - 1
+    _write_entries({"askill": {"at": at, "value": "0.1.15"}, "opencode": {"at": expired, "value": "1.2.3"}})
+    _cold_process()
+
+    # opencode re-probes, and publishing its answer rewrites the whole file --
+    # carrying whatever askill's entry was parsed into along with it.
+    assert cached_latest("opencode", _Probe("1.2.4")) == "1.2.4"
+
+    written = json.loads(cache_path().read_text(encoding="utf-8"), parse_constant=_not_json)
+    assert written["entries"]["opencode"]["value"] == "1.2.4"
+    assert "askill" not in written["entries"]
+
+
+def test_an_unforeseen_entry_failure_still_costs_only_a_probe(monkeypatch) -> None:
+    """The property, stated where enumerating members kept failing to state it.
+
+    Two review rounds each handed over the next member of a list —
+    ``UnicodeDecodeError`` from non-UTF-8 bytes, then ``OverflowError`` from an
+    integer too large for a float. Both were fixed by naming that member. This
+    test instead raises something no list could have named, and demands the
+    answer every other unusable entry already gets: one probe, no traceback. It
+    fails the moment the guard is narrowed back into an enumeration.
+    """
+
+    def boom(_value: float) -> bool:
+        raise _NovelFailure("no enumeration was ever going to list this one")
+
+    monkeypatch.setattr(latest_version_cache, "math", SimpleNamespace(isfinite=boom))
+    _write_entries({"askill": {"at": time.time(), "value": "0.1.15"}})
+
+    probe = _Probe("0.1.16")
+    assert cached_latest("askill", probe) == "0.1.16"
+    assert probe.calls == 1
 
 
 def test_a_lookup_still_answers_when_the_state_directory_cannot_be_written(
