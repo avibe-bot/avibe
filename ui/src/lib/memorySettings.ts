@@ -42,12 +42,17 @@ export const memoryRuntimeRecoveryAvailable = (
 export const memoryNavShouldBeVisible = (settings: MemorySettingsResult): boolean =>
   isMemoryOk(settings) && settings.enabled;
 
-export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
+export const draftFromConfig = (
+  config: MemoryEndpointConfig,
+  options?: { includeProvider?: boolean },
+): EndpointDraft => ({
   baseUrl: config.base_url ?? '',
   model: config.model ?? '',
   apiKey: '',
   clearKey: false,
-  provider: normalizeRerankProvider(config.provider),
+  ...(options?.includeProvider
+    ? { provider: normalizeRerankProvider(config.provider) }
+    : {}),
 });
 
 // `allowClear` gates the explicit `api_key: null` clear. `identityLocked` protects
@@ -58,6 +63,7 @@ export function buildEndpointPatch(
   allowClear: boolean,
   identityLocked = false,
   clearEndpoint = false,
+  includeProvider = false,
 ): MemoryEndpointPatch | undefined {
   const patch: MemoryEndpointPatch = {};
   let changed = false;
@@ -72,9 +78,26 @@ export function buildEndpointPatch(
       patch.model = model;
       changed = true;
     }
-    if (draft.provider !== undefined) {
+    if (includeProvider && draft.provider !== undefined) {
       const provider = normalizeRerankProvider(draft.provider);
-      if (provider !== normalizeRerankProvider(original.provider)) {
+      const originalProvider = original.provider ?? null;
+      const endpointPresent = Boolean(
+        baseUrl
+        || model
+        || draft.apiKey.trim()
+        || original.base_url
+        || original.model
+        || original.has_api_key,
+      );
+      const hadEndpoint = Boolean(
+        original.base_url || original.model || original.has_api_key,
+      );
+      const creatingEndpoint = !hadEndpoint && Boolean(
+        baseUrl || model || draft.apiKey.trim(),
+      );
+      const providerChanged = originalProvider != null
+        && provider !== normalizeRerankProvider(originalProvider);
+      if (endpointPresent && (creatingEndpoint || providerChanged)) {
         patch.provider = provider;
         changed = true;
       }
@@ -89,7 +112,7 @@ export function buildEndpointPatch(
     if (clearEndpoint) {
       patch.base_url = null;
       patch.model = null;
-      if (original.provider != null) {
+      if (includeProvider && original.provider != null) {
         patch.provider = null;
       }
     }

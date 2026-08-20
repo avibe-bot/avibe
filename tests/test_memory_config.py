@@ -339,6 +339,50 @@ def test_memory_multimodal_round_trips_without_projecting_its_key(tmp_path) -> N
     }
 
 
+def test_memory_rerank_infers_dashscope_from_maas_url_when_provider_is_omitted() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://llm-space.example.maas.aliyuncs.com",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.rerank.provider == "dashscope"
+    assert config.memory.processing.rerank.rerank_provider() == "dashscope"
+
+
+def test_memory_rerank_infers_dashscope_from_maas_url_with_explicit_port() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://llm-space.example.maas.aliyuncs.com:443",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.rerank.provider == "dashscope"
+
+
+def test_memory_rerank_keeps_omitted_provider_as_deepinfra_for_gte_model_name() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://api.deepinfra.com/v1/inference",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.rerank.provider == "deepinfra"
+    assert config.memory.processing.rerank.rerank_provider() == "deepinfra"
+
+
 def test_memory_rerank_persists_explicit_provider(tmp_path) -> None:
     processing = _complete_processing()
     processing["rerank"] = {

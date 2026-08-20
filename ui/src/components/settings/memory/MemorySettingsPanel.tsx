@@ -237,7 +237,7 @@ export const MemorySettingsPanel: React.FC<{
   const [modeDraft, setModeDraft] = useState<MemorySettings['mode']>(settings.mode);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
-  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT, { includeProvider: true }));
   const [multimodalDraft, setMultimodalDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -250,7 +250,7 @@ export const MemorySettingsPanel: React.FC<{
     setModeDraft(settings.mode);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
-    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT, { includeProvider: true }));
     setMultimodalDraft(draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   }, [settings]);
 
@@ -286,6 +286,7 @@ export const MemorySettingsPanel: React.FC<{
       settings.processing.rerank ?? EMPTY_ENDPOINT,
       true,
       false,
+      true,
       true,
     );
     const multimodalPatch = settings.im_attachment_capture_available === true
