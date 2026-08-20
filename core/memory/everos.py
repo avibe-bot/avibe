@@ -1947,8 +1947,7 @@ def _normalized_rerank_provider(
     if provider in {"deepinfra", "vllm", "dashscope"}:
         return provider
     normalized_url = (_normalized_endpoint_url(base_url) or "").lower()
-    normalized_model = (_optional_string(model) or "").lower()
-    if normalized_url.endswith(".maas.aliyuncs.com") or normalized_model == "gte-rerank-v2":
+    if normalized_url.endswith(".maas.aliyuncs.com"):
         return "dashscope"
     return DEFAULT_MEMORY_RERANK_PROVIDER
 
