@@ -307,10 +307,10 @@ def _require_agent_create_access(user_context: Any) -> None:
 
 
 def _require_agent_onboarding_access(user_context: Any):
-    """Require owner-equivalent access for Organization Agent publication."""
+    """Require instance-management access for Organization Agent publication."""
 
     context = resolve_resource_access_context(user_context)
-    if context.is_instance_owner:
+    if context.can_manage_agents:
         return context
     raise VibeAgentAccessError("Agent access is not permitted.")
 

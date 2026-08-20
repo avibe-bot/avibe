@@ -171,8 +171,14 @@ def test_onboarding_preserves_existing_acl_revision(monkeypatch, tmp_path) -> No
         editor_context = _organization_context(subject="editor-1", instance_role="editor")
         with pytest.raises(VibeAgentAccessError):
             store.organization_onboarding_inventory(user_context=editor_context)
+        with pytest.raises(VibeAgentAccessError):
+            store.organization_onboarding_inventory(
+                user_context=_organization_context(subject="viewer-1", instance_role="viewer"),
+            )
 
-        store.onboard_organization_agents(user_context=_organization_context())
+        store.onboard_organization_agents(
+            user_context=_organization_context(subject="member-1", instance_role="member"),
+        )
         _apply_agent_intent(
             store,
             agent.id,

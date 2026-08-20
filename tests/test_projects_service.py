@@ -19,6 +19,7 @@ from storage import projects_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import scope_settings, scopes
+from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
 
 
 @pytest.fixture
@@ -38,6 +39,80 @@ def _ensure_agent(name: str, backend: str) -> str:
         return agent.id
     finally:
         store.close()
+
+
+def _remote_context(role: str) -> AuthorizationContext:
+    return AuthorizationContext(
+        instance_role=role,
+        subject=f"{role}-subject",
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+
+def test_project_crud_follows_can_manage_projects(engine, tmp_path):
+    """Every existing role: member/owner mutate; editor/viewer stay denied."""
+
+    created_folder = tmp_path / "member-proj"
+    created_folder.mkdir()
+    rename_folder = tmp_path / "owner-proj"
+    rename_folder.mkdir()
+
+    with engine.begin() as conn:
+        created = projects_service.create_project(
+            conn,
+            str(created_folder),
+            display_name="Member Project",
+            authorization_context=_remote_context("member"),
+        )
+        assert created["display_name"] == "Member Project"
+        renamed = projects_service.update_project(
+            conn,
+            created["id"],
+            display_name="Member Renamed",
+            authorization_context=_remote_context("member"),
+        )
+        assert renamed["display_name"] == "Member Renamed"
+        owner_created = projects_service.create_project(
+            conn,
+            str(rename_folder),
+            display_name="Owner Project",
+            authorization_context=_remote_context("owner"),
+        )
+        projects_service.archive_project(
+            conn,
+            owner_created["id"],
+            authorization_context=_remote_context("member"),
+        )
+
+    with engine.connect() as conn:
+        listed = {project["id"] for project in projects_service.list_projects(conn)}
+        assert created["id"] in listed
+        assert owner_created["id"] not in listed
+
+    for role in ("viewer", "editor"):
+        denied_folder = tmp_path / f"{role}-proj"
+        denied_folder.mkdir()
+        with engine.begin() as conn:
+            with pytest.raises(InstanceAuthorizationError):
+                projects_service.create_project(
+                    conn,
+                    str(denied_folder),
+                    authorization_context=_remote_context(role),
+                )
+            with pytest.raises(InstanceAuthorizationError):
+                projects_service.update_project(
+                    conn,
+                    created["id"],
+                    display_name="Denied",
+                    authorization_context=_remote_context(role),
+                )
+            with pytest.raises(InstanceAuthorizationError):
+                projects_service.archive_project(
+                    conn,
+                    created["id"],
+                    authorization_context=_remote_context(role),
+                )
 
 
 def test_create_project_is_idempotent_by_path(engine, tmp_path):

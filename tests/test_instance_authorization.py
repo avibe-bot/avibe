@@ -374,3 +374,27 @@ def test_session_service_mutations_recheck_instance_role() -> None:
             agent_backend="codex",
             authorization_context=viewer,
         )
+
+
+def test_advertised_manage_capabilities_are_honored_by_service_guards() -> None:
+    """Project CRUD and Agent onboarding follow can_manage_*, not owner identity.
+
+    Seed every existing instance role so a leftover require_instance_role(...,
+    "owner") or is_instance_owner check cannot silently deny member while the
+    capability projection still advertises the surface.
+    """
+
+    from core.vibe_agents import VibeAgentAccessError, _require_agent_onboarding_access
+
+    for role in ("viewer", "editor", "member", "owner"):
+        context = _context(role, remote=True)
+        if context.can_manage_projects:
+            assert require_instance_role(context, "member") is context
+        else:
+            with pytest.raises(InstanceAuthorizationError):
+                require_instance_role(context, "member")
+        if context.can_manage_agents:
+            assert _require_agent_onboarding_access(context) is context
+        else:
+            with pytest.raises(VibeAgentAccessError):
+                _require_agent_onboarding_access(context)

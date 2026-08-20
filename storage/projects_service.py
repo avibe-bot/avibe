@@ -332,7 +332,7 @@ def create_project(
     never clobbers a name the user set earlier; renaming stays explicit.
     """
 
-    context = require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "member")
     folder = _resolve_folder(folder_path)
     now = _utc_now_iso()
 
@@ -416,7 +416,7 @@ def update_project(
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
     """
-    context = require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "member")
     reserve_write_lock(conn)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
@@ -510,7 +510,7 @@ def archive_project(
     *,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    context = require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "member")
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
