@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 try:
     import fcntl
@@ -51,6 +51,10 @@ METADATA_DIR = "/var/lib/avibe-regression"
 METADATA_PATH = f"{METADATA_DIR}/metadata.json"
 FINGERPRINT_PATH = f"{METADATA_DIR}/fingerprints.json"
 SERVICE_NAME = "avibe-regression.service"
+# Directories under ``ui/`` that a build produces or installs, as opposed to
+# reads. They are excluded from the UI source fingerprint and are the ones a
+# sync keeps in place so an unchanged front end never pays for ``npm ci``.
+UI_NON_SOURCE_DIRS = ("node_modules", "dist", ".vite")
 INTERNAL_DISPATCH_SOCKET = "/tmp/vibe_remote/dispatch.sock"
 DEFAULT_IMAGE = "avibe-regression-base-current"
 DEFAULT_BASE_SOURCE_IMAGE = "images:ubuntu/24.04/cloud"
@@ -761,6 +765,13 @@ def root_exec(target: RegressionTarget, command: str, *, remote: str | None = No
 
 
 def source_excludes(*, include_ui_dist: bool = False) -> tuple[str, ...]:
+    """Path patterns dropped from the deployed source tree.
+
+    A bare pattern matches that name at any depth. A pattern with a leading
+    ``/`` is anchored at the repository root, which is what keeps ``/dist``
+    (the Python build output) from also swallowing ``ui/dist``, whose fate
+    belongs to ``include_ui_dist``.
+    """
     excludes = [
         ".git",
         ".runtime",
@@ -776,6 +787,7 @@ def source_excludes(*, include_ui_dist: bool = False) -> tuple[str, ...]:
         "_tmp",
         "tmp",
         "logs",
+        "/dist",
     ]
     if not include_ui_dist:
         excludes.append("ui/dist")
@@ -791,6 +803,11 @@ def should_exclude(relative: str, *, include_ui_dist: bool = False) -> bool:
         return True
     parts = relative.split("/")
     for pattern in source_excludes(include_ui_dist=include_ui_dist):
+        if pattern.startswith("/"):
+            anchored = pattern[1:]
+            if relative == anchored or relative.startswith(anchored + "/"):
+                return True
+            continue
         pattern_parts = pattern.split("/")
         if relative == pattern or relative.startswith(pattern + "/"):
             return True
@@ -799,13 +816,43 @@ def should_exclude(relative: str, *, include_ui_dist: bool = False) -> bool:
     return False
 
 
+def is_virtualenv_dir(path: Path) -> bool:
+    """Whether ``path`` is a Python virtualenv root, whatever it is named.
+
+    ``pyvenv.cfg`` is the marker the interpreter itself writes, so this covers
+    ``venv``, ``.venv``, ``env`` and anything else a contributor happens to
+    use. Naming them one by one is how a 600 MB tree of host-native binaries
+    ends up shipped into a Linux container.
+    """
+    return (path / "pyvenv.cfg").is_file()
+
+
+def iter_source_entries(repo_root: Path, *, include_ui_dist: bool = False) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, arcname)`` for everything that belongs in the source tar.
+
+    Excluded directories are pruned during the walk rather than filtered after
+    it: ``node_modules`` and a virtualenv together hold well over a hundred
+    thousand paths that would otherwise be stat'ed just to be discarded.
+    """
+    def walk(current: Path) -> Iterator[tuple[Path, str]]:
+        for entry in sorted(current.iterdir()):
+            relative = entry.relative_to(repo_root).as_posix()
+            if should_exclude(relative, include_ui_dist=include_ui_dist):
+                continue
+            is_dir = entry.is_dir() and not entry.is_symlink()
+            if is_dir and is_virtualenv_dir(entry):
+                continue
+            yield entry, relative
+            if is_dir:
+                yield from walk(entry)
+
+    yield from walk(repo_root)
+
+
 def build_source_tar(repo_root: Path, *, include_ui_dist: bool = False) -> bytes:
     with tempfile.TemporaryFile() as fh:
         with tarfile.open(fileobj=fh, mode="w") as tar:
-            for path in sorted(repo_root.rglob("*")):
-                relative = path.relative_to(repo_root).as_posix()
-                if should_exclude(relative, include_ui_dist=include_ui_dist):
-                    continue
+            for path, relative in iter_source_entries(repo_root, include_ui_dist=include_ui_dist):
                 tar.add(path, arcname=relative, recursive=False)
         fh.seek(0)
         return fh.read()
@@ -820,8 +867,23 @@ def sync_source(
     clean: bool,
     include_ui_dist: bool = False,
 ) -> None:
-    runner.run(root_exec(target, f"mkdir -p {shlex.quote(SOURCE_DIR)} && find {shlex.quote(SOURCE_DIR)} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +", remote=remote))
-    runner.run(root_exec(target, f"mkdir -p {shlex.quote(SOURCE_DIR)} && chown -R {SERVICE_USER}:{SERVICE_USER} /opt/avibe", remote=remote))
+    quoted_source = shlex.quote(SOURCE_DIR)
+    if clean:
+        wipe = f"find {quoted_source} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +"
+    else:
+        # Everything stale still goes, but the UI dependency tree and its build
+        # output stay: they are the ~470 MB that a full wipe forces ``npm ci``
+        # and ``npm run build`` to recreate on every update whether or not the
+        # front end changed. Whether they are still valid is a fingerprint
+        # question, answered in update_dependencies_and_build.
+        quoted_ui = shlex.quote(f"{SOURCE_DIR}/ui")
+        keep = " ".join(f"! -name {shlex.quote(name)}" for name in UI_NON_SOURCE_DIRS)
+        wipe = (
+            f"find {quoted_source} -mindepth 1 -maxdepth 1 ! -name ui -exec rm -rf {{}} + && "
+            f"if [ -d {quoted_ui} ]; then find {quoted_ui} -mindepth 1 -maxdepth 1 {keep} -exec rm -rf {{}} +; fi"
+        )
+    runner.run(root_exec(target, f"mkdir -p {quoted_source} && {wipe}", remote=remote))
+    runner.run(root_exec(target, f"mkdir -p {quoted_source} && chown -R {SERVICE_USER}:{SERVICE_USER} /opt/avibe", remote=remote))
     tar_bytes = b"" if runner.dry_run else build_source_tar(repo_root, include_ui_dist=include_ui_dist)
     runner.run(
         incus("exec", remote_ref(remote, target.instance), "--", "tar", "-C", SOURCE_DIR, "-xf", "-", project=target.project),
@@ -910,24 +972,15 @@ def file_hash(repo_root: Path, relative_paths: Sequence[str]) -> str:
 
 
 def compute_fingerprints(repo_root: Path) -> dict:
-    ui_source_parts = [
-        tree_hash(repo_root / "ui" / "src"),
-        tree_hash(repo_root / "ui" / "public"),
-        file_hash(
-            repo_root,
-            [
-                "ui/index.html",
-                "ui/vite.config.ts",
-                "ui/tsconfig.json",
-                "ui/tsconfig.app.json",
-                "ui/tsconfig.node.json",
-            ],
-        ),
-    ]
+    # ``ui_source`` covers everything under ``ui/`` that is not an output or a
+    # dependency tree, rather than a list of the build inputs we happened to
+    # think of. The list form silently missed ``postcss.config.js``,
+    # ``eslint.config.js`` and ``ui/scripts/``; a build input added tomorrow is
+    # covered here without anyone remembering to extend a literal.
     return {
         "python": file_hash(repo_root, ["pyproject.toml", "uv.lock"]),
         "ui_deps": file_hash(repo_root, ["ui/package.json", "ui/package-lock.json"]),
-        "ui_source": "|".join(ui_source_parts),
+        "ui_source": tree_hash(repo_root / "ui", prune=UI_NON_SOURCE_DIRS),
         "show_runtime": "|".join(
             [
                 regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
@@ -938,11 +991,26 @@ def compute_fingerprints(repo_root: Path) -> dict:
     }
 
 
-def tree_hash(root: Path) -> str:
+def tree_hash(root: Path, *, prune: Sequence[str] = ()) -> str:
+    """Content hash of every file under ``root``, skipping pruned directories.
+
+    ``prune`` names directories, at any depth, that hold build outputs or
+    installed dependencies rather than sources.
+    """
     digest = hashlib.sha256()
     if not root.exists():
         return "<missing>"
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+    pruned = set(prune)
+    files: list[Path] = []
+    stack = [root]
+    while stack:
+        for entry in stack.pop().iterdir():
+            if entry.is_dir() and not entry.is_symlink():
+                if entry.name not in pruned:
+                    stack.append(entry)
+            elif entry.is_file():
+                files.append(entry)
+    for path in sorted(files):
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -1210,6 +1278,20 @@ def instance_ui_dist_exists(runner: Runner, target: RegressionTarget, *, remote:
     return result.returncode == 0
 
 
+def instance_ui_node_modules_exists(runner: Runner, target: RegressionTarget, *, remote: str | None) -> bool:
+    """Whether the instance already has an npm-installed dependency tree.
+
+    ``.package-lock.json`` is the marker npm itself writes inside
+    ``node_modules`` once an install completes, so it distinguishes a finished
+    tree from a directory left behind by an interrupted one.
+    """
+    result = runner.run(
+        tenant_exec(target, "test -f ui/node_modules/.package-lock.json", remote=remote),
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
     config_path = f"{AVIBE_HOME}/config/config.json"
     script = textwrap.dedent(f"""
@@ -1269,7 +1351,15 @@ def update_dependencies_and_build(
     if needs_ui_dist and not build_ui:
         print("UI dist missing in synced source; building UI before editable install.")
     if should_build_ui:
-        ui_deps_changed = force_ui or previous_fingerprints.get("ui_deps") != next_fingerprints.get("ui_deps") or not previous_fingerprints
+        # A sync keeps ui/node_modules, so "the fingerprint did not change" only
+        # licenses skipping npm ci when the tree it describes is actually there.
+        needs_node_modules = not instance_ui_node_modules_exists(runner, target, remote=remote)
+        ui_deps_changed = (
+            force_ui
+            or needs_node_modules
+            or previous_fingerprints.get("ui_deps") != next_fingerprints.get("ui_deps")
+            or not previous_fingerprints
+        )
         if ui_deps_changed:
             runner.run(tenant_exec(target, "cd ui && npm ci", remote=remote))
         else:
@@ -1317,7 +1407,11 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
 def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
     result = runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote), check=False)
     if result.returncode != 0:
-        runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/source ~/.npm/_cacache", remote=remote))
+        # Retry from a fresh checkout. The npm cache is verified rather than
+        # deleted: it grows past a gigabyte, refilling it costs more than the
+        # rest of an update put together, and `npm cache verify` already
+        # discards exactly the corrupt entries that made deleting it tempting.
+        runner.run(tenant_exec(target, "rm -rf ~/.avibe/runtime/show-runtime/source && npm cache verify", remote=remote), check=False)
         runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime prepare --strict", remote=remote))
     runner.run(tenant_exec(target, f"{VENV_DIR}/bin/vibe runtime status --json", remote=remote))
 
@@ -1542,7 +1636,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             next_fingerprints=fingerprints,
             force_deps=args.force_deps,
             build_ui=not args.no_build_ui,
-            force_ui=True,
+            force_ui=args.force_ui,
             remote=args.remote,
         )
         run_prepare_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
@@ -1721,9 +1815,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow reset-mode config/all to delete Avibe Cloud pairing state from the master regression environment.",
     )
-    up.add_argument("--clean", action="store_true", help="Remove stale files before source sync.")
+    up.add_argument("--clean", action="store_true", help="Wipe the synced source completely, including the UI dependency tree and build output a sync normally keeps.")
     up.add_argument("--force-deps", action="store_true", help="Force Python dependency refresh.")
     up.add_argument("--no-build-ui", action="store_true", help="Skip npm ci/build for UI assets.")
+    up.add_argument("--force-ui", action="store_true", help="Force npm ci and npm run build even when the UI fingerprint is unchanged.")
     up.set_defaults(func=cmd_up)
 
     for name, func in (

@@ -556,6 +556,73 @@ def test_source_exclude_drops_runtime_and_dependency_dirs() -> None:
     assert not incus_regression.should_exclude("vibe/ui_server.py")
 
 
+def test_root_build_output_is_excluded_without_capturing_ui_dist() -> None:
+    """``/dist`` is anchored so it cannot decide ``ui/dist``'s fate.
+
+    ``ui/dist`` is the front-end bundle that ``--no-build-ui`` ships on
+    purpose; the Python wheel output at the repository root never is.
+    """
+    assert incus_regression.should_exclude("dist/avibe-3.0.12.tar.gz")
+    assert incus_regression.should_exclude("dist")
+    assert not incus_regression.should_exclude("ui/dist/assets/app.js", include_ui_dist=True)
+    assert not incus_regression.should_exclude("vibe/dist_helpers.py")
+
+
+def test_source_tar_drops_a_virtualenv_whatever_it_is_named(tmp_path: Path) -> None:
+    """Virtualenvs are recognised by ``pyvenv.cfg``, not by a list of names.
+
+    They hold host-native binaries that are useless inside the container, and
+    the repository has carried both ``venv`` and ``.venv`` at the same time.
+    """
+    for name in ("venv", ".venv", "env", "tools/sandbox"):
+        root = tmp_path / name
+        (root / "lib").mkdir(parents=True)
+        (root / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
+        (root / "lib" / "libpython.dylib").write_text("mach-o\n", encoding="utf-8")
+    (tmp_path / "vibe").mkdir()
+    (tmp_path / "vibe" / "cli.py").write_text("print('ok')\n", encoding="utf-8")
+
+    with tarfile.open(fileobj=io.BytesIO(incus_regression.build_source_tar(tmp_path))) as tar:
+        names = set(tar.getnames())
+
+    assert "vibe/cli.py" in names
+    assert not [name for name in names if "pyvenv.cfg" in name or "libpython" in name]
+
+
+def test_source_tar_keeps_a_plain_directory_that_merely_looks_like_a_virtualenv(tmp_path: Path) -> None:
+    (tmp_path / "env").mkdir()
+    (tmp_path / "env" / "settings.py").write_text("DEBUG = False\n", encoding="utf-8")
+
+    with tarfile.open(fileobj=io.BytesIO(incus_regression.build_source_tar(tmp_path))) as tar:
+        assert "env/settings.py" in tar.getnames()
+
+
+def test_ui_source_fingerprint_covers_every_ui_input_and_no_output(tmp_path: Path) -> None:
+    """State the property: sources count, outputs and dependencies do not.
+
+    Listing the config files that matter is how ``postcss.config.js`` and
+    ``ui/scripts/`` were left out, which lets an unchanged fingerprint ship a
+    stale bundle now that the UI is no longer rebuilt unconditionally.
+    """
+    ui = tmp_path / "ui"
+    (ui / "src").mkdir(parents=True)
+    (ui / "src" / "main.tsx").write_text("export {}\n", encoding="utf-8")
+    baseline = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    for relative in ("postcss.config.js", "eslint.config.js", "agentation.d.ts", "scripts/build.mjs"):
+        path = ui / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// one\n", encoding="utf-8")
+        added = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+        assert added != baseline, f"{relative} is a build input but is outside the fingerprint"
+        baseline = added
+
+    for produced in incus_regression.UI_NON_SOURCE_DIRS:
+        (ui / produced).mkdir(parents=True, exist_ok=True)
+        (ui / produced / "generated").write_text("noise\n", encoding="utf-8")
+    assert incus_regression.compute_fingerprints(tmp_path)["ui_source"] == baseline
+
+
 def test_source_tar_excludes_regression_secret_file(tmp_path: Path) -> None:
     (tmp_path / ".env.regression").write_text("OPENAI_API_KEY=secret\n", encoding="utf-8")
     (tmp_path / "vibe").mkdir()
@@ -625,7 +692,78 @@ def test_sync_source_clears_stale_files_even_without_clean(tmp_path: Path) -> No
     incus_regression.sync_source(RecordingRunner(), target, tmp_path, remote=None, clean=False)
 
     joined = "\n".join(" ".join(command) for command in commands)
-    assert f"find {incus_regression.SOURCE_DIR} -mindepth 1 -maxdepth 1 -exec rm -rf" in joined
+    assert f"find {incus_regression.SOURCE_DIR} -mindepth 1 -maxdepth 1 ! -name ui -exec rm -rf" in joined
+    assert f"find {incus_regression.SOURCE_DIR}/ui -mindepth 1 -maxdepth 1 " in joined
+    for kept in incus_regression.UI_NON_SOURCE_DIRS:
+        assert f"! -name {kept}" in joined
+
+
+def test_sync_source_without_clean_keeps_every_ui_non_source_dir(tmp_path: Path) -> None:
+    """A sync must leave ui/node_modules and ui/dist for the fingerprints to judge.
+
+    Deleting them makes ``npm ci`` and ``npm run build`` unconditional, which is
+    the single largest cost of an update whose front end did not change.
+    """
+    script = run_sync_wipe(tmp_path, clean=False)
+
+    assert sorted(p.name for p in (tmp_path / "ui").iterdir()) == sorted(incus_regression.UI_NON_SOURCE_DIRS)
+    assert not (tmp_path / "stale.py").exists()
+    assert not (tmp_path / "stale-dir").exists()
+    assert not (tmp_path / "ui" / "src").exists()
+    assert script  # the wipe really ran rather than silently matching nothing
+
+
+def test_sync_source_with_clean_wipes_the_ui_dirs_too(tmp_path: Path) -> None:
+    run_sync_wipe(tmp_path, clean=True)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def run_sync_wipe(source_root: Path, *, clean: bool) -> str:
+    """Run sync_source's wipe command against a real directory tree.
+
+    The wipe is a shell one-liner, so asserting on its text only proves we
+    wrote what we meant to write. Executing it against a populated tree is what
+    proves it deletes the stale files and keeps the expensive ones.
+    """
+    for relative in ("stale.py", "stale-dir/old.txt", "ui/src/App.tsx"):
+        path = source_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    for kept in incus_regression.UI_NON_SOURCE_DIRS:
+        (source_root / "ui" / kept).mkdir(parents=True, exist_ok=True)
+        (source_root / "ui" / kept / "marker").write_text("x", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    class RecordingRunner:
+        dry_run = True
+
+        def run(self, command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    incus_regression.sync_source(RecordingRunner(), target, source_root, remote=None, clean=clean)
+
+    script = next(
+        command[-1]
+        for command in commands
+        if command[-1].startswith("mkdir -p") and "-exec rm -rf" in command[-1]
+    )
+    subprocess.run(
+        ["bash", "-lc", script.replace(incus_regression.SOURCE_DIR, str(source_root))],
+        check=True,
+    )
+    return script
 
 
 def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None:
@@ -1298,6 +1436,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1365,6 +1504,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1423,6 +1563,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1483,6 +1624,7 @@ def test_up_stops_when_the_daemon_cannot_say_whether_the_target_exists(
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1544,6 +1686,7 @@ def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: 
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1602,6 +1745,7 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="config",
     )
 
@@ -1658,6 +1802,7 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="config",
         allow_reset_paired_master=False,
     )
@@ -1727,6 +1872,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1795,6 +1941,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1870,6 +2017,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -1937,6 +2085,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -2035,6 +2184,7 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
         clean=False,
         force_deps=False,
         no_build_ui=True,
+        force_ui=False,
         reset_mode="none",
     )
 
@@ -2205,6 +2355,67 @@ def test_force_ui_rebuilds_with_realtime_enabled_by_default() -> None:
     assert "pip install -e ." not in joined
 
 
+def run_ui_update(*, present: set[str], force_ui: bool = False) -> str:
+    """Drive update_dependencies_and_build with a chosen instance state.
+
+    ``present`` names the artifacts a sync left behind: ``node_modules`` and/or
+    ``dist``. Every other command succeeds.
+    """
+    commands: list[str] = []
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            commands.append(joined)
+            if "ui/node_modules/.package-lock.json" in joined:
+                return subprocess.CompletedProcess(command, 0 if "node_modules" in present else 1)
+            if "test -d ui/dist" in joined:
+                return subprocess.CompletedProcess(command, 0 if "dist" in present else 1)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    fingerprints = {"python": "p", "ui_deps": "d", "ui_source": "s"}
+    incus_regression.update_dependencies_and_build(
+        RecordingRunner(),
+        target,
+        previous_fingerprints=dict(fingerprints),
+        next_fingerprints=dict(fingerprints),
+        force_deps=False,
+        build_ui=True,
+        force_ui=force_ui,
+        remote=None,
+    )
+    return "\n".join(commands)
+
+
+def test_unchanged_ui_reuses_the_dependency_tree_and_bundle_a_sync_kept() -> None:
+    joined = run_ui_update(present={"node_modules", "dist"})
+
+    assert "cd ui && npm ci" not in joined
+    assert "cd ui && npm run build" not in joined
+
+
+def test_npm_ci_runs_when_the_dependency_tree_is_absent_however_the_fingerprint_reads() -> None:
+    """``npm run build`` must never be asked to run without its dependencies.
+
+    An unchanged ``ui_deps`` fingerprint describes a lockfile, not the tree
+    installed from it; ``--clean`` and a fresh instance both leave the second
+    missing while the first still matches.
+    """
+    joined = run_ui_update(present={"dist"})
+
+    assert "cd ui && npm ci" in joined
+    assert joined.index("cd ui && npm ci") < joined.index("cd ui && npm run build")
+
+
 def test_missing_ui_dist_overrides_no_build_ui_before_editable_install() -> None:
     commands = []
 
@@ -2310,8 +2521,45 @@ def test_prepare_show_runtime_cleans_partial_source_and_retries_once() -> None:
 
     joined = "\n".join(commands)
     assert joined.count("vibe runtime prepare --strict") == 2
-    assert "rm -rf ~/.avibe/runtime/show-runtime/source ~/.npm/_cacache" in joined
+    assert "rm -rf ~/.avibe/runtime/show-runtime/source" in joined
     assert "vibe runtime status --json" in joined
+
+
+def test_prepare_show_runtime_retry_verifies_the_npm_cache_instead_of_deleting_it() -> None:
+    """The npm cache is a gigabyte of downloads shared by every later build.
+
+    Deleting it turns one failed prepare into a cold rebuild of everything;
+    `npm cache verify` drops the corrupt entries and keeps the rest.
+    """
+    commands = []
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.prepare_attempts = 0
+
+        def run(self, command, **kwargs):
+            joined = " ".join(command)
+            commands.append(joined)
+            if "vibe runtime prepare --strict" in joined:
+                self.prepare_attempts += 1
+                return subprocess.CompletedProcess(command, 1 if self.prepare_attempts == 1 else 0)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.prepare_show_runtime(RecordingRunner(), target, remote=None)
+
+    joined = "\n".join(commands)
+    assert "npm cache verify" in joined
+    assert "_cacache" not in joined
 
 
 def test_restart_waits_for_service_and_status_running() -> None:
