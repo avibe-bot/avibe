@@ -1172,6 +1172,63 @@ def test_show_access_owner_read_and_apply_use_controller_ipc(monkeypatch, tmp_pa
     ]
 
 
+def test_show_access_apply_forwards_group_and_organization_entries(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        store.ensure("ses-access-entries")
+    finally:
+        store.close()
+    calls: list[tuple[str, dict]] = []
+    request_payload = {
+        "page_id": "ses-access-entries",
+        "expected_revision": 0,
+        "target_access_mode": "limited",
+        "target_share_id": "stable-link",
+        "target_entries": [
+            {"kind": "group", "value": "group-7"},
+            {"kind": "organization", "value": "org-1"},
+        ],
+    }
+
+    async def _apply(payload):
+        calls.append(("apply", payload))
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "applied",
+                "show_access": {
+                    **_show_access_payload("ses-access-entries", revision=1),
+                    "access_mode": "limited",
+                    "entries": [
+                        {
+                            "kind": "group",
+                            "value": "group-7",
+                            "organization_id": "org-1",
+                        },
+                        {
+                            "kind": "organization",
+                            "value": "org-1",
+                            "organization_id": "org-1",
+                        },
+                    ],
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "show_access_apply", _apply)
+    client = app.test_client()
+    applied = client.post(
+        "/api/show-pages/ses-access-entries/access-settings/apply",
+        json=request_payload,
+        headers=csrf_headers(client),
+    )
+
+    assert applied.status_code == 200
+    assert applied.get_json()["show_access"]["entries"][0]["kind"] == "group"
+    assert calls == [("apply", request_payload)]
+
+
 def test_show_access_route_identity_mismatch_is_rejected_before_ipc(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

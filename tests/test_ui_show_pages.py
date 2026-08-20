@@ -21,6 +21,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from config import paths
 from core.show_pages import (
+    SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH,
+    SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT,
     SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS,
     VISIBILITIES,
     ShowPageError,
@@ -780,6 +782,7 @@ def test_limited_show_callback_maps_outages_and_rechecks_share_binding(
             access_mode=access.access_mode,
             share_id="rotated-share",
             normalized_emails=access.normalized_emails,
+            entries=access.entries,
         )
 
     monkeypatch.setattr(ShowPageStore, "get_access", get_rotated_access)
@@ -1463,6 +1466,189 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         assert stopped.status_code == 401
     finally:
         set_show_runtime_manager_for_tests(None)
+
+
+def test_limited_show_page_admits_group_and_organization_entries_readonly(
+    monkeypatch,
+    tmp_path,
+):
+    from core.show_pages import ShowPageStore as LiveStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _configure_show_identity(config)
+    share_id = _create_show_page("ses123", "limited")
+    monkeypatch.setattr(
+        LiveStore,
+        "_resolve_instance_ownership",
+        staticmethod(lambda: {"mode": "organization", "organization_id": "org-1"}),
+    )
+    store = LiveStore()
+    try:
+        access = store.get_access("ses123")
+        assert access is not None
+        applied = store.apply_access(
+            "ses123",
+            expected_revision=access.revision,
+            target_access_mode="limited",
+            target_share_id=share_id,
+            target_entries=[
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization", "value": "org-1"},
+            ],
+        )
+        assert applied.status == "applied"
+        assert applied.show_access.normalized_emails == ()
+    finally:
+        store.close()
+
+    # A full-size membership list: admission must survive it on every request
+    # after the callback, not just the callback itself.
+    organization = show_identity.ShowIdentityOrganization(
+        organization_id="org-1",
+        organization_member_id="mem-1",
+        organization_role="member",
+        group_ids=frozenset({"group-7"})
+        | {
+            f"group-{index}-{'x' * (SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH - 16)}"
+            for index in range(SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT - 1)
+        },
+    )
+    manager = _FakeShowRuntimeManager(
+        body=(
+            b'<!doctype html><html><body><script type="module" '
+            b'src="/src/main.tsx"></script></body></html>'
+        ),
+    )
+
+    def verify_identity(*_args, **_kwargs):
+        return show_identity.VerifiedShowIdentity(
+            subject="member-1",
+            normalized_email="member@example.com",
+            assertion_id=f"assertion-{_kwargs['expected_nonce']}",
+            expires_at=int(ui_server.time.time()) + 300,
+            organization=organization,
+        )
+
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        verify_identity,
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        client = app.test_client()
+        login = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(login.headers["Location"]).query
+        )
+        callback = client.post(
+            show_identity.CALLBACK_PATH,
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            data={"state": query["state"][0], "assertion": "signed-assertion"},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303
+        page = client.get(
+            f"/p/{share_id}/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={"Accept": "text/html"},
+        )
+        assert page.status_code == 200
+        assert b'"authenticated":false' in page.content
+        assert b"__show/annotation.js" not in page.content
+        events = client.get(
+            f"/p/{share_id}/__show/events",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert events.status_code == 404
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    def verify_email_only(*_args, **_kwargs):
+        return show_identity.VerifiedShowIdentity(
+            subject="outsider-1",
+            normalized_email="outsider@example.com",
+            assertion_id=f"email-only-{_kwargs['expected_nonce']}",
+            expires_at=int(ui_server.time.time()) + 300,
+        )
+
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        verify_email_only,
+    )
+    denied_client = app.test_client()
+    denied_login = denied_client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    denied_query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(denied_login.headers["Location"]).query
+    )
+    denied = denied_client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={
+            "state": denied_query["state"][0],
+            "assertion": "signed-assertion",
+        },
+    )
+    assert denied.status_code == 404
+    assert denied.get_json() == {"error": "not_found"}
+
+    other_org = show_identity.ShowIdentityOrganization(
+        organization_id="org-2",
+        organization_member_id="mem-2",
+        organization_role="member",
+        group_ids=frozenset({"group-7"}),
+    )
+
+    def verify_other_org(*_args, **_kwargs):
+        return show_identity.VerifiedShowIdentity(
+            subject="other-1",
+            normalized_email="other@example.com",
+            assertion_id=f"other-org-{_kwargs['expected_nonce']}",
+            expires_at=int(ui_server.time.time()) + 300,
+            organization=other_org,
+        )
+
+    monkeypatch.setattr(
+        show_identity,
+        "verify_show_identity_assertion",
+        verify_other_org,
+    )
+    other_client = app.test_client()
+    other_login = other_client.get(
+        f"/p/{share_id}/",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    other_query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(other_login.headers["Location"]).query
+    )
+    other = other_client.post(
+        show_identity.CALLBACK_PATH,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        data={"state": other_query["state"][0], "assertion": "signed-assertion"},
+    )
+    assert other.status_code == 404
 
 
 def test_public_show_page_still_requires_remote_login(monkeypatch, tmp_path):

@@ -9,10 +9,17 @@ from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, 
 from core.show_pages import (
     SHOW_ACCESS_EMAIL_MAX_COUNT,
     SHOW_ACCESS_ENTRY_MAX_COUNTS,
+    ShowAccess,
     ShowAccessEntry,
+    ShowAccessVisitor,
     ShowPage,
     ShowPageError,
     ShowPageStore,
+    limited_show_access_admits,
+    limited_show_access_grant,
+    limited_show_access_grant_is_current,
+    parse_show_access_apply_request,
+    show_access_payload,
     _default_index_html,
     _extract_icon_path,
     ensure_show_page_dir,
@@ -1115,6 +1122,198 @@ def test_show_access_stamps_organization_entries_from_the_pairing_held_at_persis
         }
     finally:
         store.close()
+
+
+def _limited_access(*entries: ShowAccessEntry) -> ShowAccess:
+    return ShowAccess(
+        page_id="ses-admit",
+        access_mode="limited",
+        share_id="share-admit",
+        revision=1,
+        entries=entries,
+    )
+
+
+def _visitor(
+    *,
+    email: str = "guest@example.com",
+    organization_id: str | None = None,
+    organization_member_id: str | None = None,
+    organization_role: str | None = None,
+    group_ids: frozenset[str] = frozenset(),
+) -> ShowAccessVisitor:
+    return ShowAccessVisitor(
+        normalized_email=email,
+        organization_id=organization_id,
+        organization_member_id=organization_member_id,
+        organization_role=organization_role,
+        group_ids=group_ids,
+    )
+
+
+def test_limited_show_access_admits_any_matching_entry() -> None:
+    access = _limited_access(
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    member = dict(
+        organization_id="org-1",
+        organization_member_id="mem-1",
+        organization_role="member",
+    )
+
+    assert limited_show_access_admits(access, _visitor(email="guest@example.com"))
+    assert limited_show_access_admits(
+        access,
+        _visitor(email="other@example.com", group_ids=frozenset({"group-7"}), **member),
+    )
+    assert limited_show_access_admits(
+        access,
+        _visitor(email="other@example.com", **member),
+    )
+    assert not limited_show_access_admits(
+        access,
+        _visitor(email="other@example.com"),
+    )
+    assert not limited_show_access_admits(
+        _limited_access(),
+        _visitor(email="guest@example.com", **member),
+    )
+    private = ShowAccess(
+        page_id="ses-admit",
+        access_mode="private",
+        share_id="share-admit",
+        revision=1,
+        entries=access.entries,
+    )
+    assert not limited_show_access_admits(private, _visitor(email="guest@example.com"))
+
+
+def test_limited_show_access_grant_names_the_matched_entry_and_is_rechecked() -> None:
+    """A grant is a whole audience entry, and it lasts exactly as long as it does.
+
+    Persisting the matched entry is what keeps a resumed visitor's proof
+    bounded: whatever the identity provider claims, what outlives the match is
+    one entry the audience's own write caps already bound.
+    """
+
+    entries = (
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    access = _limited_access(*entries)
+    member = dict(
+        organization_id="org-1",
+        organization_member_id="mem-1",
+        organization_role="member",
+    )
+    visitors = (
+        _visitor(email="guest@example.com"),
+        _visitor(email="other@example.com", group_ids=frozenset({"group-7"}), **member),
+        _visitor(email="other@example.com", **member),
+    )
+
+    for entry, visitor in zip(entries, visitors, strict=True):
+        grant = limited_show_access_grant(access, visitor)
+        assert grant == entry
+        # The grant holds while its entry is in the audience...
+        assert limited_show_access_grant_is_current(access, grant)
+        # ...and ends the moment that entry is withdrawn, even when the rest of
+        # the audience is untouched.
+        remaining = _limited_access(*(other for other in entries if other != entry))
+        assert not limited_show_access_grant_is_current(remaining, grant)
+
+    assert limited_show_access_grant(access, _visitor(email="other@example.com")) is None
+    assert not limited_show_access_grant_is_current(access, None)
+    private = ShowAccess(
+        page_id="ses-admit",
+        access_mode="private",
+        share_id="share-admit",
+        revision=1,
+        entries=entries,
+    )
+    assert not limited_show_access_grant_is_current(private, entries[0])
+
+
+def test_limited_show_access_organization_block_is_fail_closed() -> None:
+    access = _limited_access(
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    email_only = _visitor(email="guest@example.com")
+    other_org = _visitor(
+        email="other@example.com",
+        organization_id="org-2",
+        organization_member_id="mem-2",
+        organization_role="member",
+        group_ids=frozenset({"group-7"}),
+    )
+    incomplete = _visitor(
+        email="other@example.com",
+        organization_id="org-1",
+        organization_role="member",
+        group_ids=frozenset({"group-7"}),
+    )
+
+    assert limited_show_access_admits(access, email_only)
+    assert not limited_show_access_admits(
+        _limited_access(
+            ShowAccessEntry("group", "group-7", "org-1"),
+            ShowAccessEntry("organization", "org-1", "org-1"),
+        ),
+        email_only,
+    )
+    assert not limited_show_access_admits(access, other_org)
+    assert not limited_show_access_admits(access, incomplete)
+    assert not limited_show_access_admits(
+        _limited_access(ShowAccessEntry("group", "group-7", "org-1")),
+        _visitor(
+            email="other@example.com",
+            organization_id="org-1",
+            organization_member_id="mem-1",
+            organization_role="member",
+            group_ids=frozenset({"group-8"}),
+        ),
+    )
+
+
+def test_show_access_payload_includes_the_entry_set() -> None:
+    access = _limited_access(
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+
+    assert show_access_payload(access)["entries"] == [
+        {"kind": "email", "value": "guest@example.com", "organization_id": None},
+        {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+        {"kind": "organization", "value": "org-1", "organization_id": "org-1"},
+    ]
+    assert parse_show_access_apply_request(
+        {
+            "page_id": "ses-admit",
+            "expected_revision": 1,
+            "target_access_mode": "limited",
+            "target_share_id": "share-admit",
+            "target_emails": ["guest@example.com"],
+            "target_entries": [{"kind": "group", "value": "group-7"}],
+        }
+    ) is None
+    parsed_entries = parse_show_access_apply_request(
+        {
+            "page_id": "ses-admit",
+            "expected_revision": 1,
+            "target_access_mode": "limited",
+            "target_share_id": "share-admit",
+            "target_entries": [{"kind": "group", "value": "group-7"}],
+        }
+    )
+    assert parsed_entries is not None
+    assert "target_emails" not in parsed_entries
+    assert parsed_entries["target_entries"] == [{"kind": "group", "value": "group-7"}]
 
 
 def test_set_share_id_rejects_archived_session(monkeypatch, tmp_path):
