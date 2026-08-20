@@ -140,6 +140,19 @@ class ProjectAgentUnavailableError(ValueError):
         self.agent_name = agent_name
 
 
+class ProjectAgentAudienceError(ProjectAgentUnavailableError):
+    """The requested Agent is not usable by the project's audience.
+
+    A project default is a routing surface for everyone with access to the
+    project, so it cannot point at an Agent only one subject may use. Subclasses
+    ``ProjectAgentUnavailableError`` so the existing HTTP mapping answers with a
+    coded 400 rather than dropping the write silently, while the distinct
+    ``code`` keeps the two rejections machine-distinguishable.
+    """
+
+    code = "project_agent_audience_private"
+
+
 # Single source of truth for the columns every project payload reads, so
 # ``list_projects`` and ``_project_payload`` can never select different shapes.
 _PROJECT_COLUMNS = (
@@ -394,6 +407,27 @@ def create_project(
     return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
+def _require_project_audience_agent(
+    conn: Connection,
+    *,
+    agent_id: str,
+    agent_name: str,
+) -> None:
+    """Reject a project default the project's other users could not resolve.
+
+    Shares one predicate with the instance-wide default (see
+    ``core.vibe_agents.default_routing_audience_error``) so both default routing
+    surfaces answer the same question: is this Agent usable by the audience the
+    default routes for? Only the error shape differs, so the project endpoint
+    keeps its coded 400 contract.
+    """
+
+    from core.vibe_agents import default_routing_audience_error
+
+    if default_routing_audience_error(conn, agent_id=agent_id) is not None:
+        raise ProjectAgentAudienceError(agent_name=agent_name)
+
+
 def update_project(
     conn: Connection,
     project_id: str,
@@ -415,6 +449,11 @@ def update_project(
     lets Project Settings clear the default back to "follow the global default"
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
+
+    A newly selected default must also pass the audience check every default
+    routing surface shares (see ``_require_project_audience_agent``): existence
+    in the catalog is not enough, because the project resolves this Agent for
+    every user who starts an unpinned session in it.
     """
     context = require_instance_role(authorization_context, "member")
     reserve_write_lock(conn)
@@ -466,10 +505,14 @@ def update_project(
         if selected_agent is None:
             raise ProjectAgentUnavailableError(agent_name=cleaned_agent_id)
         preserves_current_identity = cleaned_agent_id == current_agent_id
-        if not preserves_current_identity and (
-            not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None
-        ):
-            raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
+        if not preserves_current_identity:
+            if not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None:
+                raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
+            _require_project_audience_agent(
+                conn,
+                agent_id=selected_agent["id"],
+                agent_name=selected_agent["name"],
+            )
         agent_name = selected_agent["name"]
     elif agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
@@ -481,15 +524,20 @@ def update_project(
             except ValueError as exc:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent) from exc
             available_agent = conn.execute(
-                select(agents.c.name)
+                select(agents.c.id, agents.c.name)
                 .where(agents.c.normalized_name == normalized_agent)
                 .where(agents.c.enabled == 1)
                 .where(agents.c.archived_at.is_(None))
                 .limit(1)
-            ).scalar_one_or_none()
+            ).mappings().first()
             if available_agent is None:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent)
-            agent_name = available_agent
+            _require_project_audience_agent(
+                conn,
+                agent_id=available_agent["id"],
+                agent_name=available_agent["name"],
+            )
+            agent_name = available_agent["name"]
     for field_name, value in (
         ("agent_name", agent_name),
         ("agent_variant", agent_variant),

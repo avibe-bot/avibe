@@ -15,7 +15,7 @@ from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
 from core.vibe_agents import VibeAgentStore
-from storage import projects_service
+from storage import projects_service, resource_access_service, workbench_sessions_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import scope_settings, scopes
@@ -579,3 +579,143 @@ def test_set_default_agent_on_folderless_project_inserts_row(engine):
         )
     assert updated["default_agent"]["agent_backend"] == "opencode"
     assert updated["default_agent"]["model"] == "grok-code"
+
+
+def _organization_context(subject: str, *, instance_role: str) -> AuthorizationContext:
+    return AuthorizationContext(
+        subject=subject,
+        email=f"{subject}@example.com",
+        organization_id="org-1",
+        organization_member_id=f"member-{subject}",
+        organization_role="member",
+        group_ids=frozenset({"group-engineering"}),
+        instance_role=instance_role,
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+
+
+def _agent_with_policy(engine, *, name: str, access_level: str, owner_user_id: str) -> str:
+    """Create an Agent and give it one ACL shape, returning its stable id."""
+
+    store = VibeAgentStore()
+    try:
+        agent = store.create(name=name, backend="codex")
+    finally:
+        store.close()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="agent",
+            resource_id=agent.id,
+            organization_id="org-1",
+            owner_user_id=owner_user_id,
+            access_level=access_level,
+        )
+    return agent.id
+
+
+def _stored_project_default(engine, scope_id: str) -> str | None:
+    with engine.connect() as conn:
+        return conn.execute(
+            select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
+        ).scalar_one()
+
+
+def test_project_default_agent_must_be_usable_by_the_project_audience(engine, tmp_path):
+    """A project default routes for the whole project, so it cannot be single-subject.
+
+    The invariant both default routing surfaces share: a default must reference
+    an Agent usable by the audience it routes for. A ``private`` ACL is
+    single-subject by construction, so it is refused here however the caller
+    names it — by stable id or by public name — and the stored default is left
+    exactly as it was. An audience-usable Agent is accepted, and a different
+    user can still open an unpinned session on the project afterwards, which is
+    the behaviour a private default destroys.
+    """
+
+    member = _organization_context("member-1", instance_role="member")
+    private_id = _agent_with_policy(
+        engine, name="member-private", access_level="private", owner_user_id="member-1"
+    )
+    shared_id = _agent_with_policy(
+        engine, name="team-shared", access_level="public", owner_user_id="member-1"
+    )
+
+    folder = tmp_path / "shared-proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn, str(folder), authorization_context=member
+        )
+        accepted = projects_service.update_project(
+            conn,
+            project["id"],
+            agent_id=shared_id,
+            authorization_context=member,
+        )
+    assert accepted["default_agent"]["agent_id"] == shared_id
+
+    for kwargs in ({"agent_id": private_id}, {"agent_name": "member-private"}):
+        with engine.begin() as conn:
+            with pytest.raises(projects_service.ProjectAgentAudienceError) as exc:
+                projects_service.update_project(
+                    conn,
+                    project["id"],
+                    authorization_context=member,
+                    **kwargs,
+                )
+        assert exc.value.code == "project_agent_audience_private"
+        assert _stored_project_default(engine, project["scope_id"]) == "team-shared"
+
+    # Regression: the project still starts normal sessions for another user on
+    # the unpinned path, which is what a private default would have broken.
+    with engine.begin() as conn:
+        session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="",
+            user_context=_organization_context("member-2", instance_role="editor"),
+        )
+    assert session["agent_id"] == shared_id
+
+
+def test_owner_project_default_follows_the_same_audience_rule(engine, tmp_path):
+    """Owner behaviour is unchanged for shared Agents and bound by the same rule.
+
+    The Instance Owner bypasses ACL checks when *using* a resource, but that
+    bypass describes the Owner, not the project's audience, so the audience
+    check is caller-independent.
+    """
+
+    owner = _organization_context("owner-1", instance_role="owner")
+    private_id = _agent_with_policy(
+        engine, name="owner-private", access_level="private", owner_user_id="owner-1"
+    )
+    shared_id = _agent_with_policy(
+        engine, name="owner-shared", access_level="public", owner_user_id="owner-1"
+    )
+
+    folder = tmp_path / "owner-proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn, str(folder), authorization_context=owner
+        )
+        accepted = projects_service.update_project(
+            conn,
+            project["id"],
+            agent_id=shared_id,
+            authorization_context=owner,
+        )
+    assert accepted["default_agent"]["agent_id"] == shared_id
+
+    with engine.begin() as conn:
+        with pytest.raises(projects_service.ProjectAgentAudienceError):
+            projects_service.update_project(
+                conn,
+                project["id"],
+                agent_id=private_id,
+                authorization_context=owner,
+            )
+    assert _stored_project_default(engine, project["scope_id"]) == "owner-shared"

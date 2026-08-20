@@ -125,6 +125,23 @@ class VibeAgentAccessError(PermissionError):
     """Raised when the caller is not allowed to use a Vibe Agent."""
 
 
+# Default routing surfaces -- the instance-wide default Agent and a project's
+# default Agent -- are resolved on behalf of whoever starts an unpinned session,
+# never on behalf of whoever configured them. The invariant both surfaces share:
+# a default must reference an Agent usable by the audience it routes for.
+DEFAULT_ROUTING_AUDIENCE_ERROR_CODE = "agent_default_audience_private"
+
+
+class VibeAgentDefaultAudienceError(VibeAgentAccessError):
+    """A default routing target is not usable by the audience it serves."""
+
+    code = DEFAULT_ROUTING_AUDIENCE_ERROR_CODE
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = str(agent_name)
+
+
 def get_agent_resource_metadata(
     connection: Connection,
     resource_id: str,
@@ -514,6 +531,59 @@ def resolve_effective_default_agent(connection, *, enabled_only: bool = True) ->
         return None
     row = connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name).limit(1)).mappings().first()
     return VibeAgentStore._from_row(row) if row is not None else None
+
+
+def default_routing_audience_error(
+    connection,
+    *,
+    agent_id: str,
+) -> str | None:
+    """Return an error code when an Agent cannot serve as a default route.
+
+    Shared by the instance-wide default and the per-project default so both
+    surfaces enforce one audience rule. A ``private`` ACL is single-subject by
+    construction: exactly one subject passes ``can_use_resource``, and every
+    other user of the surface fails ``ensure_agent_selection_access`` on the
+    unpinned path instead -- for a project that means it can no longer start
+    normal sessions at all.
+
+    The check is deliberately caller-independent. The Instance Owner bypasses
+    ACL checks when *using* a resource, but that bypass describes the Owner, not
+    the audience the default has to serve, so an Owner assignment is validated
+    the same way; an Owner assigning any non-private Agent is unaffected.
+
+    An Agent with no ACL row is not single-subject -- it is the local/builtin
+    shape that predates the resource catalog, and its use is fenced elsewhere.
+    Only the single-subject shape is rejected here.
+    """
+
+    from storage import resource_access_service
+
+    identifier = str(agent_id or "").strip()
+    if not identifier:
+        return None
+    policy = resource_access_service.get_resource_policy(
+        "agent",
+        identifier,
+        connection=connection,
+    )
+    if policy is None:
+        return None
+    if str(policy.get("access_level") or "") != "private":
+        return None
+    return DEFAULT_ROUTING_AUDIENCE_ERROR_CODE
+
+
+def ensure_default_routing_audience(
+    connection,
+    *,
+    agent_id: str,
+    agent_name: str,
+) -> None:
+    """Raise when an Agent cannot back a default routing surface."""
+
+    if default_routing_audience_error(connection, agent_id=agent_id) is not None:
+        raise VibeAgentDefaultAudienceError(agent_name=agent_name)
 
 
 def ensure_default_agent_access(
@@ -1694,6 +1764,11 @@ class VibeAgentStore:
                     agent_name=agent.name,
                     reason="disabled",
                 )
+            ensure_default_routing_audience(
+                conn,
+                agent_id=agent.id,
+                agent_name=agent.name,
+            )
             self._write_default_agent_name(conn, agent.name, now=now)
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:

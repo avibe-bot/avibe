@@ -11,6 +11,7 @@ from core.vibe_agents import (
     AgentImportCandidate,
     VibeAgent,
     VibeAgentAccessError,
+    VibeAgentDefaultAudienceError,
     VibeAgentStore,
     ensure_agent_selection_access,
     ensure_session_agent_access,
@@ -110,6 +111,23 @@ def _seed_agents_with_policies() -> tuple[VibeAgentStore, dict[str, VibeAgent]]:
             group_ids=["group-engineering"],
         )
     return store, agents
+
+
+def _seed_legacy_default_agent(store: VibeAgentStore, agent_name: str) -> None:
+    """Persist an instance default the setter now refuses.
+
+    ``set_default_agent_name`` rejects a single-subject Agent as the instance
+    default (``core.vibe_agents.default_routing_audience_error``), so this state
+    can now only arrive from a database written before that rule. The read-path
+    fences must still fail closed on it, which is what the callers below assert.
+    """
+
+    with store.engine.begin() as connection:
+        store._write_default_agent_name(  # noqa: SLF001
+            connection,
+            agent_name,
+            now="2026-07-20T00:00:00Z",
+        )
 
 
 def test_active_org_agent_catalog_includes_every_builtin_and_acl_shape(monkeypatch, tmp_path) -> None:
@@ -224,8 +242,13 @@ def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tm
             store.remove(agents["public"].name, user_context=member)
         updated = store.update(agents["public"].name, description="admin update", user_context=admin)
         assert updated.description == "admin update"
-        store.set_default_agent_name(agents["private"].name, user_context=admin)
-        assert store.get_default_agent_name() == agents["private"].name
+        store.set_default_agent_name(agents["public"].name, user_context=admin)
+        assert store.get_default_agent_name() == agents["public"].name
+        # Management authority does not extend to publishing a single-subject
+        # Agent as the instance-wide default route.
+        with pytest.raises(VibeAgentDefaultAudienceError):
+            store.set_default_agent_name(agents["private"].name, user_context=admin)
+        assert store.get_default_agent_name() == agents["public"].name
         assert store.remove(agents["public"].name, user_context=admin) is True
         owner_updated = store.update(
             agents["private"].name,
@@ -289,7 +312,7 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
     try:
-        store.set_default_agent_name(agents["private"].name)
+        _seed_legacy_default_agent(store, agents["private"].name)
         engine = get_cached_sqlite_engine()
         with engine.begin() as connection:
             scope_id = upsert_scope(
@@ -359,7 +382,7 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 now="2026-08-13T00:00:00Z",
             )
 
-        store.set_default_agent_name(agents["private"].name)
+        _seed_legacy_default_agent(store, agents["private"].name)
         with pytest.raises(VibeAgentAccessError):
             with engine.begin() as connection:
                 workbench_sessions_service.create_session(
@@ -473,7 +496,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
-    store.set_default_agent_name(private_agent.name)
+    _seed_legacy_default_agent(store, private_agent.name)
     store.close()
     context = _organization_context("member-1")
 
@@ -530,6 +553,8 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
         environ_base=_remote_peer(),
     )
     assert mutation.status_code == 200
+    # Instance-wide default routing serves everyone, so even an Owner cannot
+    # point it at a single-subject Agent; an audience-usable one still works.
     default_mutation = client.post(
         "/api/agents/default",
         json={"name": private_agent.name},
@@ -537,7 +562,16 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert default_mutation.status_code == 200
+    assert default_mutation.status_code == 403
+    assert default_mutation.get_json()["code"] == "agent_access_forbidden"
+    shared_default = client.post(
+        "/api/agents/default",
+        json={"name": agents["scope"].name},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert shared_default.status_code == 200
 
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:

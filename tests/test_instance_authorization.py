@@ -727,7 +727,13 @@ def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_pa
 
 
 def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None:
-    """Instance-wide default routing stays owner-only, even for a manageable Agent."""
+    """Instance-wide default routing stays owner-only, and audience-usable for all.
+
+    Two independent rules guard the same surface: only the Owner may write it,
+    and whatever is written must be usable by the audience it routes for. A
+    member's private Agent fails the first as a member and the second as the
+    Owner.
+    """
 
     from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
     from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
@@ -800,6 +806,9 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
         domain="alex.avibe.bot",
     )
     owner_headers = csrf_headers(owner_client, base_url="https://alex.avibe.bot")
+    # Owner-only is the role gate; the audience rule is the second, independent
+    # one. Instance-wide default routing serves everyone, so a single-subject
+    # Agent is refused even here — only an audience-usable one is accepted.
     owner_response = owner_client.post(
         "/api/agents/default",
         json={"name": "member-private"},
@@ -807,10 +816,26 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
     )
-    assert owner_response.status_code == 200
-    assert owner_response.get_json()["ok"] is True
+    assert owner_response.status_code == 403
+    assert owner_response.get_json()["code"] == "agent_access_forbidden"
     store = VibeAgentStore()
     try:
-        assert store.get_default_agent_name() == "member-private"
+        assert store.get_default_agent_name() == before
+        store.create(name="team-shared", backend="codex")
+    finally:
+        store.close()
+
+    shared_response = owner_client.post(
+        "/api/agents/default",
+        json={"name": "team-shared"},
+        headers=owner_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    assert shared_response.status_code == 200
+    assert shared_response.get_json()["ok"] is True
+    store = VibeAgentStore()
+    try:
+        assert store.get_default_agent_name() == "team-shared"
     finally:
         store.close()
