@@ -6,8 +6,11 @@ import {
   classifyShowPageAccessProbe,
   normalizeShowAccessEmail,
   normalizeShowAccessEmails,
+  showAccessApplyPayload,
   showAccessDirectoryOf,
   showAccessDraftChanged,
+  showAccessWireChanged,
+  showAccessWithLocalExtras,
   showAccessEntriesOf,
   showAccessSuggestions,
   showAccessTargetEmails,
@@ -161,6 +164,41 @@ describe('Show Page access policy helpers', () => {
       'stable-link',
       withoutShowAccessEntry(entries, { kind: 'organization', value: 'org-1' }),
     )).toBe(true);
+    // Until A1/A2 land, the apply route 400s on any extra key, so the wire
+    // form is the five-key set with only the email projection.
+    expect(showAccessApplyPayload(4, 'limited', 'stable-link', entries)).toEqual({
+      expected_revision: 4,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_emails: ['alice@example.com', 'bob@example.com'],
+    });
+    expect(Object.keys(showAccessApplyPayload(4, 'limited', 'stable-link', entries))).toEqual([
+      'expected_revision',
+      'target_access_mode',
+      'target_share_id',
+      'target_emails',
+    ]);
+    expect(showAccessWireChanged(saved, 'limited', 'stable-link', entries)).toBe(false);
+    expect(showAccessWireChanged(
+      saved,
+      'limited',
+      'stable-link',
+      withoutShowAccessEntry(entries, { kind: 'organization', value: 'org-1' }),
+    )).toBe(false);
+    expect(showAccessWireChanged(
+      saved,
+      'limited',
+      'stable-link',
+      withoutShowAccessEntry(entries, { kind: 'email', value: 'alice@example.com' }),
+    )).toBe(true);
+    expect(showAccessWithLocalExtras(
+      { ...saved, access_entries: undefined },
+      entries,
+    )).toEqual([
+      { kind: 'organization', value: 'org-1' },
+      { kind: 'email', value: 'alice@example.com' },
+      { kind: 'email', value: 'bob@example.com' },
+    ]);
   });
 
   it('derives the audience directory only for an Organization Avibe', () => {

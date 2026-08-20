@@ -589,7 +589,6 @@ describe('ShowPageShareControl payload sequencing without prior access', () => {
         expected_revision: 0,
         target_access_mode: 'public',
         target_share_id: 'new-link',
-        target_entries: [],
         target_emails: [],
       });
     });

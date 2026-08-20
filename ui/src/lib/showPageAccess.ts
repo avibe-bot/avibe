@@ -51,11 +51,33 @@ export type ShowAccessApplyRequest = {
   expected_revision: number;
   target_access_mode: ShowAccessMode;
   target_share_id: string | null;
-  target_entries: ShowAccessEntry[];
-  /** Email projection of `target_entries`, kept so a backend that has not yet
-   *  adopted the heterogeneous contract still applies the email audience. */
+  /** Heterogeneous audience. Optional until A1/A2 land the apply contract: the
+   *  current endpoint requires an exact five-key payload, so the wire form
+   *  omits this until that backend accepts it. */
+  target_entries?: ShowAccessEntry[];
+  /** Email projection of `target_entries`. Until A1/A2 land, this is the only
+   *  audience the current endpoint applies. */
   target_emails: string[];
 };
+
+/** Wire payload for `/access-settings/apply`. Until A1/A2 land, the route
+ *  requires an exact five-key set and 400s on any extra field, so the
+ *  heterogeneous audience is held locally and only the email projection is
+ *  sent. Once those lanes land, this helper should start including
+ *  `target_entries` again. */
+export function showAccessApplyPayload(
+  expectedRevision: number,
+  mode: ShowAccessMode,
+  shareId: string | null,
+  entries: ShowAccessEntry[],
+): ShowAccessApplyRequest {
+  return {
+    expected_revision: expectedRevision,
+    target_access_mode: mode,
+    target_share_id: shareId,
+    target_emails: showAccessTargetEmails(mode, entries),
+  };
+}
 
 export type ShowAccessApplyResult = {
   status: 'applied' | 'no_change' | 'conflict' | 'share_id_taken' | 'invalid';
@@ -233,6 +255,37 @@ export function showAccessDraftChanged(
     || saved.share_id !== shareId
     || showAccessEntriesKey(showAccessEntriesOf(saved))
       !== showAccessEntriesKey(showAccessTargetEntries(mode, entries));
+}
+
+/** True when the five-key apply payload would differ. Group and Organization
+ *  entries are invisible to the current endpoint, so a local-only audience
+ *  change must not be sent (it would 400 on `target_entries`, or a successful
+ *  email-only round-trip would wipe those rows on adopt). */
+export function showAccessWireChanged(
+  saved: ShowAccess,
+  mode: ShowAccessMode,
+  shareId: string | null,
+  entries: ShowAccessEntry[],
+): boolean {
+  return saved.access_mode !== mode
+    || saved.share_id !== shareId
+    || showAccessEntriesKey(
+      saved.normalized_emails.map((value) => ({ kind: 'email' as const, value })),
+    ) !== showAccessEntriesKey(
+      showAccessTargetEmails(mode, entries).map((value) => ({ kind: 'email' as const, value })),
+    );
+}
+
+/** Re-homes group/Organization rows the current endpoint cannot store, on top
+ *  of whatever email audience the server just acknowledged. */
+export function showAccessWithLocalExtras(
+  saved: ShowAccess,
+  local: ShowAccessEntry[],
+): ShowAccessEntry[] {
+  return canonicalShowAccessEntries([
+    ...local.filter((entry) => entry.kind !== 'email'),
+    ...showAccessEntriesOf(saved).filter((entry) => entry.kind === 'email'),
+  ]);
 }
 
 function isShowPageAccess(value: unknown): value is ShowPageAccess {

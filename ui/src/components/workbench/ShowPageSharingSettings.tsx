@@ -29,8 +29,10 @@ import {
   showAccessEntriesOf,
   showAccessEntryKey,
   showAccessSuggestions,
-  showAccessTargetEmails,
+  showAccessApplyPayload,
   showAccessTargetEntries,
+  showAccessWireChanged,
+  showAccessWithLocalExtras,
   withoutShowAccessEntry,
   withShowAccessEntry,
   SHOW_ACCESS_ENTRY_MAX_COUNT,
@@ -197,7 +199,15 @@ function AudienceCombobox({
   };
 
   return (
-    <div ref={containerRef} className="relative w-full max-w-[17.5rem]">
+    <div
+      ref={containerRef}
+      className="relative w-full max-w-[17.5rem]"
+      onBlur={(event) => {
+        if (containerRef.current?.contains(event.relatedTarget as Node | null)) return;
+        setFocused(false);
+        setActiveKey(null);
+      }}
+    >
       <div className="flex items-start gap-1.5">
         <div className="min-w-0 flex-1">
           <Input
@@ -217,7 +227,9 @@ function AudienceCombobox({
             onClick={() => setFocused(true)}
             onBlur={(event) => {
               // Clicking an option or the add button moves focus inside the field;
-              // only leaving the field entirely closes the list.
+              // only leaving the field entirely closes the list. The container's
+              // own onBlur is what actually closes it when focus then leaves
+              // from those child controls.
               if (containerRef.current?.contains(event.relatedTarget as Node | null)) return;
               setFocused(false);
               setActiveKey(null);
@@ -473,6 +485,12 @@ export function ShowPageSharingSettings({
     ) {
       return;
     }
+    // Group/Organization rows are local-only until A1/A2. Hitting the current
+    // endpoint with an unchanged email projection would either 400 or come
+    // back as an email-only snapshot that wipes those rows on adopt.
+    if (!showAccessWireChanged(current, nextMode, targetShareId, nextEntries)) {
+      return;
+    }
     const generation = generationRef.current;
     const requestSessionId = sessionId;
     const isCurrent = () =>
@@ -480,13 +498,10 @@ export function ShowPageSharingSettings({
     savingRef.current = true;
     setSaving(true);
     try {
-      const result = await api.applyShowAccess(requestSessionId, {
-        expected_revision: current.revision,
-        target_access_mode: nextMode,
-        target_share_id: targetShareId,
-        target_entries: targetEntries,
-        target_emails: showAccessTargetEmails(nextMode, nextEntries),
-      });
+      const result = await api.applyShowAccess(
+        requestSessionId,
+        showAccessApplyPayload(current.revision, nextMode, targetShareId, nextEntries),
+      );
       if (result.show_access.page_id !== requestSessionId) {
         throw new Error('ShowAccess page identity mismatch');
       }
@@ -510,6 +525,7 @@ export function ShowPageSharingSettings({
         return;
       }
       adopt(result.show_access, preserveShareIdDraftOnSuccess);
+      setEntries(showAccessWithLocalExtras(result.show_access, nextEntries));
       setGate('ready');
       onApplied?.(result.show_access);
     } catch {
@@ -731,7 +747,11 @@ export function ShowPageSharingSettings({
                       </span>
                       <Switch
                         checked={Boolean(organizationEntry)}
-                        disabled={!editable || (Boolean(organizationEntry) && lastEntryPinned)}
+                        disabled={
+                          !editable
+                          || (Boolean(organizationEntry) && lastEntryPinned)
+                          || (!organizationEntry && entryLimitReached)
+                        }
                         onCheckedChange={toggleOrganization}
                         label={t('chat.showPage.shareOrganizationGeneric')}
                       />
