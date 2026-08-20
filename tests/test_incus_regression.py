@@ -6,6 +6,7 @@ import io
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -1645,7 +1646,10 @@ def reconcile_fixture(
 
     A record in `instances` may omit `project`, in which case it is placed in the
     project its name implies -- `incus list` always reports one, and only a test
-    about misplacement needs to say which.
+    about misplacement needs to say which. That default substitutes one prefix
+    for the other rather than minting a name, so a fixture is free to describe an
+    environment whose name the runner would have refused to create: that is
+    precisely the environment enumerating from Incus exists to find.
     """
 
     repo = tmp_path / "repo"
@@ -1673,9 +1677,8 @@ def reconcile_fixture(
             commands.append(command)
             return [
                 {
-                    "project": incus_regression.project_name_for(
-                        "worktree", str(item["name"]).removeprefix(incus_regression.WORKTREE_INSTANCE_PREFIX)
-                    ),
+                    "project": incus_regression.WORKTREE_PROJECT_PREFIX
+                    + str(item["name"]).removeprefix(incus_regression.WORKTREE_INSTANCE_PREFIX),
                     **dict(item),
                 }
                 for item in instances
@@ -1918,6 +1921,67 @@ def test_reconcile_reports_every_instance_sharing_one_name(
     # it does not.
     assert "delete --target worktree --slug doubled" in out
     assert "instance lives in project default, not avr-wt-doubled" in out
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {}
+
+
+def test_reconcile_lists_names_the_runner_would_not_mint_and_offers_only_runnable_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every command the report prints is one the runner accepts, whatever Incus holds.
+
+    An environment the runner did not create had nothing constraining its name,
+    so the names below are ones Incus accepts and `--slug` does not. Deriving
+    those names from the slug a second time ran them back through the validating
+    minter, and `reconcile` raised before printing anything at all -- blinding the
+    one command whose purpose is finding environments nobody tracked.
+
+    The command assertion is a property over the whole report rather than a list
+    of rejected shapes: too short, too long, a trailing hyphen, and whatever else
+    Incus permits form an open set, and the member a list omits is the one that
+    ships. Parsing the commands back out of the output also covers report lines
+    that do not exist yet.
+    """
+    too_long = "l" * 41
+    mapping_path, _ = reconcile_fixture(
+        tmp_path,
+        monkeypatch,
+        entries={},
+        projects=("avr-wt-ab", f"avr-wt-{too_long}", "avr-wt-fine"),
+        instances=(
+            {"name": "avibe-wt-ab", "status": "Running"},
+            {"name": "avibe-wt-fine", "status": "Stopped"},
+        ),
+    )
+
+    exit_code = incus_regression.cmd_reconcile(argparse.Namespace(yes=True, dry_run=False, remote=None))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    # Reported at all, which is the regression: three environments exist and the
+    # command used to raise on the first one it could not have created.
+    assert "3 worktree regression environment(s)" in out
+    for slug in ("ab", too_long, "fine"):
+        assert f"  {slug}  [" in out
+
+    offered = []
+    for line in out.splitlines():
+        printed = line.strip()
+        if not printed.startswith("python3 scripts/incus_regression.py"):
+            continue
+        argv = shlex.split(printed)
+        if "--slug" in argv:
+            offered.append(argv[argv.index("--slug") + 1])
+    assert offered == ["fine"]
+    for slug in offered:
+        # Raises if the report offered a command `delete` would reject.
+        incus_regression.validate_slug(slug)
+
+    # What the runner cannot name, it names the objects for instead. A command
+    # that exits on its own argument is not a reclamation path.
+    assert "  ab: not a slug this runner accepts" in out
+    assert "Reclaim by hand: avr-wt-ab, avr-wt-ab/avibe-wt-ab." in out
+    assert f"Reclaim by hand: avr-wt-{too_long}." in out
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == {}
 
@@ -2378,7 +2442,6 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         "ensure_host_port_available",
         lambda host, port: (_ for _ in ()).throw(AssertionError("should not preflight existing master instance")),
     )
-    monkeypatch.setattr(incus_regression.WorktreeMetadata, "reserve", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "stop_service_for_update", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "write_runtime_env", lambda *args, **kwargs: None)
@@ -3081,9 +3144,9 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     monkeypatch.setattr(incus_regression, "worktree_mapping_lock", mapping_lock)
     original_reserve = incus_regression.WorktreeMetadata.reserve
 
-    def reserve(self, target):
+    def reserve(self, target, **kwargs):
         calls.append("reserve_worktree_metadata")
-        original_reserve(self, target)
+        return original_reserve(self, target, **kwargs)
 
     monkeypatch.setattr(incus_regression, "target_update_lock", target_lock)
     monkeypatch.setattr(incus_regression.WorktreeMetadata, "reserve", reserve)
@@ -3141,6 +3204,198 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     assert mapping["host_port"] == 15200
     assert mapping["project"] == "avr-wt-demo-branch"
     assert "updated_at" in mapping
+
+
+@pytest.mark.parametrize("recorded", [False, True], ids=["new-row", "existing-row"])
+@pytest.mark.parametrize(
+    "fail_at",
+    ["require_runtime_seed_env", "ensure_project_and_instance", "sync_source"],
+)
+def test_up_gives_back_only_the_reservation_it_created_and_only_before_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str, recorded: bool
+) -> None:
+    """A failed `up` drops the row only if it created it and nothing may bind it.
+
+    Both halves are asserted as one derived expectation rather than a table of
+    steps, so the property is the assertion and a step inserted later is
+    classified by the code rather than by nobody:
+
+    - Up to `ensure_project_and_instance` the run has only read, so the row is
+      the one thing it brought about; from that call on the daemon may hold a
+      project or an instance and releasing would hand a live environment's port
+      to the next `up`.
+    - A row that predates the run is a claim older than the run. `up` on an
+      existing environment re-enters it, so releasing there would free the port
+      of something already running -- worse than the leak being fixed.
+
+    Left behind, an abandoned reservation reads as one still in flight, which
+    `reconcile` refuses to prune by design, so its port stayed reserved until
+    someone deleted the slug by hand.
+    """
+    calls = []
+
+    class NewRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names = daemon_listing()
+
+        def run(self, command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout="{}")
+
+    def record(name):
+        def wrapper(*args, **kwargs):
+            calls.append(name)
+            if name == fail_at:
+                raise RuntimeError(f"{name} failed")
+            if name == "update_dependencies_and_build":
+                return set()
+
+        return wrapper
+
+    mapping_path = tmp_path / ".runtime" / "incus-regression" / "worktrees.json"
+    if recorded:
+        mapping_path.parent.mkdir(parents=True)
+        mapping_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "worktrees": {
+                        "demo-branch": {
+                            "path": str(tmp_path),
+                            "project": "avr-wt-demo-branch",
+                            "instance": "avibe-wt-demo-branch",
+                            "host_port": 15200,
+                            "updated_at": "2026-08-01T00:00:00+00:00",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
+    monkeypatch.setattr(incus_regression, "Runner", NewRunner)
+    monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
+    monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
+    monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
+    for name in (
+        "require_runtime_seed_env",
+        "guard_paired_master_reset",
+        "ensure_project_and_instance",
+        "stop_service_for_update",
+        "write_runtime_env",
+        "migrate_legacy_backend_runtimes",
+        "sync_source",
+        "invalidate_fingerprints",
+        "update_dependencies_and_build",
+        "run_prepare_state",
+        "normalize_runtime_config",
+        "write_metadata",
+        "prepare_show_runtime",
+        "restart_and_verify",
+    ):
+        monkeypatch.setattr(incus_regression, name, record(name))
+
+    args = argparse.Namespace(
+        target="worktree",
+        slug="demo-branch",
+        host_port=None,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        force_ui=False,
+        reset_mode="none",
+    )
+
+    with pytest.raises(RuntimeError):
+        incus_regression.cmd_up(args)
+
+    assert fail_at in calls
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
+    assert ("demo-branch" in mapping) == (recorded or "ensure_project_and_instance" in calls)
+    if recorded:
+        # Still the same claim, still holding the same port -- re-entering a
+        # reservation must not be a way to lose one.
+        assert mapping["demo-branch"]["host_port"] == 15200
+
+
+def test_up_releases_its_reservation_when_the_run_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ctrl-C is how an `up` is abandoned in practice, and a KeyboardInterrupt is
+    # not an Exception -- catching only that class would leave exactly the row
+    # this release exists for.
+    class NewRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names = daemon_listing()
+
+        def run(self, command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout="{}")
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
+    monkeypatch.setattr(incus_regression, "Runner", NewRunner)
+    monkeypatch.setattr(incus_regression, "require_runtime_seed_env", interrupt)
+
+    args = argparse.Namespace(
+        target="worktree",
+        slug="demo-branch",
+        host_port=None,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        force_ui=False,
+        reset_mode="none",
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        incus_regression.cmd_up(args)
+
+    mapping = json.loads(
+        (tmp_path / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8")
+    )["worktrees"]
+    assert mapping == {}
 
 
 def test_normalize_runtime_config_updates_preserved_backend_paths_host_and_port() -> None:

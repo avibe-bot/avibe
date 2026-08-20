@@ -539,11 +539,19 @@ class WorktreeMetadata:
             return item["host_port"]
         return None
 
-    def reserve(self, target: RegressionTarget) -> None:
-        """Record the slug and its port before the environment is built."""
-        if target.target != WORKTREE_TARGET:
-            return
-        reservation = {
+    def reserve(self, target: RegressionTarget, *, dry_run: bool = False) -> WorktreeReservation:
+        """Record the slug and its port before the environment is built.
+
+        The claim handed back knows whether this run is what brought the row into
+        existence, because that is the only condition under which releasing it
+        could be right and here is the only place it is knowable: decided under
+        the lock, by the code doing the write. A remote accessor writes nothing,
+        so its claim created nothing and has nothing to give back.
+        """
+        reservation = WorktreeReservation(metadata=self, target=target, dry_run=dry_run)
+        if dry_run or target.target != WORKTREE_TARGET:
+            return reservation
+        row = {
             "path": str(self.repo_root),
             "project": target.project,
             "instance": target.instance,
@@ -551,7 +559,13 @@ class WorktreeMetadata:
             "reserved_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch_name(self.repo_root),
         }
-        self.mutate(lambda worktrees: worktrees.setdefault(target.slug, {}).update(reservation))
+
+        def claim(worktrees: dict) -> None:
+            reservation.created = target.slug not in worktrees
+            worktrees.setdefault(target.slug, {}).update(row)
+
+        self.mutate(claim)
+        return reservation
 
     def complete(self, target: RegressionTarget) -> None:
         """Stamp the environment as built, replacing the row and its `reserved_at`."""
@@ -577,6 +591,50 @@ class WorktreeMetadata:
                 worktrees.pop(slug, None)
 
         self.mutate(prune)
+
+
+@dataclass
+class WorktreeReservation:
+    """A claim on a slug and its host port, scoped to the run that made it.
+
+    `reserve` and `complete` are the two ends of an `up` that worked. This is the
+    third end, and it exists because a claim that outlives the process making it
+    is not a claim about anything: left behind, the row reads as a reservation
+    still in flight -- which `reconcile` refuses to prune, by design -- so the
+    host port stayed reserved until someone deleted the slug by hand.
+
+    Dropping it is only ever right under two conditions, and both live here
+    rather than in `up`, for the reason round 3 named: a question every caller has
+    to remember to ask is how a defect gets in.
+
+    - This run must be what brought the row into existence. An `up` on an
+      environment that already had a row is re-entering a claim older than
+      itself, and releasing that would free a port a live environment is bound
+      to -- the exact accident the row exists to prevent.
+    - Nothing may hold the port yet. Once `keep` is called the daemon may hold a
+      project or an instance, and a failure from there on is a "cannot tell"
+      that resolves the same way: keep the row.
+    """
+
+    metadata: WorktreeMetadata
+    target: RegressionTarget
+    dry_run: bool = False
+    created: bool = False
+    held: bool = False
+
+    def keep(self) -> None:
+        """Declare that the claim now outlives this run, whatever happens next."""
+        self.held = True
+
+    def complete(self) -> None:
+        """Stamp the environment as built, ending the reservation."""
+        if not self.dry_run:
+            self.metadata.complete(self.target)
+
+    def release(self) -> None:
+        """Give the claim back if this run is the only thing that ever held it."""
+        if self.created and not self.held:
+            self.metadata.forget([self.target.slug])
 
 
 def allocate_worktree_port(
@@ -664,19 +722,42 @@ class WorktreeEnvironment:
         return self.has_project or bool(self.instances)
 
     @property
+    def reachable_by_slug(self) -> bool:
+        """Whether `delete --slug` can name this environment at all.
+
+        A slug here is whatever remained after stripping a known prefix off a
+        name the daemon reported, so it is bounded by what Incus accepts, not by
+        what the runner would mint. `delete --slug` validates its argument, so a
+        suffix it rejects -- two characters, over forty, an underscore -- has no
+        runner command at all. This is exactly the environment the report exists
+        for: the runner did not create it, so nothing constrained its name.
+        """
+        return bool(SLUG_RE.match(self.slug))
+
+    @property
     def deletable_instances(self) -> tuple[ObservedInstance, ...]:
         """The observed instances `delete --slug` would actually reach."""
+        if not self.reachable_by_slug:
+            return ()
         return tuple(item for item in self.instances if item.project == self.project)
 
     @property
     def stranded_instances(self) -> tuple[ObservedInstance, ...]:
-        """The observed instances living outside the project the slug names."""
+        """The observed instances `delete --slug` would not reach.
+
+        Either the instance lives outside the project the slug names, or the slug
+        is not one the runner can name -- in which case the command reaches
+        nothing and every observed instance is stranded. The two properties stay
+        complementary by construction, so an instance cannot fall out of both.
+        """
+        if not self.reachable_by_slug:
+            return self.instances
         return tuple(item for item in self.instances if item.project != self.project)
 
     @property
     def deletable_by_slug(self) -> bool:
-        """Whether `delete --slug` would reach every instance that was observed."""
-        return not self.stranded_instances
+        """Whether `delete --slug` reaches any part of this environment."""
+        return self.reachable_by_slug and (self.has_project or bool(self.deletable_instances))
 
     @property
     def pending(self) -> bool:
@@ -762,11 +843,20 @@ def worktree_environments(runner: Runner, metadata: WorktreeMetadata) -> list[Wo
     authorities. When they did, a remote environment was annotated with the
     local row that happened to share its slug, and local-only rows were listed
     as environments the remote had lost.
+
+    Each environment carries the names the daemon reported rather than minting
+    them again from the slug. The slug is that name with a known prefix removed,
+    so re-deriving it can only reproduce what was already observed -- except that
+    minting validates, and a name Incus accepts is not necessarily a name the
+    runner would choose. `project_name_for` therefore raised on a discovered
+    two-character or over-long suffix, and `reconcile` reported nothing at all
+    for the one kind of environment it exists to find. A name that was observed
+    is evidence; deriving it a second time only adds a way to disagree with it.
     """
     remote = metadata.remote
     entries = metadata.rows()
     projects = {
-        name[len(WORKTREE_PROJECT_PREFIX):]
+        name[len(WORKTREE_PROJECT_PREFIX):]: name
         for name in runner.names(
             incus("project", "list", *optional_remote_ref(remote), "--format", "json"),
             what="Incus projects",
@@ -774,18 +864,20 @@ def worktree_environments(runner: Runner, metadata: WorktreeMetadata) -> list[Wo
         if name.startswith(WORKTREE_PROJECT_PREFIX)
     }
     instances = worktree_instances(runner, remote=remote)
-    slugs = set(entries) | projects | {name[len(WORKTREE_INSTANCE_PREFIX):] for name in instances}
+    instance_names = {name[len(WORKTREE_INSTANCE_PREFIX):]: name for name in instances}
+    slugs = set(entries) | set(projects) | set(instance_names)
     environments = []
     for slug in sorted(slugs):
         entry = entries.get(slug)
         entry = entry if isinstance(entry, dict) else None
+        instance = instance_names.get(slug, f"{WORKTREE_INSTANCE_PREFIX}{slug}")
         environments.append(
             WorktreeEnvironment(
                 slug=slug,
-                project=project_name_for(WORKTREE_TARGET, slug),
-                instance=instance_name_for(WORKTREE_TARGET, slug),
+                project=projects.get(slug, f"{WORKTREE_PROJECT_PREFIX}{slug}"),
+                instance=instance,
                 has_project=slug in projects,
-                instances=instances.get(instance_name_for(WORKTREE_TARGET, slug), ()),
+                instances=instances.get(instance, ()),
                 entry=entry,
             )
         )
@@ -2136,79 +2228,88 @@ def cmd_up(args: argparse.Namespace) -> int:
         require_incus()
     with worktree_mapping_lock(repo_root, dry_run=args.dry_run):
         target = resolve_target(args, repo_root, dry_run=args.dry_run)
-        if not args.dry_run:
-            WorktreeMetadata(repo_root, args.remote).reserve(target)
-    with target_update_lock(repo_root, target, dry_run=args.dry_run):
-        runner = Runner(dry_run=args.dry_run)
-        target_exists = instance_exists(runner, args.remote, target.project, target.instance)
-        if not args.dry_run and not target_exists and args.remote is None:
-            # Reached only once the daemon has enumerated its instances and this one
-            # was absent, so an occupied port is a real conflict with something else
-            # rather than this environment's own proxy device.
-            ensure_host_port_available(target.ui_host, target.host_port)
-        seed_requires_env = not args.dry_run and (args.reset_mode != "none" or not target_exists)
-        if seed_requires_env:
-            require_runtime_seed_env()
-        if target_exists:
-            guard_paired_master_reset(
+        metadata = WorktreeMetadata(repo_root, args.remote)
+        reservation = metadata.reserve(target, dry_run=args.dry_run)
+    try:
+        with target_update_lock(repo_root, target, dry_run=args.dry_run):
+            runner = Runner(dry_run=args.dry_run)
+            target_exists = instance_exists(runner, args.remote, target.project, target.instance)
+            if not args.dry_run and not target_exists and args.remote is None:
+                # Reached only once the daemon has enumerated its instances and this one
+                # was absent, so an occupied port is a real conflict with something else
+                # rather than this environment's own proxy device.
+                ensure_host_port_available(target.ui_host, target.host_port)
+            seed_requires_env = not args.dry_run and (args.reset_mode != "none" or not target_exists)
+            if seed_requires_env:
+                require_runtime_seed_env()
+            if target_exists:
+                guard_paired_master_reset(
+                    runner,
+                    target,
+                    reset_mode=args.reset_mode,
+                    allow_reset_paired_master=getattr(args, "allow_reset_paired_master", False),
+                    remote=args.remote,
+                )
+            # Everything above only reads, so up to here a failure leaves the row
+            # as the one thing this run brought about. From here the daemon may
+            # hold a project or an instance bound to this port.
+            reservation.keep()
+            ensure_project_and_instance(
                 runner,
                 target,
-                reset_mode=args.reset_mode,
-                allow_reset_paired_master=getattr(args, "allow_reset_paired_master", False),
+                image=args.image,
+                storage_pool=args.storage_pool,
+                network=args.network,
+                cpus=args.cpus,
+                memory=args.memory,
+                disk=args.disk,
+                processes=args.processes,
                 remote=args.remote,
             )
-        ensure_project_and_instance(
-            runner,
-            target,
-            image=args.image,
-            storage_pool=args.storage_pool,
-            network=args.network,
-            cpus=args.cpus,
-            memory=args.memory,
-            disk=args.disk,
-            processes=args.processes,
-            remote=args.remote,
-        )
-        if not args.dry_run and not seed_requires_env and should_seed_state(runner, target, reset_mode=args.reset_mode, remote=args.remote):
-            require_runtime_seed_env()
-        stop_service_for_update(runner, target, remote=args.remote)
-        if seed_requires_env or loaded_env_file is not None or args.dry_run:
-            write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
-        else:
-            print("No regression env file loaded; preserving existing runtime env file.")
-        migrate_legacy_backend_runtimes(runner, target, remote=args.remote)
-        sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
-        fingerprints = compute_fingerprints(repo_root)
-        previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)
-        invalidate_fingerprints(runner, target, remote=args.remote)
-        reconciled = update_dependencies_and_build(
-            runner,
-            target,
-            previous_fingerprints=previous_fingerprints,
-            next_fingerprints=fingerprints,
-            force_deps=args.force_deps,
-            build_ui=not args.no_build_ui,
-            force_ui=args.force_ui,
-            remote=args.remote,
-        )
-        # ``prepare_show_runtime`` below is unconditional, so the run either
-        # reconciles the show runtime or fails outright.
-        reconciled = reconciled | {"show_runtime"}
-        run_prepare_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
-        normalize_runtime_config(runner, target, remote=args.remote)
-        write_metadata(
-            runner,
-            target,
-            repo_root,
-            reconciled_fingerprints(previous_fingerprints, fingerprints, reconciled),
-            remote=args.remote,
-        )
-        # Install updated runtime sources while the service is stopped so the
-        # restarted process cannot keep serving code loaded before preparation.
-        prepare_show_runtime(runner, target, remote=args.remote)
-        restart_and_verify(runner, target, remote=args.remote)
-        if not args.dry_run:
-            WorktreeMetadata(repo_root, args.remote).complete(target)
+            if not args.dry_run and not seed_requires_env and should_seed_state(runner, target, reset_mode=args.reset_mode, remote=args.remote):
+                require_runtime_seed_env()
+            stop_service_for_update(runner, target, remote=args.remote)
+            if seed_requires_env or loaded_env_file is not None or args.dry_run:
+                write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
+            else:
+                print("No regression env file loaded; preserving existing runtime env file.")
+            migrate_legacy_backend_runtimes(runner, target, remote=args.remote)
+            sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
+            fingerprints = compute_fingerprints(repo_root)
+            previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)
+            invalidate_fingerprints(runner, target, remote=args.remote)
+            reconciled = update_dependencies_and_build(
+                runner,
+                target,
+                previous_fingerprints=previous_fingerprints,
+                next_fingerprints=fingerprints,
+                force_deps=args.force_deps,
+                build_ui=not args.no_build_ui,
+                force_ui=args.force_ui,
+                remote=args.remote,
+            )
+            # ``prepare_show_runtime`` below is unconditional, so the run either
+            # reconciles the show runtime or fails outright.
+            reconciled = reconciled | {"show_runtime"}
+            run_prepare_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
+            normalize_runtime_config(runner, target, remote=args.remote)
+            write_metadata(
+                runner,
+                target,
+                repo_root,
+                reconciled_fingerprints(previous_fingerprints, fingerprints, reconciled),
+                remote=args.remote,
+            )
+            # Install updated runtime sources while the service is stopped so the
+            # restarted process cannot keep serving code loaded before preparation.
+            prepare_show_runtime(runner, target, remote=args.remote)
+            restart_and_verify(runner, target, remote=args.remote)
+            reservation.complete()
+    except BaseException:
+        # Not `Exception`: Ctrl-C is how an `up` is abandoned in practice, and a
+        # KeyboardInterrupt would otherwise leave exactly the row this exists for.
+        reservation.release()
+        raise
     print_summary(target)
     return 0
 
@@ -2347,7 +2448,6 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         live = [env for env in environments if env.exists]
         pending = [env for env in environments if not env.exists and env.pending]
         forgotten = [env for env in environments if not env.exists and not env.pending]
-        stranded = [env for env in live if env.stranded_instances]
 
         if live:
             print(f"{len(live)} worktree regression environment(s) exist in {authority}:")
@@ -2365,7 +2465,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             # something: either it offers a delete command that leaves an instance
             # running, or it withholds one that would reclaim most of the disk.
             # Saying both is the only honest report.
-            deletable = [env for env in live if env.has_project or env.deletable_instances]
+            deletable = [env for env in live if env.deletable_by_slug]
             if deletable:
                 print("Delete any of them with:")
                 for env in deletable:
@@ -2373,7 +2473,21 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                         "  python3 scripts/incus_regression.py delete --target worktree "
                         f"--slug {shlex.quote(env.slug)} --yes{remote_suffix}"
                     )
-            for env in stranded:
+            for env in live:
+                if not env.reachable_by_slug:
+                    # `delete --slug` validates its argument, so for this name it
+                    # reaches nothing at all -- and the whole point of enumerating
+                    # from Incus is to find environments the runner did not create,
+                    # whose names nothing constrained. Printing the command anyway
+                    # would advertise a reclamation that exits on its own argument,
+                    # so the objects are named for a manual one instead.
+                    observed = [env.project] if env.has_project else []
+                    observed += sorted(f"{item.project}/{env.instance}" for item in env.instances)
+                    print(
+                        f"  {env.slug}: not a slug this runner accepts, so `delete --slug` would "
+                        f"reject it. Reclaim by hand: {', '.join(observed)}."
+                    )
+                    continue
                 for item in env.stranded_instances:
                     print(
                         f"  {env.slug}: instance lives in project {item.project}, not {env.project}. "
@@ -2397,6 +2511,15 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             for env in pending:
                 print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
             print("Left alone: a concurrent `up` may still be creating them, and their ports stay reserved.")
+            # An `up` releases its own claim on the way out, so a row can only
+            # survive here while that `up` is still running or was killed without
+            # getting to run anything. The second case cannot be told from the
+            # first, and guessing costs a live `up` its port, so the recovery is
+            # named rather than performed.
+            print(
+                "  A reservation left by an `up` that was killed outright is removed with "
+                f"`delete --target worktree --slug <slug> --yes{remote_suffix}`."
+            )
 
         if not forgotten:
             return 0

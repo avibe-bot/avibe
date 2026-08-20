@@ -147,6 +147,14 @@ project from the slug, so it would report success without touching the instance.
 An environment holding both kinds gets both the command and the warning — one
 statement covers what the convention reaches, the other what it does not.
 
+Those names are the ones the daemon reported, never derived a second time from
+the slug. A slug here is an observed name with a known prefix removed, so it is
+bounded by what Incus accepts rather than by what the runner would choose — and
+`--slug` is stricter than Incus. A discovered name the runner would not have
+minted therefore gets no command at all: the report names its project and
+instance for a manual reclamation instead of printing a `delete --slug` that
+would exit on its own argument.
+
 Deletion stays a separate, explicit call. Nothing recorded about an environment
 can prove it is no longer wanted: the recorded path is the checkout the runner
 was invoked from, shared by every environment created there and still present
@@ -165,7 +173,15 @@ is worse than keeping a row nobody needs:
   identify, is an unanswered question rather than an absence, and aborts instead.
 - A row that reserves a slug whose environment is not built yet is left alone.
   `up` records the slug and its port before it creates the project and the
-  instance, so this is what a concurrent `up` looks like from the outside.
+  instance, so this is what a concurrent `up` looks like from the outside. The
+  reservation lasts exactly as long as the run that makes it: an `up` that fails
+  before it asks the daemon to create anything releases the row on its way out,
+  so a reservation still standing is a live `up` — or one killed outright, which
+  cannot be told apart from the first and is removed by
+  `delete --target worktree --slug <slug> --yes` like every other removal. Once
+  creation may have begun the row stays even on failure: a project or instance
+  may now bind that port, and handing it to the next `up` is worse than keeping
+  a row nobody needs.
 - `worktrees.json` is reached only through an accessor bound to the daemon it
   describes. The file reserves host ports on this machine and records what this
   machine's daemon holds, so every read of it and every write to it is a claim

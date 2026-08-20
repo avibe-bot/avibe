@@ -120,11 +120,17 @@ Hard rules:
   created outside the runner, which no metadata-driven command can see — and
   forgets metadata rows whose environment is already gone. It never deletes an
   environment: no recorded field can prove one is unwanted, so that call stays
-  with the operator
+  with the operator. It reports the names the daemon gave, never re-derived from
+  the slug, because a discovered name is bounded by what Incus accepts and
+  `--slug` is stricter; one it would reject gets its objects named for a manual
+  reclamation instead of a command that would exit on its own argument
 - a metadata row is dropped only when the daemon that owns it completed a
   listing whose every entry was readable, that listing held neither its project
   nor its instance, and the row is not a reservation whose `up` may still be
-  running. `worktrees.json` is reached only through an accessor bound to the
+  running. A reservation lives exactly as long as its run: an `up` that fails
+  before asking the daemon to create anything releases its own row, while one
+  that fails afterwards keeps it, because a project or instance may already bind
+  that port. `worktrees.json` is reached only through an accessor bound to the
   daemon it describes — it reserves host ports on this machine and records what
   this machine's daemon holds — so a `--remote` command cannot name it and
   neither reads nor writes it: `reconcile --remote` reports the remote inventory
