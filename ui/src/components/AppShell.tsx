@@ -498,13 +498,12 @@ export const AppShell: React.FC = () => {
   const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
   // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
-  // bar with Workbench, Control Panel, and More (which opens the full nested nav
-  // sheet). See ``adminMenuOpen``.
+  // bar with Workbench, Control Panel, More, and Advanced Settings. Permissions
+  // stays in the More sheet with the other overflow destinations.
   const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
-    { to: '/admin/permissions', label: t('nav.permissions'), icon: ShieldCheck },
     {
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),

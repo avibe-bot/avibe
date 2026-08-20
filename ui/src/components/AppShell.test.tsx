@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -226,10 +226,11 @@ describe('AppShell workbench sidebar', () => {
 
 describe('AppShell Permissions navigation', () => {
   it.each([
-    ['personal', 2],
-    [null, 2],
-    ['organization', 2],
-  ] as const)('shows current-instance Permissions for %s instances', async (instanceKind, expectedCount) => {
+    'personal',
+    null,
+    'organization',
+  ] as const)('keeps current-instance Permissions in More Settings for %s instances', async (instanceKind) => {
+    const user = userEvent.setup();
     instanceAuth.instanceKind = instanceKind;
 
     render(
@@ -243,16 +244,23 @@ describe('AppShell Permissions navigation', () => {
     );
 
     expect(await screen.findByTestId('dashboard')).toBeTruthy();
-    const permissionEntries = screen.queryAllByText('nav.permissions');
-    expect(permissionEntries).toHaveLength(expectedCount);
-    const advancedEntries = screen.queryAllByText('nav.advancedSettings');
-    expect(advancedEntries).toHaveLength(expectedCount);
-    permissionEntries.forEach((permission, index) => {
-      expect(
-        permission.compareDocumentPosition(advancedEntries[index]!)
-          & Node.DOCUMENT_POSITION_FOLLOWING,
-      ).toBeTruthy();
-    });
+
+    const moreTab = screen.getByRole('button', { name: 'nav.more' });
+    const bottomNav = moreTab.closest('nav');
+    expect(bottomNav).not.toBeNull();
+    expect(within(bottomNav!).queryByText('nav.permissions')).toBeNull();
+
+    await user.click(moreTab);
+    const moreSettings = screen.getByRole('dialog');
+    expect(within(moreSettings).getByRole('link', { name: 'nav.permissions' }).getAttribute('href')).toBe(
+      '/admin/permissions',
+    );
+
+    const desktopSidebar = document.querySelector('aside');
+    expect(desktopSidebar).not.toBeNull();
+    expect(within(desktopSidebar!).getByRole('link', { name: 'nav.permissions' }).getAttribute('href')).toBe(
+      '/admin/permissions',
+    );
   });
 });
 
