@@ -114,7 +114,7 @@ def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatc
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     paths.ensure_data_dirs()
-    tool_root = tmp_path / "uv" / "tools" / "vibe-remote"
+    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
     python_path = tool_root / "bin" / "python"
     vibe_path = tool_root / "bin" / "vibe"
     service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
@@ -128,11 +128,50 @@ def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatc
     (metadata_dir / "METADATA").write_text("Name: avibe-os\nVersion: 3.0.12\n", encoding="utf-8")
 
     monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: None)
     monkeypatch.setattr(
         runtime,
         "get_process_command",
         lambda pid: f"{python_path} {service_main}",
     )
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="3.0.12",
+        package="avibe-os",
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_legacy_upgrade_target_prefers_running_version_over_stale_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    tool_root = tmp_path / "venv"
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# replaced release\n", encoding="utf-8")
+    metadata_root = service_main.parent.parent
+    for name, version in (("avibe_os", "3.0.13"), ("vibe_remote", "2.9.4")):
+        metadata_dir = metadata_root / f"{name}-{version}.dist-info"
+        metadata_dir.mkdir()
+        package_name = "avibe-os" if name == "avibe_os" else "vibe-remote"
+        (metadata_dir / "METADATA").write_text(
+            f"Name: {package_name}\nVersion: {version}\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: f"{python_path} {service_main}",
+    )
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.12")
 
     target = restart_supervisor._discover_legacy_upgrade_target(
         trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")

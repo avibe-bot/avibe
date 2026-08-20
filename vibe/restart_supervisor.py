@@ -114,14 +114,21 @@ def _running_ui_version() -> str | None:
         host = "::1"
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    url = f"http://{host}:{config.ui.setup_port}/api/version"
-    try:
-        with urllib.request.urlopen(url, timeout=2.0) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, ValueError, TypeError, urllib.error.URLError):
-        return None
-    version = payload.get("current") if isinstance(payload, dict) else None
-    return version if isinstance(version, str) and _names_a_published_release(version) else None
+    base_url = f"http://{host}:{config.ui.setup_port}"
+    for endpoint in ("/api/version/local", "/api/version"):
+        try:
+            with urllib.request.urlopen(f"{base_url}{endpoint}", timeout=2.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                continue
+            return None
+        except (OSError, ValueError, TypeError, urllib.error.URLError):
+            return None
+        version = payload.get("current") if isinstance(payload, dict) else None
+        if isinstance(version, str) and _names_a_published_release(version):
+            return version
+    return None
 
 
 def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher | None:
@@ -180,8 +187,25 @@ def _legacy_service_launcher(vibe_path: str | None, *, service_pid: int | None =
         return fallback
 
 
-def _legacy_install_metadata(launcher: runtime.ServiceLauncher) -> tuple[str, str] | None:
-    """Read the old release metadata from the launcher-owned site-packages."""
+def _launcher_package_name(launcher: runtime.ServiceLauncher) -> str:
+    """Infer the distribution name that owns a launcher when metadata is stale."""
+
+    executable = launcher.python.replace("\\", "/")
+    for package in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
+        if f"/uv/tools/{package}/" in executable:
+            return package
+    return installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
+
+
+def _legacy_install_metadata(
+    launcher: runtime.ServiceLauncher, *, package_name: str
+) -> tuple[str, str] | None:
+    """Read the old release metadata from the launcher-owned site-packages.
+
+    A renamed distribution can leave an older ``vibe-remote`` dist-info beside
+    the current ``avibe-os`` install. The launcher identifies which side was
+    running, so unrelated metadata must never win by directory order.
+    """
 
     main = Path(launcher.main).resolve()
     site_packages = main.parent.parent
@@ -193,7 +217,7 @@ def _legacy_install_metadata(launcher: runtime.ServiceLauncher) -> tuple[str, st
             name = str(payload.get("Name") or "").strip()
             version = str(payload.get("Version") or "").strip()
             if (
-                name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME}
+                name == package_name
                 and version
                 and version != replacement_version
                 and _names_a_published_release(version)
@@ -211,14 +235,13 @@ def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> R
         return None
     service_pid = _read_recorded_pid()
     launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid)
-    metadata = _legacy_install_metadata(launcher)
-    if metadata is not None:
-        version, package = metadata
-    else:
-        version = _running_ui_version()
-        if version is None:
+    package = _launcher_package_name(launcher)
+    version = _running_ui_version()
+    if version is None:
+        metadata = _legacy_install_metadata(launcher, package_name=package)
+        if metadata is None:
             return None
-        package = installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
+        version, package = metadata
     return RollbackTarget(version=version, package=package, launcher=launcher)
 
 
