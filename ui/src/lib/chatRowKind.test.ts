@@ -26,11 +26,16 @@ describe('chatRowKind', () => {
   it('keeps the pre-existing role families intact', () => {
     expect(row({ author: 'user', source: 'user' })).toEqual({ kind: 'user' });
     expect(row({ author: 'agent', type: 'result' })).toEqual({ kind: 'agent' });
+    expect(row({ author: 'agent', type: 'output' })).toEqual({ kind: 'boundary' });
     expect(row({ author: 'system', type: 'user' })).toEqual({ kind: 'system' });
     expect(row({ author: 'harness', source: 'harness', type: 'harness' })).toEqual({ kind: 'harness' });
     expect(row({ author: 'harness', source: 'harness', type: 'vault' })).toEqual({ kind: 'harness' });
     expect(row({ author: 'agent', type: 'notify' })).toEqual({ kind: 'notify' });
     expect(row({ author: 'agent', type: 'error' })).toEqual({ kind: 'notify' });
+  });
+
+  it('keeps legacy detached results in the boundary family', () => {
+    expect(row({ author: 'agent', type: 'result', metadata: { detached: true } })).toEqual({ kind: 'boundary' });
   });
 
   it('draws an annotation card for both directions', () => {
@@ -126,6 +131,7 @@ describe('drawsEmptyBodyPlaceholder', () => {
   it('fills an ordinary empty bubble', () => {
     expect(drawsEmptyBodyPlaceholder({ kind: 'user' }, false)).toBe(true);
     expect(drawsEmptyBodyPlaceholder({ kind: 'agent' }, false)).toBe(true);
+    expect(drawsEmptyBodyPlaceholder({ kind: 'boundary' }, false)).toBe(true);
     expect(drawsEmptyBodyPlaceholder({ kind: 'harness' }, false)).toBe(true);
   });
 

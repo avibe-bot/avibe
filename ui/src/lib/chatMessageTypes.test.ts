@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
+import { isBoundaryMessage, isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
 
 describe('isTranscriptMessage', () => {
   it('shows the rows the transcript has always shown, and hides process log', () => {
@@ -70,5 +70,19 @@ describe('isTerminalAgentMessage', () => {
       }),
     ).toBe(false);
     expect(isTerminalAgentMessage({ author: 'user', type: 'result' })).toBe(false);
+  });
+
+  it('never lets a detached legacy result settle the active turn', () => {
+    for (const type of ['result', 'error', 'notify']) {
+      expect(isTerminalAgentMessage({ author: 'agent', type, metadata: { detached: true } }), type).toBe(false);
+    }
+  });
+});
+
+describe('isBoundaryMessage', () => {
+  it('recognizes current output rows and legacy detached results', () => {
+    expect(isBoundaryMessage({ type: 'output' })).toBe(true);
+    expect(isBoundaryMessage({ type: 'result', metadata: { detached: true } })).toBe(true);
+    expect(isBoundaryMessage({ type: 'result' })).toBe(false);
   });
 });

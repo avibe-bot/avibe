@@ -136,6 +136,29 @@ def output_for_message(message_type: str, output: MessageOutput | None) -> Messa
     return MessageOutput(completes_turn=False, completes_run=False)
 
 
+def communication_type_for_output(
+    message_type: str,
+    output: MessageOutput,
+    *,
+    is_error: bool = False,
+) -> str:
+    """Classify a visible output by the lifecycle authority it actually owns.
+
+    Backends may surface a nonterminal phase or detached Activity completion
+    through their native ``result`` frame. That frame still drives internal Run
+    settlement, but it must not be persisted or streamed as a terminal transcript
+    result: only an attached output with Turn-completion authority owns that role.
+    """
+
+    if message_type in {"result", "output"} and (
+        message_type == "output" or not output.completes_turn or output.detached
+    ):
+        return "output"
+    if message_type == "result" and is_error:
+        return "error"
+    return message_type
+
+
 def terminal_turn_output() -> MessageOutput:
     """Explicitly grant one output authority to settle its Turn and Run."""
 

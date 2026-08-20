@@ -121,6 +121,17 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.byMessageId.has('agent-later')).toBe(false);
   });
 
+  it('keeps a nonterminal Agent output eligible to own its request card', () => {
+    const output = { ...message('agent-output', '2026-07-30T10:00:10Z'), type: 'output' };
+    const placed = placeVaultProvisionRequests(
+      [output],
+      [request('p', 'provision', '2026-07-30T10:00:00Z', output.id)],
+    );
+
+    expect(placed.byMessageId.get(output.id)?.map((item) => item.id)).toEqual(['p']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('uses the message id clock when the reply shares the request second', () => {
     const sameSecondMessages = [
       orderedMessage('11111111', '2026-07-30T10:00:00.100Z', '2026-07-30T10:00:00Z', 'user'),

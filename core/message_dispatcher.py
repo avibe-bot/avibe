@@ -34,6 +34,7 @@ from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     HARNESS_TRIGGER_KINDS,
     MessageOutput,
+    communication_type_for_output,
     output_for_message,
 )
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
@@ -2167,6 +2168,11 @@ class ConsolidatedMessageDispatcher:
             terminal_reason = "failed"
 
         visible_output_type = canonical_type in {"result", "output"}
+        communication_type = communication_type_for_output(
+            canonical_type,
+            output_semantics,
+            is_error=is_error,
+        )
         if visible_output_type:
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info(
@@ -2485,7 +2491,6 @@ class ConsolidatedMessageDispatcher:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
                 if visible_output_type:
-                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
                             raw_text,
@@ -2497,7 +2502,7 @@ class ConsolidatedMessageDispatcher:
                         )
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             background_enhanced.text or persist_text,
                             quick_replies=[b.text for b in background_enhanced.buttons] or None,
                             result_footer=result_footer,
@@ -2507,7 +2512,7 @@ class ConsolidatedMessageDispatcher:
                     else:
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             recorded_text,
                             result_footer=result_footer,
                             metadata=output_metadata,
@@ -2894,7 +2899,6 @@ class ConsolidatedMessageDispatcher:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
                     # as an unread agent reply (unread queries are result-only). Codex P2.
-                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         # Keep the ``file://`` links in the persisted avibe text so the
                         # workbench media-proxy rewrite (in ``persist_agent_message``)
@@ -2913,7 +2917,7 @@ class ConsolidatedMessageDispatcher:
                         )
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             avibe_enhanced.text or persist_text,
                             quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
                             result_footer=folded_footer,
@@ -2923,7 +2927,7 @@ class ConsolidatedMessageDispatcher:
                     else:
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             persisted_result_text,
                             result_footer=folded_footer,
                             metadata=output_metadata,
@@ -3009,7 +3013,7 @@ class ConsolidatedMessageDispatcher:
                         context,
                         text=display_text,
                         message_id=primary_message_id,
-                        kind=canonical_type,
+                        kind=communication_type,
                         completes_turn=mutates_turn_lifecycle,
                     )
                 elif mutates_turn_lifecycle:

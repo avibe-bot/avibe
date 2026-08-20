@@ -4319,6 +4319,7 @@ export const MessageRow = memo(function MessageRow({
   const row = chatRowKind(message);
   const isNotify = row.kind === 'notify';
   const isAgent = row.kind === 'agent';
+  const isBoundary = row.kind === 'boundary';
   // ...and, separately, who wrote it. Only the agent's own words may carry the
   // agent-authored Markdown affordances, and its reverse annotation is still its
   // own words even though a different card draws it.
@@ -4567,15 +4568,16 @@ export const MessageRow = memo(function MessageRow({
     );
   }
 
-  // ----- Agent / system: left-aligned bubble with avatar + name header -----
-  const name = isAgent
+  // ----- Agent / boundary / system: left-aligned bubble with identity header -----
+  const agentIdentity = isAgent || isBoundary;
+  const name = agentIdentity
     ? agentDisplayName || session.agent_name || message.author_name
     : message.author_name;
   return (
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{isAgent ? <Bot /> : <Info />}</RoleAvatar>
+          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <Bot /> : <Info />}</RoleAvatar>
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
         {bodyNode || attachmentsNode ? (

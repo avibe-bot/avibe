@@ -22,7 +22,8 @@ export type VaultProvisionPlacement = {
 };
 
 function isAgentReply(message: WorkbenchMessage): boolean {
-  return chatRowKind(message).kind === 'agent';
+  const kind = chatRowKind(message).kind;
+  return kind === 'agent' || kind === 'boundary';
 }
 
 function isInputTurn(message: WorkbenchMessage): boolean {

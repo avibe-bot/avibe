@@ -21,17 +21,25 @@ export const isNotifyMessageType = (type: string): boolean => specFor(type).rend
 export const isTranscriptMessage = (message: { type: string }): boolean => specFor(message.type).transcript;
 
 type TerminalMessageCandidate = {
-  author: string;
   type: string;
   metadata?: Record<string, unknown> | null;
 };
+
+// A phase boundary never settles the current Turn. ``metadata.detached`` keeps
+// rows written by older servers on the same contract even when their stored type
+// was still ``result`` / ``error``.
+export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean =>
+  specFor(message.type).activityRole === 'boundary' || message.metadata?.detached === true;
+
+type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
 
 // A terminal reply the TRANSCRIPT shows: the catalog's terminal activity role
 // intersected with transcript visibility (``silent`` is terminal for activity
 // bookkeeping but never rendered), plus the conditional terminals that only settle
 // a turn for specific metadata events (``notify`` + ``backend_failure``).
-export const isTerminalAgentMessage = (message: TerminalMessageCandidate): boolean => {
+export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): boolean => {
   if (message.author !== 'agent') return false;
+  if (isBoundaryMessage(message)) return false;
   const spec = specFor(message.type);
   if (spec.transcript && spec.activityRole === 'terminal') return true;
   const event = message.metadata?.event;

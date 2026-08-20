@@ -257,6 +257,23 @@ describe('archived Agent display names', () => {
   });
 });
 
+describe('nonterminal Agent output', () => {
+  it('keeps Agent identity but uses the muted boundary presentation', () => {
+    for (const message of [
+      { ...agentWithQuickReplies(), type: 'output', content: {} },
+      { ...agentWithQuickReplies(), type: 'result', content: {}, metadata: { detached: true } },
+    ] as WorkbenchMessage[]) {
+      const markup = render(
+        <MessageRow message={message} session={session()} messageFontSize={13} />,
+      );
+
+      expect(markup).toContain('lucide-bot');
+      expect(markup).toContain('bg-foreground/[0.03]');
+      expect(markup).not.toContain('bg-mint/[0.09]');
+    }
+  });
+});
+
 // ── Codex review #3 (ChatPage.tsx:2540) ───────────────────────────────────────
 // The previous round kept the Show Page toggle and the Share control on the
 // theory that the store already refuses archived mutations. That is the
