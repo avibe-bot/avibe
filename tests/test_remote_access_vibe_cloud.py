@@ -1550,7 +1550,15 @@ def test_report_runtime_status_binds_pending_deferred_contexts_through_the_real_
                 metadata_json=json.dumps(legacy_metadata),
             )
         )
-        assert _run_sqlite_data_migrations(connection) == {
+        counts = _run_sqlite_data_migrations(connection)
+        assert {
+            key: counts[key]
+            for key in (
+                "legacy_deferred_definitions",
+                "legacy_deferred_runs",
+                "legacy_deferred_deliveries",
+            )
+        } == {
             "legacy_deferred_definitions": 0,
             "legacy_deferred_runs": 0,
             "legacy_deferred_deliveries": 0,
@@ -1744,6 +1752,11 @@ def test_pair_persists_with_locked_incremental_config_save(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(remote_access.api, "save_config", lambda payload: save_payloads.append(payload) or config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
     monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
     monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
@@ -1780,6 +1793,11 @@ def test_pair_accepts_legacy_or_invalid_instance_kind_as_unknown(monkeypatch, re
         response["instance_kind"] = reported_kind
     monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
     monkeypatch.setattr(remote_access.api, "save_config", lambda payload: save_payloads.append(payload) or config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
     monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True})
     monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
@@ -1856,6 +1874,86 @@ def test_pair_reports_success_when_connector_start_fails(monkeypatch, tmp_path) 
     assert result["start"]["ok"] is False
     assert result["start"]["error"] == "cloudflared_spawn_failed"
     assert saved_payload["remote_access"]["vibe_cloud"]["tunnel_token"] == "tunnel-token"
+
+
+def _pair_redeem_response(*, instance_id: str = "inst_new") -> dict[str, str]:
+    return {
+        "instance_id": instance_id,
+        "instance_kind": "personal",
+        "client_id": "vr_client_new",
+        "issuer": "https://backend.test",
+        "authorization_endpoint": "https://backend.test/oauth/authorize",
+        "token_endpoint": "https://backend.test/oauth/token",
+        "jwks_uri": "https://backend.test/oauth/jwks.json",
+        "public_url": "https://new.avibe.bot",
+        "redirect_uri": "https://new.avibe.bot/auth/callback",
+        "tunnel_token": "new-tunnel-token",
+        "instance_secret": "new-instance-secret",
+    }
+
+
+def test_pair_aborts_when_legacy_provenance_cannot_be_read(monkeypatch, tmp_path) -> None:
+    """An unavailable pre-pair config read must not replace the pairing."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.instance_id = ""
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+    original = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: _pair_redeem_response())
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: (_ for _ in ()).throw(RuntimeError("legacy_deferred_context_provenance_unavailable")),
+    )
+    saves: list[dict] = []
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda payload, **kwargs: saves.append(payload) or config,
+    )
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_provenance_unavailable"
+    assert saves == []
+    assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
+
+
+def test_pair_aborts_when_pending_migration_fails(monkeypatch, tmp_path) -> None:
+    """A failing deferred migration must not let pair() stamp a new identity."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.instance_id = ""
+    config.save()
+    original = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: _pair_redeem_response())
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: (_ for _ in ()).throw(RuntimeError("sqlite locked")),
+    )
+    saves: list[dict] = []
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda payload, **kwargs: saves.append(payload) or config,
+    )
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_provenance_unavailable"
+    assert saves == []
+    assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
 
 
 def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tmp_path) -> None:
@@ -1943,6 +2041,11 @@ def test_pair_queues_lifecycle_status_for_drain(monkeypatch, tmp_path) -> None:
         },
     )
     monkeypatch.setattr(remote_access.api, "save_config", lambda payload: config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": False, "error": "cloudflared_spawn_failed"})
     monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": False, "paired": True})
     monkeypatch.setattr(

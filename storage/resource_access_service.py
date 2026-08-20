@@ -50,6 +50,8 @@ RESOURCE_BINDING_STATE_UNAVAILABLE = "unavailable"
 RESOURCE_BINDING_STATE_UNPAIRED = "unpaired"
 RESOURCE_BINDING_STATE_PARTIAL = "partial"
 RESOURCE_BINDING_STATE_READY = "ready"
+RESOURCE_BINDING_STATE_SEALED = "sealed"
+RESOURCE_BINDING_STATUS_KEY = "binding_status"
 
 _SHOW_PAGE_OWNERSHIP_MODES = frozenset(
     {
@@ -618,11 +620,21 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     instance is authoritatively classified.
     """
 
-    empty_counts = {
-        "legacy_deferred_definitions": 0,
-        "legacy_deferred_runs": 0,
-        "legacy_deferred_deliveries": 0,
-    }
+    def _counts(
+        *,
+        binding_status: str,
+        definitions: int = 0,
+        runs: int = 0,
+        deliveries: int = 0,
+    ) -> dict[str, int | str]:
+        return {
+            "legacy_deferred_definitions": definitions,
+            "legacy_deferred_runs": runs,
+            "legacy_deferred_deliveries": deliveries,
+            RESOURCE_BINDING_STATUS_KEY: binding_status,
+        }
+
+    empty_unavailable = _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
     marker_value = connection.execute(
         select(state_meta.c.value_json).where(
             state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
@@ -638,7 +650,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             # A corrupt marker cannot prove which pairing created the rows.
             # Preserve fail-closed behavior instead of trying to insert a
             # duplicate key or guessing a new binding.
-            return empty_counts
+            return _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
         marker = parsed_marker
         marker_state = marker.get("state")
         if marker_state not in {"pending", "completed", "sealed_unattributed"}:
@@ -654,7 +666,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     if configured.status == RESOURCE_BINDING_STATE_UNAVAILABLE:
         # A read failure must not create ``pending(instance_id=None)`` or
         # rewrite a known marker. Startup/heartbeat will retry this operation.
-        return empty_counts
+        return empty_unavailable
     current_instance_id = configured.instance_id
     current_kind = (
         configured.instance_kind
@@ -698,7 +710,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
             )
 
     if marker is not None and marker.get("state") in {"completed", "sealed_unattributed"}:
-        return empty_counts
+        return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
 
     raw_marker_instance_id = marker.get("instance_id") if marker else None
     marker_instance_id = (
@@ -707,31 +719,32 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
     if marker and raw_marker_instance_id is not None and marker_instance_id is None:
         # A malformed marker cannot prove ownership. Keep the existing value
         # intact and fail closed rather than guessing a new pairing.
-        return empty_counts
+        return _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
     if marker is not None:
         if marker_instance_id is None:
             # No first pairing was available to prove ownership. A later
             # pairing must not be allowed to claim these records.
             write_marker(state="sealed_unattributed", instance_id=None)
-            return empty_counts
+            return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
         if current_instance_id is None:
             if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
                 write_marker(state="sealed_unattributed", instance_id=marker_instance_id)
-            return empty_counts
+                return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+            return _counts(binding_status=configured.status)
         if current_instance_id != marker_instance_id:
             write_marker(state="sealed_unattributed", instance_id=marker_instance_id)
-            return empty_counts
+            return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
 
     if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
         write_marker(state="sealed_unattributed", instance_id=current_instance_id)
-        return empty_counts
+        return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
     if configured.status != RESOURCE_BINDING_STATE_READY:
         write_marker(state="pending", instance_id=current_instance_id)
-        return empty_counts
+        return _counts(binding_status=configured.status)
     if current_instance_id is None or current_kind not in {"personal", "organization"}:
         # Defensive guard for a future state-reader change. This branch is
         # never authoritative enough to complete a migration.
-        return empty_counts
+        return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
     paired_instance_id = current_instance_id
     paired_kind = current_kind
 
@@ -739,6 +752,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         "legacy_deferred_definitions": 0,
         "legacy_deferred_runs": 0,
         "legacy_deferred_deliveries": 0,
+        RESOURCE_BINDING_STATUS_KEY: RESOURCE_BINDING_STATE_READY,
     }
     definition_rows = connection.execute(
         select(run_definitions.c.id, run_definitions.c.metadata_json).where(

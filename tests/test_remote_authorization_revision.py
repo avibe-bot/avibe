@@ -512,6 +512,68 @@ def test_refresh_from_a_previous_binding_generation_is_discarded(monkeypatch, tm
     )
 
 
+def test_stale_cross_process_kind_response_cannot_reverse_durable_generation(
+    monkeypatch,
+    tmp_path,
+):
+    """A UI-process in-flight Personal response must not undo a controller reclass.
+
+    The controller and UI server are separate processes; the in-memory
+    binding epoch cannot fence this. The durable generation in state_meta
+    is the compare-and-swap token both processes share.
+    """
+
+    config = _paired_config(tmp_path)
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    cookie = remote_access.make_session_cookie(
+        config,
+        "user-1@example.com",
+        "user-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "vibe_instance_authorization_revision": 41,
+        },
+    )
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    observed_generation = remote_access_authorization_service.current_instance_binding_generation()
+    # Controller heartbeat in another process: Personal -> Organization.
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="organization",
+    )
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.save()
+    newer = remote_access_authorization_service.load_instance_binding_state()
+    assert newer is not None
+    assert newer["generation"] > observed_generation
+    assert newer["instance_kind"] == "organization"
+
+    # Stale UI-process in-flight epoch is unchanged; durable generation is not.
+    monkeypatch.setattr(remote_access, "_authorization_binding_epoch", lambda: 0)
+    persisted = remote_access._persist_instance_kind(
+        "inst_123",
+        "personal",
+        expected_binding_generation=observed_generation,
+        expected_binding_epoch=0,
+    )
+
+    assert persisted is False
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    after = remote_access_authorization_service.load_instance_binding_state()
+    assert after is not None
+    assert after["generation"] == newer["generation"]
+    assert after["instance_kind"] == "organization"
+
+
 def test_exact_show_page_grants_survive_a_kind_transition_but_not_a_repair(tmp_path):
     """Show Page grants are their own scope, bound to the instance that issued them."""
 
@@ -1046,7 +1108,7 @@ def test_refresh_backoff_starts_when_the_network_request_finishes(
     identity = remote_access.parse_session_identity(config, _organization_cookie(config))
     assert identity is not None
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *args, **kwargs: 42)
-    monotonic_values = iter((100.0, 110.0, 110.1))
+    monotonic_values = iter((100.0, 110.0, 110.05, 110.1, 110.15, 110.2))
     monkeypatch.setattr(remote_access.time, "monotonic", lambda: next(monotonic_values))
     calls = 0
 

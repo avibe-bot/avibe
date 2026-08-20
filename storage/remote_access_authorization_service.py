@@ -729,3 +729,20 @@ def instance_binding_generation(
     ):
         return None
     return int(state["generation"])
+
+
+def current_instance_binding_generation(*, ensure: bool = True) -> int:
+    """Return the durable generation any process can compare against.
+
+    Missing state is generation 0 (a never-initialized install). A corrupt
+    or reconciling row still exposes its generation so a stale writer can
+    refuse to reverse a newer transition.
+    """
+
+    state = load_instance_binding_state(ensure=ensure)
+    if state is None:
+        return 0
+    try:
+        return int(state.get("generation") or 0)
+    except (TypeError, ValueError):
+        return 0

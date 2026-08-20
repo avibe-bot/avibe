@@ -886,7 +886,7 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
             from storage.importer import _run_sqlite_data_migrations
 
             counts = _run_sqlite_data_migrations(connection)
-            assert counts == {
+            assert _migration_counts(counts) == {
                 "legacy_deferred_definitions": 2,
                 "legacy_deferred_runs": 1,
                 "legacy_deferred_deliveries": 1,
@@ -930,9 +930,9 @@ def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliverie
                 delivery["snapshot_json"].encode("utf-8")
             ).hexdigest()
 
-            assert _run_sqlite_data_migrations(
+            assert _migration_counts(_run_sqlite_data_migrations(
                 connection
-            ) == {
+            )) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -979,7 +979,7 @@ def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch,
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1031,7 +1031,7 @@ def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_pat
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1050,7 +1050,7 @@ def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_pat
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1107,7 +1107,7 @@ def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1117,7 +1117,7 @@ def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 1,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1175,7 +1175,7 @@ def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1195,7 +1195,7 @@ def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 "legacy_deferred_definitions": 1,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1261,7 +1261,7 @@ def test_typed_binding_reader_preserves_partial_identity_and_does_not_latch_read
         assert unavailable.status == resource_access_service.RESOURCE_BINDING_STATE_UNAVAILABLE
 
         with engine.begin() as connection:
-            assert resource_access_service.migrate_legacy_deferred_resource_contexts(connection) == {
+            assert _migration_counts(resource_access_service.migrate_legacy_deferred_resource_contexts(connection)) == {
                 "legacy_deferred_definitions": 0,
                 "legacy_deferred_runs": 0,
                 "legacy_deferred_deliveries": 0,
@@ -1281,6 +1281,19 @@ _EMPTY_MIGRATION_COUNTS = {
     "legacy_deferred_runs": 0,
     "legacy_deferred_deliveries": 0,
 }
+
+
+def _migration_counts(result: dict) -> dict[str, int]:
+    """Numeric migration counts, ignoring the typed binding-status field."""
+
+    return {
+        key: int(result[key])
+        for key in (
+            "legacy_deferred_definitions",
+            "legacy_deferred_runs",
+            "legacy_deferred_deliveries",
+        )
+    }
 
 
 def _paired_cloud_config(
@@ -1346,7 +1359,7 @@ def test_partial_pairing_marker_records_configured_instance_without_claiming_a_k
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             marker = json.loads(_stored_migration_marker(connection))
 
         assert marker["schema_version"] == 2
@@ -1381,13 +1394,13 @@ def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
 
         config.remote_access.vibe_cloud.instance_secret = "instance-secret"
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 **_EMPTY_MIGRATION_COUNTS,
                 "legacy_deferred_definitions": 1,
             }
@@ -1404,7 +1417,7 @@ def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
         assert completed["completed_at"]
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             assert json.loads(_stored_migration_marker(connection)) == completed
             assert (
                 _legacy_definition_metadata(connection, "legacy-task") == metadata
@@ -1444,7 +1457,7 @@ def test_transient_configuration_failure_leaves_the_migration_retryable(
                 ),
             )
             with engine.begin() as connection:
-                assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+                assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
                 # No first migration opportunity may be recorded from a read
                 # failure; otherwise the retry below would be fenced out.
                 assert _stored_migration_marker(connection) is None
@@ -1452,7 +1465,7 @@ def test_transient_configuration_failure_leaves_the_migration_retryable(
         assert V2Config.load.__func__ is real_load.__func__
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 **_EMPTY_MIGRATION_COUNTS,
                 "legacy_deferred_definitions": 1,
             }
@@ -1490,7 +1503,7 @@ def test_unpaired_first_opportunity_cannot_be_adopted_by_a_later_pairing(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             sealed = json.loads(_stored_migration_marker(connection))
 
         assert sealed["state"] == "sealed_unattributed"
@@ -1504,7 +1517,7 @@ def test_unpaired_first_opportunity_cannot_be_adopted_by_a_later_pairing(
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             metadata = _legacy_definition_metadata(connection, "legacy-task")
             snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
             assert "vibe_instance_id" not in snapshot
@@ -1536,7 +1549,7 @@ def test_pending_marker_for_one_instance_cannot_be_adopted_by_another_instance(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             pending = json.loads(_stored_migration_marker(connection))
         assert pending["state"] == "pending"
         assert pending["instance_id"] == "instance-a"
@@ -1547,7 +1560,7 @@ def test_pending_marker_for_one_instance_cannot_be_adopted_by_another_instance(
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             sealed = json.loads(_stored_migration_marker(connection))
             assert sealed["state"] == "sealed_unattributed"
             # The original owner stays recorded so no later pairing, including
@@ -1558,7 +1571,7 @@ def test_pending_marker_for_one_instance_cannot_be_adopted_by_another_instance(
         config.save()
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
             metadata = _legacy_definition_metadata(connection, "legacy-task")
             snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
             assert "vibe_instance_id" not in snapshot
@@ -1599,7 +1612,7 @@ def test_shared_access_source_snapshots_migrate_for_either_pairing_kind(
         from storage.importer import _run_sqlite_data_migrations
 
         with engine.begin() as connection:
-            assert _run_sqlite_data_migrations(connection) == {
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
                 **_EMPTY_MIGRATION_COUNTS,
                 "legacy_deferred_definitions": 1,
             }
@@ -1709,7 +1722,7 @@ def test_released_migration_marker_shapes_stay_idempotent_and_fail_closed(
 
         for _ in range(2):
             with engine.begin() as connection:
-                assert _run_sqlite_data_migrations(connection) == _EMPTY_MIGRATION_COUNTS
+                assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
                 metadata = _legacy_definition_metadata(connection, "legacy-task")
                 snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
                 assert "vibe_instance_id" not in snapshot

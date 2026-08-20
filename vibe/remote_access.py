@@ -1700,12 +1700,16 @@ def _durable_binding_allows_cached_authorization(
     return bool(identity_id and identity_id == state.get("instance_id"))
 
 
-def _run_pending_deferred_context_migration() -> dict[str, int]:
+def _run_pending_deferred_context_migration() -> dict[str, int | str]:
     """Run the data migration against the now-readable current pairing."""
 
     from storage.db import get_cached_sqlite_engine
     from storage.importer import ensure_sqlite_state
-    from storage.resource_access_service import migrate_legacy_deferred_resource_contexts
+    from storage.resource_access_service import (
+        RESOURCE_BINDING_STATE_UNAVAILABLE,
+        RESOURCE_BINDING_STATUS_KEY,
+        migrate_legacy_deferred_resource_contexts,
+    )
 
     # Bootstrap first so a heartbeat can repair a state created before the
     # controller/UI process opened SQLite. The explicit second call observes
@@ -1714,7 +1718,10 @@ def _run_pending_deferred_context_migration() -> dict[str, int]:
     ensure_sqlite_state()
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:
-        return migrate_legacy_deferred_resource_contexts(connection)
+        result = migrate_legacy_deferred_resource_contexts(connection)
+    if result.get(RESOURCE_BINDING_STATUS_KEY) == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        raise RuntimeError("legacy_deferred_context_provenance_unavailable")
+    return result
 
 
 def _authorization_binding_epoch() -> int:
@@ -1799,27 +1806,44 @@ def _persist_instance_kind(
     value: object,
     *,
     reconcile: bool = False,
+    expected_binding_generation: int | None = None,
     expected_binding_epoch: int | None = None,
 ) -> bool:
-    """Persist and reconcile a server-owned kind before admitting claims."""
+    """Persist and reconcile a server-owned kind before admitting claims.
+
+    Kind writes are fenced on the durable binding generation, not the
+    in-process epoch. The controller and UI server are separate processes
+    (AGENTS.md); an in-memory epoch cannot stop a stale authorization
+    response in one process from reversing a newer heartbeat in another.
+    """
 
     instance_kind = _normalized_instance_kind(value)
     if instance_kind is None:
         return False
     previous_kind: str | None
+    from storage import remote_access_authorization_service
+
     with CONFIG_LOCK:
         live_config = V2Config.load()
         live_cloud = live_config.remote_access.vibe_cloud
         if str(live_cloud.instance_id or "") != instance_id:
             return False
         previous_kind = _normalized_instance_kind(live_cloud.instance_kind)
+        current_generation = (
+            remote_access_authorization_service.current_instance_binding_generation()
+        )
+        observed_generation = (
+            expected_binding_generation
+            if expected_binding_generation is not None
+            else expected_binding_epoch
+        )
         if (
-            expected_binding_epoch is not None
-            and _authorization_binding_epoch() != expected_binding_epoch
+            observed_generation is not None
+            and current_generation > int(observed_generation)
             and previous_kind != instance_kind
         ):
-            # A response that started before another transition must not be
-            # allowed to roll the persisted kind back to the old projection.
+            # A response that started before another process advanced the
+            # durable generation must not roll the persisted kind back.
             return False
         if previous_kind == instance_kind and not reconcile:
             # Existing releases have no binding epoch row yet. Authentication
@@ -1827,9 +1851,15 @@ def _persist_instance_kind(
             # ``reconcile=True`` to repair or initialize the durable row.
             return True
         if previous_kind != instance_kind:
-            # A known kind may change only through the same durable transition
-            # as a backfill; the hook below fences old claims before callers
-            # store the new projection.
+            # Re-check the durable generation immediately before the write so
+            # a concurrent process cannot slip a newer transition in between
+            # the comparison above and this persist.
+            if (
+                observed_generation is not None
+                and remote_access_authorization_service.current_instance_binding_generation()
+                > int(observed_generation)
+            ):
+                return False
             api.save_config(
                 {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
                 validate_remote_access_network=False,
@@ -1842,6 +1872,17 @@ def _persist_instance_kind(
     except Exception:
         logger.warning("Remote instance binding reconciliation failed", exc_info=True)
         return False
+    if observed_generation is not None:
+        persisted_generation = transition.get("generation")
+        try:
+            persisted_generation_value = int(persisted_generation)
+        except (TypeError, ValueError):
+            persisted_generation_value = None
+        if (
+            persisted_generation_value is not None
+            and persisted_generation_value < int(observed_generation)
+        ):
+            return False
     return bool(transition.get("ok") and transition.get("ready"))
 
 
@@ -4597,13 +4638,20 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
         previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
     except Exception:
         previous_instance_id = ""
-    # Give the old configuration one last chance to bind released snapshots
-    # before replacing its identity. Once the new pairing is persisted, the
-    # durable migration marker fences any remaining unattributed work.
+    # Give the old configuration one last chance to bind or seal released
+    # snapshots before replacing its identity. An unavailable read or a
+    # migration failure must abort pairing: otherwise the transition under
+    # the new identity can stamp unbound work with a Personal ACL bypass.
     try:
         _run_pending_deferred_context_migration()
-    except Exception:
+    except Exception as exc:
         logger.warning("legacy deferred context migration before pairing failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": "pairing_provenance_unavailable",
+            "detail": str(exc),
+            "pairing": {"ok": False},
+        }
     try:
         config = api.save_config(
             {
@@ -5219,6 +5267,11 @@ def _fetch_authorization_context(
     now: int,
     observed_revision: int | None,
 ) -> AuthorizationResolution:
+    from storage import remote_access_authorization_service
+
+    request_binding_generation = (
+        remote_access_authorization_service.current_instance_binding_generation()
+    )
     request_binding_epoch = _authorization_binding_epoch()
     subject = str(identity.get("sub") or "").strip()
     email = str(identity.get("email") or "").strip()
@@ -5275,6 +5328,7 @@ def _fetch_authorization_context(
         persisted = _persist_instance_kind(
             str(identity.get("instance_id") or ""),
             instance_kind,
+            expected_binding_generation=request_binding_generation,
             expected_binding_epoch=request_binding_epoch,
         )
     except Exception:
