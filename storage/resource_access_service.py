@@ -423,25 +423,33 @@ def _configured_show_page_instance() -> tuple[str, str] | None | object:
     return instance_id, cloud.instance_kind
 
 
-def _configured_resource_instance() -> tuple[str | None, str | None] | None | object:
-    """Return the current pairing identity used to fence deferred resources."""
+def _configured_resource_state() -> tuple[str | None, str | None, bool] | None | object:
+    """Return configured identity plus whether its runtime credentials are complete."""
 
     try:
         from config.v2_config import V2Config
 
         cloud = V2Config.load().remote_access.vibe_cloud
-        credentials = cloud.runtime_credentials()
-        if credentials is None:
-            return None
-        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
-            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-        instance_id = _clean_optional_string(credentials[1])
+        instance_id = _clean_optional_string(cloud.instance_id)
         instance_kind = (
             cloud.instance_kind if cloud.instance_kind in {"personal", "organization"} else None
         )
+        runtime_ready = cloud.runtime_credentials() is not None
     except Exception:
         return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
-    if instance_id is None and instance_kind is None:
+    if instance_id is None and instance_kind is None and not runtime_ready:
+        return None
+    return instance_id, instance_kind, runtime_ready
+
+
+def _configured_resource_instance() -> tuple[str | None, str | None] | None | object:
+    """Return the current complete pairing identity used to fence deferred resources."""
+
+    configured = _configured_resource_state()
+    if configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE or configured is None:
+        return configured
+    instance_id, instance_kind, runtime_ready = configured
+    if not runtime_ready:
         return None
     return instance_id, instance_kind
 
@@ -577,7 +585,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         if marker.get("state") not in {"pending", "completed"}:
             marker["state"] = "completed" if marker.get("completed_at") else "pending"
 
-    configured = _configured_resource_instance()
+    configured = _configured_resource_state()
     current_instance_id = (
         configured[0]
         if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
@@ -588,6 +596,7 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         configured[1]
         if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
         and isinstance(configured, tuple)
+        and configured[2]
         else None
     )
 

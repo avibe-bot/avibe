@@ -181,12 +181,51 @@ def test_validated_remote_payload_projects_paired_instance_kind(tmp_path):
         },
         {
             "id": "authorization-1",
-            "claims": {**_organization_claims(config), "vibe_instance_kind": "organization"},
+            "claims": {**_organization_claims(config), "vibe_instance_kind": "personal"},
         },
     )
 
     assert payload is not None
     assert context_from_session_payload(payload).is_personal_instance
+
+
+def test_cached_authorization_from_previous_instance_kind_refreshes_before_personal_bypass(
+    monkeypatch,
+    tmp_path,
+):
+    config = _paired_config(tmp_path)
+    cookie = _organization_cookie(config)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="personal",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(config, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "personal"
+    assert len(calls) == 1
+    record = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=int(time.time()),
+    )
+    assert record is not None
+    assert record["claims"]["vibe_instance_kind"] == "personal"
 
 
 def test_partial_pairing_cannot_restore_cached_personal_authorization(tmp_path):

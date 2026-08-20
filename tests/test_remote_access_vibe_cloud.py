@@ -1474,6 +1474,12 @@ def test_report_runtime_status_backfills_instance_kind_once(monkeypatch, tmp_pat
         "_json_request",
         lambda *args, **kwargs: {"ok": True, "instance_kind": "organization"},
     )
+    migration_calls = []
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: migration_calls.append(True),
+    )
     real_save_config = remote_access.api.save_config
     saves = []
 
@@ -1486,6 +1492,7 @@ def test_report_runtime_status_backfills_instance_kind_once(monkeypatch, tmp_pat
     assert remote_access.report_runtime_status(config)["ok"] is True
     assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
     assert remote_access.report_runtime_status(V2Config.load())["ok"] is True
+    assert migration_calls == [True]
     assert saves == [
         {"remote_access": {"vibe_cloud": {"instance_kind": "organization"}}}
     ]

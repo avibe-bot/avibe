@@ -1649,10 +1649,27 @@ def _is_exact_show_page_grant(
     )
 
 
+def _run_pending_deferred_context_migration() -> None:
+    """Retry legacy deferred binding after the server classifies this pairing."""
+
+    try:
+        from storage.db import get_cached_sqlite_engine
+        from storage.resource_access_service import migrate_legacy_deferred_resource_contexts
+
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as connection:
+            migrate_legacy_deferred_resource_contexts(connection)
+    except Exception:
+        # Startup will retry when the database is not ready yet; kind backfill
+        # must still succeed even if this optional cleanup cannot run now.
+        logger.warning("legacy deferred context migration after kind backfill failed", exc_info=True)
+
+
 def _persist_instance_kind(instance_id: str, value: object) -> bool:
     instance_kind = _normalized_instance_kind(value)
     if instance_kind is None:
         return False
+    changed = False
     with CONFIG_LOCK:
         live_config = V2Config.load()
         live_cloud = live_config.remote_access.vibe_cloud
@@ -1664,6 +1681,9 @@ def _persist_instance_kind(instance_id: str, value: object) -> bool:
             {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
             validate_remote_access_network=False,
         )
+        changed = True
+    if changed:
+        _run_pending_deferred_context_migration()
     return True
 
 
@@ -4675,10 +4695,19 @@ def _store_scoped_authorization(
     claims: Mapping[str, Any],
     authorization_state: str,
     checked_at: int,
+    instance_kind: str | None = None,
 ) -> str:
     from storage import remote_access_authorization_service
 
-    scope_kind, scope_ref = _authorization_scope(config, claims)
+    stored_claims = dict(claims)
+    persisted_kind = _normalized_instance_kind(instance_kind) or _normalized_instance_kind(
+        config.remote_access.vibe_cloud.instance_kind
+    )
+    if persisted_kind is not None:
+        # This is server-owned provenance, kept beside the claims so a later
+        # pairing reclassification cannot re-project stale authorization.
+        stored_claims["vibe_instance_kind"] = persisted_kind
+    scope_kind, scope_ref = _authorization_scope(config, stored_claims)
     return remote_access_authorization_service.upsert_scoped(
         reference=reference,
         instance_id=str(config.remote_access.vibe_cloud.instance_id),
@@ -4687,7 +4716,7 @@ def _store_scoped_authorization(
         scope_kind=scope_kind,
         scope_ref=scope_ref,
         authorization_state=authorization_state,
-        claims=claims,
+        claims=stored_claims,
         last_checked_at=checked_at,
         updated_at=checked_at,
     )
@@ -4940,12 +4969,17 @@ def _validated_authorization_payload(
     claims = record.get("claims")
     if not isinstance(claims, Mapping):
         return None
+    instance_kind = _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
+    if instance_kind is not None and not _is_exact_show_page_grant(identity, record):
+        if _normalized_instance_kind(claims.get("vibe_instance_kind")) != instance_kind:
+            # A cached row from the previous server-owned kind must be
+            # refreshed before it can receive the current ACL policy.
+            return None
     payload = dict(identity)
     payload.update(claims)
     reference = record.get("id")
     if isinstance(reference, str):
         payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
-    instance_kind = _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
     if instance_kind is not None:
         # The paired config is server-owned. Keep instance kind out of the
         # user-submitted claims while making it available to every ACL caller.
@@ -5051,6 +5085,7 @@ def _fetch_authorization_context(
             claims=stored_claims,
             authorization_state="current",
             checked_at=now,
+            instance_kind=instance_kind,
         )
         from storage import remote_access_authorization_service
 
