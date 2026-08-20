@@ -444,7 +444,7 @@ def _configured_resource_state() -> ConfiguredResourceState:
     try:
         from config.v2_config import V2Config
 
-        loaded = V2Config.load()
+        loaded = V2Config.load(persist_migrations=False)
         # A recovered/defaulted load is not an authoritative unpaired state:
         # the file is broken and the user will repair it. Treat it as a
         # transient UNAVAILABLE so we never seal snapshots against empty
@@ -661,9 +661,17 @@ def _has_unbound_deferred_snapshots(connection: Connection) -> bool:
             if _metadata_snapshot_lacks_binding(metadata):
                 return True
     if _connection_has_table(connection, "message_deliveries"):
+        from storage.delivery_states import DELIVERY_STATE_MATRIX
+
+        executable_delivery_states = tuple(
+            state
+            for state, policy in DELIVERY_STATE_MATRIX.items()
+            if policy.ordering != "terminal"
+        )
         delivery_rows = connection.execute(
             select(message_deliveries.c.snapshot_json).where(
-                message_deliveries.c.snapshot_json.is_not(None)
+                message_deliveries.c.snapshot_json.is_not(None),
+                message_deliveries.c.state.in_(executable_delivery_states),
             )
         )
         for (snapshot_json,) in delivery_rows:
@@ -956,12 +964,22 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         )
         counts["legacy_deferred_runs"] += 1
 
+    from storage.delivery_states import DELIVERY_STATE_MATRIX
+
+    executable_delivery_states = tuple(
+        state
+        for state, policy in DELIVERY_STATE_MATRIX.items()
+        if policy.ordering != "terminal"
+    )
     delivery_rows = (
         connection.execute(
             select(
                 message_deliveries.c.id,
                 message_deliveries.c.snapshot_json,
-            ).where(message_deliveries.c.snapshot_json.is_not(None))
+            ).where(
+                message_deliveries.c.snapshot_json.is_not(None),
+                message_deliveries.c.state.in_(executable_delivery_states),
+            )
         ).mappings()
         if _connection_has_table(connection, "message_deliveries")
         else ()

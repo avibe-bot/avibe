@@ -3644,6 +3644,7 @@ class V2Config:
         cls,
         config_path: Optional[Path] = None,
         *,
+        persist_migrations: bool = True,
         _migration_reload_depth: int = 0,
     ) -> "V2Config":
         paths.ensure_data_dirs()
@@ -3713,7 +3714,12 @@ class V2Config:
                 recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
 
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
-        if migrated and not migration_warnings and not recovery_warnings:
+        if (
+            persist_migrations
+            and migrated
+            and not migration_warnings
+            and not recovery_warnings
+        ):
             persisted_payload = copy.deepcopy(payload)
             persisted_payload["model_hub"] = config.model_hub.to_payload()
             try:
