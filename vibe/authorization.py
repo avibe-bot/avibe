@@ -403,8 +403,9 @@ _VIEWER_HTTP_RULES = tuple(
 # Advertised Editor/Viewer surfaces are admitted by namespace so a newly
 # added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push route
 # inherits the same Instance role as the rest of that capability. Routes
-# that stay Owner-only — allowlist member management — are listed below.
-# Remaining unknown APIs fail closed to member, the instance-management floor.
+# that stay Owner-only — allowlist member management and pairing identity —
+# are listed below. Remaining unknown APIs fail closed to member, the
+# instance-management floor.
 _EDITOR_HTTP_NAMESPACES = (
     "/api/skills",
     "/api/vault",
@@ -420,6 +421,21 @@ _VIEWER_HTTP_NAMESPACES = (
 _VIEWER_HTTP_MUTATION_RULES = (
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
+)
+
+# Pairing identity, member set, and ownership stay Owner-only. Writes under
+# /api/remote-access default to owner so a newly added pair/unpair/settings
+# sibling cannot slip through as member. The ops below cannot change instance
+# id, backend URL, or secrets, so member keeps them.
+_REMOTE_ACCESS_HTTP_NAMESPACE = "/api/remote-access"
+_REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("GET", r"^/api/remote-access/status$"),
+        ("GET", r"^/api/remote-access/network-interfaces$"),
+        ("POST", r"^/api/remote-access/optimize-route$"),
+        ("POST", r"^/api/remote-access/diagnostics$"),
+    )
 )
 
 # Member-management stays Owner-only even though instance management is now
@@ -502,6 +518,10 @@ def http_authorization_policy(
         return HttpAuthorizationPolicy("viewer")
     if _path_in_namespaces(path, _EDITOR_HTTP_NAMESPACES):
         return HttpAuthorizationPolicy("editor")
+    if _path_in_namespaces(path, (_REMOTE_ACCESS_HTTP_NAMESPACE,)):
+        if _http_rule_matches(normalized_method, path, _REMOTE_ACCESS_MEMBER_HTTP_RULES):
+            return HttpAuthorizationPolicy("member")
+        return HttpAuthorizationPolicy("owner")
     if _http_rule_matches(normalized_method, path, _OWNER_HTTP_RULES):
         return HttpAuthorizationPolicy("owner")
 
@@ -525,8 +545,10 @@ def required_instance_role(method: str, path: str) -> str | None:
     Non-API page/static reads are handled by the authenticated shell. Unknown
     API routes deliberately default to member so a newly added management
     route cannot accidentally become available to editors or viewers, while
-    member inherits today's instance-management surface. Allowlist mutation
-    stays Owner-only via ``_OWNER_HTTP_RULES``.
+    member inherits today's instance-management surface. Pairing identity,
+    member-set mutation, and ownership stay Owner-only: writes under
+    ``/api/remote-access`` default to owner, and allowlist mutation stays
+    Owner-only via ``_OWNER_HTTP_RULES``.
     """
 
     return http_authorization_policy(method, path).minimum_role

@@ -1619,6 +1619,28 @@ def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_p
     assert recovered.ui.instance_name == "kept"
 
 
+def test_strip_pairing_identity_drops_whole_vibe_cloud_section():
+    payload = {
+        "ack_mode": "message",
+        "remote_access": {
+            "provider": "vibe_cloud",
+            "vibe_cloud": {
+                "instance_id": "inst-hijacked",
+                "backend_url": "https://attacker.example",
+                "future_pairing_field": "new-secret",
+            },
+        },
+    }
+
+    stripped = api.strip_pairing_identity_from_config_write(payload)
+
+    assert stripped == {
+        "ack_mode": "message",
+        "remote_access": {"provider": "vibe_cloud"},
+    }
+    assert payload["remote_access"]["vibe_cloud"]["instance_id"] == "inst-hijacked"
+
+
 def test_editor_config_write_payload_keeps_messaging_fields_only():
     projected = api.editor_config_write_payload(
         {

@@ -1391,6 +1391,28 @@ def _remote_access_pairing_projection(payload: dict) -> dict:
     return {"vibe_cloud": {"paired": paired}}
 
 
+def strip_pairing_identity_from_config_write(payload: dict) -> dict:
+    """Drop ``remote_access.vibe_cloud`` from a non-owner config write.
+
+    Pairing identity, member set, and ownership stay Owner-only. Stripping
+    the whole section — not a field list — means a newly added pairing
+    field cannot persist through ``POST /api/config``. Connector controls
+    already have to go through ``/api/remote-access/settings``.
+    """
+
+    remote_access = payload.get("remote_access")
+    if not isinstance(remote_access, dict) or "vibe_cloud" not in remote_access:
+        return payload
+    cleaned_remote = {
+        key: value for key, value in remote_access.items() if key != "vibe_cloud"
+    }
+    if cleaned_remote:
+        return {**payload, "remote_access": cleaned_remote}
+    cleaned = dict(payload)
+    cleaned.pop("remote_access", None)
+    return cleaned
+
+
 def _audio_asr_preference_projection(payload: dict) -> dict:
     audio_asr = payload.get("audio_asr")
     if not isinstance(audio_asr, dict):

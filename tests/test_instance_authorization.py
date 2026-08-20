@@ -4,6 +4,8 @@ from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
     _EDITOR_HTTP_NAMESPACES,
+    _REMOTE_ACCESS_HTTP_NAMESPACE,
+    _REMOTE_ACCESS_MEMBER_HTTP_RULES,
     _VIEWER_HTTP_NAMESPACES,
     can_receive_workbench_event,
     context_from_session_payload,
@@ -237,6 +239,12 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
         == "owner"
     )
     assert http_authorization_policy("GET", "/show/ses-1/").minimum_role == "viewer"
+    assert http_authorization_policy("POST", "/api/remote-access/vibe-cloud/pair").minimum_role == "owner"
+    assert http_authorization_policy("POST", "/api/remote-access/start").minimum_role == "owner"
+    assert http_authorization_policy("POST", "/api/remote-access/stop").minimum_role == "owner"
+    assert http_authorization_policy("POST", "/api/remote-access/settings").minimum_role == "owner"
+    assert http_authorization_policy("POST", "/api/remote-access/future-unpair").minimum_role == "owner"
+    assert http_authorization_policy("GET", "/api/remote-access/status").minimum_role == "member"
 
 
 def test_advertised_capability_namespaces_cover_current_and_future_routes() -> None:
@@ -245,7 +253,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
     route must inherit the same Instance role as the rest of that capability.
     Agent create/import and unknown APIs fail closed to member; allowlist
-    mutation stays owner-only.
+    mutation and pairing-identity writes stay owner-only.
     """
 
     assert _EDITOR_HTTP_NAMESPACES == (
@@ -328,6 +336,10 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/browse/mkdir"),
         ("PUT", "/api/permissions/projects/project-1/access"),
         ("PUT", "/api/permissions/resources/show_page/page-1/access"),
+        ("GET", "/api/remote-access/status"),
+        ("GET", "/api/remote-access/network-interfaces"),
+        ("POST", "/api/remote-access/optimize-route"),
+        ("POST", "/api/remote-access/diagnostics"),
     )
     for method, path in member_examples:
         assert http_authorization_policy(method, path).minimum_role == "member", path
@@ -336,6 +348,13 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
         == "owner"
     )
+    assert _REMOTE_ACCESS_HTTP_NAMESPACE == "/api/remote-access"
+    assert {(method, pattern.pattern) for method, pattern in _REMOTE_ACCESS_MEMBER_HTTP_RULES} == {
+        ("GET", r"^/api/remote-access/status$"),
+        ("GET", r"^/api/remote-access/network-interfaces$"),
+        ("POST", r"^/api/remote-access/optimize-route$"),
+        ("POST", r"^/api/remote-access/diagnostics$"),
+    }
 
 
 def test_workbench_events_follow_role_boundaries() -> None:
@@ -398,3 +417,295 @@ def test_advertised_manage_capabilities_are_honored_by_service_guards() -> None:
         else:
             with pytest.raises(VibeAgentAccessError):
                 _require_agent_onboarding_access(context)
+
+
+_REMOTE_ACCESS_MEMBER_OPS = frozenset(
+    {
+        ("GET", "/api/remote-access/status"),
+        ("GET", "/api/remote-access/network-interfaces"),
+        ("POST", "/api/remote-access/optimize-route"),
+        ("POST", "/api/remote-access/diagnostics"),
+    }
+)
+
+
+def _registered_remote_access_routes():
+    from vibe.ui_server import app
+
+    routes = []
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None) or ()
+        if not path or not path.startswith("/api/remote-access"):
+            continue
+        for method in methods:
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            routes.append((method.upper(), path))
+    return tuple(sorted(set(routes)))
+
+
+def _remote_access_ok_payload(method: str, path: str) -> dict:
+    if method == "GET" and path.endswith("/status"):
+        return {"ok": True, "paired": True, "running": False}
+    if method == "GET" and path.endswith("/network-interfaces"):
+        return {"ok": True, "interfaces": []}
+    if path.endswith("/optimize-route"):
+        return {"ok": True}
+    if path.endswith("/diagnostics"):
+        return {"ok": True, "checks": []}
+    return {"ok": True}
+
+
+def _install_remote_access_handler_stubs(monkeypatch) -> None:
+    from vibe import remote_access
+
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda *args, **kwargs: _remote_access_ok_payload("GET", "/api/remote-access/status"),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda *args, **kwargs: _remote_access_ok_payload(
+            "GET", "/api/remote-access/network-interfaces"
+        ),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "optimize_route",
+        lambda *args, **kwargs: _remote_access_ok_payload(
+            "POST", "/api/remote-access/optimize-route"
+        ),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "connectivity_diagnostics",
+        lambda *args, **kwargs: _remote_access_ok_payload(
+            "POST", "/api/remote-access/diagnostics"
+        ),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "pair",
+        lambda *args, **kwargs: _remote_access_ok_payload(
+            "POST", "/api/remote-access/vibe-cloud/pair"
+        ),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "start",
+        lambda *args, **kwargs: _remote_access_ok_payload("POST", "/api/remote-access/start"),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "stop",
+        lambda *args, **kwargs: _remote_access_ok_payload("POST", "/api/remote-access/stop"),
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "apply_settings",
+        lambda *args, **kwargs: _remote_access_ok_payload(
+            "POST", "/api/remote-access/settings"
+        ),
+    )
+
+
+def _request_remote_access(client, method: str, path: str, headers: dict[str, str]):
+    from tests.ui_server_test_helpers import remote_peer
+
+    kwargs = {
+        "headers": headers,
+        "base_url": "https://alex.avibe.bot",
+        "environ_base": remote_peer(),
+    }
+    if method not in {"GET", "HEAD", "OPTIONS"}:
+        kwargs["json"] = {}
+    return client.request(method, path, **kwargs)
+
+
+def test_registered_remote_access_writes_default_to_owner(monkeypatch, tmp_path) -> None:
+    """Every registered /api/remote-access write is owner unless it is a named ops route.
+
+    Introspect the live router so a newly added pair/unpair/settings sibling
+    fails this test until it is classified. Viewer and editor stay 403 on the
+    whole namespace, matching master. Member keeps the four ops that cannot
+    change pairing identity.
+    """
+
+    from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie, save_config
+    from vibe import remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    _install_remote_access_handler_stubs(monkeypatch)
+
+    routes = _registered_remote_access_routes()
+    assert routes, "router must expose /api/remote-access"
+    for method, path in _REMOTE_ACCESS_MEMBER_OPS:
+        assert (method, path) in routes, f"{method} {path} must remain registered"
+
+    for method, path in routes:
+        policy = http_authorization_policy(method, path)
+        if (method, path) in _REMOTE_ACCESS_MEMBER_OPS:
+            assert policy.minimum_role == "member", f"{method} {path}"
+        else:
+            assert policy.minimum_role == "owner", (
+                f"{method} {path} must default-deny to owner"
+            )
+
+    for role in ("viewer", "editor", "member", "owner"):
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(
+                config,
+                f"{role}@example.com",
+                f"{role}-1",
+                role=role,
+                access_source="email" if role != "owner" else "owner",
+            ),
+            domain="alex.avibe.bot",
+        )
+        headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+        for method, path in routes:
+            response = _request_remote_access(client, method, path, headers)
+            policy_role = http_authorization_policy(method, path).minimum_role
+            admitted = _context(role, remote=True).has_role(policy_role or "owner")
+            if admitted:
+                assert response.status_code != 403, f"{role} {method} {path}"
+            else:
+                assert response.status_code == 403, f"{role} {method} {path}"
+                assert response.get_json()["error"] == "instance_access_forbidden"
+
+
+def test_member_config_write_cannot_change_pairing_identity(monkeypatch, tmp_path) -> None:
+    from config.v2_config import V2Config
+    from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
+    from vibe import remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.example"
+    cloud.instance_secret = "device-secret"
+    cloud.tunnel_token = "tunnel-token"
+    config.save()
+    remote_access._replace_authorization_revision(config, 1)  # noqa: SLF001
+    cookie = remote_session_cookie(
+        config,
+        "member@example.com",
+        "member-1",
+        role="member",
+        access_source="email",
+        session_claims={
+            "vibe_instance_id": cloud.instance_id,
+            "vibe_instance_role": "member",
+            "vibe_instance_access_source": "email",
+            "vibe_instance_authorization_revision": 1,
+        },
+    )
+    before = V2Config.load().remote_access.vibe_cloud
+    monkeypatch.setattr(remote_access, "reconcile", lambda: {"ok": True})
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        cookie,
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+    response = client.post(
+        "/api/config",
+        json={
+            "remote_access": {
+                "vibe_cloud": {
+                    "instance_id": "inst-hijacked",
+                    "backend_url": "https://attacker.example",
+                    "instance_secret": "stolen-secret",
+                    "tunnel_token": "stolen-tunnel",
+                    "session_secret": "stolen-session",
+                    "enabled": False,
+                }
+            }
+        },
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+
+    assert response.status_code == 200
+    after = V2Config.load().remote_access.vibe_cloud
+    assert after.instance_id == before.instance_id == "inst_123"
+    assert after.backend_url == before.backend_url == "https://backend.example"
+    assert after.instance_secret == before.instance_secret == "device-secret"
+    assert after.tunnel_token == before.tunnel_token == "tunnel-token"
+    assert after.session_secret == before.session_secret == "session-secret"
+    assert after.enabled is True
+
+
+def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_path) -> None:
+    from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
+    from vibe import remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    paired: list[tuple[str, str, str]] = []
+
+    def pair(pairing_key, backend_url, device_name):
+        paired.append((pairing_key, backend_url, device_name))
+        return {"ok": True, "instance_id": "inst_new"}
+
+    monkeypatch.setattr(remote_access, "pair", pair)
+
+    member_client = app.test_client()
+    member_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "member@example.com",
+            "member-1",
+            role="member",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    member_headers = csrf_headers(member_client, base_url="https://alex.avibe.bot")
+    member_response = member_client.post(
+        "/api/remote-access/vibe-cloud/pair",
+        json={"pairing_key": "key", "backend_url": "https://avibe.bot"},
+        headers=member_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    assert member_response.status_code == 403
+    assert member_response.get_json()["error"] == "instance_access_forbidden"
+    assert paired == []
+
+    owner_client = app.test_client()
+    owner_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "owner@example.com",
+            "owner-1",
+            role="owner",
+            access_source="owner",
+        ),
+        domain="alex.avibe.bot",
+    )
+    owner_headers = csrf_headers(owner_client, base_url="https://alex.avibe.bot")
+    owner_response = owner_client.post(
+        "/api/remote-access/vibe-cloud/pair",
+        json={"pairing_key": "key", "backend_url": "https://avibe.bot", "device_name": "avibe"},
+        headers=owner_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    assert owner_response.status_code == 200
+    assert owner_response.get_json()["ok"] is True
+    assert paired == [("key", "https://avibe.bot", "avibe")]

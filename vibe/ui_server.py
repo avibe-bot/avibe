@@ -6594,6 +6594,12 @@ async def config_post():
         except ValueError as exc:
             code = api.editor_config_write_error_code(exc)
             return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
+    elif (
+        authorization_context is not None
+        and not authorization_context.can_manage_access_members
+        and isinstance(payload, dict)
+    ):
+        payload = api.strip_pairing_identity_from_config_write(payload)
     remote_access_runtime = None
     try:
         (
@@ -6728,6 +6734,9 @@ def remote_access_status():
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
 
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is None or not authorization_context.can_manage_access_members:
+        return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
     payload = request.json or {}
     result = remote_access.pair(
         payload.get("pairing_key", ""),
