@@ -360,12 +360,38 @@ def test_require_incus_reports_missing_override(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_existence_comes_from_the_names_the_daemon_listed(monkeypatch: pytest.MonkeyPatch) -> None:
-    listing = json.dumps([{"name": "avr-master"}, {"name": "avr-wt-demo-branch"}, {"other": "ignored"}])
+    listing = json.dumps([{"name": "avr-master"}, {"name": "avr-wt-demo-branch"}])
     monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(0, stdout=listing))
 
     names = incus_regression.Runner().names(incus_regression.incus("project", "list"), what="Incus projects")
 
     assert names == ["avr-master", "avr-wt-demo-branch"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param({"other": "ignored"}, id="no-name"),
+        pytest.param({"name": None}, id="null-name"),
+        pytest.param({"name": 7}, id="non-string-name"),
+        pytest.param("avr-master", id="not-an-object"),
+    ],
+)
+def test_an_entry_the_runner_cannot_read_makes_the_whole_listing_unanswerable(
+    monkeypatch: pytest.MonkeyPatch, entry
+) -> None:
+    """An unparseable entry is a listing nobody enumerated, not one entry fewer.
+
+    Dropping it leaves an inventory that looks complete and happens to be
+    missing whatever the runner could not read -- which reads as a confirmed
+    absence, and `reconcile --yes` acts on a confirmed absence by releasing host
+    ports that are still in use.
+    """
+    listing = json.dumps([{"name": "avr-master"}, entry])
+    monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(0, stdout=listing))
+
+    with pytest.raises(incus_regression.RegressionError, match="Unreadable entry"):
+        incus_regression.Runner().names(incus_regression.incus("project", "list"), what="Incus projects")
 
 
 @pytest.mark.parametrize(
@@ -1795,6 +1821,41 @@ def test_reconcile_does_not_offer_to_delete_a_misplaced_instance_by_slug(
     assert payload["worktrees"] == {}
 
 
+def test_reconcile_reports_every_instance_sharing_one_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Incus scopes instance names per project, so one name can be two instances.
+
+    A single observation slot keeps whichever the listing mentioned last. If that
+    is the convention-project one, the report offers a delete command and says
+    nothing about the instance it cannot reach -- the disk stays occupied by
+    something the operator was told had been enumerated.
+    """
+    mapping_path, _ = reconcile_fixture(
+        tmp_path,
+        monkeypatch,
+        entries={},
+        projects=("avr-wt-doubled",),
+        instances=(
+            {"name": "avibe-wt-doubled", "status": "Stopped", "project": "default"},
+            {"name": "avibe-wt-doubled", "status": "Running", "project": "avr-wt-doubled"},
+        ),
+    )
+
+    exit_code = incus_regression.cmd_reconcile(argparse.Namespace(yes=True, dry_run=False, remote=None))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "doubled  [project, Stopped in default, Running]" in out
+    # Both statements are true of this environment at once, so it earns both: the
+    # command that reclaims what the convention covers, and the warning about what
+    # it does not.
+    assert "delete --target worktree --slug doubled" in out
+    assert "instance lives in project default, not avr-wt-doubled" in out
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {}
+
+
 def test_reconcile_never_forgets_a_reservation_that_is_still_in_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1979,6 +2040,84 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
     ]
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == {}
+
+
+def test_delete_against_a_remote_keeps_the_local_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A removal somewhere else is no evidence about the row describing this machine.
+
+    `worktrees.json` reserves host ports here and records what this machine's
+    daemon holds. The same slug can be in use on both daemons, so dropping the
+    local row because the remote copy was deleted releases a port a live local
+    environment is bound to.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runtime = repo / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    slug = "shared-slug"
+    row = {"path": str(repo), "project": f"avr-wt-{slug}", "instance": f"avibe-wt-{slug}", "host_port": 15207}
+    mapping_path = runtime / "worktrees.json"
+    mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": {slug: row}}), encoding="utf-8")
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        def run(self, command, *, check=True, **kwargs):
+            return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: repo)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda _repo_root, _env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+
+    exit_code = incus_regression.cmd_delete(
+        argparse.Namespace(
+            target="worktree",
+            slug=slug,
+            env_file=None,
+            host_port=None,
+            ui_host="127.0.0.1",
+            ui_port=5123,
+            worktree_port_start=15200,
+            worktree_port_end=15399,
+            dry_run=False,
+            remote="lab",
+            yes=True,
+        )
+    )
+
+    assert exit_code == 0
+    assert "Kept the local metadata" in capsys.readouterr().out
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    assert payload["worktrees"] == {slug: row}
+
+
+def test_the_mapping_lock_nests_without_deadlocking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`flock` is owned by an open file description, not by a process.
+
+    A writer that takes the lock itself is nested inside every command that
+    already holds it across a decision, so a second `open` plus `flock` would
+    block forever on a lock this very process holds -- and a deadlocked runner
+    looks like a hung daemon, not like a bug here.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".runtime" / "incus-regression").mkdir(parents=True)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda _repo_root: repo)
+    written = []
+
+    with incus_regression.worktree_mapping_lock(repo, dry_run=False):
+        incus_regression.mutate_worktree_mapping(repo, lambda worktrees: worktrees.update({"nested": {"host_port": 1}}))
+        written.append(json.loads((repo / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8")))
+
+    assert written == [{"schema_version": 1, "worktrees": {"nested": {"host_port": 1}}}]
+    # The outer span released the lock on the way out, so the next acquisition is
+    # a real one rather than a leaked no-op.
+    with incus_regression.worktree_mapping_lock(repo, dry_run=False):
+        pass
 
 
 def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2712,6 +2851,8 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
 
 def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
+    held = []
+    writes = []
 
     class ExistingRunner:
         def __init__(self, *, dry_run=False):
@@ -2726,11 +2867,23 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
         class Lock:
             def __enter__(self):
                 calls.append("mapping_lock_enter")
+                held.append("lock")
 
             def __exit__(self, exc_type, exc, tb):
+                held.pop()
                 calls.append("mapping_lock_exit")
 
         return Lock()
+
+    # Records the depth every write sees rather than naming the writers, so a
+    # write added later is covered without editing this test.
+    original_write = incus_regression._write_worktree_mapping
+
+    def recording_write(repo_root, payload):
+        writes.append(len(held))
+        original_write(repo_root, payload)
+
+    monkeypatch.setattr(incus_regression, "_write_worktree_mapping", recording_write)
 
     def target_lock(repo_root, target, *, dry_run):
         class Lock:
@@ -2809,7 +2962,14 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
 
     assert incus_regression.cmd_up(args) == 0
 
-    assert calls[:4] == ["mapping_lock_enter", "reserve_worktree_mapping", "mapping_lock_exit", "target_lock_enter"]
+    assert calls[:2] == ["mapping_lock_enter", "reserve_worktree_mapping"]
+    assert "target_lock_enter" in calls
+    # The reservation and the completion stamp are two writes, and `up` releases
+    # the lock between them, so the mapping's own writer has to take it. Asserting
+    # the depth every write saw states that as the property it is: no write to
+    # `worktrees.json` happens outside the lock, whoever performs it.
+    assert len(writes) == 2
+    assert all(depth >= 1 for depth in writes)
     payload = json.loads((tmp_path / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8"))
     mapping = payload["worktrees"]["demo-branch"]
     assert mapping["host_port"] == 15200

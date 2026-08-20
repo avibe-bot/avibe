@@ -139,10 +139,13 @@ to every command that reads `.runtime/incus-regression/worktrees.json`, and can
 only be removed by hand. For each one it prints what Incus was observed to hold
 — its project and its instance, reported separately, because an environment can
 be half gone — plus whatever provenance the metadata holds and the `delete`
-command that removes it. An instance living in a project other than the one its
-slug implies is listed with that project and *without* a delete command:
-`delete --slug` derives the project from the slug, so it would report success
-without touching the instance.
+command that removes it. Every instance Incus reported under that name is listed,
+because Incus scopes instance names per project and one name can be several
+instances. An instance living in a project other than the one its slug implies is
+listed with that project and warned about by hand: `delete --slug` derives the
+project from the slug, so it would report success without touching the instance.
+An environment holding both kinds gets both the command and the warning — one
+statement covers what the convention reaches, the other what it does not.
 
 Deletion stays a separate, explicit call. Nothing recorded about an environment
 can prove it is no longer wanted: the recorded path is the checkout the runner
@@ -157,15 +160,18 @@ host ports. Without `--yes` it only reports.
 is worse than keeping a row nobody needs:
 
 - The daemon must have completed a listing that held neither the environment's
-  project nor its instance. A daemon that could not be reached is an unanswered
-  question, not an absence, and aborts instead.
+  project nor its instance, and every entry in that listing must have been
+  readable. A daemon that could not be reached, or an entry the runner could not
+  identify, is an unanswered question rather than an absence, and aborts instead.
 - A row that reserves a slug whose environment is not built yet is left alone.
   `up` records the slug and its port before it creates the project and the
   instance, so this is what a concurrent `up` looks like from the outside.
-- `--remote` reports and never forgets. `worktrees.json` reserves ports on this
-  machine and describes this machine's daemon, so a remote's inventory is no
-  evidence about those rows. The `delete` commands it prints carry `--remote`,
-  or they would name the same slug on the wrong daemon.
+- Only a local run writes `worktrees.json` at all. The file reserves ports on this
+  machine and describes this machine's daemon, so another daemon's inventory is no
+  evidence about those rows: `reconcile --remote` reports and never prunes, and
+  `delete --remote` removes the remote environment and says it kept the local row.
+  The `delete` commands `reconcile --remote` prints carry `--remote`, or they would
+  name the same slug on the wrong daemon.
 
 Useful flags:
 

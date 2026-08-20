@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Container, Iterator, Sequence
+from typing import Callable, Container, Iterator, Sequence
 
 try:
     import fcntl
@@ -128,6 +128,14 @@ class Runner:
         is stalled. Collapsing the second into the first turns "cannot tell"
         into "not there", and callers then set out to create what already
         exists.
+
+        A zero exit is not on its own an answer either. An entry this runner
+        cannot read -- a client and daemon disagreeing about the listing schema,
+        say -- used to be filtered out, which turns a listing nobody could parse
+        into an inventory that looks complete and happens to be empty. That reads
+        as a confirmed absence, and `reconcile --yes` acts on it by releasing
+        host ports that are still in use. Every entry is therefore either
+        understood or fatal.
         """
         if self.dry_run:
             return []
@@ -140,15 +148,17 @@ class Runner:
             raise RegressionError(f"Could not parse the {what} listing returned by Incus: {exc}") from exc
         if not isinstance(payload, list):
             raise RegressionError(f"Unexpected {what} listing returned by Incus: {type(payload).__name__}")
-        return [item for item in payload if isinstance(item, dict)]
+        for item in payload:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise RegressionError(
+                    f"Unreadable entry in the {what} listing returned by Incus: {item!r}\n"
+                    "Every caller identifies an object by name, so an entry without one cannot be reasoned about."
+                )
+        return payload
 
     def names(self, command: Sequence[str], *, what: str) -> list[str]:
         """The names from `records`, for callers that only ask whether something exists."""
-        return [
-            item["name"]
-            for item in self.records(command, what=what)
-            if isinstance(item.get("name"), str)
-        ]
+        return [item["name"] for item in self.records(command, what=what)]
 
 
 def incus(*args: str, project: str | None = None) -> list[str]:
@@ -276,20 +286,40 @@ def target_update_lock(repo_root: Path, target: RegressionTarget, *, dry_run: bo
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+_held_mapping_locks: set[Path] = set()
+
+
 @contextmanager
 def worktree_mapping_lock(repo_root: Path, *, dry_run: bool):
+    """Serialize every read-modify-write of `worktrees.json`, and nest safely.
+
+    Re-entrant on purpose, because the mapping's writers now take this lock
+    themselves rather than trusting a caller to have taken it: `up` holds it
+    across resolving a target and reserving its slug, `reconcile` holds it across
+    a listing and the decision that listing feeds, and both end in a write that
+    acquires it again. `flock` is owned by an open file description, not by a
+    process, so a second `open` plus `flock` here would block forever on a lock
+    this very process holds -- a deadlock rather than a wait. Remembering what is
+    already held makes the inner acquisition a no-op and keeps the outer span
+    exactly as wide as it was.
+    """
     if dry_run or fcntl is None:
         yield
         return
     lock_dir = runtime_root(repo_root) / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "worktrees.lock"
+    lock_path = (lock_dir / "worktrees.lock").resolve()
+    if lock_path in _held_mapping_locks:
+        yield
+        return
     with lock_path.open("w", encoding="utf-8") as fh:
         print(f"Acquiring regression worktree mapping lock: {lock_path}")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        _held_mapping_locks.add(lock_path)
         try:
             yield
         finally:
+            _held_mapping_locks.discard(lock_path)
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
@@ -431,10 +461,45 @@ def load_worktree_mapping(repo_root: Path) -> dict:
     return payload
 
 
-def save_worktree_mapping(repo_root: Path, payload: dict) -> None:
+def _write_worktree_mapping(repo_root: Path, payload: dict) -> None:
+    """Write the mapping file. Private: reach it through `mutate_worktree_mapping`."""
     path = mapping_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def mutate_worktree_mapping(repo_root: Path, mutate: Callable[[dict], None]) -> None:
+    """The only writer of `worktrees.json`: lock, load, apply, save.
+
+    Owning the sequence here is what makes "the mapping is only ever modified
+    under the mapping lock" true by construction instead of true whenever every
+    caller remembers. One caller did not: `up` stamps completion after the
+    command has already released the lock, so that load-modify-save could
+    interleave with reconcile's, and whichever saved last erased the other --
+    restoring a row that was just pruned, or dropping the stamp that proves a
+    reservation finished and leaving the slug pending forever.
+
+    `mutate` receives the `worktrees` mapping itself, loaded inside the lock, so
+    it cannot act on a copy read before the lock was held.
+    """
+    with worktree_mapping_lock(repo_root, dry_run=False):
+        payload = load_worktree_mapping(repo_root)
+        mutate(payload.setdefault("worktrees", {}))
+        _write_worktree_mapping(repo_root, payload)
+
+
+def owns_local_metadata(remote: str | None) -> bool:
+    """Whether an operation against this daemon may write `worktrees.json`.
+
+    The mapping reserves host ports on this machine and records what this
+    machine's daemon holds, so it is evidence about exactly one authority. Every
+    command asks this single question rather than deciding for itself, because
+    deciding separately is how the same slug on two daemons came to be treated as
+    one environment: `reconcile --remote` learned not to prune, while
+    `delete --remote` went on dropping the local row for an environment it had
+    removed somewhere else entirely.
+    """
+    return remote is None
 
 
 def allocated_worktree_ports(repo_root: Path) -> set[int]:
@@ -479,6 +544,19 @@ def parse_metadata_timestamp(value: object) -> datetime | None:
 
 
 @dataclass(frozen=True)
+class ObservedInstance:
+    """One instance Incus reported, named by the project that actually holds it.
+
+    Incus scopes instance names per project, so a name is not an identity on its
+    own; only the pair is. Carrying the project alongside the state is what lets
+    a caller say which instance it means, rather than which name it saw.
+    """
+
+    project: str
+    state: str
+
+
+@dataclass(frozen=True)
 class WorktreeEnvironment:
     """One worktree regression environment, as Incus has it and as metadata describes it.
 
@@ -487,14 +565,21 @@ class WorktreeEnvironment:
     Incus was observed to hold is kept separately, so a partial or misplaced
     footprint can be reported as what it is rather than averaged into a single
     "present" flag.
+
+    That observation is a set, not one slot. The same instance name can exist in
+    several projects at once -- exactly what happens when an earlier run left one
+    behind and a later one recreated it under the convention project -- and a
+    single slot silently keeps whichever the listing mentioned last. Losing the
+    other one is not a cosmetic omission: if the survivor is the convention-project
+    instance, `reconcile` reports a footprint it can delete and prints no warning
+    about the one it cannot reach.
     """
 
     slug: str
     project: str
     instance: str
     has_project: bool
-    instance_state: str | None
-    instance_project: str | None
+    instances: tuple[ObservedInstance, ...]
     entry: dict | None
 
     @property
@@ -505,12 +590,22 @@ class WorktreeEnvironment:
         slug and still has to be reclaimed, and an instance whose project was
         never recorded still holds a host port.
         """
-        return self.has_project or self.instance_state is not None
+        return self.has_project or bool(self.instances)
+
+    @property
+    def deletable_instances(self) -> tuple[ObservedInstance, ...]:
+        """The observed instances `delete --slug` would actually reach."""
+        return tuple(item for item in self.instances if item.project == self.project)
+
+    @property
+    def stranded_instances(self) -> tuple[ObservedInstance, ...]:
+        """The observed instances living outside the project the slug names."""
+        return tuple(item for item in self.instances if item.project != self.project)
 
     @property
     def deletable_by_slug(self) -> bool:
-        """Whether `delete --slug` would reach the instance that was observed."""
-        return self.instance_project is None or self.instance_project == self.project
+        """Whether `delete --slug` would reach every instance that was observed."""
+        return not self.stranded_instances
 
     @property
     def pending(self) -> bool:
@@ -533,38 +628,49 @@ class WorktreeEnvironment:
 
     @property
     def footprint(self) -> str:
-        """What Incus was observed to hold, one half at a time.
+        """What Incus was observed to hold, every part of it named.
 
         Reported rather than summarised: `Unknown` used to stand for an instance
-        nobody had looked for, which reads as a daemon that would not answer.
+        nobody had looked for, which reads as a daemon that would not answer. Each
+        observed instance appears, and one outside the slug's project says where it
+        is, because that is the part `delete --slug` will not reach.
         """
-        if self.instance_state is None:
-            instance = "no instance"
-        elif self.deletable_by_slug:
-            instance = self.instance_state
+        if not self.instances:
+            observed = ["no instance"]
         else:
-            instance = f"{self.instance_state} in {self.instance_project}"
-        return f"{'project' if self.has_project else 'no project'}, {instance}"
+            observed = [
+                item.state if item.project == self.project else f"{item.state} in {item.project}"
+                for item in self.instances
+            ]
+        return ", ".join(["project" if self.has_project else "no project", *observed])
 
 
-def worktree_instances(runner: Runner, *, remote: str | None) -> dict[str, dict[str, str]]:
-    """Map each worktree instance name to the state and project Incus reports for it.
+def worktree_instances(runner: Runner, *, remote: str | None) -> dict[str, tuple[ObservedInstance, ...]]:
+    """Group every worktree instance Incus reports by name, keeping each one's project.
 
     The project is part of the observation, not decoration. An instance living
     in a project other than the one its name implies is not reachable by
     `delete --slug`, and reporting it as if it were promises a removal that
     would silently leave it running.
+
+    A name maps to a tuple because Incus scopes names per project, so one name can
+    legitimately be several instances. Keying a single record by name kept the last
+    one the listing happened to mention and dropped the rest, which is how a
+    stranded instance disappeared from a report that also claimed to have
+    enumerated it.
     """
     command = incus("list", *optional_remote_ref(remote), "--all-projects", "--format", "json")
-    instances: dict[str, dict[str, str]] = {}
+    instances: dict[str, list[ObservedInstance]] = {}
     for item in runner.records(command, what="Incus instances"):
-        name = item.get("name")
-        if isinstance(name, str) and name.startswith(WORKTREE_INSTANCE_PREFIX):
-            instances[name] = {
-                "state": str(item.get("status") or "Unknown"),
-                "project": str(item.get("project") or "default"),
-            }
-    return instances
+        name = item["name"]
+        if name.startswith(WORKTREE_INSTANCE_PREFIX):
+            instances.setdefault(name, []).append(
+                ObservedInstance(
+                    project=str(item.get("project") or "default"),
+                    state=str(item.get("status") or "Unknown"),
+                )
+            )
+    return {name: tuple(observed) for name, observed in instances.items()}
 
 
 def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None) -> list[WorktreeEnvironment]:
@@ -595,15 +701,13 @@ def worktree_environments(runner: Runner, repo_root: Path, *, remote: str | None
     for slug in sorted(slugs):
         entry = entries.get(slug)
         entry = entry if isinstance(entry, dict) else None
-        observed = instances.get(instance_name_for(WORKTREE_TARGET, slug))
         environments.append(
             WorktreeEnvironment(
                 slug=slug,
                 project=project_name_for(WORKTREE_TARGET, slug),
                 instance=instance_name_for(WORKTREE_TARGET, slug),
                 has_project=slug in projects,
-                instance_state=observed["state"] if observed else None,
-                instance_project=observed["project"] if observed else None,
+                instances=instances.get(instance_name_for(WORKTREE_TARGET, slug), ()),
                 entry=entry,
             )
         )
@@ -1817,8 +1921,7 @@ def prepare_show_runtime(runner: Runner, target: RegressionTarget, *, remote: st
 def update_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
     if target.target != WORKTREE_TARGET:
         return
-    payload = load_worktree_mapping(repo_root)
-    payload.setdefault("worktrees", {})[target.slug] = {
+    row = {
         "path": str(repo_root),
         "project": target.project,
         "instance": target.instance,
@@ -1827,25 +1930,24 @@ def update_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
         "branch": branch_name(repo_root),
         "commit": commit_sha(repo_root),
     }
-    save_worktree_mapping(repo_root, payload)
+    mutate_worktree_mapping(repo_root, lambda worktrees: worktrees.update({target.slug: row}))
 
 
 def reserve_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
     if target.target != WORKTREE_TARGET:
         return
-    payload = load_worktree_mapping(repo_root)
-    payload.setdefault("worktrees", {}).setdefault(target.slug, {})
-    payload["worktrees"][target.slug].update(
-        {
-            "path": str(repo_root),
-            "project": target.project,
-            "instance": target.instance,
-            "host_port": target.host_port,
-            "reserved_at": datetime.now(timezone.utc).isoformat(),
-            "branch": branch_name(repo_root),
-        }
+    reservation = {
+        "path": str(repo_root),
+        "project": target.project,
+        "instance": target.instance,
+        "host_port": target.host_port,
+        "reserved_at": datetime.now(timezone.utc).isoformat(),
+        "branch": branch_name(repo_root),
+    }
+    mutate_worktree_mapping(
+        repo_root,
+        lambda worktrees: worktrees.setdefault(target.slug, {}).update(reservation),
     )
-    save_worktree_mapping(repo_root, payload)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -2133,9 +2235,16 @@ def cmd_delete(args: argparse.Namespace) -> int:
     runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False)
     runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False)
     if target.target == WORKTREE_TARGET and not args.dry_run:
-        payload = load_worktree_mapping(repo_root)
-        (payload.get("worktrees") or {}).pop(target.slug, None)
-        save_worktree_mapping(repo_root, payload)
+        if owns_local_metadata(args.remote):
+            mutate_worktree_mapping(repo_root, lambda worktrees: worktrees.pop(target.slug, None))
+        else:
+            # The row describes a slug and host port on this machine, and this
+            # deletion happened somewhere else. `reconcile --remote` already
+            # refuses to prune on a remote's inventory; deleting a remote
+            # environment is the same evidence and gets the same answer, or a
+            # slug used on both daemons loses its local port reservation the
+            # moment the remote copy is removed.
+            print(f"Kept the local metadata for {target.slug}: it describes the local Incus daemon, not remote {args.remote}.")
     return 0
 
 
@@ -2187,7 +2296,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         live = [env for env in environments if env.exists]
         pending = [env for env in environments if not env.exists and env.pending]
         forgotten = [env for env in environments if not env.exists and not env.pending]
-        stranded = [env for env in live if not env.deletable_by_slug]
+        stranded = [env for env in live if env.stranded_instances]
 
         if live:
             print(f"{len(live)} worktree regression environment(s) exist in {authority}:")
@@ -2198,7 +2307,14 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             # project and instance from the slug by naming convention, so it
             # reaches an environment with no metadata just as well as a tracked
             # one -- but only where that convention matches what Incus holds.
-            deletable = [env for env in live if env.deletable_by_slug]
+            #
+            # The two lists overlap on purpose. An environment can hold a
+            # convention-project instance and a stranded one at the same time, so
+            # partitioning it into one bucket or the other has to be wrong about
+            # something: either it offers a delete command that leaves an instance
+            # running, or it withholds one that would reclaim most of the disk.
+            # Saying both is the only honest report.
+            deletable = [env for env in live if env.has_project or env.deletable_instances]
             if deletable:
                 print("Delete any of them with:")
                 for env in deletable:
@@ -2207,10 +2323,11 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
                         f"--slug {shlex.quote(env.slug)} --yes{remote_suffix}"
                     )
             for env in stranded:
-                print(
-                    f"  {env.slug}: instance lives in project {env.instance_project}, not {env.project}. "
-                    "Delete by slug would not reach it; reclaim it by hand."
-                )
+                for item in env.stranded_instances:
+                    print(
+                        f"  {env.slug}: instance lives in project {item.project}, not {env.project}. "
+                        "Delete by slug would not reach it; reclaim it by hand."
+                    )
 
         if pending:
             if live:
@@ -2227,7 +2344,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         print(f"{len(forgotten)} metadata entr(ies) describe environments {authority} no longer has:")
         for env in forgotten:
             print(f"  {env.slug}  {describe_worktree_entry(env.entry)}")
-        if args.remote:
+        if not owns_local_metadata(args.remote):
             # `worktrees.json` reserves ports on this machine and describes the
             # environments this machine's daemon holds. A remote's inventory is
             # no evidence about those rows, so a remote reconcile reports and
@@ -2239,10 +2356,13 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             return 0
         if not args.yes:
             raise RegressionError("Dropping stale metadata entries requires --yes.")
-        payload = load_worktree_mapping(repo_root)
-        for env in forgotten:
-            (payload.get("worktrees") or {}).pop(env.slug, None)
-        save_worktree_mapping(repo_root, payload)
+        slugs = [env.slug for env in forgotten]
+
+        def prune(worktrees: dict) -> None:
+            for slug in slugs:
+                worktrees.pop(slug, None)
+
+        mutate_worktree_mapping(repo_root, prune)
         print(f"Dropped {len(forgotten)} stale metadata entr(ies). No instance was deleted.")
         return 0
 
