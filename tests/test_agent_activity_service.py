@@ -792,6 +792,147 @@ def test_detached_completion_closes_only_activity_with_matching_turn_provenance(
         ),
     ],
 )
+def test_provenance_free_detached_completion_closes_unambiguous_activity(
+    isolated_state,
+    message_type,
+    metadata,
+    expected_status,
+):
+    engine = create_sqlite_engine()
+    sid = f"ses_detached_unowned_{message_type}"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="legacy activity",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_before",
+            created_at="2026-06-01T10:00:01Z",
+            text="recovered background work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype=message_type,
+            author="agent",
+            created_at="2026-06-01T10:00:02Z",
+            text="background completed",
+            metadata=metadata,
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == [expected_status]
+    assert groups[0]["anchor_message_id"] == "m_detached"
+    assert groups[0]["anchor_position"] == "before"
+    assert groups[0]["open"] is False
+
+
+def test_provenance_free_detached_completion_does_not_guess_after_interleaving(
+    isolated_state,
+):
+    engine = create_sqlite_engine()
+    sid = "ses_detached_unowned_interleaved"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="background origin",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_background",
+            created_at="2026-06-01T10:00:01Z",
+            text="background work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u2",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:02Z",
+            text="new turn",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_current",
+            created_at="2026-06-01T10:00:03Z",
+            text="current work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype="error",
+            author="agent",
+            created_at="2026-06-01T10:00:04Z",
+            text="background failed",
+            metadata={"detached": True},
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_current_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:05Z",
+            text="current completed",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == ["interrupted", "done"]
+    assert groups[0]["anchor_message_id"] == "m_u1"
+    assert groups[1]["anchor_message_id"] == "m_current_result"
+
+
+@pytest.mark.parametrize(
+    ("message_type", "metadata", "expected_status"),
+    [
+        ("result", {"detached": True}, "done"),
+        ("error", {"detached": True}, "failed"),
+        (
+            "notify",
+            {"detached": True, "event": "backend_failure"},
+            "failed",
+        ),
+    ],
+)
 def test_detached_completion_repairs_its_origin_without_consuming_newer_activity(
     isolated_state,
     message_type,

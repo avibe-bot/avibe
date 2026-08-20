@@ -544,11 +544,28 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 for pending_item in pending
                 if pending_item.get("turn_id")
             }
-            owns_pending = bool(
+            has_unresolved_origin = any(
+                group["status"] == "interrupted" for group in groups
+            )
+            provenance_matches_pending = bool(
                 owner_turn_id
                 and (
-                    owner_turn_id == turn_id
+                    (
+                        owner_turn_id == turn_id
+                        and pending_turn_ids <= {owner_turn_id}
+                    )
                     or (turn_id is None and pending_turn_ids == {owner_turn_id})
+                )
+            )
+            owns_pending = bool(
+                provenance_matches_pending
+                # Recovered legacy activity may have no provenance on either side.
+                # Only the sole unresolved group is safe to close chronologically.
+                or (
+                    owner_turn_id is None
+                    and turn_id is None
+                    and not pending_turn_ids
+                    and not has_unresolved_origin
                 )
             )
             if pending and owns_pending:
