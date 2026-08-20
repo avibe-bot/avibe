@@ -2640,14 +2640,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // is what keeps its first "connected" report from reading as a recovery.
   const eventControllerLegRef = useRef<'unknown' | 'connected' | 'disconnected'>('unknown');
   // When the active stream last proved it was alive, and the cadence the server
-  // said it would prove it at. Null whenever there is no stream to speak for.
+  // said it would prove it at. Null whenever there is no stream to speak for --
+  // including a stream that has connected but not yet been heard from, because a
+  // heartbeat is the only thing that proves continuity and nothing else may
+  // stand in for one. A server too old to send them therefore never reads as
+  // proven, which is the pre-heartbeat behavior this optimization replaces.
   const eventHeartbeatAtRef = useRef<number | null>(null);
   const eventHeartbeatIntervalRef = useRef(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
-  // Whether this stream has ever delivered a heartbeat. A server too old to send
-  // them still completes the handshake, so without this the seeded stamp would
-  // lapse and a watchdog would recycle a perfectly healthy stream on a timer,
-  // forever. Unproven cadence means no watchdog, not a dead stream.
-  const eventHeartbeatObservedRef = useRef(false);
   // Fires when the next heartbeat is overdue. A heartbeat is a continuous clock,
   // so whoever trusts it has to keep watching it: sampling only at the moment a
   // page returns would leave a stream that dies one second later unquestioned
@@ -2848,7 +2847,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // The stamp and the cadence both speak for one socket only; a later stream
     // must earn its own, including the right to be watched on a timer.
     eventHeartbeatAtRef.current = null;
-    eventHeartbeatObservedRef.current = false;
     clearWorkbenchHeartbeatWatchdog();
   };
 
@@ -2873,7 +2871,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * is the browser leg. Reopening it cannot repair the controller leg behind the
    * UI server -- the replacement would inherit the same severed bridge -- so the
    * controller leg is not a term here; it announces its own recovery instead, in
-   * the `workbench.events.bridge.status` listener below.
+   * the `workbench.events.bridge.status` listener below. Same shape for a full
+   * broker queue: whoever can see a loss announces it, because a live socket
+   * cannot be interrogated about what it never carried.
    *
    * All three terms are needed for this leg. `readyState` is the browser's own
    * transport verdict, which it revises on network changes and HTTP/2 ping
@@ -2913,14 +2913,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   const armWorkbenchHeartbeatWatchdog = () => {
     clearWorkbenchHeartbeatWatchdog();
-    // Only a stream that has actually sent one owes another. A deadline is a
+    // Only a stream that has sent a heartbeat owes another one. A deadline is a
     // claim about a cadence, so a server that never declared one cannot be held
     // to it: against an older server -- a rollback under a tab that stayed open
-    // -- this would otherwise close a healthy stream every time the handshake
-    // stamp lapsed, forever, and charge every consumer a catch-up each round.
-    // Such a stream just stops counting as proven, which is the pre-heartbeat
-    // behavior this optimization replaces.
-    if (!eventHeartbeatObservedRef.current) return;
+    // -- this would otherwise close a healthy stream every stale window forever,
+    // charging every consumer a catch-up each round. A null stamp is exactly
+    // that stream, because a heartbeat is the only thing that ever stamps.
     const stampedAt = eventHeartbeatAtRef.current;
     if (stampedAt === null) return;
     const staleAt = stampedAt + workbenchEventStaleAfterMs(eventHeartbeatIntervalRef.current);
@@ -2991,12 +2989,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
       if (eventSourceRef.current !== source) return;
-      // A frame just arrived, which is proof of life in its own right. Seeding
-      // here rather than waiting for the first heartbeat keeps a stream from
-      // reading as unproven for its first cadence. It is a stamp and not yet a
-      // cadence, so it starts no watchdog: what this frame proves is that the
-      // stream is alive now, not that the server will keep saying so.
-      stampWorkbenchHeartbeat(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
+      // Deliberately no stamp here. This frame proves the stream is alive now,
+      // which is not the question: the question is whether it will still be
+      // proving that in a minute, and only a heartbeat answers it. Seeding from
+      // the handshake would hand a stream up to one stale window of unearned
+      // trust -- enough for a suspended tab to return, be believed, and skip the
+      // catch-up for a gap it did have -- and against a server too old to send
+      // heartbeats nothing would ever come along to withdraw it.
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
@@ -3031,10 +3030,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {
         // The frame arrived, which is what matters; keep the current cadence.
       }
-      // This is the server declaring a cadence, which is what makes a deadline
-      // enforceable. Set before stamping, because stamping is what arms it.
-      eventHeartbeatObservedRef.current = true;
+      // The only place a stream is ever stamped, which is what lets a null stamp
+      // mean "this server has not declared a cadence" and keeps the watchdog off
+      // servers that never will.
       stampWorkbenchHeartbeat(intervalMs);
+    });
+    // The server telling us it could not hand us something. A full broker queue
+    // discards events and cannot replay them, so this stream is alive but no
+    // longer complete -- and nothing else would ever say so, since the socket
+    // stays open and the heartbeats keep coming. It is the same kind of news as
+    // a reconnect, so it arrives through the same signal. Read caches are
+    // cleared wholesale because the frame says an event was lost, not which one.
+    source.addEventListener('workbench.events.gap', () => {
+      if (eventSourceRef.current !== source) return;
+      clearReadCache();
+      const connected = workbenchEventHandshake();
+      if (connected) dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<{

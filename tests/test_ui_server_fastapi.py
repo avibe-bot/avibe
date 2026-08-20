@@ -2662,6 +2662,66 @@ def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch
     assert "hidden-secret" not in busy
 
 
+def test_workbench_events_tell_a_subscriber_its_queue_overflowed(monkeypatch, tmp_path):
+    """A dropped event has to reach the client as news rather than as silence.
+
+    The broker's per-subscriber queue is bounded, so "slow subscriber" and "lost
+    events" are one condition -- and nothing else on the wire betrays it: the
+    socket stays open and the heartbeats keep proving it alive. The stream is the
+    only thing positioned to admit what it could not hand over.
+    """
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_until_gap() -> tuple[int, list[str]]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            frames: list[str] = []
+            try:
+                handshake = [decode(await iterator.__anext__()) for _ in range(3)]
+                sub_id = int(json.loads(handshake[1].split("data: ", 1)[1])["sub_id"])
+                # Park the stream inside its read loop before overflowing the
+                # queue. A discard from before the loop started is already
+                # covered by the handshake the client just received, so only a
+                # later one is worth a frame.
+                pending = asyncio.create_task(iterator.__anext__())
+                await asyncio.sleep(0)
+
+                for index in range(400):
+                    broker.publish("session.activity", {"session_id": f"ses{index}"})
+                # One yield runs the whole batch of ``call_soon_threadsafe``
+                # handoffs, so every discard has happened by the time the count
+                # is read.
+                await asyncio.sleep(0)
+                dropped = broker.dropped_count(sub_id)
+
+                frames.append(decode(await asyncio.wait_for(pending, timeout=2)))
+                while "event: workbench.events.gap" not in frames[-1] and len(frames) < 4:
+                    frames.append(decode(await asyncio.wait_for(iterator.__anext__(), timeout=2)))
+            finally:
+                await iterator.aclose()
+        return dropped, frames
+
+    dropped, frames = asyncio.run(collect_until_gap())
+
+    assert dropped > 0
+    gap_frames = [frame for frame in frames if "event: workbench.events.gap" in frame]
+    assert len(gap_frames) == 1
+    # Named, not merely signalled: the client clears its read caches wholesale
+    # because the frame says an event was lost, and the count is what makes the
+    # loss auditable in a log after the fact.
+    assert f'"dropped":{dropped}' in gap_frames[0]
+
+
 def test_workbench_events_allow_show_events_when_show_page_acl_allows(monkeypatch, tmp_path) -> None:
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker

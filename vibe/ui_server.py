@@ -174,6 +174,12 @@ _AUTHORIZATION_REVISION_RECHECK_SECONDS = 1.0
 # proxy keep-alive -- Cloudflare Tunnel's default idle is well below 100s, and
 # mid-tier proxies are happier still with something this short.
 WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S = 15.0
+# Told to a subscriber whose broker queue overflowed. A dropped event is a hole
+# in that one subscriber's view with nothing else to reveal it: the socket is
+# healthy, heartbeats keep arriving, and the broker cannot replay. Naming the
+# hole is what lets the client re-read instead of trusting a stream that is
+# alive but no longer complete.
+WORKBENCH_EVENTS_GAP_EVENT = "workbench.events.gap"
 _TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
@@ -11778,11 +11784,31 @@ async def workbench_events():
             )
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             last_heartbeat_at = time.monotonic()
+            # Anything discarded before this point is already covered by the
+            # handshake above: the client catches up on connect. From here on a
+            # discard is news, so only growth past this reading is reported.
+            last_dropped = broker.dropped_count(sub_id)
             while True:
                 state = await authorization_state()
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
                     return
+                # Before the heartbeat, because a heartbeat is a claim that this
+                # stream is worth trusting and an unreported drop would make that
+                # claim false. Reported from the generator rather than from the
+                # broker because this is where there is room to say it: the queue
+                # that overflowed is drained here, and the client is reachable
+                # here. Growth, never a reset -- resetting a shared counter would
+                # let one reader consume another's evidence.
+                dropped = broker.dropped_count(sub_id)
+                if dropped > last_dropped:
+                    lost = dropped - last_dropped
+                    last_dropped = dropped
+                    logger.warning(
+                        "workbench events: telling subscriber %s it lost %s event(s)", sub_id, lost
+                    )
+                    yield f'event: {WORKBENCH_EVENTS_GAP_EVENT}\ndata: {{"dropped":{lost}}}\n\n'
+                    continue
                 # A fixed cadence, deliberately not "only when the queue went
                 # quiet". Data frames are no proof of life to a client that may
                 # be filtered out of all of them, and one unconditional clock

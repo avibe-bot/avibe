@@ -5,10 +5,10 @@ export const WORKBENCH_EVENT_RETRY_MAX_MS = 15_000;
 export const WORKBENCH_EVENT_OPEN_TIMEOUT_MS = 20_000;
 
 /**
- * Heartbeat cadence to assume until the server announces its own. It only has
- * to cover the window between the `connected` frame and the first heartbeat; a
- * server too old to send heartbeats never stamps one either, so its streams
- * simply never read as proven.
+ * Heartbeat cadence to assume when the server has not declared a usable one.
+ * Only ever sizes the window around a heartbeat that did arrive: a stream is
+ * unproven until one does, so a server too old to send them never reads as
+ * proven no matter what this says.
  */
 export const WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS = 15_000;
 

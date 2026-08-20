@@ -94,6 +94,11 @@ const emitControllerLeg = (connected: boolean) => {
   });
 };
 
+/** The UI server admitting it discarded events for this subscriber. */
+const emitDroppedEvents = (dropped: number) => {
+  FakeEventSource.latest().emit('workbench.events.gap', { dropped });
+};
+
 /** Open a stream and complete its handshake, as a real connect would. */
 const mountStream = () => {
   render(<ApiProvider><Subscriber /></ApiProvider>);
@@ -102,8 +107,8 @@ const mountStream = () => {
 
 /**
  * The ordinary case: a stream that handshook and then declared its cadence.
- * Only a server that declares one can be held to a deadline, so anything about
- * the watchdog has to start here rather than at the handshake.
+ * A handshake is not proof of continuity, so anything that expects a stream to
+ * vouch for itself has to start here rather than at the handshake.
  */
 const mountConnectedStream = () => {
   mountStream();
@@ -265,7 +270,7 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(onConnected).toHaveBeenCalledTimes(3);
   });
 
-  it('never puts a stream on a deadline its server never declared', () => {
+  it('never lets a handshake alone vouch for a stream', () => {
     mountStream();
     const legacy = FakeEventSource.latest();
 
@@ -279,9 +284,10 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(onConnected).toHaveBeenCalledTimes(1);
 
-    // It still cannot vouch for a gap, so the reactivation edge recycles it --
-    // which is the pre-heartbeat behavior this optimization replaces, and no
-    // worse than it.
+    // But it never counts as proven either, not even for one cadence: the
+    // handshake says this stream is alive now, which is not the question. So the
+    // reactivation edge recycles it immediately -- the pre-heartbeat behavior
+    // this optimization replaces, and no worse than it.
     reactivate();
     expect(legacy.closed).toBe(true);
   });
@@ -294,5 +300,29 @@ describe('ApiProvider workbench stream liveness', () => {
     emitHeartbeat();
     vi.advanceTimersByTime(STALE_AFTER_MS);
     expect(proven.closed).toBe(true);
+  });
+
+  it('treats discarded events as a gap on a stream that stayed healthy', () => {
+    mountConnectedStream();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // A full broker queue discards events and cannot replay them, so this
+    // stream is alive but no longer complete. Nothing else can say so: the
+    // socket never broke and the heartbeats keep proving it.
+    emitDroppedEvents(3);
+    expect(onConnected).toHaveBeenCalledTimes(2);
+
+    // Announced in place, because the loss is behind the socket rather than in
+    // it -- reopening would discard the same events again under the same load.
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(FakeEventSource.latest().closed).toBe(false);
+
+    // And the stream still speaks for itself afterwards: a gap is news about
+    // what was missed, not a verdict on whether the stream is alive.
+    vi.advanceTimersByTime(STALE_AFTER_MS - 1_000);
+    emitHeartbeat();
+    reactivate();
+    expect(FakeEventSource.latest().closed).toBe(false);
+    expect(onConnected).toHaveBeenCalledTimes(2);
   });
 });
