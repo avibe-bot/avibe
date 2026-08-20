@@ -5841,19 +5841,9 @@ def _show_access_page_identity_matches(body: Any, page_id: str) -> bool:
 
 
 def _valid_show_access_apply_payload(payload: dict[str, Any]) -> bool:
-    return bool(
-        isinstance(payload.get("page_id"), str)
-        and not isinstance(payload.get("expected_revision"), bool)
-        and isinstance(payload.get("expected_revision"), int)
-        and payload["expected_revision"] >= 0
-        and isinstance(payload.get("target_access_mode"), str)
-        and (
-            payload.get("target_share_id") is None
-            or isinstance(payload.get("target_share_id"), str)
-        )
-        and isinstance(payload.get("target_emails"), list)
-        and all(isinstance(email, str) for email in payload["target_emails"])
-    )
+    from core.show_pages import parse_show_access_apply_request
+
+    return parse_show_access_apply_request(payload) is not None
 
 
 @app.route("/api/show-pages/<session_id>/access-settings/read", methods=["POST"])
@@ -5902,19 +5892,12 @@ async def show_page_access_settings_apply(session_id):
     from vibe import api, internal_client
 
     payload = request.json if isinstance(request.json, dict) else {}
-    required = {
-        "page_id",
-        "expected_revision",
-        "target_access_mode",
-        "target_share_id",
-        "target_emails",
-    }
     if payload.get("page_id") != session_id:
         return _show_access_http_response(
             {"ok": False, "error": "show_access_page_identity_mismatch"},
             400,
         )
-    if set(payload) != required or not _valid_show_access_apply_payload(payload):
+    if not _valid_show_access_apply_payload(payload):
         return _show_access_http_response(
             {"ok": False, "error": "invalid_show_access_apply_request"},
             400,
@@ -13036,6 +13019,34 @@ def _show_public_authenticated_context(config: V2Config | None):
     return context_from_session_payload(session) if session is not None else None
 
 
+def _show_access_visitor_from_context(context: Any):
+    from core.show_pages import ShowAccessVisitor, normalize_show_access_email
+
+    if context is None:
+        return None
+    normalized_email = ""
+    if context.email:
+        try:
+            normalized_email = normalize_show_access_email(context.email)
+        except (TypeError, ValueError):
+            normalized_email = ""
+    return ShowAccessVisitor(
+        normalized_email=normalized_email,
+        organization_id=context.organization_id,
+        organization_member_id=context.organization_member_id,
+        organization_role=context.organization_role,
+        group_ids=frozenset(context.group_ids or ()),
+    )
+
+
+def _limited_show_access_admits(access: Any, visitor: Any) -> bool:
+    from core.show_pages import limited_show_access_admits
+
+    return access is not None and visitor is not None and limited_show_access_admits(
+        access, visitor
+    )
+
+
 def _show_limited_viewer_is_allowed(
     context: Any,
     access: Any,
@@ -13043,18 +13054,9 @@ def _show_limited_viewer_is_allowed(
     *,
     allow_page_scoped: bool = True,
 ) -> bool:
-    from core.show_pages import normalize_show_access_email
-
-    allowlisted = False
-    if context.email:
-        try:
-            allowlisted = (
-                access is not None
-                and normalize_show_access_email(context.email)
-                in access.normalized_emails
-            )
-        except (TypeError, ValueError):
-            allowlisted = False
+    allowlisted = _limited_show_access_admits(
+        access, _show_access_visitor_from_context(context)
+    )
     return allowlisted or (allow_page_scoped and context.can_use_show_page(page_id))
 
 
@@ -14905,7 +14907,7 @@ async def complete_show_identity_login():
             access.access_mode != "limited"
             or page.visibility != "limited"
             or access.share_id != state.share_id
-            or identity.normalized_email not in access.normalized_emails
+            or not _limited_show_access_admits(access, identity.visitor())
         ):
             return _show_identity_not_found_response()
 
@@ -14924,6 +14926,7 @@ async def complete_show_identity_login():
             page_id=page.session_id,
             share_id=state.share_id,
             normalized_email=identity.normalized_email,
+            organization=identity.organization,
         )
         response = redirect(state.return_target, code=303)
         response.set_cookie(
@@ -14974,12 +14977,7 @@ def redirect_public_show_page_to_canonical_path(share_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_public_show_page(share_id, asset_path):
-    from core.show_pages import (
-        ShowPageError,
-        ShowPageStore,
-        ensure_show_page_dir,
-        normalize_show_access_email,
-    )
+    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
     from vibe import show_identity
 
     config = _load_remote_access_config()
@@ -15034,7 +15032,7 @@ async def serve_public_show_page(share_id, asset_path):
                 and page.visibility == "limited"
                 and access.access_mode == "limited"
                 and access.share_id == share_id
-                and lease.normalized_email in access.normalized_emails
+                and _limited_show_access_admits(access, lease.visitor())
             )
             if not lease_is_current:
                 current_limited_binding = (

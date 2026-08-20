@@ -658,46 +658,35 @@ def create_app(
 
     @app.post("/internal/show-access/apply")
     async def _show_access_apply(request: Request) -> Any:
-        from core.show_pages import ShowPageError, ShowPageStore, show_access_payload
+        from core.show_pages import (
+            ShowPageError,
+            ShowPageStore,
+            parse_show_access_apply_request,
+            show_access_payload,
+        )
 
         payload = await _safe_json(request)
-        required = {
-            "page_id",
-            "expected_revision",
-            "target_access_mode",
-            "target_share_id",
-            "target_emails",
-        }
-        if (
-            set(payload) != required
-            or not isinstance(payload.get("page_id"), str)
-            or isinstance(payload.get("expected_revision"), bool)
-            or not isinstance(payload.get("expected_revision"), int)
-            or payload["expected_revision"] < 0
-            or not isinstance(payload.get("target_access_mode"), str)
-            or not (
-                payload.get("target_share_id") is None
-                or isinstance(payload.get("target_share_id"), str)
-            )
-            or not isinstance(payload.get("target_emails"), list)
-            or any(not isinstance(email, str) for email in payload["target_emails"])
-        ):
+        parsed = parse_show_access_apply_request(payload)
+        if parsed is None:
             return JSONResponse(
                 status_code=400,
                 content={"ok": False, "error": "invalid_show_access_apply_request"},
             )
-        page_id = payload["page_id"]
+        page_id = parsed["page_id"]
 
         def _apply() -> dict[str, Any]:
             store = ShowPageStore()
             try:
-                result = store.apply_access(
-                    page_id,
-                    expected_revision=payload["expected_revision"],
-                    target_access_mode=payload["target_access_mode"],
-                    target_share_id=payload["target_share_id"],
-                    target_emails=payload["target_emails"],
-                )
+                apply_kwargs = {
+                    "expected_revision": parsed["expected_revision"],
+                    "target_access_mode": parsed["target_access_mode"],
+                    "target_share_id": parsed["target_share_id"],
+                }
+                if "target_emails" in parsed:
+                    apply_kwargs["target_emails"] = parsed["target_emails"]
+                else:
+                    apply_kwargs["target_entries"] = parsed["target_entries"]
+                result = store.apply_access(page_id, **apply_kwargs)
             finally:
                 store.close()
             if result.show_access.page_id != page_id:

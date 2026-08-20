@@ -16,7 +16,14 @@ from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError
 
 from config.v2_config import V2Config
-from core.show_pages import normalize_show_access_email, validate_share_id
+from core.show_pages import (
+    SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH,
+    SHOW_ACCESS_ORGANIZATION_ROLES,
+    SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT,
+    ShowAccessVisitor,
+    normalize_show_access_email,
+    validate_share_id,
+)
 
 
 CALLBACK_PATH = "/auth/show-identity/callback"
@@ -48,12 +55,41 @@ class ShowIdentityState:
     callback_origin: str
 
 
+_ORGANIZATION_CLAIM_NAMES = (
+    "organization_id",
+    "organization_member_id",
+    "organization_role",
+    "group_ids",
+)
+
+
+@dataclass(frozen=True)
+class ShowIdentityOrganization:
+    organization_id: str
+    organization_member_id: str
+    organization_role: str
+    group_ids: frozenset[str]
+
+
 @dataclass(frozen=True)
 class VerifiedShowIdentity:
     subject: str
     normalized_email: str
     assertion_id: str
     expires_at: int
+    organization: ShowIdentityOrganization | None = None
+
+    def visitor(self) -> ShowAccessVisitor:
+        organization = self.organization
+        if organization is None:
+            return ShowAccessVisitor(normalized_email=self.normalized_email)
+        return ShowAccessVisitor(
+            normalized_email=self.normalized_email,
+            organization_id=organization.organization_id,
+            organization_member_id=organization.organization_member_id,
+            organization_role=organization.organization_role,
+            group_ids=organization.group_ids,
+        )
 
 
 @dataclass(frozen=True)
@@ -61,6 +97,19 @@ class ShowGuestLease:
     page_id: str
     share_id: str
     normalized_email: str
+    organization: ShowIdentityOrganization | None = None
+
+    def visitor(self) -> ShowAccessVisitor:
+        organization = self.organization
+        if organization is None:
+            return ShowAccessVisitor(normalized_email=self.normalized_email)
+        return ShowAccessVisitor(
+            normalized_email=self.normalized_email,
+            organization_id=organization.organization_id,
+            organization_member_id=organization.organization_member_id,
+            organization_role=organization.organization_role,
+            group_ids=organization.group_ids,
+        )
 
 
 def _b64url_encode(value: bytes) -> str:
@@ -334,6 +383,7 @@ def verify_show_identity_assertion(
         raise ShowIdentityError("invalid_assertion")
     try:
         normalized_email = normalize_show_access_email(claims["verified_email"])
+        organization = _parse_show_identity_organization(claims)
     except Exception as exc:
         raise ShowIdentityError("invalid_assertion") from exc
     return VerifiedShowIdentity(
@@ -341,7 +391,84 @@ def verify_show_identity_assertion(
         normalized_email=normalized_email,
         assertion_id=claims["jti"],
         expires_at=claims["exp"],
+        organization=organization,
     )
+
+
+def _optional_organization_identifier(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ShowIdentityError("invalid_assertion")
+    identifier = value.strip()
+    if not identifier or len(identifier) > SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH:
+        raise ShowIdentityError("invalid_assertion")
+    return identifier
+
+
+def _parse_show_identity_organization(claims: dict[str, Any]) -> ShowIdentityOrganization | None:
+    """Read the optional all-or-nothing organization block.
+
+    Backend signs the four claims together or not at all. A partial block,
+    an unknown role, or a malformed group list is an invalid assertion, not
+    a missing block: missing means fail-closed for group/organization
+    entries, invalid means the visitor never reached admission.
+    """
+
+    present = [name for name in _ORGANIZATION_CLAIM_NAMES if name in claims]
+    if not present:
+        return None
+    if set(present) != set(_ORGANIZATION_CLAIM_NAMES):
+        raise ShowIdentityError("invalid_assertion")
+
+    organization_id = _optional_organization_identifier(claims.get("organization_id"))
+    organization_member_id = _optional_organization_identifier(
+        claims.get("organization_member_id")
+    )
+    organization_role = claims.get("organization_role")
+    raw_group_ids = claims.get("group_ids")
+    if (
+        organization_id is None
+        or organization_member_id is None
+        or not isinstance(organization_role, str)
+        or organization_role not in SHOW_ACCESS_ORGANIZATION_ROLES
+        or not isinstance(raw_group_ids, list)
+        or len(raw_group_ids) > SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT
+    ):
+        raise ShowIdentityError("invalid_assertion")
+    group_ids: set[str] = set()
+    for raw in raw_group_ids:
+        group_id = _optional_organization_identifier(raw)
+        if group_id is None:
+            raise ShowIdentityError("invalid_assertion")
+        group_ids.add(group_id)
+    return ShowIdentityOrganization(
+        organization_id=organization_id,
+        organization_member_id=organization_member_id,
+        organization_role=organization_role,
+        group_ids=frozenset(group_ids),
+    )
+
+
+def _organization_lease_payload(organization: ShowIdentityOrganization) -> dict[str, Any]:
+    return {
+        "organization_id": organization.organization_id,
+        "organization_member_id": organization.organization_member_id,
+        "organization_role": organization.organization_role,
+        "group_ids": sorted(organization.group_ids),
+    }
+
+
+def _parse_lease_organization(payload: dict[str, Any]) -> ShowIdentityOrganization | None:
+    present = [name for name in _ORGANIZATION_CLAIM_NAMES if name in payload]
+    if not present:
+        return None
+    if set(present) != set(_ORGANIZATION_CLAIM_NAMES):
+        raise ShowIdentityError("invalid_lease")
+    try:
+        return _parse_show_identity_organization(payload)
+    except ShowIdentityError as exc:
+        raise ShowIdentityError("invalid_lease") from exc
 
 
 def consume_verified_show_identity(
@@ -380,19 +507,23 @@ def make_show_guest_lease(
     page_id: str,
     share_id: str,
     normalized_email: str,
+    organization: ShowIdentityOrganization | None = None,
 ) -> str:
     # Deliberately a browser-session lease: access changes govern new
     # admissions without interrupting a page the user already opened.
+    payload: dict[str, Any] = {
+        "v": 1,
+        "page_id": page_id,
+        "share_id": validate_share_id(share_id),
+        "normalized_email": normalize_show_access_email(normalized_email),
+        "lease_id": secrets.token_urlsafe(18),
+    }
+    if organization is not None:
+        payload.update(_organization_lease_payload(organization))
     return _encode_signed_payload(
         _lease_secret(config),
         _LEASE_PREFIX,
-        {
-            "v": 1,
-            "page_id": page_id,
-            "share_id": validate_share_id(share_id),
-            "normalized_email": normalize_show_access_email(normalized_email),
-            "lease_id": secrets.token_urlsafe(18),
-        },
+        payload,
     )
 
 
@@ -408,13 +539,17 @@ def read_show_guest_lease(
         token,
         max_bytes=MAX_STATE_BYTES,
     )
-    if set(payload) != {
+    required = {
         "v",
         "page_id",
         "share_id",
         "normalized_email",
         "lease_id",
-    }:
+    }
+    extra = set(payload) - required
+    if extra and extra != set(_ORGANIZATION_CLAIM_NAMES):
+        raise ShowIdentityError("invalid_lease")
+    if not required.issubset(payload):
         raise ShowIdentityError("invalid_lease")
     if payload.get("v") != 1:
         raise ShowIdentityError("invalid_lease")
@@ -436,10 +571,14 @@ def read_show_guest_lease(
         raise ShowIdentityError("invalid_lease")
     try:
         normalized_email = normalize_show_access_email(payload.get("normalized_email"))
+        organization = _parse_lease_organization(payload)
+    except ShowIdentityError:
+        raise
     except Exception as exc:
         raise ShowIdentityError("invalid_lease") from exc
     return ShowGuestLease(
         page_id=page_id,
         share_id=share_id,
         normalized_email=normalized_email,
+        organization=organization,
     )

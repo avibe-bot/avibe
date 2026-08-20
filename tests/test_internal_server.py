@@ -8528,6 +8528,18 @@ def test_show_access_settings_read_returns_controller_snapshot(monkeypatch):
             "share_id": "stable-link",
             "revision": 7,
             "normalized_emails": ["alice@example.com", "bob@example.com"],
+            "entries": [
+                {
+                    "kind": "email",
+                    "value": "alice@example.com",
+                    "organization_id": None,
+                },
+                {
+                    "kind": "email",
+                    "value": "bob@example.com",
+                    "organization_id": None,
+                },
+            ],
         }
     }
     assert captured == ["ses-show-access", "closed"]
@@ -8617,6 +8629,7 @@ def test_show_access_apply_preserves_atomic_result_status(monkeypatch, status):
             "share_id": "current-link",
             "revision": 9,
             "normalized_emails": [],
+            "entries": [],
         },
     }
     assert captured == {
@@ -8626,6 +8639,74 @@ def test_show_access_apply_preserves_atomic_result_status(monkeypatch, status):
         "target_share_id": "candidate-link",
         "target_emails": ["guest@example.com"],
     }
+
+
+def test_show_access_apply_writes_and_reads_group_and_organization_entries(monkeypatch):
+    from core import show_pages
+
+    captured: dict = {}
+
+    class _Store:
+        def apply_access(self, page_id, **kwargs):
+            captured.update(page_id=page_id, **kwargs)
+            return show_pages.ShowAccessApplyResult(
+                status="applied",
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="limited",
+                    share_id="stable-link",
+                    revision=2,
+                    entries=(
+                        show_pages.ShowAccessEntry("group", "group-7", "org-1"),
+                        show_pages.ShowAccessEntry("organization", "org-1", "org-1"),
+                    ),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "page_id": "ses-show-access",
+        "expected_revision": 1,
+        "target_access_mode": "limited",
+        "target_share_id": "stable-link",
+        "target_entries": [
+            {"kind": "group", "value": "group-7"},
+            {"kind": "organization", "value": "org-1"},
+        ],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/show-access/apply", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "applied",
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "limited",
+            "share_id": "stable-link",
+            "revision": 2,
+            "normalized_emails": [],
+            "entries": [
+                {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+                {
+                    "kind": "organization",
+                    "value": "org-1",
+                    "organization_id": "org-1",
+                },
+            ],
+        },
+    }
+    assert captured["target_entries"] == payload["target_entries"]
+    assert "target_emails" not in captured
 
 
 def test_show_access_internal_identity_mismatch_fails_closed(monkeypatch):

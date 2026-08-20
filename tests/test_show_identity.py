@@ -23,6 +23,28 @@ def _identity_config(monkeypatch, tmp_path):
     return config
 
 
+def _signed_assertion(monkeypatch, claims):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    assertion = jwt.encode(
+        claims,
+        private_key,
+        algorithm="RS256",
+        headers={"typ": "JWT", "kid": "current"},
+    )
+
+    class JwkClientStub:
+        def __init__(self, uri, *, timeout):
+            assert uri == "https://backend.test/oauth/jwks.json"
+            assert timeout == 5
+
+        def get_signing_key_from_jwt(self, token):
+            assert token == assertion
+            return type("SigningKey", (), {"key": private_key.public_key()})()
+
+    monkeypatch.setattr(show_identity, "PyJWKClient", JwkClientStub)
+    return assertion
+
+
 def test_show_identity_state_round_trips_only_for_its_callback_origin(monkeypatch, tmp_path):
     config = _identity_config(monkeypatch, tmp_path)
     authorization_url = show_identity.begin_show_identity_authorization(
@@ -127,6 +149,7 @@ def test_show_identity_assertion_verifies_paired_issuer_instance_and_nonce(
     assert identity.normalized_email == "viewer@example.com"
     assert identity.assertion_id == "assertion-1"
     assert identity.expires_at == issued_at + 300
+    assert identity.organization is None
 
     with pytest.raises(show_identity.ShowIdentityError, match="invalid_assertion"):
         show_identity.verify_show_identity_assertion(
@@ -232,4 +255,110 @@ def test_show_guest_lease_is_page_and_share_bound_without_live_membership_state(
             config,
             token,
             expected_share_id="other-page",
+        )
+
+
+def _base_assertion_claims(*, issued_at: int, extra: dict | None = None) -> dict:
+    claims = {
+        "iss": "https://backend.test",
+        "aud": "avibe-show-identity:vr_client_123",
+        "sub": "user-1",
+        "iat": issued_at,
+        "exp": issued_at + 300,
+        "jti": "assertion-org",
+        "nonce": "nonce-1",
+        "instance_id": "inst_123",
+        "verified_email": "viewer@example.com",
+    }
+    if extra:
+        claims.update(extra)
+    return claims
+
+
+def test_show_identity_assertion_accepts_complete_organization_block(monkeypatch, tmp_path):
+    config = _identity_config(monkeypatch, tmp_path)
+    issued_at = int(time.time())
+    assertion = _signed_assertion(
+        monkeypatch,
+        _base_assertion_claims(
+            issued_at=issued_at,
+            extra={
+                "organization_id": "org-1",
+                "organization_member_id": "mem-1",
+                "organization_role": "member",
+                "group_ids": ["group-7", "group-8"],
+            },
+        ),
+    )
+
+    identity = show_identity.verify_show_identity_assertion(
+        config,
+        assertion,
+        expected_nonce="nonce-1",
+    )
+    assert identity.organization is not None
+    assert identity.organization.organization_id == "org-1"
+    assert identity.organization.organization_member_id == "mem-1"
+    assert identity.organization.organization_role == "member"
+    assert identity.organization.group_ids == frozenset({"group-7", "group-8"})
+    visitor = identity.visitor()
+    assert visitor.has_organization_block
+    assert visitor.group_ids == frozenset({"group-7", "group-8"})
+
+    token = show_identity.make_show_guest_lease(
+        config,
+        page_id="page-1",
+        share_id="shared-page",
+        normalized_email=identity.normalized_email,
+        organization=identity.organization,
+    )
+    lease = show_identity.read_show_guest_lease(
+        config,
+        token,
+        expected_share_id="shared-page",
+    )
+    assert lease.organization == identity.organization
+    assert lease.visitor().group_ids == identity.organization.group_ids
+
+
+def test_show_identity_assertion_rejects_a_partial_organization_block(monkeypatch, tmp_path):
+    config = _identity_config(monkeypatch, tmp_path)
+    issued_at = int(time.time())
+    assertion = _signed_assertion(
+        monkeypatch,
+        _base_assertion_claims(
+            issued_at=issued_at,
+            extra={"organization_id": "org-1", "organization_role": "member"},
+        ),
+    )
+
+    with pytest.raises(show_identity.ShowIdentityError, match="invalid_assertion"):
+        show_identity.verify_show_identity_assertion(
+            config,
+            assertion,
+            expected_nonce="nonce-1",
+        )
+
+
+def test_show_identity_assertion_rejects_an_unknown_organization_role(monkeypatch, tmp_path):
+    config = _identity_config(monkeypatch, tmp_path)
+    issued_at = int(time.time())
+    assertion = _signed_assertion(
+        monkeypatch,
+        _base_assertion_claims(
+            issued_at=issued_at,
+            extra={
+                "organization_id": "org-1",
+                "organization_member_id": "mem-1",
+                "organization_role": "guest",
+                "group_ids": [],
+            },
+        ),
+    )
+
+    with pytest.raises(show_identity.ShowIdentityError, match="invalid_assertion"):
+        show_identity.verify_show_identity_assertion(
+            config,
+            assertion,
+            expected_nonce="nonce-1",
         )

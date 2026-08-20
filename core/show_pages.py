@@ -58,6 +58,13 @@ ORGANIZATION_ACCESS_ENTRY_KINDS = (
     ACCESS_ENTRY_KIND_GROUP,
     ACCESS_ENTRY_KIND_ORGANIZATION,
 )
+# Active-member roles the show-identity organization block may assert. A
+# missing or unknown role is fail-closed for group and organization entries.
+SHOW_ACCESS_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+# Bound the assertion's group list so a lease cookie cannot grow without
+# limit. It is independent of SHOW_ACCESS_GROUP_MAX_COUNT (how many groups a
+# page may grant).
+SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT = 256
 SHOW_ACCESS_EMAIL_MAX_COUNT = 64
 SHOW_ACCESS_GROUP_MAX_COUNT = 64
 # Per-kind write caps. "This organization may read" is one switch, so it caps at
@@ -192,6 +199,65 @@ class ShowAccess:
 
     def entries_of_kind(self, kind: str) -> tuple[ShowAccessEntry, ...]:
         return tuple(entry for entry in self.entries if entry.kind == kind)
+
+
+@dataclass(frozen=True)
+class ShowAccessVisitor:
+    """Identity used to match a Limited ``/p`` audience.
+
+    ``organization_id`` / ``organization_member_id`` / ``organization_role`` /
+    ``group_ids`` are the optional show-identity organization block. Absence is
+    fail-closed for group and organization entries and never grants them.
+    """
+
+    normalized_email: str
+    organization_id: str | None = None
+    organization_member_id: str | None = None
+    organization_role: str | None = None
+    group_ids: frozenset[str] = frozenset()
+
+    @property
+    def has_organization_block(self) -> bool:
+        return bool(
+            self.organization_id
+            and self.organization_member_id
+            and self.organization_role in SHOW_ACCESS_ORGANIZATION_ROLES
+        )
+
+
+def limited_show_access_admits(access: ShowAccess, visitor: ShowAccessVisitor) -> bool:
+    """Admit a Limited visitor when any audience entry matches.
+
+    The three kinds are peers and OR-ed: an email hit, a group intersection,
+    or active membership of the page's organization. Every hit is read-only;
+    this function does not grant HMR, annotations, or Agent. Group and
+    organization entries fail closed when the visitor has no organization
+    block, including a block for a different organization.
+    """
+
+    if access.access_mode != ACCESS_MODE_LIMITED:
+        return False
+    for entry in access.entries:
+        if entry.kind == ACCESS_ENTRY_KIND_EMAIL:
+            if visitor.normalized_email and visitor.normalized_email == entry.value:
+                return True
+            continue
+        if not visitor.has_organization_block:
+            continue
+        if entry.kind == ACCESS_ENTRY_KIND_GROUP:
+            if (
+                entry.organization_id == visitor.organization_id
+                and entry.value in visitor.group_ids
+            ):
+                return True
+        elif entry.kind == ACCESS_ENTRY_KIND_ORGANIZATION:
+            if (
+                entry.value == visitor.organization_id
+                and entry.organization_id == visitor.organization_id
+                and visitor.organization_role in SHOW_ACCESS_ORGANIZATION_ROLES
+            ):
+                return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -393,17 +459,96 @@ def show_access_entry_payload(entry: ShowAccessEntry) -> dict[str, Any]:
 
 
 def show_access_payload(show_access: ShowAccess) -> dict[str, Any]:
-    # The wire shape stays email-only until the admission/UI lanes consume the
-    # heterogeneous set. ``show_access_entry_payload`` and ``ShowAccess.entries``
-    # are the additive surface those lanes read; putting ``entries`` on this
-    # payload here would change the internal-server JSON contract in this lane.
     return {
         "page_id": show_access.page_id,
         "access_mode": show_access.access_mode,
         "share_id": show_access.share_id,
         "revision": show_access.revision,
         "normalized_emails": list(show_access.normalized_emails),
+        "entries": [show_access_entry_payload(entry) for entry in show_access.entries],
     }
+
+
+def _is_show_access_entries_payload(entries: Any) -> bool:
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            return False
+        if set(entry) - {"kind", "value", "organization_id"}:
+            return False
+        kind = entry.get("kind")
+        value = entry.get("value")
+        organization_id = entry.get("organization_id")
+        if "kind" in entry and not isinstance(kind, str):
+            return False
+        if "value" in entry and value is not None and not isinstance(value, str):
+            return False
+        if (
+            "organization_id" in entry
+            and organization_id is not None
+            and not isinstance(organization_id, str)
+        ):
+            return False
+    return True
+
+
+def parse_show_access_apply_request(payload: Any) -> dict[str, Any] | None:
+    """Return store kwargs for a well-formed apply body, else None.
+
+    Exactly one of ``target_emails`` or ``target_entries`` may be present.
+    The email-only form remains the complete-replacement shorthand; the
+    entry form is how group and organization grants are written.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    keys = set(payload)
+    has_emails = "target_emails" in keys
+    has_entries = "target_entries" in keys
+    if has_emails == has_entries:
+        return None
+    expected = {
+        "page_id",
+        "expected_revision",
+        "target_access_mode",
+        "target_share_id",
+    }
+    expected.add("target_emails" if has_emails else "target_entries")
+    if keys != expected:
+        return None
+    page_id = payload.get("page_id")
+    expected_revision = payload.get("expected_revision")
+    target_access_mode = payload.get("target_access_mode")
+    target_share_id = payload.get("target_share_id")
+    if (
+        not isinstance(page_id, str)
+        or isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+        or not isinstance(target_access_mode, str)
+        or not (target_share_id is None or isinstance(target_share_id, str))
+    ):
+        return None
+    parsed: dict[str, Any] = {
+        "page_id": page_id,
+        "expected_revision": expected_revision,
+        "target_access_mode": target_access_mode,
+        "target_share_id": target_share_id,
+    }
+    if has_emails:
+        emails = payload.get("target_emails")
+        if not isinstance(emails, list) or any(
+            not isinstance(email, str) for email in emails
+        ):
+            return None
+        parsed["target_emails"] = emails
+        return parsed
+    entries = payload.get("target_entries")
+    if not _is_show_access_entries_payload(entries):
+        return None
+    parsed["target_entries"] = entries
+    return parsed
 
 
 def show_page_dir(session_id: str) -> Path:
