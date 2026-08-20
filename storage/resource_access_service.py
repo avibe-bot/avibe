@@ -335,13 +335,25 @@ def resource_user_context_from_metadata(
         paired_instance_id, paired_kind = configured
         from storage import remote_access_authorization_service
 
-        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+        ready = remote_access_authorization_service.binding_is_ready_for_pairing(
             instance_id=paired_instance_id,
             instance_kind=paired_kind,
             ensure=False,
-            bootstrap=True,
-        ):
-            # Kind is not yet reconciled; do not project a Personal bypass.
+            # Never bootstrap from this call: it can run while a SQLite writer
+            # lock is already held (queued-delivery recheck). Opening a second
+            # write connection here deadlocks; the interactive/UI path hoists
+            # bootstrap via remote_access.binding_is_ready(..., bootstrap=True).
+            bootstrap=False,
+        )
+        # An absent durable row is an upgrade artifact, not evidence the
+        # pairing is wrong. Identity matching below still applies; the
+        # authorization consumers (binding_is_ready) fail closed / bootstrap
+        # on their own path. Only an explicit reconciling/mismatched row
+        # means "do not project a Personal bypass from this snapshot".
+        state = remote_access_authorization_service.load_instance_binding_state(
+            ensure=False
+        )
+        if not ready and state is not None:
             return None
         if context.instance_kind is not None and (
             not paired_instance_id or not paired_kind
@@ -432,7 +444,19 @@ def _configured_resource_state() -> ConfiguredResourceState:
     try:
         from config.v2_config import V2Config
 
-        cloud = V2Config.load().remote_access.vibe_cloud
+        loaded = V2Config.load()
+        # A recovered/defaulted load is not an authoritative unpaired state:
+        # the file is broken and the user will repair it. Treat it as a
+        # transient UNAVAILABLE so we never seal snapshots against empty
+        # recovery defaults.
+        if getattr(loaded, "load_warnings", ()):
+            return ConfiguredResourceState(
+                status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+                instance_id=None,
+                instance_kind=None,
+                runtime_ready=False,
+            )
+        cloud = loaded.remote_access.vibe_cloud
         raw_instance_id = cloud.instance_id
         instance_id = _clean_optional_string(raw_instance_id)
         if raw_instance_id not in (None, "") and instance_id is None:
