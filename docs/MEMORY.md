@@ -64,10 +64,12 @@ EverOS rerank provider (`deepinfra`, `vllm`, or `dashscope`) and configure that
 provider's Base URL, model, and API key together. Changing a configured
 endpoint is admitted by a provider-specific bounded preflight before it is
 saved. Older configs without `provider` keep the DeepInfra probe and sidecar
-protocol. Leave the rerank fields empty to keep the standard Memory search
-tier. Removing the saved reranking endpoint clears the provider and the three
-endpoint values and does not rebuild the embedding index. DashScope currently
-accepts only `gte-rerank-v2` at `https://dashscope.aliyuncs.com`.
+protocol, except an omitted-provider Bailian workspace host
+(`*.maas.aliyuncs.com`) is inferred as DashScope. Leave the rerank fields empty
+to keep the standard Memory search tier. Removing the saved reranking endpoint
+clears the provider and the three endpoint values and does not rebuild the
+embedding index. DashScope currently accepts only `gte-rerank-v2`; the Base URL
+is either `https://dashscope.aliyuncs.com` or a Bailian workspace host.
 
 ## Processing Record
 
