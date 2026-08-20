@@ -1091,7 +1091,7 @@ INBOX_ACTIVITY_TYPES = types_with("inboxActivity")
 TRANSCRIPT_TYPES = types_with("transcript")
 _INBOX_PREVIEW_TYPES = types_with("inboxPreview")
 _INBOX_SETTLES_REPLY_TYPES = types_with("inboxSettlesReply")
-_DETACHED_BOUNDARY_TYPES = types_with("detachedBoundary")
+_DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _UNREAD_TYPES = types_with("unread")
 
 
@@ -1286,7 +1286,7 @@ def list_inbox_sessions(
         if active_turn_reply_only:
             query = query.where(
                 ~and_(
-                    msg.c.type.in_(_DETACHED_BOUNDARY_TYPES),
+                    msg.c.type.in_(_DETACHED_COMPLETION_TYPES),
                     func.coalesce(func.json_extract(msg.c.metadata_json, "$.detached"), 0)
                     == 1,
                 )

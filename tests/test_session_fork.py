@@ -1413,7 +1413,7 @@ def test_fork_source_state_keeps_detached_failure_outside_current_turn(
         engine.dispose()
 
 
-def test_fork_source_state_treats_backend_failure_notify_after_anchor_as_terminal(
+def test_fork_source_state_keeps_terminal_visible_past_later_detached_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from config import paths
@@ -1445,6 +1445,16 @@ def test_fork_source_state_treats_backend_failure_notify_after_anchor_as_termina
                 message_type="notify",
                 text="Codex backend failed",
                 metadata={"event": "backend_failure", "failure_id": "failure_1"},
+            )
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="Older background work completed",
+                metadata={"detached": True, "turn_id": "turn-background"},
             )
 
         state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})

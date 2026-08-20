@@ -14,6 +14,7 @@ from vibe.message_types import (
     activity_role_for,
     build_partial_index_predicate,
     input_author_type_pairs,
+    is_detached_completion,
     spec_for,
     types_with,
 )
@@ -179,7 +180,7 @@ def test_annotation_catalog_contract_is_explicit() -> None:
         "inboxPreview": False,
         "inboxSettlesReply": False,
         "activityRole": "none",
-        "detachedBoundary": False,
+        "detachedCompletion": False,
         "terminalWhenEvents": (),
         "unread": False,
         "webPush": False,
@@ -195,7 +196,7 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         for message_type in _catalog_types()
         if spec_for(message_type)["activityRole"] != "none"
         or spec_for(message_type)["terminalWhenEvents"]
-        or spec_for(message_type)["detachedBoundary"]
+        or spec_for(message_type)["detachedCompletion"]
     }
     expected_relevant = (
         "user",
@@ -220,7 +221,7 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
                 legacy_expected = (
                     message_type in {"result", "error"}
                     or (message_type == "notify" and event == "backend_failure")
-                ) and not (detached and spec["detachedBoundary"])
+                ) and not (detached and spec["detachedCompletion"])
                 assert (
                     activity_role_for(message_type, metadata) == "terminal"
                 ) is legacy_expected
@@ -238,12 +239,15 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
     )
 
 
-def test_detached_completion_boundary_is_catalog_owned() -> None:
-    assert types_with("detachedBoundary") == ("result", "notify", "error")
+def test_detached_completion_classification_is_catalog_owned() -> None:
+    assert types_with("detachedCompletion") == ("result", "notify", "error")
     for message_type in _catalog_types():
         spec = spec_for(message_type)
-        expected = "boundary" if spec["detachedBoundary"] else spec["activityRole"]
+        expected = "none" if spec["detachedCompletion"] else spec["activityRole"]
         assert activity_role_for(message_type, {"detached": True}) == expected
+        assert is_detached_completion(message_type, {"detached": True}) is bool(
+            spec["detachedCompletion"]
+        )
 
 
 def test_web_push_candidate_exact_and_unread_sets_match_current_service() -> None:

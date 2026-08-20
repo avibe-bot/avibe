@@ -145,15 +145,15 @@ def communication_type_for_output(
     """Classify a visible output by the lifecycle authority it actually owns.
 
     Attached nonterminal output is persisted as ``output``. Detached completions
-    retain their ``result`` / ``error`` notification family while metadata marks
-    them as an Activity boundary without granting current-Turn completion authority.
+    retain their ``result`` / ``error`` notification family while metadata records
+    their detached provenance without granting current-Turn timeline authority.
     """
 
     if message_type == "output":
         return "output"
     if message_type == "result":
         # Detached completion keeps its notification semantics. Lifecycle consumers
-        # derive its boundary role from metadata instead of changing its visible type.
+        # use its provenance without changing the visible type or current Turn.
         if output.detached:
             return "error" if is_error else "result"
         if not output.completes_turn:

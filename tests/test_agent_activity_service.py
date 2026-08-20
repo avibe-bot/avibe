@@ -91,6 +91,7 @@ def _evt(
     text,
     event_type="tool_call",
     metadata=None,
+    turn_id=None,
 ):
     conn.execute(
         agent_events.insert().values(
@@ -104,6 +105,7 @@ def _evt(
             content_json=json.dumps({"kind": "tool_call", "text": text}),
             metadata_json=json.dumps(metadata or {}),
             source="agent",
+            turn_id=turn_id,
             created_at=created_at,
             updated_at=created_at,
         )
@@ -725,7 +727,7 @@ def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
         ),
     ],
 )
-def test_detached_completion_closes_its_activity_without_ending_the_next(
+def test_detached_completion_closes_only_activity_with_matching_turn_provenance(
     isolated_state,
     message_type,
     metadata,
@@ -745,6 +747,7 @@ def test_detached_completion_closes_its_activity_without_ending_the_next(
             created_at="2026-06-01T10:00:00Z",
             text="primary",
             source="user",
+            metadata={"turn_id": "turn-background"},
         )
         _evt(
             conn,
@@ -753,6 +756,7 @@ def test_detached_completion_closes_its_activity_without_ending_the_next(
             eid="e_before",
             created_at="2026-06-01T10:00:01Z",
             text="background work",
+            turn_id="turn-background",
         )
         _msg(
             conn,
@@ -763,15 +767,61 @@ def test_detached_completion_closes_its_activity_without_ending_the_next(
             author="agent",
             created_at="2026-06-01T10:00:02Z",
             text="background completed",
-            metadata=metadata,
+            metadata={**metadata, "turn_id": "turn-background"},
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == [expected_status]
+    assert groups[0]["anchor_message_id"] == "m_detached"
+    assert groups[0]["anchor_position"] == "before"
+
+
+@pytest.mark.parametrize(
+    ("message_type", "metadata", "expected_status"),
+    [
+        ("result", {"detached": True}, "done"),
+        ("error", {"detached": True}, "failed"),
+        (
+            "notify",
+            {"detached": True, "event": "backend_failure"},
+            "failed",
+        ),
+    ],
+)
+def test_detached_completion_repairs_its_origin_without_consuming_newer_activity(
+    isolated_state,
+    message_type,
+    metadata,
+    expected_status,
+):
+    engine = create_sqlite_engine()
+    sid = f"ses_detached_interleaved_{message_type}"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="background origin",
+            source="user",
+            metadata={"turn_id": "turn-background"},
         )
         _evt(
             conn,
             scope,
             sid,
-            eid="e_after",
-            created_at="2026-06-01T10:00:03Z",
-            text="current turn work",
+            eid="e_background",
+            created_at="2026-06-01T10:00:01Z",
+            text="background work",
+            turn_id="turn-background",
         )
         _msg(
             conn,
@@ -780,9 +830,41 @@ def test_detached_completion_closes_its_activity_without_ending_the_next(
             mid="m_u2",
             mtype="user",
             author="user",
-            created_at="2026-06-01T10:00:04Z",
-            text="next turn",
+            created_at="2026-06-01T10:00:02Z",
+            text="new turn",
             source="user",
+            metadata={"turn_id": "turn-current"},
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_current",
+            created_at="2026-06-01T10:00:03Z",
+            text="current work",
+            turn_id="turn-current",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype=message_type,
+            author="agent",
+            created_at="2026-06-01T10:00:04Z",
+            text="background completed",
+            metadata={**metadata, "turn_id": "turn-background"},
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_current_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:05Z",
+            text="current completed",
+            metadata={"turn_id": "turn-current"},
         )
 
     with engine.connect() as conn:
@@ -790,14 +872,9 @@ def test_detached_completion_closes_its_activity_without_ending_the_next(
             "groups"
         ]
 
-    assert [group["status"] for group in groups] == [
-        expected_status,
-        "interrupted",
-    ]
+    assert [group["status"] for group in groups] == [expected_status, "done"]
     assert groups[0]["anchor_message_id"] == "m_detached"
-    assert groups[0]["anchor_position"] == "before"
-    assert groups[1]["anchor_message_id"] == "m_detached"
-    assert groups[1]["anchor_position"] == "after"
+    assert groups[1]["anchor_message_id"] == "m_current_result"
 
 
 def test_get_turn_group_unknown_id_returns_none(isolated_state):

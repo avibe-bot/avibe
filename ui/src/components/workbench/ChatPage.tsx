@@ -17,7 +17,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isAgentActivityGroupBoundaryMessage, isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
+import { isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -1538,11 +1538,10 @@ export const ChatPage: React.FC = () => {
         // Harness live rows can precede read-side provenance enrichment. Pull
         // the enriched REST row so trigger/source chips update without reload.
         if (needsHarnessProvenanceReconcile(msg)) void reconcile();
-        // Agent Activity: a terminal reply or detached completion closes one
-        // Activity group. Rebuild from storage without treating the detached row
-        // as authority to settle the current Turn.
-        if (showAgentActivityRef.current && isAgentActivityGroupBoundaryMessage(msg)) {
-          dispatchLive({ type: 'settle' });
+        // Rebuild durable Activity groups for a phase boundary, terminal reply, or
+        // detached completion. Only a terminal reply owns this live generation.
+        if (showAgentActivityRef.current && shouldRefreshAgentActivityForMessage(msg)) {
+          if (isTerminalAgentMessage(msg)) dispatchLive({ type: 'settle' });
           scheduleActivityRefresh(workingRef.current);
         }
         // Don't clear ``working`` from a result row here: with the queue, a

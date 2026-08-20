@@ -7,7 +7,7 @@
     "inboxPreview": false,
     "inboxSettlesReply": false,
     "activityRole": "none",
-    "detachedBoundary": false,
+    "detachedCompletion": false,
     "terminalWhenEvents": [],
     "unread": false,
     "webPush": false,
@@ -64,7 +64,7 @@
       "inboxPreview": true,
       "inboxSettlesReply": true,
       "activityRole": "terminal",
-      "detachedBoundary": true,
+      "detachedCompletion": true,
       "unread": true,
       "webPush": true,
       "render": "agent"
@@ -74,7 +74,7 @@
       "inboxActivity": true,
       "inboxPreview": true,
       "inboxSettlesReply": true,
-      "detachedBoundary": true,
+      "detachedCompletion": true,
       "terminalWhenEvents": [
         "backend_failure"
       ],
@@ -96,7 +96,7 @@
       "inboxPreview": true,
       "inboxSettlesReply": true,
       "activityRole": "terminal",
-      "detachedBoundary": true,
+      "detachedCompletion": true,
       "webPush": true,
       "render": "status"
     },

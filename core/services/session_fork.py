@@ -40,6 +40,7 @@ SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _FORK_ANCHOR_TYPES = tuple(
     dict.fromkeys(
         (
@@ -563,6 +564,14 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         ),
                     ),
                     after_anchor,
+                    ~and_(
+                        messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.detached"),
+                            0,
+                        )
+                        == 1,
+                    ),
                 )
                 .order_by(transcript_order_value().desc(), messages.c.id.desc())
                 .limit(1)

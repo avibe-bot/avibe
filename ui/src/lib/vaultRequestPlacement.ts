@@ -1,4 +1,5 @@
 import type { VaultRequest, WorkbenchMessage } from '@/context/ApiContext';
+import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { chatRowKind } from '@/lib/chatRowKind';
 import { specFor } from '@/lib/messageTypes';
 import { messageOrderTimeMs, timestampOrderTimeMs, transcriptOrderTimeMs } from '@/lib/transcriptOrder';
@@ -21,9 +22,13 @@ export type VaultProvisionPlacement = {
   unanchored: VaultRequest[];
 };
 
-function isAgentReply(message: WorkbenchMessage): boolean {
+function isAgentReplyWithExplicitProvenance(message: WorkbenchMessage): boolean {
   const kind = chatRowKind(message).kind;
   return kind === 'agent' || kind === 'boundary';
+}
+
+function isInferredAgentReply(message: WorkbenchMessage): boolean {
+  return !isDetachedCompletionMessage(message) && isAgentReplyWithExplicitProvenance(message);
 }
 
 function isInputTurn(message: WorkbenchMessage): boolean {
@@ -87,7 +92,7 @@ function inferReplyWithinTurn(
     // An anchorless request belongs only to the turn that created it. Once a
     // later user/harness input starts another turn, no later Agent row can own it.
     if (isInputTurn(message)) return undefined;
-    if (isAgentReply(message)) return message;
+    if (isInferredAgentReply(message)) return message;
   }
   return undefined;
 }
@@ -118,7 +123,7 @@ function inferReplyFromSourceMessage(
         ? replyBeforeRequest
         : undefined;
     }
-    if (!isAgentReply(message)) continue;
+    if (!isInferredAgentReply(message)) continue;
     if (Number.isNaN(requestTime) || messageOrderTimeMs(message) >= requestTime) return message;
     // Some legacy request rows point at an older input even though the request
     // was persisted after that turn's reply. Keep it as a fallback only when
@@ -143,7 +148,7 @@ export function placeVaultProvisionRequests(
   const byMessageId = new Map<string, VaultRequest[]>();
   const unanchored: VaultRequest[] = [];
   const messagesById = new Map(messages.map((message) => [message.id, message]));
-  const agentMessages = messages.filter(isAgentReply);
+  const agentMessages = messages.filter(isAgentReplyWithExplicitProvenance);
   // Window coverage follows transcript-entry order. A queued row can be authored
   // before the request but only enter the visible transcript after it, so its
   // message-id clock must not make a trimmed request look loaded.
@@ -156,11 +161,13 @@ export function placeVaultProvisionRequests(
       ? request.message_id
       : null;
     const explicit = explicitReplyId ? messagesById.get(explicitReplyId) : undefined;
-    if (explicit && isAgentReply(explicit)) {
+    if (explicit && isAgentReplyWithExplicitProvenance(explicit)) {
       appendRequest(byMessageId, explicit.id, request);
       continue;
     }
-    const explicitReplyUnresolved = Boolean(explicitReplyId && (!explicit || !isAgentReply(explicit)));
+    const explicitReplyUnresolved = Boolean(
+      explicitReplyId && (!explicit || !isAgentReplyWithExplicitProvenance(explicit))
+    );
 
     const requestTime = timestampOrderTimeMs(request.created_at);
     const sameTurn = agentMessages.find((message) => sameRequestTurn(request, message));

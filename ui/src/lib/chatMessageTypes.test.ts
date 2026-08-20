@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  isAgentActivityGroupBoundaryMessage,
   isBoundaryMessage,
+  isDetachedCompletionMessage,
   isNotifyMessageType,
   isTerminalAgentMessage,
   isTranscriptMessage,
+  shouldRefreshAgentActivityForMessage,
 } from './chatMessageTypes';
 import { messageTypeNames, specFor } from './messageTypes';
 
@@ -102,21 +103,31 @@ describe('isBoundaryMessage', () => {
   });
 });
 
-describe('isAgentActivityGroupBoundaryMessage', () => {
+describe('isDetachedCompletionMessage', () => {
+  it('classifies lifecycle provenance independently from presentation', () => {
+    for (const type of ['result', 'error', 'notify']) {
+      expect(isDetachedCompletionMessage({ type, metadata: { detached: true } }), type).toBe(true);
+    }
+    expect(isDetachedCompletionMessage({ type: 'output', metadata: { detached: true } })).toBe(false);
+    expect(isDetachedCompletionMessage({ type: 'result' })).toBe(false);
+  });
+});
+
+describe('shouldRefreshAgentActivityForMessage', () => {
   it('refreshes Activity groups for terminal replies and detached completions', () => {
     for (const type of ['output', 'result', 'error']) {
-      expect(isAgentActivityGroupBoundaryMessage({ author: 'agent', type }), type).toBe(true);
+      expect(shouldRefreshAgentActivityForMessage({ author: 'agent', type }), type).toBe(true);
     }
     for (const type of ['result', 'error', 'notify']) {
       expect(
-        isAgentActivityGroupBoundaryMessage({ author: 'agent', type, metadata: { detached: true } }),
+        shouldRefreshAgentActivityForMessage({ author: 'agent', type, metadata: { detached: true } }),
         type,
       ).toBe(true);
     }
   });
 
   it('ignores non-boundary process and user rows', () => {
-    expect(isAgentActivityGroupBoundaryMessage({ author: 'agent', type: 'assistant' })).toBe(false);
-    expect(isAgentActivityGroupBoundaryMessage({ author: 'user', type: 'result' })).toBe(false);
+    expect(shouldRefreshAgentActivityForMessage({ author: 'agent', type: 'assistant' })).toBe(false);
+    expect(shouldRefreshAgentActivityForMessage({ author: 'user', type: 'result' })).toBe(false);
   });
 });

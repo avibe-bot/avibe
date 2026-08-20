@@ -25,13 +25,16 @@ type TerminalMessageCandidate = {
   metadata?: Record<string, unknown> | null;
 };
 
-const isDetachedMessage = (message: TerminalMessageCandidate): boolean => message.metadata?.detached === true;
+export const isDetachedCompletionMessage = (message: TerminalMessageCandidate): boolean => {
+  const spec = specFor(message.type);
+  return message.metadata?.detached === true && spec.detachedCompletion;
+};
 
 const activityRoleForMessage = (
   message: TerminalMessageCandidate,
 ): ReturnType<typeof specFor>['activityRole'] => {
   const spec = specFor(message.type);
-  if (isDetachedMessage(message) && spec.detachedBoundary) return 'boundary';
+  if (isDetachedCompletionMessage(message)) return 'none';
   const event = message.metadata?.event;
   if (typeof event === 'string' && spec.terminalWhenEvents.includes(event)) return 'terminal';
   return spec.activityRole;
@@ -42,7 +45,9 @@ const activityRoleForMessage = (
 // remain status pills even when detached.
 export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean => {
   const spec = specFor(message.type);
-  return activityRoleForMessage(message) === 'boundary' && spec.render === 'agent';
+  return spec.render === 'agent' && (
+    activityRoleForMessage(message) === 'boundary' || isDetachedCompletionMessage(message)
+  );
 };
 
 type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
@@ -57,12 +62,12 @@ export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): 
   return spec.transcript && activityRoleForMessage(message) === 'terminal';
 };
 
-// Both terminal replies and detached completions end one Activity group. Only
-// terminal replies settle the current Turn; callers must keep those decisions separate.
-export const isAgentActivityGroupBoundaryMessage = (
+// Terminal replies, nonterminal phase boundaries, and detached completions all
+// require a durable Activity refresh. Only terminal replies settle the live Turn.
+export const shouldRefreshAgentActivityForMessage = (
   message: TerminalAgentMessageCandidate,
 ): boolean => {
   if (message.author !== 'agent') return false;
   const role = activityRoleForMessage(message);
-  return role === 'boundary' || role === 'terminal';
+  return role === 'boundary' || role === 'terminal' || isDetachedCompletionMessage(message);
 };

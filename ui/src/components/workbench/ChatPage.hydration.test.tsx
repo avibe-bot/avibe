@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
     onConnected: () => void;
     onAuthorizationChanged: (data: { resource_kinds?: string[] }) => void;
     onMessageNew: (message: ReturnType<typeof projectedMessage>) => void;
+    onTurnStart: (data: { session_id: string }) => void;
     onTurnEnd: (data: { session_id: string }) => void;
   },
 }));
@@ -369,7 +370,7 @@ describe('ChatPage transcript hydration', () => {
     expect(screen.queryByText(projected.text)).toBeNull();
   });
 
-  it('refreshes Agent Activity when a detached completion arrives', async () => {
+  it('refreshes detached Activity without settling the current live generation', async () => {
     mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
     mocks.api.getSessionBootstrap.mockResolvedValue({
       ...bootstrapPayload('session-new'),
@@ -386,17 +387,34 @@ describe('ChatPage transcript hydration', () => {
 
     await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalled());
     mocks.api.getSessionActivity.mockClear();
+    const detachedRefresh = deferred<{ groups: never[] }>();
+    mocks.api.getSessionActivity.mockReturnValue(detachedRefresh.promise);
 
-    act(() =>
+    act(() => {
+      mocks.events?.onTurnStart({ session_id: 'session-new' });
+      mocks.events?.onMessageNew({
+        ...projectedMessage('active-step-1', 'first active step'),
+        author: 'agent',
+        type: 'assistant',
+        source: 'agent',
+      });
       mocks.events?.onMessageNew({
         ...projectedMessage('detached-result', 'background completed'),
         author: 'agent',
         type: 'result',
         source: 'agent',
         metadata: { detached: true, activity_id: 'background-1' },
-      }),
-    );
+      });
+      mocks.events?.onMessageNew({
+        ...projectedMessage('active-step-2', 'second active step'),
+        author: 'agent',
+        type: 'assistant',
+        source: 'agent',
+      });
+    });
 
     await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('first active step')).toBeTruthy();
+    expect(screen.getByText('second active step')).toBeTruthy();
   });
 });

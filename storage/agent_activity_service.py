@@ -42,7 +42,12 @@ from sqlalchemy import func, select
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
 from storage.models import message_deliveries, session_turns
-from vibe.message_types import activity_role_for, spec_for, types_with
+from vibe.message_types import (
+    activity_role_for,
+    is_detached_completion,
+    spec_for,
+    types_with,
+)
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
 # demand; covering the most-recent MESSAGE_SCAN_LIMIT transcript messages (and
@@ -61,7 +66,7 @@ _TRANSCRIPT_ACTIVITY_TYPES = tuple(
     for message_type in types_with("transcript")
     if spec_for(message_type)["activityRole"] != "none"
     or spec_for(message_type)["terminalWhenEvents"]
-    or spec_for(message_type)["detachedBoundary"]
+    or spec_for(message_type)["detachedCompletion"]
 )
 _NON_TRANSCRIPT_START_TYPES = tuple(
     message_type
@@ -177,8 +182,9 @@ _PHASE_RANK = {
     "turn_start": 0,
     "activity": 1,
     "boundary": 2,
-    "terminal": 3,
-    "ignore": 4,
+    "detached_completion": 3,
+    "terminal": 4,
+    "ignore": 5,
 }
 
 
@@ -236,6 +242,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 message_deliveries.c.message_id,
                 message_deliveries.c.id.label("delivery_id"),
                 message_deliveries.c.materialized_at,
+                session_turns.c.id.label("turn_id"),
                 session_turns.c.initial_delivery_id,
                 session_turns.c.started_at,
                 session_turns.c.created_at.label("turn_created_at"),
@@ -270,6 +277,11 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         accepted_role = accepted_roles.get(str(msg.get("id") or ""))
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
+        elif is_detached_completion(
+            mtype if isinstance(mtype, str) else "",
+            metadata,
+        ):
+            kind = "detached_completion"
         elif activity_role == "turn_start":
             kind = (
                 "turn_start"
@@ -306,6 +318,12 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "kind": kind,
                 "id": msg.get("id"),
                 "mtype": mtype,
+                "turn_id": str(
+                    metadata.get("turn_id")
+                    or (accepted_role or {}).get("turn_id")
+                    or ""
+                ).strip()
+                or None,
                 "is_transcript": bool(
                     spec_for(mtype if isinstance(mtype, str) else "")["transcript"]
                 ),
@@ -318,7 +336,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "is_silent": False,
                 "terminal_status": (
                     _terminal_status(mtype, metadata)
-                    if kind in {"boundary", "terminal"}
+                    if kind in {"boundary", "detached_completion", "terminal"}
                     else None
                 ),
             }
@@ -349,6 +367,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                     "kind": "terminal",
                     "id": event.get("id"),
                     "mtype": "silent_terminal",
+                    "turn_id": str(event.get("turn_id") or "").strip() or None,
                     "row_kind": "turn_terminal",
                     "text": None,
                     "is_silent": True,
@@ -369,6 +388,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "kind": "activity",
                 "id": event.get("id"),
                 "mtype": "tool_call",
+                "turn_id": str(event.get("turn_id") or "").strip() or None,
                 "row_kind": "tool_call",
                 "text": event.get("text") if include_text else None,
             }
@@ -399,6 +419,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "kind": "terminal",
                 "id": f"turn-terminal:{turn['id']}",
                 "mtype": "turn_terminal",
+                "turn_id": str(turn["id"] or "").strip() or None,
                 "row_kind": "turn_terminal",
                 "text": None,
                 "is_silent": True,
@@ -421,6 +442,7 @@ def _make_group(
     started_iso: Optional[str],
     ended_iso: Optional[str],
     include_rows: bool,
+    turn_id: Optional[str],
 ) -> dict[str, Any]:
     started = started_iso or pending[0]["created_at"]
     group: dict[str, Any] = {
@@ -439,6 +461,7 @@ def _make_group(
         "started_at": started,
         "ended_at": ended_iso,
         "duration_ms": _duration_ms(started, ended_iso),
+        "_turn_id": turn_id,
     }
     if include_rows:
         group["rows"] = [
@@ -457,6 +480,7 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
     groups: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
     turn_start_iso: Optional[str] = None
+    turn_id: Optional[str] = None
     # Id of the most recent transcript-visible boundary (turn_start OR terminal). An
     # interrupted turn anchors BACKWARD to this — the boundary immediately before its
     # activity (its trigger) — so its chip is positioned by its OWN chronology and
@@ -465,6 +489,8 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
     for item in items:
         kind = item["kind"]
         if kind == "activity":
+            if turn_id is None:
+                turn_id = item.get("turn_id")
             pending.append(item)
         elif kind == "turn_start":
             if pending:
@@ -481,10 +507,12 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                         started_iso=turn_start_iso,
                         ended_iso=pending[-1]["created_at"],
                         include_rows=include_rows,
+                        turn_id=turn_id,
                     )
                 )
                 pending = []
             turn_start_iso = item["created_at"]
+            turn_id = item.get("turn_id")
             if item["is_transcript"]:
                 last_boundary_id = item["id"]
         elif kind == "boundary":
@@ -499,6 +527,7 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                         started_iso=turn_start_iso,
                         ended_iso=item["created_at"],
                         include_rows=include_rows,
+                        turn_id=turn_id,
                     )
                 )
                 pending = []
@@ -508,6 +537,57 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
             turn_start_iso = item["created_at"]
             if item["is_transcript"]:
                 last_boundary_id = item["id"]
+        elif kind == "detached_completion":
+            owner_turn_id = item.get("turn_id")
+            pending_turn_ids = {
+                pending_item.get("turn_id")
+                for pending_item in pending
+                if pending_item.get("turn_id")
+            }
+            owns_pending = bool(
+                owner_turn_id
+                and (
+                    owner_turn_id == turn_id
+                    or (turn_id is None and pending_turn_ids == {owner_turn_id})
+                )
+            )
+            if pending and owns_pending:
+                groups.append(
+                    _make_group(
+                        pending,
+                        status=item["terminal_status"],
+                        anchor_id=item["id"],
+                        anchor_position="before",
+                        open_turn=False,
+                        started_iso=turn_start_iso,
+                        ended_iso=item["created_at"],
+                        include_rows=include_rows,
+                        turn_id=owner_turn_id,
+                    )
+                )
+                pending = []
+                turn_start_iso = None
+                turn_id = None
+            elif owner_turn_id:
+                # A later Turn may already have interrupted the origin group. Repair
+                # that group by provenance without consuming the newer Turn's rows.
+                for group in reversed(groups):
+                    if (
+                        group.get("_turn_id") == owner_turn_id
+                        and group["status"] == "interrupted"
+                    ):
+                        group.update(
+                            status=item["terminal_status"],
+                            anchor_message_id=item["id"],
+                            anchor_position="before",
+                            open=False,
+                            ended_at=item["created_at"],
+                            duration_ms=_duration_ms(
+                                group.get("started_at"),
+                                item["created_at"],
+                            ),
+                        )
+                        break
         elif kind == "terminal":
             if pending:
                 # A silent marker is invisible in the transcript, so its DONE group
@@ -529,10 +609,12 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                         started_iso=turn_start_iso,
                         ended_iso=item["created_at"],
                         include_rows=include_rows,
+                        turn_id=turn_id,
                     )
                 )
                 pending = []
             turn_start_iso = None
+            turn_id = None
             # Keep ``last_boundary_id`` on a TRANSCRIPT-VISIBLE row: a visible terminal
             # becomes the new boundary; the invisible silent marker does NOT (a later
             # turn must still anchor to a row the frontend can render).
@@ -553,8 +635,11 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 started_iso=turn_start_iso,
                 ended_iso=pending[-1]["created_at"],
                 include_rows=include_rows,
+                turn_id=turn_id,
             )
         )
+    for group in groups:
+        group.pop("_turn_id", None)
     return groups
 
 
