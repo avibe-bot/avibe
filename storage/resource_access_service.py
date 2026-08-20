@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from sqlalchemy import select, update
+from sqlalchemy import text as sqlalchemy_text
 from sqlalchemy.engine import Connection
 
 from storage.db import get_cached_sqlite_engine
@@ -338,6 +339,7 @@ def resource_user_context_from_metadata(
             instance_id=paired_instance_id,
             instance_kind=paired_kind,
             ensure=False,
+            bootstrap=True,
         ):
             # Kind is not yet reconciled; do not project a Personal bypass.
             return None
@@ -568,6 +570,25 @@ def _legacy_deferred_context_binding(
     }
 
 
+def _connection_has_table(connection: Connection, table_name: str) -> bool:
+    """True when the table exists on this connection's schema.
+
+    The deferred-context migration also runs while an unversioned legacy
+    schema is being stamped, where newer tables may not exist yet. A missing
+    table simply has no deferred records to migrate.
+    """
+
+    return (
+        connection.execute(
+            sqlalchemy_text(
+                "select 1 from sqlite_master where type = 'table' and name = :name"
+            ),
+            {"name": table_name},
+        ).scalar_one_or_none()
+        is not None
+    )
+
+
 def _metadata_snapshot_lacks_binding(metadata: Any) -> bool:
     """True when a deferred snapshot exists but carries no complete binding."""
 
@@ -589,43 +610,46 @@ def _has_unbound_deferred_snapshots(connection: Connection) -> bool:
     the first migration opportunity meaningful.
     """
 
-    definition_rows = connection.execute(
-        select(run_definitions.c.metadata_json).where(
-            run_definitions.c.definition_type.in_(("scheduled", "watch"))
+    if _connection_has_table(connection, "run_definitions"):
+        definition_rows = connection.execute(
+            select(run_definitions.c.metadata_json).where(
+                run_definitions.c.definition_type.in_(("scheduled", "watch"))
+            )
         )
-    )
-    for (metadata_json,) in definition_rows:
-        try:
-            metadata = json.loads(metadata_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if _metadata_snapshot_lacks_binding(metadata):
-            return True
-    run_rows = connection.execute(
-        select(agent_runs.c.metadata_json).where(
-            agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
+        for (metadata_json,) in definition_rows:
+            try:
+                metadata = json.loads(metadata_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            if _metadata_snapshot_lacks_binding(metadata):
+                return True
+    if _connection_has_table(connection, "agent_runs"):
+        run_rows = connection.execute(
+            select(agent_runs.c.metadata_json).where(
+                agent_runs.c.status.in_(("pending", "queued", "processing", "running"))
+            )
         )
-    )
-    for (metadata_json,) in run_rows:
-        try:
-            metadata = json.loads(metadata_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if _metadata_snapshot_lacks_binding(metadata):
-            return True
-    delivery_rows = connection.execute(
-        select(message_deliveries.c.snapshot_json).where(
-            message_deliveries.c.snapshot_json.is_not(None)
+        for (metadata_json,) in run_rows:
+            try:
+                metadata = json.loads(metadata_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            if _metadata_snapshot_lacks_binding(metadata):
+                return True
+    if _connection_has_table(connection, "message_deliveries"):
+        delivery_rows = connection.execute(
+            select(message_deliveries.c.snapshot_json).where(
+                message_deliveries.c.snapshot_json.is_not(None)
+            )
         )
-    )
-    for (snapshot_json,) in delivery_rows:
-        try:
-            snapshot = json.loads(snapshot_json or "{}")
-            metadata = json.loads(snapshot.get("metadata_json") or "{}")
-        except (AttributeError, TypeError, ValueError):
-            continue
-        if _metadata_snapshot_lacks_binding(metadata):
-            return True
+        for (snapshot_json,) in delivery_rows:
+            try:
+                snapshot = json.loads(snapshot_json or "{}")
+                metadata = json.loads(snapshot.get("metadata_json") or "{}")
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if _metadata_snapshot_lacks_binding(metadata):
+                return True
     return False
 
 
@@ -803,6 +827,32 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         # Defensive guard for a future state-reader change. This branch is
         # never authoritative enough to complete a migration.
         return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
+    # C2 fence: this migration can run from a bare ensure_sqlite_state()
+    # without config_file_lock (taking it here would invert the canonical
+    # lock order against a peer holding config lock -> migration lock).
+    # Instead, refuse to bind snapshots when the durable binding row exists
+    # and disagrees with the pairing snapshot just read: a peer is mid-
+    # reclassification and owns this migration through its own transition.
+    from storage.remote_access_authorization_service import (
+        INSTANCE_BINDING_STATE_RECONCILING as _BINDING_RECONCILING,
+        _load_binding_state_from_connection as _load_binding_row,
+    )
+
+    try:
+        binding_row = _load_binding_row(connection)
+    except Exception:
+        binding_row = None
+    if binding_row is not None:
+        row_id = binding_row.get("instance_id")
+        row_kind = binding_row.get("instance_kind")
+        row_state = binding_row.get("state")
+        identity_matches = row_id == current_instance_id and (
+            row_kind == current_kind
+            or (row_state == _BINDING_RECONCILING and row_kind in {None, current_kind})
+        )
+        if not identity_matches:
+            write_marker(state="pending", instance_id=current_instance_id)
+            return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
     paired_instance_id = current_instance_id
     paired_kind = current_kind
 
@@ -812,11 +862,15 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         "legacy_deferred_deliveries": 0,
         RESOURCE_BINDING_STATUS_KEY: RESOURCE_BINDING_STATE_READY,
     }
-    definition_rows = connection.execute(
-        select(run_definitions.c.id, run_definitions.c.metadata_json).where(
-            run_definitions.c.definition_type.in_(("scheduled", "watch"))
-        )
-    ).mappings()
+    definition_rows = (
+        connection.execute(
+            select(run_definitions.c.id, run_definitions.c.metadata_json).where(
+                run_definitions.c.definition_type.in_(("scheduled", "watch"))
+            )
+        ).mappings()
+        if _connection_has_table(connection, "run_definitions")
+        else ()
+    )
     for row in definition_rows:
         try:
             metadata = json.loads(row["metadata_json"] or "{}")
@@ -843,10 +897,14 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         )
         counts["legacy_deferred_definitions"] += 1
 
-    run_rows = connection.execute(
-        select(agent_runs.c.id, agent_runs.c.metadata_json)
-        .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
-    ).mappings()
+    run_rows = (
+        connection.execute(
+            select(agent_runs.c.id, agent_runs.c.metadata_json)
+            .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
+        ).mappings()
+        if _connection_has_table(connection, "agent_runs")
+        else ()
+    )
     for row in run_rows:
         try:
             metadata = json.loads(row["metadata_json"] or "{}")
@@ -874,12 +932,16 @@ def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[st
         )
         counts["legacy_deferred_runs"] += 1
 
-    delivery_rows = connection.execute(
-        select(
-            message_deliveries.c.id,
-            message_deliveries.c.snapshot_json,
-        ).where(message_deliveries.c.snapshot_json.is_not(None))
-    ).mappings()
+    delivery_rows = (
+        connection.execute(
+            select(
+                message_deliveries.c.id,
+                message_deliveries.c.snapshot_json,
+            ).where(message_deliveries.c.snapshot_json.is_not(None))
+        ).mappings()
+        if _connection_has_table(connection, "message_deliveries")
+        else ()
+    )
     for row in delivery_rows:
         try:
             snapshot = json.loads(row["snapshot_json"] or "{}")
