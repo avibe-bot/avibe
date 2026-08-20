@@ -63,6 +63,7 @@ export function buildEndpointPatch(
   allowClear: boolean,
   identityLocked = false,
   clearEndpoint = false,
+  includeProvider = false,
 ): MemoryEndpointPatch | undefined {
   const patch: MemoryEndpointPatch = {};
   let changed = false;
@@ -77,21 +78,26 @@ export function buildEndpointPatch(
       patch.model = model;
       changed = true;
     }
-    if (draft.provider !== undefined) {
+    if (includeProvider && draft.provider !== undefined) {
       const provider = normalizeRerankProvider(draft.provider);
       const originalProvider = original.provider ?? null;
-      const configuringNow = Boolean(
-        patch.base_url
-        || patch.model
-        || draft.apiKey.trim(),
+      const endpointPresent = Boolean(
+        baseUrl
+        || model
+        || draft.apiKey.trim()
+        || original.base_url
+        || original.model
+        || original.has_api_key,
       );
-      // A new optional endpoint has no saved provider. Send the selected one
-      // when this patch itself is configuring the endpoint, so preflight
-      // cannot fall back to DeepInfra's `/{model}` path.
-      if (
-        configuringNow
-        && (originalProvider == null || provider !== normalizeRerankProvider(originalProvider))
-      ) {
+      const hadEndpoint = Boolean(
+        original.base_url || original.model || original.has_api_key,
+      );
+      const creatingEndpoint = !hadEndpoint && Boolean(
+        baseUrl || model || draft.apiKey.trim(),
+      );
+      const providerChanged = originalProvider != null
+        && provider !== normalizeRerankProvider(originalProvider);
+      if (endpointPresent && (creatingEndpoint || providerChanged)) {
         patch.provider = provider;
         changed = true;
       }
@@ -106,7 +112,7 @@ export function buildEndpointPatch(
     if (clearEndpoint) {
       patch.base_url = null;
       patch.model = null;
-      if (original.provider != null) {
+      if (includeProvider && original.provider != null) {
         patch.provider = null;
       }
     }

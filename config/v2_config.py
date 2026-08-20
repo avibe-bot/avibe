@@ -1891,7 +1891,10 @@ class MemoryEndpointConfig:
         if not any((self.base_url, self.model, self.api_key)):
             self.provider = None
             return
-        provider = (self.provider or "").strip() or DEFAULT_MEMORY_RERANK_PROVIDER
+        provider = (self.provider or "").strip() or _inferred_memory_rerank_provider(
+            base_url=self.base_url,
+            model=self.model,
+        )
         if provider not in MEMORY_RERANK_PROVIDERS:
             raise ValueError(
                 "Memory rerank endpoint provider must be deepinfra, vllm, or dashscope"
@@ -1909,7 +1912,10 @@ class MemoryEndpointConfig:
         provider = (self.provider or "").strip()
         if provider in MEMORY_RERANK_PROVIDERS:
             return provider
-        return DEFAULT_MEMORY_RERANK_PROVIDER
+        return _inferred_memory_rerank_provider(
+            base_url=self.base_url,
+            model=self.model,
+        )
 
 
 @dataclass
@@ -2234,6 +2240,18 @@ class MemoryConfig:
                 self.cloud.capabilities.multimodal or self.cloud.capabilities.chat
             )
         return bool(self.processing.multimodal and self.processing.multimodal.complete())
+
+
+def _inferred_memory_rerank_provider(
+    *,
+    base_url: Optional[str],
+    model: Optional[str],
+) -> MemoryRerankProvider:
+    normalized_url = (base_url or "").strip().rstrip("/").lower()
+    normalized_model = (model or "").strip().lower()
+    if normalized_url.endswith(".maas.aliyuncs.com") or normalized_model == DASHSCOPE_RERANK_MODEL:
+        return "dashscope"
+    return DEFAULT_MEMORY_RERANK_PROVIDER
 
 
 def _validate_memory_url(value: object, *, path: str) -> Optional[str]:

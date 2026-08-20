@@ -287,6 +287,7 @@ export const MemorySettingsPanel: React.FC<{
       true,
       false,
       true,
+      true,
     );
     const multimodalPatch = settings.im_attachment_capture_available === true
       ? buildEndpointPatch(

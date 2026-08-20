@@ -131,12 +131,36 @@ describe('buildEndpointPatch', () => {
       true,
       false,
       true,
+      true,
     )).toEqual({
       base_url: 'https://llm-space.example.test',
       model: 'gte-rerank-v2',
       api_key: 'rerank-secret',
       provider: 'dashscope',
     });
+  });
+
+  it('sends a provider-only change for an already configured rerank endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://api.deepinfra.com/v1/inference',
+        model: 'Qwen/Qwen3-Reranker-4B',
+        apiKey: '',
+        clearKey: false,
+        provider: 'vllm',
+      },
+      {
+        base_url: 'https://api.deepinfra.com/v1/inference',
+        model: 'Qwen/Qwen3-Reranker-4B',
+        api_key: null,
+        has_api_key: true,
+        provider: 'deepinfra',
+      },
+      true,
+      false,
+      true,
+      true,
+    )).toEqual({ provider: 'vllm' });
   });
 
   it('includes an explicit rerank provider when it differs from the saved endpoint', () => {
@@ -156,6 +180,7 @@ describe('buildEndpointPatch', () => {
       },
       true,
       false,
+      true,
       true,
     )).toEqual({
       base_url: 'https://dashscope.aliyuncs.com',
