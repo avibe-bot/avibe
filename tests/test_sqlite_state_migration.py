@@ -35,7 +35,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260819_0057"
+HEAD_REVISION = "20260820_0058"
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
 # Alembic cannot re-emit them when batch mode recreates a table. Every migration that
 # rebuilds one therefore passes this convention; the rebuild simulated below has to pass
@@ -112,14 +112,24 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
         assert all(row[2] for row in rows.values())
 
         show_indexes = {row[1] for row in conn.execute("pragma index_list(show_pages)")}
-        email_indexes = {
+        # 20260820_0058 moved the audience out of ``show_page_authorized_emails``
+        # into the heterogeneous entry table, so that is where the audience half
+        # of this round trip lives at head.
+        entry_indexes = {
             row[1]
-            for row in conn.execute("pragma index_list(show_page_authorized_emails)")
+            for row in conn.execute("pragma index_list(show_page_access_entries)")
         }
         assert {"ix_show_pages_share_id", "ix_show_pages_access_mode"}.issubset(show_indexes)
-        assert "ix_show_page_authorized_emails_email" in email_indexes
+        assert {
+            "ix_show_page_access_entries_lookup",
+            "uq_show_page_access_entries_organization",
+        }.issubset(entry_indexes)
+        assert "show_page_authorized_emails" not in {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
         foreign_key = conn.execute(
-            "pragma foreign_key_list(show_page_authorized_emails)"
+            "pragma foreign_key_list(show_page_access_entries)"
         ).fetchone()
         assert foreign_key is not None
         assert foreign_key[2] == "show_pages"
@@ -139,17 +149,16 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
             "where session_id = 'private-stable'"
         )
         conn.execute(
-            "insert into show_page_authorized_emails values (?, ?, ?)",
-            ("private-stable", "guest@example.com", "2026-08-17T00:00:00Z"),
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)",
+            ("private-stable", "email", "guest@example.com", None, "2026-08-17T00:00:00Z"),
         )
         conn.execute(
-            "insert into show_page_authorized_emails values (?, ?, ?)",
-            ("private-null", "cascade@example.com", "2026-08-17T00:00:00Z"),
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)",
+            ("private-null", "email", "cascade@example.com", None, "2026-08-17T00:00:00Z"),
         )
         conn.execute("delete from show_pages where session_id = 'private-null'")
         assert conn.execute(
-            "select count(*) from show_page_authorized_emails "
-            "where session_id = 'private-null'"
+            "select count(*) from show_page_access_entries where page_id = 'private-null'"
         ).fetchone() == (0,)
 
     command.downgrade(migrations.alembic_config(db_path), "20260815_0054")
@@ -187,11 +196,216 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
             "select access_mode, access_revision, share_id from show_pages "
             "where session_id = 'private-stable'"
         ).fetchone()
-        email_count = conn.execute(
-            "select count(*) from show_page_authorized_emails"
+        entry_count = conn.execute(
+            "select count(*) from show_page_access_entries"
         ).fetchone()
     assert reupgraded == ("private", 0, "private-link")
-    assert email_count == (0,)
+    assert entry_count == (0,)
+
+
+SHOW_PAGE_ACCESS_ENTRY_MIGRATION_MODULE = (
+    "storage.alembic.versions.20260820_0058_show_page_access_entries"
+)
+
+
+def _seed_show_pages(conn: sqlite3.Connection, session_ids: Iterable[str]) -> None:
+    conn.executemany(
+        """
+        insert into show_pages (
+            session_id, share_id, offline_at, access_mode, access_revision,
+            created_at, updated_at
+        ) values (?, ?, null, 'limited', 1, '2026-08-19T00:00:00Z', '2026-08-19T00:00:00Z')
+        """,
+        [(session_id, f"{session_id}-link") for session_id in session_ids],
+    )
+
+
+def _restore_legacy_show_page_email_table(db_path: Path) -> None:
+    """Put the retired pre-0058 email table back the way a replay finds it.
+
+    An unversioned database is stamped at the replay floor, so 20260820_0058
+    runs again over state it already produced. Reusing the revision's own
+    downgrade helper keeps this fixture from becoming a second, drifting copy of
+    that table's shape.
+    """
+
+    migration = import_module(SHOW_PAGE_ACCESS_ENTRY_MIGRATION_MODULE)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            with Operations.context(MigrationContext.configure(conn)):
+                migration._create_legacy_email_table()
+    finally:
+        engine.dispose()
+
+
+def test_show_page_access_entry_migration_moves_every_email_row_and_narrows_on_downgrade(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260819_0057")
+    # One row of every audience shape 20260819_0057 can hold: a page with
+    # several addresses, a page with one, and a page with none.
+    seeded_emails = [
+        ("many-emails", "first@example.com", "2026-08-17T00:00:00Z"),
+        ("many-emails", "second@example.com", "2026-08-18T00:00:00Z"),
+        ("one-email", "only@example.com", "2026-08-18T12:00:00Z"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        _seed_show_pages(conn, ("many-emails", "one-email", "no-emails"))
+        conn.executemany(
+            "insert into show_page_authorized_emails values (?, ?, ?)", seeded_emails
+        )
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        migrated = conn.execute(
+            "select page_id, kind, value, organization_id, created_at "
+            "from show_page_access_entries order by page_id, kind, value"
+        ).fetchall()
+        # The organization-scoped kinds have no pre-0058 representation, so they
+        # only exist from here on.
+        conn.executemany(
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)",
+            [
+                ("many-emails", "group", "group-7", "org-1", "2026-08-20T00:00:00Z"),
+                ("many-emails", "organization", "org-1", "org-1", "2026-08-20T00:00:00Z"),
+            ],
+        )
+    assert migrated == [
+        (page_id, "email", value, None, created_at)
+        for page_id, value, created_at in sorted(seeded_emails)
+    ]
+
+    command.downgrade(migrations.alembic_config(db_path), "20260819_0057")
+    with sqlite3.connect(db_path) as conn:
+        restored = conn.execute(
+            "select session_id, normalized_email, created_at "
+            "from show_page_authorized_emails order by session_id, normalized_email"
+        ).fetchall()
+        legacy_indexes = {
+            row[1]
+            for row in conn.execute("pragma index_list(show_page_authorized_emails)")
+        }
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+    # A pre-0058 reader only understands emails, so the audience narrows and
+    # fails closed: the group and organization grants are dropped, never widened
+    # into an email that was never granted.
+    assert restored == sorted(seeded_emails)
+    assert "ix_show_page_authorized_emails_email" in legacy_indexes
+    assert "show_page_access_entries" not in tables
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        reupgraded = conn.execute(
+            "select page_id, kind, value, organization_id, created_at "
+            "from show_page_access_entries order by page_id, kind, value"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+    assert reupgraded == [
+        (page_id, "email", value, None, created_at)
+        for page_id, value, created_at in sorted(seeded_emails)
+    ]
+    assert "show_page_authorized_emails" not in tables
+
+
+def test_show_page_access_entry_migration_replay_neither_duplicates_nor_overwrites(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    already_migrated = [
+        ("replayed", "email", "kept@example.com", None, "2026-08-20T00:00:00Z"),
+        ("replayed", "group", "group-7", "org-1", "2026-08-20T00:00:00Z"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        _seed_show_pages(conn, ("replayed",))
+        conn.executemany(
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)", already_migrated
+        )
+
+    _restore_legacy_show_page_email_table(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            "insert into show_page_authorized_emails values (?, ?, ?)",
+            [
+                # One address this revision has already moved, carrying a
+                # different timestamp, and one it has never seen.
+                ("replayed", "kept@example.com", "2000-01-01T00:00:00Z"),
+                ("replayed", "added@example.com", "2026-08-21T00:00:00Z"),
+            ],
+        )
+    command.stamp(migrations.alembic_config(db_path), "20260819_0057")
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        entries = conn.execute(
+            "select page_id, kind, value, organization_id, created_at "
+            "from show_page_access_entries order by kind, value"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+    assert entries == [
+        ("replayed", "email", "added@example.com", None, "2026-08-21T00:00:00Z"),
+        *sorted(already_migrated, key=lambda row: (row[1], row[2])),
+    ]
+    assert "show_page_authorized_emails" not in tables
+
+
+def test_show_page_access_entry_constraints_hold_for_every_kind(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    insert = "insert into show_page_access_entries values (?, ?, ?, ?, '2026-08-20T00:00:00Z')"
+    accepted = [
+        ("page", "email", "guest@example.com", None),
+        ("page", "group", "group-7", "org-1"),
+        ("page", "group", "group-8", "org-1"),
+        ("page", "organization", "org-1", "org-1"),
+        # Another page's audience is independent, including its organization.
+        ("other", "group", "group-7", "org-1"),
+        ("other", "organization", "org-1", "org-1"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = on")
+        _seed_show_pages(conn, ("page", "other"))
+        conn.executemany(insert, accepted)
+
+        for row in accepted:
+            # Every accepted shape is unique per (page, kind, value)...
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(insert, row)
+        # ...and "this organization may read" is one switch per page, not a
+        # list, which the composite key alone cannot say.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(insert, ("page", "organization", "org-2", "org-2"))
+
+        rejected = [
+            ("page", "user", "someone", None),
+            ("page", "email", "other@example.com", "org-1"),
+            ("page", "group", "group-9", None),
+            ("page", "organization", "org-9", "org-1"),
+            ("page", "email", "", None),
+            ("page", "email", "a" * 321, None),
+            ("missing-page", "email", "guest@example.com", None),
+        ]
+        for row in rejected:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(insert, row)
+
+        conn.execute("delete from show_pages where session_id = 'other'")
+        surviving = conn.execute(
+            "select page_id, kind, value, organization_id "
+            "from show_page_access_entries order by page_id, kind, value"
+        ).fetchall()
+    assert surviving == sorted(row for row in accepted if row[0] == "page")
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -1138,15 +1352,17 @@ def test_delivery_history_default_repair_preserves_rows_and_reverses(tmp_path: P
         seeded["constraints"]["message_deliveries"]
     )
 
-    run_migrations(db_path)
+    run_migrations(db_path, revision="20260819_0057")
     with sqlite3.connect(db_path) as conn:
         upgraded = _schema_fingerprint(conn)
         assert _delivery_rows(conn) == rows_before
         assert conn.execute("select version_num from alembic_version").fetchone() == (
-            HEAD_REVISION,
+            "20260819_0057",
         )
     # Only that one column's default may differ -- every other column, constraint,
-    # index, and table in the database is untouched.
+    # index, and table in the database is untouched. Later revisions (0058+) are
+    # a different change and have their own round-trip tests; pinning here keeps
+    # 0057's invariant from absorbing them.
     assert _fingerprint_difference(seeded, upgraded) == {
         ("message_deliveries", "delivery_history_json")
     }
@@ -4687,7 +4903,7 @@ def test_run_migrations_backfills_existing_session_policy_only_for_targeted_defi
         # migration. Current metadata has already replaced the 0004-era
         # ``show_pages.visibility`` shape, so remove the future tables instead of
         # presenting 0004 with an impossible hybrid schema.
-        conn.execute("drop table show_page_authorized_emails")
+        conn.execute("drop table show_page_access_entries")
         conn.execute("drop table show_pages")
         conn.execute("update run_definitions set session_policy = null")
         conn.execute(

@@ -405,22 +405,54 @@ show_pages = Table(
     Index("ix_show_pages_access_mode", "access_mode"),
 )
 
-show_page_authorized_emails = Table(
-    "show_page_authorized_emails",
+# The Limited audience of a Show Page: one heterogeneous set of read-only
+# grants, OR-ed at admission. ``email`` is instance-independent; ``group`` and
+# ``organization`` only mean something relative to the organization that owns
+# the page, so they carry that organization and cannot exist on a Personal
+# instance. This table replaces the email-only ``show_page_authorized_emails``.
+show_page_access_entries = Table(
+    "show_page_access_entries",
     metadata,
     Column(
-        "session_id",
+        "page_id",
         String,
         ForeignKey("show_pages.session_id", ondelete="CASCADE"),
         primary_key=True,
     ),
-    Column("normalized_email", String, primary_key=True),
+    Column("kind", String, primary_key=True),
+    Column("value", String, primary_key=True),
+    Column("organization_id", String, nullable=True),
     Column("created_at", String, nullable=False),
     CheckConstraint(
-        "length(normalized_email) between 3 and 320",
-        name="ck_show_page_authorized_emails_length",
+        "kind in ('email', 'group', 'organization')",
+        name="ck_show_page_access_entries_kind",
     ),
-    Index("ix_show_page_authorized_emails_email", "normalized_email"),
+    CheckConstraint(
+        "length(value) between 1 and 320",
+        name="ck_show_page_access_entries_value_length",
+    ),
+    CheckConstraint(
+        "(kind = 'email' and organization_id is null) "
+        "or (kind in ('group', 'organization') and organization_id is not null)",
+        name="ck_show_page_access_entries_organization",
+    ),
+    # An organization entry IS the organization, so its value cannot name a
+    # different one than the entry is scoped to.
+    CheckConstraint(
+        "kind <> 'organization' or value = organization_id",
+        name="ck_show_page_access_entries_organization_value",
+    ),
+    # Admission resolves a visitor assertion to entries by (kind, value).
+    Index("ix_show_page_access_entries_lookup", "kind", "value"),
+    # "This organization may read" is one switch, not a list: at most one such
+    # entry per page. The composite primary key cannot say that on its own,
+    # because two organization rows would differ in ``value``.
+    Index(
+        "uq_show_page_access_entries_organization",
+        "page_id",
+        unique=True,
+        sqlite_where=text("kind = 'organization'"),
+    ),
 )
 
 show_session_events = Table(

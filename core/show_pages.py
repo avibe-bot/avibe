@@ -6,6 +6,7 @@ import hmac
 import os
 import secrets
 import stat as stat_module
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -23,7 +24,7 @@ from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
 from core.show_git import format_agent_contract
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.models import agent_sessions, show_page_authorized_emails, show_pages
+from storage.models import agent_sessions, show_page_access_entries, show_pages
 from storage.pagination import PageRequest, PageResult, page_sequence
 
 VISIBILITY_PRIVATE = "private"
@@ -40,7 +41,33 @@ ACCESS_MODE_PRIVATE = "private"
 ACCESS_MODE_LIMITED = "limited"
 ACCESS_MODE_PUBLIC = "public"
 ACCESS_MODES = {ACCESS_MODE_PRIVATE, ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}
+# The Limited audience is one heterogeneous set of read-only grants, OR-ed at
+# admission: an email, an organization group, or "everyone in this
+# organization". They are peers -- no kind outranks or implies another.
+ACCESS_ENTRY_KIND_EMAIL = "email"
+ACCESS_ENTRY_KIND_GROUP = "group"
+ACCESS_ENTRY_KIND_ORGANIZATION = "organization"
+ACCESS_ENTRY_KINDS = (
+    ACCESS_ENTRY_KIND_EMAIL,
+    ACCESS_ENTRY_KIND_GROUP,
+    ACCESS_ENTRY_KIND_ORGANIZATION,
+)
+# Kinds whose meaning is relative to the organization that owns the page. A
+# Personal instance has no organization, so it can hold none of them.
+ORGANIZATION_ACCESS_ENTRY_KINDS = (
+    ACCESS_ENTRY_KIND_GROUP,
+    ACCESS_ENTRY_KIND_ORGANIZATION,
+)
 SHOW_ACCESS_EMAIL_MAX_COUNT = 64
+SHOW_ACCESS_GROUP_MAX_COUNT = 64
+# Per-kind write caps. "This organization may read" is one switch, so it caps at
+# one; the list kinds get the same bound the email audience already had.
+SHOW_ACCESS_ENTRY_MAX_COUNTS = {
+    ACCESS_ENTRY_KIND_EMAIL: SHOW_ACCESS_EMAIL_MAX_COUNT,
+    ACCESS_ENTRY_KIND_GROUP: SHOW_ACCESS_GROUP_MAX_COUNT,
+    ACCESS_ENTRY_KIND_ORGANIZATION: 1,
+}
+SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH = 320
 SHARE_ID_BYTES = 8
 SHOW_EVENT_WRITE_TOKEN_COOKIE = "vibe_show_event_token"
 SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
@@ -119,12 +146,52 @@ class ShowPage:
 
 
 @dataclass(frozen=True)
+class ShowAccessEntry:
+    """One read-only grant in a Limited audience.
+
+    ``organization_id`` is set for ``group`` and ``organization`` entries and is
+    always the organization that owns the page -- never one the caller names.
+    """
+
+    kind: str
+    value: str
+    organization_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ShowAccess:
     page_id: str
     access_mode: str
     share_id: str | None
     revision: int
-    normalized_emails: tuple[str, ...]
+    entries: tuple[ShowAccessEntry, ...] = ()
+    # Kept as a stored field so existing constructors that pass
+    # ``normalized_emails=`` still construct, and so equality for those
+    # callers stays email-shaped. It is always the email slice of ``entries``.
+    normalized_emails: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.normalized_emails and not self.entries:
+            object.__setattr__(
+                self,
+                "entries",
+                tuple(
+                    ShowAccessEntry(kind=ACCESS_ENTRY_KIND_EMAIL, value=email)
+                    for email in self.normalized_emails
+                ),
+            )
+        object.__setattr__(
+            self,
+            "normalized_emails",
+            tuple(
+                entry.value
+                for entry in self.entries
+                if entry.kind == ACCESS_ENTRY_KIND_EMAIL
+            ),
+        )
+
+    def entries_of_kind(self, kind: str) -> tuple[ShowAccessEntry, ...]:
+        return tuple(entry for entry in self.entries if entry.kind == kind)
 
 
 @dataclass(frozen=True)
@@ -213,7 +280,123 @@ def normalize_show_access_emails(emails: list[str] | tuple[str, ...]) -> tuple[s
     return tuple(sorted({normalize_show_access_email(email) for email in emails}))
 
 
+def _normalize_opaque_entry_value(raw: Any) -> str:
+    """Normalize a group/organization identifier: an opaque, non-empty string."""
+
+    if not isinstance(raw, str):
+        raise ShowPageError("Invalid Show Page access entry.", code="invalid_access_entry")
+    value = raw.strip()
+    if not value or len(value) > SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH:
+        raise ShowPageError("Invalid Show Page access entry.", code="invalid_access_entry")
+    return value
+
+
+def _entry_fields(raw: Any) -> tuple[Any, Any, Any]:
+    if isinstance(raw, ShowAccessEntry):
+        return raw.kind, raw.value, raw.organization_id
+    if isinstance(raw, Mapping):
+        unexpected = set(raw) - {"kind", "value", "organization_id"}
+        if unexpected:
+            raise ShowPageError(
+                "Invalid Show Page access entry.", code="invalid_access_entry"
+            )
+        return raw.get("kind"), raw.get("value"), raw.get("organization_id")
+    raise ShowPageError("Invalid Show Page access entry.", code="invalid_access_entry")
+
+
+def normalize_show_access_entries(
+    entries: Any,
+    *,
+    page_organization_id: str | None,
+) -> tuple[ShowAccessEntry, ...]:
+    """Validate one complete audience against the page's own organization.
+
+    ``page_organization_id`` is the server's answer to "which organization owns
+    this instance", so a group or organization entry is only ever stored for
+    that organization: a caller-named one that disagrees is rejected rather than
+    quietly rewritten, and a Personal instance (no organization) accepts email
+    entries only.
+    """
+
+    if isinstance(entries, (str, bytes, Mapping)) or not isinstance(entries, Iterable):
+        raise ShowPageError(
+            "Invalid Show Page access entry list.", code="invalid_access_entry"
+        )
+
+    normalized: dict[tuple[str, str], ShowAccessEntry] = {}
+    for raw in entries:
+        kind, value, organization_id = _entry_fields(raw)
+        if kind not in ACCESS_ENTRY_KINDS:
+            raise ShowPageError(
+                "Invalid Show Page access entry.", code="invalid_access_entry"
+            )
+        if kind == ACCESS_ENTRY_KIND_EMAIL:
+            if organization_id is not None:
+                raise ShowPageError(
+                    "An email Show Page access entry has no organization.",
+                    code="invalid_access_entry",
+                )
+
+            normalized_value = normalize_show_access_email(value)
+            entry_organization_id = None
+        else:
+            if page_organization_id is None:
+                raise ShowPageError(
+                    "This instance has no organization, so it has no "
+                    f"{kind} Show Page access entries.",
+                    code="invalid_access_entry",
+                )
+            # An organization entry names the page's organization in both
+            # fields; a group entry only in ``organization_id``. Whatever the
+            # caller supplied has to agree with the server's answer, which is
+            # what gets stored -- a cross-organization group is rejected, not
+            # rewritten into the local one.
+            claimed = [organization_id]
+            if kind == ACCESS_ENTRY_KIND_ORGANIZATION:
+                claimed.append(value)
+            if any(
+                _normalize_opaque_entry_value(claim) != page_organization_id
+                for claim in claimed
+                if claim is not None
+            ):
+                raise ShowPageError(
+                    "A Show Page access entry cannot name another organization.",
+                    code="invalid_access_entry",
+                )
+            entry_organization_id = page_organization_id
+            normalized_value = (
+                page_organization_id
+                if kind == ACCESS_ENTRY_KIND_ORGANIZATION
+                else _normalize_opaque_entry_value(value)
+            )
+        normalized[(kind, normalized_value)] = ShowAccessEntry(
+            kind=kind,
+            value=normalized_value,
+            organization_id=entry_organization_id,
+        )
+
+    for kind, limit in SHOW_ACCESS_ENTRY_MAX_COUNTS.items():
+        if sum(1 for entry_kind, _ in normalized if entry_kind == kind) > limit:
+            raise ShowPageError(
+                f"A Show Page may grant access to at most {limit} {kind} entries.",
+                code="invalid_access_entry",
+            )
+    return tuple(normalized[key] for key in sorted(normalized))
+
+
+def show_access_entry_payload(entry: ShowAccessEntry) -> dict[str, Any]:
+    return {
+        "kind": entry.kind,
+        "value": entry.value,
+        "organization_id": entry.organization_id,
+    }
+
+
 def show_access_payload(show_access: ShowAccess) -> dict[str, Any]:
+    # The wire shape stays email-only until the admission/UI lanes consume the
+    # heterogeneous set. ``show_access_entry_payload`` and ``ShowAccess.entries``
+    # are the additive surface those lanes read; putting ``entries`` on this
+    # payload here would change the internal-server JSON contract in this lane.
     return {
         "page_id": show_access.page_id,
         "access_mode": show_access.access_mode,
@@ -457,9 +640,19 @@ class ShowPageStore:
         expected_revision: int,
         target_access_mode: str,
         target_share_id: str | None,
-        target_emails: list[str] | tuple[str, ...],
+        target_emails: list[str] | tuple[str, ...] | None = None,
+        target_entries: Any = None,
         user_context: Any = None,
     ) -> ShowAccessApplyResult:
+        """Replace the whole ShowAccess aggregate under a revision check.
+
+        The audience is a complete entry set, not a delta: whatever is not in
+        ``target_entries`` is revoked. ``target_emails`` is the email-only
+        shorthand for the same replacement, so a caller that passes it revokes
+        every group and organization entry too. Exactly one of the two may be
+        given.
+        """
+
         page_id = validate_session_id(page_id)
         context = _resolve_resource_access_context(user_context)
         current = self.require_access_settings(page_id, user_context=context)
@@ -473,6 +666,11 @@ class ShowPageStore:
                 raise ShowPageError("Invalid ShowAccess revision.", code="invalid_revision")
             if target_access_mode not in ACCESS_MODES:
                 raise ShowPageError("Invalid ShowAccess mode.", code="invalid_access_mode")
+            if target_emails is not None and target_entries is not None:
+                raise ShowPageError(
+                    "Pass either a ShowAccess email list or an entry list, not both.",
+                    code="invalid_show_access",
+                )
             normalized_share_id = (
                 validate_share_id(target_share_id)
                 if target_share_id is not None
@@ -480,109 +678,124 @@ class ShowPageStore:
             )
             if target_access_mode == ACCESS_MODE_PRIVATE and normalized_share_id is None:
                 normalized_share_id = current.share_id
-            normalized_emails = normalize_show_access_emails(target_emails)
-            if target_access_mode == ACCESS_MODE_LIMITED:
-                if normalized_share_id is None or not normalized_emails:
-                    raise ShowPageError(
-                        "Limited ShowAccess requires a share ID and at least one email.",
-                        code="invalid_show_access",
-                    )
-            elif normalized_emails:
-                raise ShowPageError(
-                    "Only Limited ShowAccess may contain emails.",
-                    code="invalid_show_access",
-                )
-            if target_access_mode == ACCESS_MODE_PUBLIC and normalized_share_id is None:
-                raise ShowPageError(
-                    "Public ShowAccess requires a share ID.",
-                    code="invalid_show_access",
-                )
         except (ShowPageError, TypeError):
             return ShowAccessApplyResult(status="invalid", show_access=current)
 
         status = "applied"
         now = _utc_now_iso()
         try:
-            with self.engine.begin() as conn:
-                row = (
-                    conn.execute(
-                        select(show_pages)
-                        .where(show_pages.c.session_id == page_id)
-                        .limit(1)
+            # Organization-scoped entries are stamped with the instance's
+            # current organization. Hold the pairing lock that ``ensure`` /
+            # ``get_for_use`` already use across that read AND the database
+            # write, so a re-pair cannot land between them and persist the
+            # former organization's ID.
+            with config_file_lock():
+                try:
+                    normalized_entries = self._normalize_target_entries(
+                        target_emails=target_emails,
+                        target_entries=target_entries,
                     )
-                    .mappings()
-                    .first()
-                )
-                if row is None:
-                    raise ShowPageError(
-                        "This session has no Show Page.",
-                        code="show_page_not_found",
-                    )
-                self._require_sharing_control(conn, page_id, context)
-                current = _show_access_from_row(conn, row)
-                if current.revision != expected_revision:
-                    return ShowAccessApplyResult(
-                        status="conflict",
-                        show_access=current,
-                    )
-                canonical_target = (
-                    target_access_mode,
-                    normalized_share_id,
-                    normalized_emails,
-                )
-                canonical_current = (
-                    current.access_mode,
-                    current.share_id,
-                    current.normalized_emails,
-                )
-                if canonical_target == canonical_current:
-                    return ShowAccessApplyResult(
-                        status="no_change",
-                        show_access=current,
-                    )
-                archived = conn.execute(
-                    select(agent_sessions.c.status)
-                    .where(agent_sessions.c.id == page_id)
-                    .limit(1)
-                ).scalar_one_or_none()
-                if archived == "archived":
-                    return ShowAccessApplyResult(
-                        status="invalid",
-                        show_access=current,
-                    )
-                result = conn.execute(
-                    update(show_pages)
-                    .where(
-                        show_pages.c.session_id == page_id,
-                        show_pages.c.access_revision == expected_revision,
-                    )
-                    .values(
-                        access_mode=target_access_mode,
-                        share_id=normalized_share_id,
-                        access_revision=expected_revision + 1,
-                        updated_at=now,
-                    )
-                )
-                if not result.rowcount:
-                    status = "conflict"
-                else:
-                    conn.execute(
-                        delete(show_page_authorized_emails).where(
-                            show_page_authorized_emails.c.session_id == page_id
+                    if target_access_mode == ACCESS_MODE_LIMITED:
+                        if normalized_share_id is None or not normalized_entries:
+                            raise ShowPageError(
+                                "Limited ShowAccess requires a share ID and at least one "
+                                "access entry.",
+                                code="invalid_show_access",
+                            )
+                    elif normalized_entries:
+                        raise ShowPageError(
+                            "Only Limited ShowAccess may contain access entries.",
+                            code="invalid_show_access",
                         )
-                    )
-                    if normalized_emails:
+                    if target_access_mode == ACCESS_MODE_PUBLIC and normalized_share_id is None:
+                        raise ShowPageError(
+                            "Public ShowAccess requires a share ID.",
+                            code="invalid_show_access",
+                        )
+                except (ShowPageError, TypeError):
+                    return ShowAccessApplyResult(status="invalid", show_access=current)
+                with self.engine.begin() as conn:
+                    row = (
                         conn.execute(
-                            insert(show_page_authorized_emails),
-                            [
-                                {
-                                    "session_id": page_id,
-                                    "normalized_email": email,
-                                    "created_at": now,
-                                }
-                                for email in normalized_emails
-                            ],
+                            select(show_pages)
+                            .where(show_pages.c.session_id == page_id)
+                            .limit(1)
                         )
+                        .mappings()
+                        .first()
+                    )
+                    if row is None:
+                        raise ShowPageError(
+                            "This session has no Show Page.",
+                            code="show_page_not_found",
+                        )
+                    self._require_sharing_control(conn, page_id, context)
+                    current = _show_access_from_row(conn, row)
+                    if current.revision != expected_revision:
+                        return ShowAccessApplyResult(
+                            status="conflict",
+                            show_access=current,
+                        )
+                    canonical_target = (
+                        target_access_mode,
+                        normalized_share_id,
+                        normalized_entries,
+                    )
+                    canonical_current = (
+                        current.access_mode,
+                        current.share_id,
+                        current.entries,
+                    )
+                    if canonical_target == canonical_current:
+                        return ShowAccessApplyResult(
+                            status="no_change",
+                            show_access=current,
+                        )
+                    archived = conn.execute(
+                        select(agent_sessions.c.status)
+                        .where(agent_sessions.c.id == page_id)
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if archived == "archived":
+                        return ShowAccessApplyResult(
+                            status="invalid",
+                            show_access=current,
+                        )
+                    result = conn.execute(
+                        update(show_pages)
+                        .where(
+                            show_pages.c.session_id == page_id,
+                            show_pages.c.access_revision == expected_revision,
+                        )
+                        .values(
+                            access_mode=target_access_mode,
+                            share_id=normalized_share_id,
+                            access_revision=expected_revision + 1,
+                            updated_at=now,
+                        )
+                    )
+                    if not result.rowcount:
+                        status = "conflict"
+                    else:
+                        conn.execute(
+                            delete(show_page_access_entries).where(
+                                show_page_access_entries.c.page_id == page_id
+                            )
+                        )
+                        if normalized_entries:
+                            conn.execute(
+                                insert(show_page_access_entries),
+                                [
+                                    {
+                                        "page_id": page_id,
+                                        "kind": entry.kind,
+                                        "value": entry.value,
+                                        "organization_id": entry.organization_id,
+                                        "created_at": now,
+                                    }
+                                    for entry in normalized_entries
+                                ],
+                            )
         except IntegrityError:
             status = "share_id_taken"
 
@@ -593,6 +806,55 @@ class ShowPageStore:
                 code="show_page_not_found",
             )
         return ShowAccessApplyResult(status=status, show_access=latest)
+
+    def _normalize_target_entries(
+        self,
+        *,
+        target_emails: list[str] | tuple[str, ...] | None,
+        target_entries: Any,
+    ) -> tuple[ShowAccessEntry, ...]:
+        if target_entries is None:
+            return tuple(
+                ShowAccessEntry(kind=ACCESS_ENTRY_KIND_EMAIL, value=email)
+                for email in normalize_show_access_emails(target_emails or ())
+            )
+        if isinstance(target_entries, (str, bytes, Mapping)) or not isinstance(
+            target_entries, Iterable
+        ):
+            raise ShowPageError(
+                "Invalid Show Page access entry list.", code="invalid_access_entry"
+            )
+        materialized = list(target_entries)
+        # Resolving the instance organization reads configuration, so only an
+        # audience that actually contains an organization-scoped entry pays for
+        # the answer; an email-only audience never needs one.
+        needs_organization = any(
+            _entry_fields(raw)[0] in ORGANIZATION_ACCESS_ENTRY_KINDS
+            for raw in materialized
+        )
+        return normalize_show_access_entries(
+            materialized,
+            page_organization_id=(
+                self._page_organization_id() if needs_organization else None
+            ),
+        )
+
+    @classmethod
+    def _page_organization_id(cls) -> str | None:
+        """The organization that owns this instance, or None when Personal.
+
+        Group and organization entries are stored against this value, never
+        against one a caller supplies, so a Personal instance simply has no
+        organization to grant and rejects both kinds.
+        """
+
+        ownership = cls._resolve_instance_ownership()
+        if not isinstance(ownership, Mapping) or ownership.get("mode") != "organization":
+            return None
+        organization_id = ownership.get("organization_id")
+        if not isinstance(organization_id, str) or not organization_id.strip():
+            return None
+        return organization_id.strip()
 
     def get_by_share_id(self, share_id: str) -> ShowPage | None:
         share_id = (share_id or "").strip()
@@ -1168,7 +1430,9 @@ class ShowPageStore:
                 expected_revision=access.revision,
                 target_access_mode=access.access_mode,
                 target_share_id=_new_share_id(),
-                target_emails=access.normalized_emails,
+                # Rotating the link is not an audience edit: carry the whole
+                # entry set over, not just its email slice.
+                target_entries=access.entries,
                 user_context=context,
             )
             if result.status == "share_id_taken":
@@ -1221,7 +1485,9 @@ class ShowPageStore:
             expected_revision=access.revision,
             target_access_mode=access.access_mode,
             target_share_id=new_share_id,
-            target_emails=access.normalized_emails,
+            # Renaming the link is not an audience edit: carry the whole entry
+            # set over, not just its email slice.
+            target_entries=access.entries,
             user_context=context,
         )
         if result.status == "share_id_taken":
@@ -1265,20 +1531,35 @@ def _page_from_row(row: Any) -> ShowPage:
 
 def _show_access_from_row(connection: Connection, row: Any) -> ShowAccess:
     page_id = str(row["session_id"])
-    emails = tuple(
-        str(value)
-        for value in connection.execute(
-            select(show_page_authorized_emails.c.normalized_email)
-            .where(show_page_authorized_emails.c.session_id == page_id)
-            .order_by(show_page_authorized_emails.c.normalized_email.asc())
-        ).scalars()
+    entries = tuple(
+        ShowAccessEntry(
+            kind=str(entry_row["kind"]),
+            value=str(entry_row["value"]),
+            organization_id=(
+                str(entry_row["organization_id"])
+                if entry_row["organization_id"]
+                else None
+            ),
+        )
+        for entry_row in connection.execute(
+            select(
+                show_page_access_entries.c.kind,
+                show_page_access_entries.c.value,
+                show_page_access_entries.c.organization_id,
+            )
+            .where(show_page_access_entries.c.page_id == page_id)
+            .order_by(
+                show_page_access_entries.c.kind.asc(),
+                show_page_access_entries.c.value.asc(),
+            )
+        ).mappings()
     )
     return ShowAccess(
         page_id=page_id,
         access_mode=str(row["access_mode"]),
         share_id=str(row["share_id"]) if row["share_id"] else None,
         revision=int(row["access_revision"]),
-        normalized_emails=emails,
+        entries=entries,
     )
 
 

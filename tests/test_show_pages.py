@@ -8,6 +8,8 @@ from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.show_pages import (
     SHOW_ACCESS_EMAIL_MAX_COUNT,
+    SHOW_ACCESS_ENTRY_MAX_COUNTS,
+    ShowAccessEntry,
     ShowPage,
     ShowPageError,
     ShowPageStore,
@@ -791,6 +793,326 @@ def test_show_access_and_availability_are_independent(monkeypatch, tmp_path) -> 
         assert public.show_access.revision == 2
         assert public.show_access.access_mode == "public"
         assert store.get("ses-offline-access").offline is True
+    finally:
+        store.close()
+
+
+def _instance_ownership(monkeypatch, organization_id: str | None) -> None:
+    """Pin the store's own answer to "which organization owns this instance".
+
+    Group and organization access entries are stored against that answer and
+    never against a caller-supplied one, so pinning it here is what makes an
+    organization-scoped audience reachable (or, with ``None``, Personal).
+    """
+
+    ownership = (
+        {"mode": "personal"}
+        if organization_id is None
+        else {"mode": "organization", "organization_id": organization_id}
+    )
+    monkeypatch.setattr(
+        ShowPageStore,
+        "_resolve_instance_ownership",
+        staticmethod(lambda: dict(ownership)),
+    )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ShowAccessEntry(kind="group", value="group-7", organization_id="org-1"),
+        ShowAccessEntry(kind="group", value="group-7"),
+        ShowAccessEntry(kind="organization", value="org-1", organization_id="org-1"),
+        {"kind": "organization"},
+    ],
+)
+def test_show_access_personal_instance_grants_emails_only(monkeypatch, tmp_path, entry) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-personal-entries")
+        _instance_ownership(monkeypatch, None)
+        result = store.apply_access(
+            "ses-personal-entries",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[{"kind": "email", "value": "guest@example.com"}, entry],
+        )
+
+        assert result.status == "invalid"
+        assert result.show_access.revision == 0
+        assert result.show_access.access_mode == "private"
+        # A rejected audience is rejected whole: the email alongside it is not
+        # written either.
+        assert result.show_access.entries == ()
+        assert store.get_access("ses-personal-entries").entries == ()
+    finally:
+        store.close()
+
+
+def test_show_access_entries_are_scoped_to_the_instance_organization(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-org-entries")
+        _instance_ownership(monkeypatch, "org-1")
+        applied = store.apply_access(
+            "ses-org-entries",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": " Guest@Example.COM "},
+                {"kind": "group", "value": " group-7 "},
+                {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+                # "This organization may read" is one switch, not a list: every
+                # organization entry names the instance's organization by
+                # construction, so two of them collapse into one.
+                {"kind": "organization"},
+                {"kind": "organization", "value": "org-1", "organization_id": "org-1"},
+            ],
+        )
+
+        assert applied.status == "applied"
+        assert applied.show_access.revision == 1
+        assert applied.show_access.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+            ShowAccessEntry("group", "group-7", "org-1"),
+            ShowAccessEntry("organization", "org-1", "org-1"),
+        )
+        assert applied.show_access.normalized_emails == ("guest@example.com",)
+        assert store.get_access("ses-org-entries") == applied.show_access
+
+        cross_organization = store.apply_access(
+            "ses-org-entries",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[{"kind": "group", "value": "group-9", "organization_id": "org-2"}],
+        )
+        assert cross_organization.status == "invalid"
+        assert store.get_access("ses-org-entries") == applied.show_access
+
+        # The audience is a complete set, not a delta.
+        replaced = store.apply_access(
+            "ses-org-entries",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[{"kind": "group", "value": "group-8"}],
+        )
+        assert replaced.status == "applied"
+        assert replaced.show_access.entries == (ShowAccessEntry("group", "group-8", "org-1"),)
+        assert replaced.show_access.normalized_emails == ()
+
+        # ``target_emails`` is the email-only shorthand for that same
+        # replacement, so it revokes the group entry with it.
+        shorthand = store.apply_access(
+            "ses-org-entries",
+            expected_revision=2,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        assert shorthand.status == "applied"
+        assert shorthand.show_access.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+        )
+    finally:
+        store.close()
+
+
+def test_show_access_group_audience_over_limit_has_no_write(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-group-limit")
+        _instance_ownership(monkeypatch, "org-1")
+        limit = SHOW_ACCESS_ENTRY_MAX_COUNTS["group"]
+        allowed_groups = [{"kind": "group", "value": f"group-{index}"} for index in range(limit)]
+        allowed = store.apply_access(
+            "ses-group-limit",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=allowed_groups,
+        )
+        result = store.apply_access(
+            "ses-group-limit",
+            expected_revision=allowed.show_access.revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[*allowed_groups, {"kind": "group", "value": "one-too-many"}],
+        )
+
+        assert allowed.status == "applied"
+        assert len(allowed.show_access.entries) == limit
+        assert result.status == "invalid"
+        assert result.show_access == allowed.show_access
+    finally:
+        store.close()
+
+
+def test_show_access_never_partially_replaces_the_entry_set(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        first = store.ensure("ses-entries-first")
+        second = store.ensure("ses-entries-second")
+        _instance_ownership(monkeypatch, "org-1")
+        taken = store.apply_access(
+            "ses-entries-first",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id="taken-link",
+            target_entries=[{"kind": "email", "value": "first@example.com"}],
+        )
+        heterogeneous = store.apply_access(
+            "ses-entries-second",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=second.share_id,
+            target_entries=[
+                {"kind": "email", "value": "second@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        assert taken.status == heterogeneous.status == "applied"
+
+        conflict = store.apply_access(
+            "ses-entries-second",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=second.share_id,
+            target_entries=[{"kind": "email", "value": "replacement@example.com"}],
+        )
+        collision = store.apply_access(
+            "ses-entries-second",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id="taken-link",
+            target_entries=[{"kind": "email", "value": "replacement@example.com"}],
+        )
+
+        assert conflict.status == "conflict"
+        assert collision.status == "share_id_taken"
+        assert conflict.show_access == heterogeneous.show_access
+        assert collision.show_access == heterogeneous.show_access
+        assert store.get_access("ses-entries-second") == heterogeneous.show_access
+        assert store.get_by_share_id("taken-link").session_id == first.session_id
+    finally:
+        store.close()
+
+
+def test_share_link_edits_carry_the_whole_entry_set(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-entries-rotate")
+        _instance_ownership(monkeypatch, "org-1")
+        limited = store.apply_access(
+            "ses-entries-rotate",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": "guest@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        rotated, previous = store.rotate_share("ses-entries-rotate")
+        after_rotate = store.get_access("ses-entries-rotate")
+        renamed, _ = store.set_share_id("ses-entries-rotate", "renamed-link")
+        after_rename = store.get_access("ses-entries-rotate")
+
+        assert previous == page.share_id
+        assert rotated.share_id not in {None, page.share_id}
+        assert renamed.share_id == "renamed-link"
+        assert after_rotate.entries == limited.show_access.entries
+        assert after_rename.entries == limited.show_access.entries
+
+        # Known-by-design: the entry set is re-validated against the instance's
+        # CURRENT organization, so an instance that has left it can no longer
+        # rotate the link — the audience fails closed instead of being silently
+        # re-scoped. Owner/organization transfer is out of scope for this lane.
+        _instance_ownership(monkeypatch, None)
+        _expect_show_page_error(lambda: store.rotate_share("ses-entries-rotate"), "invalid")
+        assert store.get_access("ses-entries-rotate").entries == limited.show_access.entries
+    finally:
+        store.close()
+
+
+def test_show_access_stamps_organization_entries_from_the_pairing_held_at_persist(
+    monkeypatch, tmp_path
+) -> None:
+    """Organization-scoped entries are stamped with the pairing live at persist.
+
+    Resolving ownership before the pairing lock used to let a re-pair land
+    between that read and the write, so the former organization's ID could be
+    stored after the new pairing was already active. Resolution and persist now
+    share one lock hold: an unlocked snapshot is never the one written.
+    """
+
+    from contextlib import contextmanager
+
+    import core.show_pages as show_pages_mod
+    from config.v2_config import config_file_lock as real_config_file_lock
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-pairing-lock")
+        held = {"depth": 0}
+        resolved_under_lock: list[bool] = []
+
+        @contextmanager
+        def tracking_lock(*args, **kwargs):
+            held["depth"] += 1
+            try:
+                with real_config_file_lock(*args, **kwargs):
+                    yield
+            finally:
+                held["depth"] -= 1
+
+        def resolve_ownership():
+            under_lock = held["depth"] > 0
+            resolved_under_lock.append(under_lock)
+            organization_id = "org-live" if under_lock else "org-stale"
+            return {"mode": "organization", "organization_id": organization_id}
+
+        monkeypatch.setattr(show_pages_mod, "config_file_lock", tracking_lock)
+        monkeypatch.setattr(
+            ShowPageStore,
+            "_resolve_instance_ownership",
+            staticmethod(resolve_ownership),
+        )
+        applied = store.apply_access(
+            "ses-pairing-lock",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": "guest@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        persisted = store.get_access("ses-pairing-lock")
+
+        assert applied.status == "applied"
+        assert persisted.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+            ShowAccessEntry("group", "group-7", "org-live"),
+            ShowAccessEntry("organization", "org-live", "org-live"),
+        )
+        assert resolved_under_lock
+        assert all(resolved_under_lock)
+        assert "org-stale" not in {
+            entry.organization_id for entry in persisted.entries
+        }
     finally:
         store.close()
 
