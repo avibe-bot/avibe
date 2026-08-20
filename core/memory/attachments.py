@@ -14,10 +14,15 @@ import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from config import paths
+from core.inbound_attachment_lease import (
+    InboundAttachmentLease,
+    LeasedAttachmentRecord,
+    leased_attachment_records,
+    open_leased_attachment_record,
+)
 from core.memory import modality as memory_modality
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
@@ -32,13 +37,6 @@ from core.memory.types import (
     MemoryContentKind,
     MemoryErrorCode,
 )
-
-if TYPE_CHECKING:
-    from core.handlers.inbound_attachments import (
-        InboundAttachmentLease,
-        _LeasedAttachmentRecord,
-    )
-
 
 MAX_PINNED_ATTACHMENTS = 8
 MAX_PINNED_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -648,13 +646,9 @@ class AttachmentPinStore:
     def _pin_source(
         self,
         source_lease: InboundAttachmentLease | None,
-    ) -> tuple[Path, dict[Path, _LeasedAttachmentRecord] | None]:
+    ) -> tuple[Path, dict[Path, LeasedAttachmentRecord] | None]:
         if source_lease is None:
             return self._source_root, None
-        from core.handlers.inbound_attachments import (
-            InboundAttachmentLease,
-            leased_attachment_records,
-        )
 
         if type(source_lease) is not InboundAttachmentLease:
             raise AttachmentPinError(
@@ -691,7 +685,7 @@ class AttachmentPinStore:
         source: CaptureAttachment,
         *,
         source_root: Path,
-        allowed_records: dict[Path, _LeasedAttachmentRecord] | None,
+        allowed_records: dict[Path, LeasedAttachmentRecord] | None,
         source_lease: InboundAttachmentLease | None,
     ) -> tuple[int, os.stat_result, str | None]:
         source_path = _path_from_file_uri(source.uri)
@@ -720,11 +714,6 @@ class AttachmentPinStore:
             raise AttachmentPinError("memory_invalid_input", "attachment extension is inconsistent")
 
         if source_lease is not None:
-            from core.handlers.inbound_attachments import (
-                leased_attachment_records,
-                open_leased_attachment_record,
-            )
-
             directory_fd: int | None = None
             try:
                 current_root, directory_fd, current_records = leased_attachment_records(source_lease)

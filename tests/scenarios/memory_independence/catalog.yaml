@@ -1,17 +1,23 @@
 version: 1
 capability:
   id: memory_independence
-  name: Memory capture must not fence dispatch or destructive session ops
+  name: Memory remains optional across delivery and session lifecycle
   canonical_tests:
     - tests/test_session_delivery_fsm.py
     - tests/test_message_handler_typing.py
     - tests/test_command_handler_user_names.py
     - tests/test_memory_runtime.py
+    - tests/test_memory_admission.py
+    - tests/test_memory_slice3.py
+    - tests/test_controller_dispatch_loop.py
 contract:
   dispatch: capture_must_not_fence_turn_start
   destructive_ops: new_and_archive_fail_open_on_capture_timeout
-  generation: epoch_snapshot_prevents_cross_generation_attribution
-  shutdown: drain_and_cancel_still_settle_accepted_captures
+  generation: retained_snapshot_prevents_cross_generation_attribution
+  shutdown: capture_and_archive_flush_tasks_settle_before_runtime_close
+  imports: shared_delivery_modules_do_not_load_memory_implementations
+  retention: settled_lifecycle_and_archive_authorization_state_is_released
+  scheduling: capture_setup_failure_is_best_effort
 status_legend:
   covered: executable evidence exists
 scenarios:
@@ -33,3 +39,33 @@ scenarios:
     kind: regression_keep
     layer: scenario
     test: tests/test_session_delivery_fsm.py::test_idle_session_capture_attributes_and_shutdown_drains
+  - id: MEMORY-INDEP-004
+    name: Shared delivery imports do not load Memory implementations
+    status: covered
+    kind: guardrail
+    layer: contract
+    test: tests/test_memory_admission.py::test_session_turns_import_keeps_memory_and_handlers_behind_their_boundaries
+  - id: MEMORY-INDEP-005
+    name: Settled lifecycle generations do not retain historical sessions
+    status: covered
+    kind: guardrail
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_completed_memory_lifecycle_state_does_not_accumulate
+  - id: MEMORY-INDEP-006
+    name: A synchronous Memory capture setup failure stays best effort
+    status: covered
+    kind: correctness
+    layer: contract
+    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_text_memory_capture_setup_failure_is_best_effort
+  - id: MEMORY-INDEP-007
+    name: Archive releases process-local Memory authorization after final flush
+    status: covered
+    kind: guardrail
+    layer: contract
+    test: tests/test_memory_slice3.py::test_archive_memory_cli_session_commits_without_waiting_on_memory
+  - id: MEMORY-INDEP-008
+    name: Shutdown settles archive Memory flush tasks before closing the runtime
+    status: covered
+    kind: guardrail
+    layer: contract
+    test: tests/test_controller_dispatch_loop.py::test_cleanup_sync_stops_watch_service_on_stopped_loop

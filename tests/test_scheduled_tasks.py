@@ -12707,7 +12707,6 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
     from core.internal_server import create_app
     from core.message_output import terminal_output_for
     from core.session_turns import (
-        TURN_LIFECYCLE_ADMISSION_KEY,
         SessionTurnManager,
         emit_matches_active_turn,
     )
@@ -12850,26 +12849,21 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         del parsed_session_key
-        lifecycle_admission = (context.platform_specific or {}).pop(
-            TURN_LIFECYCLE_ADMISSION_KEY,
-            None,
+        assert "_turn_lifecycle_admission" not in (
+            context.platform_specific or {}
         )
-        try:
-            await controller.agent_service.handle_message(
-                "claude",
-                AgentRequest(
-                    context=context,
-                    message=message,
-                    user_message=message,
-                    working_path=str(tmp_path),
-                    base_session_id=session_id,
-                    composite_session_id=f"{session_id}:{tmp_path}",
-                    session_key=controller._get_session_key(context),
-                ),
-            )
-        finally:
-            if lifecycle_admission is not None:
-                lifecycle_admission.release()
+        await controller.agent_service.handle_message(
+            "claude",
+            AgentRequest(
+                context=context,
+                message=message,
+                user_message=message,
+                working_path=str(tmp_path),
+                base_session_id=session_id,
+                composite_session_id=f"{session_id}:{tmp_path}",
+                session_key=controller._get_session_key(context),
+            ),
+        )
 
     controller.message_handler = SimpleNamespace(
         handle_scheduled_message=_handle_scheduled_message,

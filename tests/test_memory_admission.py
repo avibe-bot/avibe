@@ -691,7 +691,40 @@ from core.memory.admission_metadata import MEMORY_USER_ID_METADATA
 assert message_deliveries.MEMORY_USER_ID_METADATA is MEMORY_USER_ID_METADATA
 assert "core.memory.admission" not in sys.modules
 assert "core.memory.im_attachments" not in sys.modules
+assert "core.memory.module" not in sys.modules
+assert "core.memory.store" not in sys.modules
+assert "core.memory.types" not in sys.modules
 assert "core.handlers" not in sys.modules
+assert "httpx" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_session_turns_import_keeps_memory_and_handlers_behind_their_boundaries() -> None:
+    """Scenario: MEMORY-INDEP-004.
+
+    The delivery FSM must not load optional Memory or handler implementations.
+    """
+
+    script = """
+import sys
+import core.session_turns
+assert "core.memory.admission" not in sys.modules
+assert "core.memory.attachments" not in sys.modules
+assert "core.memory.im_attachments" not in sys.modules
+assert "core.memory.module" not in sys.modules
+assert "core.memory.runtime" not in sys.modules
+assert "core.memory.types" not in sys.modules
+assert "core.handlers" not in sys.modules
+assert "core.handlers.message_handler" not in sys.modules
+assert "aiohttp" not in sys.modules
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -34,8 +35,7 @@ from core.runtime_activation import (
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
-    TURN_LIFECYCLE_ADMISSION_KEY,
-    TURN_LIFECYCLE_EPOCH_KEY,
+    TURN_LIFECYCLE_SNAPSHOT_KEY,
     DeliveryRequest,
     DeliveryResult,
     SessionTurnManager,
@@ -120,12 +120,9 @@ def _memory_facts_controller():
 
 
 def _complete_capture_admission(context: MessageContext) -> None:
-    admission = (context.platform_specific or {}).pop(
-        TURN_LIFECYCLE_ADMISSION_KEY,
-        None,
-    )
-    if admission is not None:
-        admission.release()
+    """Guard that durable dispatch no longer carries the retired fence lease."""
+
+    assert "_turn_lifecycle_admission" not in (context.platform_specific or {})
 
 
 def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
@@ -217,6 +214,37 @@ def _capture_handler(manager: SessionTurnManager) -> MessageHandler:
 
 
 @pytest.mark.anyio
+async def test_completed_memory_lifecycle_state_does_not_accumulate(managers) -> None:
+    """Scenario: MEMORY-INDEP-005.
+
+    Settled optional Memory fences must not retain every historical session.
+    """
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    for index in range(256):
+        session_id = f"settled-memory-session-{index}"
+        snapshot = manager.snapshot_session_lifecycle(session_id)
+        admission = await manager.acquire_lifecycle_admission(session_id)
+        admission.release()
+
+        async def reset_session() -> str:
+            return "reset"
+
+        assert await manager.run_session_lifecycle(
+            session_id,
+            reset_session,
+        ) == "reset"
+        assert not manager.session_lifecycle_snapshot_matches(
+            session_id,
+            snapshot,
+        )
+
+    del admission, snapshot
+    gc.collect()
+    assert len(manager._session_lifecycle_states) == 0
+
+
+@pytest.mark.anyio
 async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
     handler = _capture_handler(manager)
@@ -225,7 +253,9 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
     lifecycle_entered = asyncio.Event()
 
     async def run_turn(_session_id, context, _text, **_kwargs):
-        expected_epoch = context.platform_specific.get(TURN_LIFECYCLE_EPOCH_KEY, 0)
+        expected_snapshot = context.platform_specific[
+            TURN_LIFECYCLE_SNAPSHOT_KEY
+        ]
 
         async def capture() -> None:
             capture_entered.set()
@@ -233,7 +263,7 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
 
         handler._schedule_memory_capture_task(
             session_id="ses_fsm",
-            expected_epoch=expected_epoch,
+            expected_snapshot=expected_snapshot,
             capture=capture(),
         )
 
@@ -270,19 +300,19 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
 
 
 @pytest.mark.anyio
-async def test_session_lifecycle_advances_local_epoch_after_operation(managers) -> None:
+async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
-    pre_epoch = manager.session_lifecycle_epoch("ses_fsm")
+    snapshot = manager.snapshot_session_lifecycle("ses_fsm")
 
     async def lifecycle_operation() -> str:
-        assert manager.session_lifecycle_epoch("ses_fsm") == pre_epoch
+        assert manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
         return "reset"
 
     assert await manager.run_session_lifecycle(
         "ses_fsm",
         lifecycle_operation,
     ) == "reset"
-    assert manager.session_lifecycle_epoch_matches("ses_fsm", pre_epoch + 1)
+    assert not manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
 
 
 @pytest.mark.anyio
@@ -290,7 +320,7 @@ async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> Non
     """MEMORY-IM-ATTACH-001: failed reset preserves an in-flight turn epoch."""
 
     manager, _other, _engine, _engine_b, _starts = managers
-    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
 
     async def lifecycle_operation() -> str:
         raise RuntimeError("reset failed")
@@ -300,7 +330,10 @@ async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> Non
 
     admission = await manager.acquire_lifecycle_admission("ses_fsm")
     try:
-        assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+        assert manager.session_lifecycle_snapshot_matches(
+            "ses_fsm",
+            sampled_snapshot,
+        )
     finally:
         admission.release()
 
@@ -324,7 +357,7 @@ async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
 
     handler._schedule_memory_capture_task(
         session_id="ses_fsm",
-        expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+        expected_snapshot=manager.snapshot_session_lifecycle("ses_fsm"),
         capture=hung_capture(),
     )
     await asyncio.wait_for(capture_holding.wait(), timeout=1.0)
@@ -389,7 +422,7 @@ async def test_capture_admitted_before_new_is_discarded_after_transition(
     attributed: list[str] = []
     admitted = asyncio.Event()
     finish_capture = asyncio.Event()
-    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
 
     async def capture_write() -> None:
         attributed.append("wrote")
@@ -399,7 +432,7 @@ async def test_capture_admitted_before_new_is_discarded_after_transition(
         await finish_capture.wait()
         await handler._run_memory_capture(
             "ses_fsm",
-            sampled_epoch,
+            sampled_snapshot,
             capture_write(),
         )
 
@@ -415,7 +448,10 @@ async def test_capture_admitted_before_new_is_discarded_after_transition(
         reset_session,
         deadline_seconds=0.05,
     ) == "reset"
-    assert not manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+    assert not manager.session_lifecycle_snapshot_matches(
+        "ses_fsm",
+        sampled_snapshot,
+    )
 
     finish_capture.set()
     await handler.drain_memory_capture_tasks()
@@ -437,7 +473,7 @@ async def test_idle_session_capture_attributes_and_shutdown_drains(
 
     await handler._run_memory_capture(
         "ses_fsm",
-        manager.session_lifecycle_epoch("ses_fsm"),
+        manager.snapshot_session_lifecycle("ses_fsm"),
         capture_write(),
     )
     assert attributed == ["wrote"]
@@ -470,7 +506,7 @@ async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
     async def reset_session() -> str:
         task = handler._schedule_memory_capture_task(
             session_id="ses_fsm",
-            expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+            expected_snapshot=manager.snapshot_session_lifecycle("ses_fsm"),
             capture=asyncio.sleep(0),
         )
         assert task is not None
@@ -503,13 +539,13 @@ async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
         holding.set()
         await never_resolves.wait()
 
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
     handler._schedule_memory_capture_task(
         session_id="ses_fsm",
-        expected_epoch=manager.session_lifecycle_epoch("ses_fsm"),
+        expected_snapshot=sampled_snapshot,
         capture=hung_capture(),
     )
     await asyncio.wait_for(holding.wait(), timeout=1.0)
-    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
 
     async def reset_session() -> str:
         raise RuntimeError("reset failed")
@@ -521,7 +557,10 @@ async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
             deadline_seconds=0.05,
         )
 
-    assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+    assert manager.session_lifecycle_snapshot_matches(
+        "ses_fsm",
+        sampled_snapshot,
+    )
     assert handler._memory_capture_tasks
     assert all(not task.cancelled() for task in handler._memory_capture_tasks)
     never_resolves.set()
@@ -5098,7 +5137,7 @@ def test_persisted_start_does_not_acquire_lifecycle_admission(
     )
 
     assert acquired is False
-    assert "ses_fsm" not in manager._session_lifecycle_locks
+    assert "ses_fsm" not in manager._session_lifecycle_states
 
 
 @pytest.mark.parametrize(

@@ -68,7 +68,7 @@ from core.memory.types import (
 from core.memory.worker import MemoryWorker, ProcessingEvent
 
 if TYPE_CHECKING:
-    from core.handlers.inbound_attachments import InboundAttachmentLease
+    from core.inbound_attachment_lease import InboundAttachmentLease
 
 
 MAX_CAPTURE_TEXT_BYTES = 32 * 1024

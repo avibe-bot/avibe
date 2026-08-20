@@ -27,6 +27,7 @@ from core.memory import (
     CaptureSkipped,
     MemoryModule,
 )
+from core.memory.admission import InboundTurnFacts
 from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.everos import FakeMemoryProvider
 from core.memory.runtime import MemoryRuntime
@@ -1094,6 +1095,8 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Scenario: MEMORY-INDEP-007."""
+
     from storage import workbench_sessions_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -1139,7 +1142,15 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
     controller._memory_scopes_by_session = {
         session_id: (principal_id, PROJECT),
     }
-    controller._memory_cli_facts_by_session = {}
+    controller._memory_cli_facts_by_session = {
+        session_id: InboundTurnFacts(
+            platform="avibe",
+            user_id="workbench-user",
+            message_id="message-1",
+            session_id=session_id,
+            memory_enabled=True,
+        )
+    }
     controller.memory_runtime.recovered_scopes = ((principal_id, PROJECT),)
 
     async def run() -> None:
@@ -1163,11 +1174,34 @@ def test_archive_memory_cli_session_commits_without_waiting_on_memory(
         pending = list(getattr(controller, "_archive_memory_flush_tasks", set()))
         if pending:
             await asyncio.gather(*pending)
+        assert session_id not in controller._memory_scopes_by_session
+        assert session_id not in controller._memory_cli_facts_by_session
 
     try:
         asyncio.run(run())
     finally:
         engine.dispose()
+
+
+def test_archive_memory_flush_drops_on_a_stopped_controller_loop() -> None:
+    """Scenario: MEMORY-INDEP-007."""
+
+    session_id = "ses-archived-on-stopped-loop"
+    controller = _controller()
+    controller._memory_scopes_by_session = {
+        session_id: ("u-" + ("2" * 32), PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {session_id: object()}
+    controller._loop = asyncio.new_event_loop()
+
+    try:
+        controller._schedule_best_effort_archive_memory_flush(session_id)
+    finally:
+        controller._loop.close()
+
+    assert session_id not in controller._memory_scopes_by_session
+    assert session_id not in controller._memory_cli_facts_by_session
+    assert getattr(controller, "_archive_memory_flush_tasks", set()) == set()
 
 
 def test_archive_memory_cli_session_schedules_flush_when_commit_is_cancelled(

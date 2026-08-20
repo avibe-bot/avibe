@@ -265,6 +265,8 @@ class Controller:
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
         self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
+        self._archive_memory_flush_tasks: set[asyncio.Task[None]] = set()
+        self._archive_memory_flush_registration_open = True
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -2131,6 +2133,16 @@ class Controller:
             return scope
         return None
 
+    def _forget_memory_cli_session(self, session_id: str) -> None:
+        """Drop process-local Memory authorization after a terminal archive."""
+
+        scopes = getattr(self, "_memory_scopes_by_session", None)
+        if isinstance(scopes, dict):
+            scopes.pop(session_id, None)
+        facts = getattr(self, "_memory_cli_facts_by_session", None)
+        if isinstance(facts, dict):
+            facts.pop(session_id, None)
+
     def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
         """Return the principal associated with an admitted Agent session."""
 
@@ -2309,6 +2321,10 @@ class Controller:
     def _schedule_best_effort_archive_memory_flush(self, raw_session_id: str) -> None:
         """Flush Memory for an archived session without owning the archive result."""
 
+        if not getattr(self, "_archive_memory_flush_registration_open", True):
+            self._forget_memory_cli_session(raw_session_id)
+            return
+
         async def _flush() -> None:
             try:
                 await self.final_flush_memory_cli_session(raw_session_id)
@@ -2318,6 +2334,8 @@ class Controller:
                     raw_session_id,
                     exc_info=True,
                 )
+            finally:
+                self._forget_memory_cli_session(raw_session_id)
 
         def _consume(task: asyncio.Task[None]) -> None:
             tasks = getattr(self, "_archive_memory_flush_tasks", None)
@@ -2338,32 +2356,40 @@ class Controller:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = getattr(self, "_loop", None)
-            if loop is None or loop.is_closed():
+            if loop is None or loop.is_closed() or not loop.is_running():
                 logger.debug(
-                    "archive: Memory flush dropped; no event loop for %s",
+                    "archive: Memory flush dropped; no running event loop for %s",
                     raw_session_id,
                 )
+                self._forget_memory_cli_session(raw_session_id)
                 return
-            future = asyncio.run_coroutine_threadsafe(_flush(), loop)
-
-            def _consume_future(completed: concurrent.futures.Future[None]) -> None:
-                if completed.cancelled():
-                    return
-                error = completed.exception()
-                if error is not None:
-                    logger.debug(
-                        "archive: best-effort Memory flush failed for %s",
-                        raw_session_id,
-                        exc_info=error,
-                    )
-
-            future.add_done_callback(_consume_future)
+            try:
+                loop.call_soon_threadsafe(
+                    self._schedule_best_effort_archive_memory_flush,
+                    raw_session_id,
+                )
+            except RuntimeError:
+                logger.debug(
+                    "archive: Memory flush dropped; event loop stopped for %s",
+                    raw_session_id,
+                )
+                self._forget_memory_cli_session(raw_session_id)
             return
 
-        task = loop.create_task(
-            _flush(),
-            name=f"archive-memory-flush:{raw_session_id}",
-        )
+        scheduled = _flush()
+        try:
+            task = loop.create_task(
+                scheduled,
+                name=f"archive-memory-flush:{raw_session_id}",
+            )
+        except RuntimeError:
+            scheduled.close()
+            logger.debug(
+                "archive: Memory flush dropped; event loop stopped for %s",
+                raw_session_id,
+            )
+            self._forget_memory_cli_session(raw_session_id)
+            return
         tasks = getattr(self, "_archive_memory_flush_tasks", None)
         if tasks is None:
             self._archive_memory_flush_tasks = tasks = set()
@@ -2409,6 +2435,7 @@ class Controller:
 
         existing = await asyncio.to_thread(read_session)
         if existing.get("status") == "archived":
+            self._forget_memory_cli_session(raw_session_id)
             return existing
 
         def archive_session() -> dict[str, Any]:
@@ -2438,6 +2465,7 @@ class Controller:
                         "archive: Memory flush dropped; event loop closed for %s",
                         raw_session_id,
                     )
+                    self._forget_memory_cli_session(raw_session_id)
                 return session
 
             return await run_blocking(archive_and_schedule)
@@ -3375,11 +3403,31 @@ class Controller:
             if callable(cancel):
                 await cancel()
 
+        async def _cancel_archive_memory_flush_tasks() -> None:
+            tasks = getattr(self, "_archive_memory_flush_tasks", None)
+            if not isinstance(tasks, set):
+                return
+            pending = tuple(task for task in tasks if not task.done())
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            tasks.clear()
+
+        # Close registration before the loop-owned sweep so a completed archive
+        # cannot add another optional flush behind Memory runtime shutdown.
+        self._archive_memory_flush_registration_open = False
+
         # Close registration and sweep the resulting closed task set in one
         # event-loop turn. This does not depend on platform shutdown ordering.
         _stop_loop_coroutine(
             _cancel_memory_capture_tasks(),
             "Memory capture tasks",
+            timeout=None,
+        )
+        _stop_loop_coroutine(
+            _cancel_archive_memory_flush_tasks(),
+            "Archive Memory flush tasks",
             timeout=None,
         )
         memory_runtime = getattr(self, "memory_runtime", None)

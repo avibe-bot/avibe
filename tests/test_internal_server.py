@@ -279,13 +279,7 @@ def _build_controller_double(handler=None):
 
     async def _handle_user_message(context, text):
         payload = context.platform_specific or {}
-        lifecycle_admission = payload.pop(
-            session_turns.TURN_LIFECYCLE_ADMISSION_KEY,
-            None,
-        )
-        release = getattr(lifecycle_admission, "release", None)
-        if callable(release):
-            release()
+        assert "_turn_lifecycle_admission" not in payload
         if handler is not None:
             return await handler(context, text)
         return None
@@ -355,23 +349,19 @@ def _build_controller_double(handler=None):
     return controller
 
 
-def test_controller_double_releases_turn_lifecycle_admission_before_handler() -> None:
+def test_controller_double_omits_retired_turn_lifecycle_admission() -> None:
     async def _exercise() -> None:
-        lock = asyncio.Lock()
-        await lock.acquire()
-        admission = session_turns.TurnLifecycleAdmission(lock)
         context = MessageContext(
             user_id="U",
             channel_id="C",
             platform="avibe",
-            platform_specific={
-                session_turns.TURN_LIFECYCLE_ADMISSION_KEY: admission,
-            },
+            platform_specific={},
         )
 
         async def handler(received_context, _text):
-            assert session_turns.TURN_LIFECYCLE_ADMISSION_KEY not in received_context.platform_specific
-            assert lock.locked() is False
+            assert "_turn_lifecycle_admission" not in (
+                received_context.platform_specific or {}
+            )
 
         controller = _build_controller_double(handler=handler)
         await controller.message_handler.handle_user_message(context, "hello")
