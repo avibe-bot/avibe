@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -109,6 +109,15 @@ def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> s
 
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     instance_kind = str(getattr(cloud, "instance_kind", "") or "")
+    if instance_kind in {"personal", "organization"}:
+        from storage import remote_access_authorization_service
+
+        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=str(getattr(cloud, "instance_id", "") or ""),
+            instance_kind=instance_kind,
+            ensure=False,
+        ):
+            instance_kind = ""
     if instance_kind == "organization":
         return "organization"
     if instance_kind == "personal":
@@ -190,6 +199,20 @@ def _evaluate_record_authorization(
     from vibe import remote_access
 
     policy = _notification_policy_for_record(config, record)
+    if config is None:
+        reason = (
+            "paired configuration could not be read; instance binding cannot be validated"
+            if config_load_failed
+            else "paired configuration is unavailable; instance binding cannot be validated"
+        )
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason=reason,
+        )
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     if cloud is not None and not cloud.enabled:
         # Disabling remote access is a confirmed, deliberate removal of every
@@ -215,6 +238,36 @@ def _evaluate_record_authorization(
             authorized=False,
             disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
             reason="paired configuration could not be read; instance binding cannot be validated",
+        )
+    paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
+    if paired_kind in {"personal", "organization"}:
+        from storage import remote_access_authorization_service
+
+        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=_paired_instance_id(config),
+            instance_kind=paired_kind,
+            ensure=False,
+        ):
+            return OwnerAuthorizationDecision(
+                user_key=user_key,
+                policy=policy,
+                context=None,
+                authorized=False,
+                disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+                reason="durable instance binding is not ready",
+            )
+    if (
+        paired_kind in {"personal", "organization"}
+        and cloud is not None
+        and cloud.runtime_credentials() is None
+    ):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="current pairing lacks complete runtime credentials",
         )
     context = context_from_session_payload(record)
     if not (
@@ -250,6 +303,48 @@ def _evaluate_record_authorization(
             disposition=WEB_PUSH_DISPOSITION_REVOKED,
             reason="persisted snapshot was issued for a different paired instance",
         )
+    record_kind = record.get("vibe_instance_kind")
+    if (
+        record_kind in {"personal", "organization"}
+        and paired_kind not in {"personal", "organization"}
+    ):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+            reason="current pairing instance kind is unavailable",
+        )
+    if (
+        record_kind in {"personal", "organization"}
+        and paired_kind in {"personal", "organization"}
+        and record_kind != paired_kind
+    ):
+        return OwnerAuthorizationDecision(
+            user_key=user_key,
+            policy=policy,
+            context=None,
+            authorized=False,
+            disposition=WEB_PUSH_DISPOSITION_REVOKED,
+            reason="persisted snapshot instance kind differs from the current pairing",
+        )
+    if (
+        context.instance_kind is None
+        and record_kind is None
+        and paired_instance_id
+        and paired_kind in {"personal", "organization"}
+    ):
+        if record_instance_id != paired_instance_id:
+            return OwnerAuthorizationDecision(
+                user_key=user_key,
+                policy=policy,
+                context=None,
+                authorized=False,
+                disposition=WEB_PUSH_DISPOSITION_REVOKED,
+                reason="persisted snapshot lacks a binding to the current paired instance",
+            )
+        context = replace(context, instance_kind=paired_kind)
     if policy == "personal":
         return OwnerAuthorizationDecision(
             user_key=user_key,
@@ -626,6 +721,7 @@ def web_push_authorization_context_record(
         "sub": context.subject,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "vibe_instance_kind": context.instance_kind,
         "vibe_group_ids": sorted(context.group_ids),
         "claims_issued_at": context.claims_issued_at,
     }

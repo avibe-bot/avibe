@@ -7,18 +7,27 @@ content, prompts, paths, outputs, or secret values.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
 from storage.db import get_cached_sqlite_engine
-from storage.models import resource_access_groups, resource_access_policies, state_meta
+from storage.models import (
+    agent_runs,
+    message_deliveries,
+    resource_access_groups,
+    resource_access_policies,
+    run_definitions,
+    state_meta,
+)
 from vibe.authorization import (
     AuthorizationContext,
     context_from_session_payload,
@@ -30,8 +39,26 @@ RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill"})
 ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
+LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY = "migrations.legacy_deferred_resource_contexts.v1"
 RESOURCE_ORGANIZATIONS_META_KEY = "resource_access_organizations"
 HARNESS_ACCESS_FORBIDDEN_CODE = "harness_access_forbidden"
+RESOURCE_BINDING_STATE_UNAVAILABLE = "unavailable"
+RESOURCE_BINDING_STATE_UNPAIRED = "unpaired"
+RESOURCE_BINDING_STATE_PARTIAL = "partial"
+RESOURCE_BINDING_STATE_READY = "ready"
+RESOURCE_BINDING_STATE_SEALED = "sealed"
+RESOURCE_BINDING_STATUS_KEY = "binding_status"
+_CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE = object()
+
+
+@dataclass(frozen=True)
+class ConfiguredResourceState:
+    """One coherent read of the pairing identity used by deferred resources."""
+
+    status: str
+    instance_id: str | None
+    instance_kind: str | None
+    runtime_ready: bool
 
 
 class ResourceAccessError(ValueError):
@@ -250,8 +277,10 @@ def metadata_with_resource_user_context(
         "vibe_organization_role": context.organization_role,
         "vibe_group_ids": sorted(context.group_ids) if context.group_ids is not None else None,
         "vibe_membership_version": context.membership_version,
+        "vibe_instance_id": context.instance_id,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "vibe_instance_kind": context.instance_kind,
         "vibe_show_page_id": context.show_page_id,
         "claims_issued_at": context.claims_issued_at,
         "vibe_instance_authorization_revision": context.authorization_revision,
@@ -290,7 +319,60 @@ def resource_user_context_from_metadata(
     snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
         return None
-    return current_resource_context(snapshot, is_remote=True)
+    context = current_resource_context(snapshot, is_remote=True)
+
+    # A persisted context is durable across re-pairing, so a Personal snapshot
+    # must not authorize work after this installation moves to another
+    # instance. Compare the server-owned binding whenever the current pairing
+    # exposes one; legacy snapshots without an instance id remain unbound.
+    configured = _configured_resource_instance()
+    if context.instance_kind is not None and (
+        configured is _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE or configured is None
+    ):
+        return None
+    if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE and configured is not None:
+        paired_instance_id, paired_kind = configured
+        from storage import remote_access_authorization_service
+
+        if not remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=paired_instance_id,
+            instance_kind=paired_kind,
+            ensure=False,
+        ):
+            # Kind is not yet reconciled; do not project a Personal bypass.
+            return None
+        if context.instance_kind is not None and (
+            not paired_instance_id or not paired_kind
+        ):
+            return None
+        snapshot_instance_id = context.instance_id
+        if (
+            snapshot_instance_id
+            and paired_instance_id
+            and snapshot_instance_id != paired_instance_id
+        ):
+            return None
+        if context.instance_kind and paired_kind and context.instance_kind != paired_kind:
+            return None
+    if context.instance_kind is not None or snapshot.get("vibe_instance_kind") is not None:
+        return context
+
+    # Released snapshots predate the instance-kind field. Recover their kind
+    # only when the snapshot still names the current server-owned instance. An
+    # unbound legacy snapshot cannot be attributed to a re-paired Personal
+    # instance, because doing so would turn old Organization work into a
+    # Personal ACL bypass.
+    paired_kind = (
+        configured[1]
+        if configured is not _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        and configured is not None
+        else None
+    )
+    if paired_kind not in {"personal", "organization"}:
+        return context
+    if not context.instance_id:
+        return None
+    return replace(context, instance_kind=paired_kind)
 
 
 def _as_context(user_context: ResourceUserContext | Mapping[str, Any] | None) -> ResourceUserContext:
@@ -310,6 +392,457 @@ def _connection(connection: Connection | None) -> Iterator[Connection]:
     with engine.begin() as active_connection:
         yield active_connection
 
+
+def _configured_show_page_instance() -> tuple[str, str] | None | object:
+    try:
+        from config.v2_config import V2Config
+
+        cloud = V2Config.load().remote_access.vibe_cloud
+        credentials = cloud.runtime_credentials()
+        if credentials is None:
+            return None
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+        instance_id = _clean_optional_string(credentials[1])
+        if instance_id is None or cloud.instance_kind not in {"personal", "organization"}:
+            return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    except (
+        AttributeError,
+        FileNotFoundError,
+        IndexError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    return instance_id, cloud.instance_kind
+
+
+def _configured_resource_state() -> ConfiguredResourceState:
+    """Return one typed, fail-closed read of the configured pairing state.
+
+    ``UNAVAILABLE`` is intentionally distinct from a successfully read
+    unpaired configuration. Migration provenance must never be sealed because
+    a transient config read failed.
+    """
+
+    try:
+        from config.v2_config import V2Config
+
+        cloud = V2Config.load().remote_access.vibe_cloud
+        raw_instance_id = cloud.instance_id
+        instance_id = _clean_optional_string(raw_instance_id)
+        if raw_instance_id not in (None, "") and instance_id is None:
+            return ConfiguredResourceState(
+                status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+                instance_id=None,
+                instance_kind=None,
+                runtime_ready=False,
+            )
+        instance_kind = (
+            cloud.instance_kind if cloud.instance_kind in {"personal", "organization"} else None
+        )
+        credentials = cloud.runtime_credentials()
+    except Exception:
+        return ConfiguredResourceState(
+            status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+            instance_id=None,
+            instance_kind=None,
+            runtime_ready=False,
+        )
+
+    runtime_ready = False
+    if credentials is not None:
+        if not isinstance(credentials, (tuple, list)) or len(credentials) != 3:
+            return ConfiguredResourceState(
+                status=RESOURCE_BINDING_STATE_UNAVAILABLE,
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+                runtime_ready=False,
+            )
+        credential_instance_id = _clean_optional_string(credentials[1])
+        runtime_ready = instance_id is not None and credential_instance_id == instance_id
+
+    if instance_id is None:
+        return ConfiguredResourceState(
+            status=RESOURCE_BINDING_STATE_UNPAIRED,
+            instance_id=None,
+            instance_kind=instance_kind,
+            runtime_ready=False,
+        )
+    if runtime_ready and instance_kind in {"personal", "organization"}:
+        status = RESOURCE_BINDING_STATE_READY
+    else:
+        status = RESOURCE_BINDING_STATE_PARTIAL
+    return ConfiguredResourceState(
+        status=status,
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+        runtime_ready=runtime_ready,
+    )
+
+
+def _configured_resource_instance() -> tuple[str | None, str | None] | None | object:
+    """Return the current complete pairing identity used to fence deferred resources."""
+
+    configured = _configured_resource_state()
+    if configured.status == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        return _CONFIGURED_SHOW_PAGE_INSTANCE_UNAVAILABLE
+    if configured.status != RESOURCE_BINDING_STATE_READY:
+        return None
+    return configured.instance_id, configured.instance_kind
+
+
+def _legacy_snapshot_has_organization_context(
+    context: ResourceUserContext,
+    snapshot: Mapping[str, Any],
+) -> bool:
+    """Detect Organization semantics retained by pre-binding snapshots."""
+
+    return bool(
+        context.organization_id
+        or context.organization_member_id
+        or context.organization_role
+        or context.instance_access_source == "organization_group"
+        or context.group_ids
+        or any(
+            snapshot.get(key)
+            for key in (
+                "vibe_organization_id",
+                "vibe_organization_member_id",
+                "vibe_organization_role",
+                "vibe_group_ids",
+            )
+        )
+    )
+
+
+def _legacy_deferred_context_binding(
+    snapshot: Mapping[str, Any],
+    *,
+    paired_instance_id: str,
+    paired_kind: str,
+) -> dict[str, str] | None:
+    """Return a safe current binding for one pre-instance metadata snapshot."""
+
+    context = current_resource_context(snapshot, is_remote=True)
+    if context.instance_role not in {"owner", "editor", "viewer"}:
+        return None
+
+    raw_instance_id = snapshot.get("vibe_instance_id")
+    snapshot_instance_id = _clean_optional_string(raw_instance_id)
+    if raw_instance_id is not None and snapshot_instance_id is None:
+        return None
+    if snapshot_instance_id and snapshot_instance_id != paired_instance_id:
+        return None
+
+    raw_kind = snapshot.get("vibe_instance_kind")
+    if raw_kind is not None and raw_kind not in {"personal", "organization"}:
+        return None
+    if raw_kind is not None and raw_kind != paired_kind:
+        return None
+
+    # The pairing kind is the only authoritative evidence for a legacy
+    # snapshot that predates both binding fields. Explicit Organization claims
+    # still contradict a Personal pairing, but access sources such as ``email``
+    # are shared by Personal and Organization instances and cannot choose a
+    # kind on their own.
+    if paired_kind == "personal" and _legacy_snapshot_has_organization_context(context, snapshot):
+        return None
+    inferred_kind = raw_kind or paired_kind
+    if inferred_kind != paired_kind:
+        return None
+    return {
+        "vibe_instance_id": paired_instance_id,
+        "vibe_instance_kind": paired_kind,
+    }
+
+
+def _migrate_deferred_metadata_value(
+    metadata: Any,
+    *,
+    paired_instance_id: str,
+    paired_kind: str,
+) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+    if not isinstance(snapshot, Mapping):
+        return None
+    binding = _legacy_deferred_context_binding(
+        snapshot,
+        paired_instance_id=paired_instance_id,
+        paired_kind=paired_kind,
+    )
+    if binding is None:
+        return None
+    if all(snapshot.get(key) == value for key, value in binding.items()):
+        return None
+    migrated = dict(metadata)
+    migrated_snapshot = dict(snapshot)
+    migrated_snapshot.update(binding)
+    migrated[RESOURCE_USER_CONTEXT_METADATA_KEY] = migrated_snapshot
+    return migrated
+
+
+def migrate_legacy_deferred_resource_contexts(connection: Connection) -> dict[str, int]:
+    """Bind released deferred metadata to the still-current runtime pairing.
+
+    The migration is deliberately conservative and one-shot. It needs complete
+    runtime credentials and a known server-owned instance kind, and it only
+    updates a legacy snapshot when its existing instance evidence or explicit
+    Organization claims agree with that pairing. A transient configuration read
+    is not an unpaired state: it leaves the marker untouched so the same
+    pairing can retry later. A successfully observed unpaired state is sealed,
+    while a known instance with an unknown kind remains pending until that same
+    instance is authoritatively classified.
+    """
+
+    def _counts(
+        *,
+        binding_status: str,
+        definitions: int = 0,
+        runs: int = 0,
+        deliveries: int = 0,
+    ) -> dict[str, int | str]:
+        return {
+            "legacy_deferred_definitions": definitions,
+            "legacy_deferred_runs": runs,
+            "legacy_deferred_deliveries": deliveries,
+            RESOURCE_BINDING_STATUS_KEY: binding_status,
+        }
+
+    empty_unavailable = _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
+    marker_value = connection.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+        )
+    ).scalar_one_or_none()
+    marker: dict[str, Any] | None = None
+    if marker_value is not None:
+        try:
+            parsed_marker = json.loads(marker_value)
+        except (TypeError, ValueError):
+            parsed_marker = None
+        if not isinstance(parsed_marker, dict):
+            # A corrupt marker cannot prove which pairing created the rows.
+            # Preserve fail-closed behavior instead of trying to insert a
+            # duplicate key or guessing a new binding.
+            return _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
+        marker = parsed_marker
+        marker_state = marker.get("state")
+        if marker_state not in {"pending", "completed", "sealed_unattributed"}:
+            marker_state = "completed" if marker.get("completed_at") else "pending"
+        # Markers written by e64/d667 used ``completed`` with no instance ID
+        # for an unpaired first opportunity. Preserve that terminal meaning;
+        # never reinterpret it as a fresh migration opportunity.
+        if marker_state == "completed" and marker.get("instance_id") is None:
+            marker_state = "sealed_unattributed"
+        marker = {**marker, "state": marker_state}
+
+    configured = _configured_resource_state()
+    if configured.status == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        # A read failure must not create ``pending(instance_id=None)`` or
+        # rewrite a known marker. Startup/heartbeat will retry this operation.
+        return empty_unavailable
+    current_instance_id = configured.instance_id
+    current_kind = (
+        configured.instance_kind
+        if configured.status == RESOURCE_BINDING_STATE_READY
+        else None
+    )
+
+    def write_marker(
+        *,
+        state: str,
+        instance_id: str | None,
+        instance_kind: str | None = None,
+    ) -> None:
+        now = _utc_now_iso()
+        payload: dict[str, Any] = {
+            "schema_version": 2,
+            "state": state,
+            "instance_id": instance_id,
+            "updated_at": now,
+        }
+        if instance_kind in {"personal", "organization"}:
+            payload["instance_kind"] = instance_kind
+        if state == "completed":
+            payload["completed_at"] = now
+        values = {
+            "value_json": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            "updated_at": now,
+        }
+        if marker is None:
+            connection.execute(
+                state_meta.insert().values(
+                    key=LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    **values,
+                )
+            )
+        else:
+            connection.execute(
+                update(state_meta)
+                .where(state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY)
+                .values(**values)
+            )
+
+    if marker is not None and marker.get("state") in {"completed", "sealed_unattributed"}:
+        return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+
+    raw_marker_instance_id = marker.get("instance_id") if marker else None
+    marker_instance_id = (
+        _clean_optional_string(raw_marker_instance_id) if marker else None
+    )
+    if marker and raw_marker_instance_id is not None and marker_instance_id is None:
+        # A malformed marker cannot prove ownership. Keep the existing value
+        # intact and fail closed rather than guessing a new pairing.
+        return _counts(binding_status=RESOURCE_BINDING_STATE_UNAVAILABLE)
+    if marker is not None:
+        if marker_instance_id is None:
+            # No first pairing was available to prove ownership. A later
+            # pairing must not be allowed to claim these records.
+            write_marker(state="sealed_unattributed", instance_id=None)
+            return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+        if current_instance_id is None:
+            if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
+                write_marker(state="sealed_unattributed", instance_id=marker_instance_id)
+                return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+            return _counts(binding_status=configured.status)
+        if current_instance_id != marker_instance_id:
+            write_marker(state="sealed_unattributed", instance_id=marker_instance_id)
+            return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+
+    if configured.status == RESOURCE_BINDING_STATE_UNPAIRED:
+        write_marker(state="sealed_unattributed", instance_id=current_instance_id)
+        return _counts(binding_status=RESOURCE_BINDING_STATE_SEALED)
+    if configured.status != RESOURCE_BINDING_STATE_READY:
+        write_marker(state="pending", instance_id=current_instance_id)
+        return _counts(binding_status=configured.status)
+    if current_instance_id is None or current_kind not in {"personal", "organization"}:
+        # Defensive guard for a future state-reader change. This branch is
+        # never authoritative enough to complete a migration.
+        return _counts(binding_status=RESOURCE_BINDING_STATE_PARTIAL)
+    paired_instance_id = current_instance_id
+    paired_kind = current_kind
+
+    counts = {
+        "legacy_deferred_definitions": 0,
+        "legacy_deferred_runs": 0,
+        "legacy_deferred_deliveries": 0,
+        RESOURCE_BINDING_STATUS_KEY: RESOURCE_BINDING_STATE_READY,
+    }
+    definition_rows = connection.execute(
+        select(run_definitions.c.id, run_definitions.c.metadata_json).where(
+            run_definitions.c.definition_type.in_(("scheduled", "watch"))
+        )
+    ).mappings()
+    for row in definition_rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        migrated = _migrate_deferred_metadata_value(
+            metadata,
+            paired_instance_id=paired_instance_id,
+            paired_kind=paired_kind,
+        )
+        if migrated is None:
+            continue
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            .values(
+                metadata_json=json.dumps(
+                    migrated,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        )
+        counts["legacy_deferred_definitions"] += 1
+
+    run_rows = connection.execute(
+        select(agent_runs.c.id, agent_runs.c.metadata_json)
+        .where(agent_runs.c.status.in_(("pending", "queued", "processing", "running")))
+    ).mappings()
+    for row in run_rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        migrated = _migrate_deferred_metadata_value(
+            metadata,
+            paired_instance_id=paired_instance_id,
+            paired_kind=paired_kind,
+        )
+        if migrated is None:
+            continue
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == row["id"])
+            .values(
+                metadata_json=json.dumps(
+                    migrated,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                updated_at=_utc_now_iso(),
+            )
+        )
+        counts["legacy_deferred_runs"] += 1
+
+    delivery_rows = connection.execute(
+        select(
+            message_deliveries.c.id,
+            message_deliveries.c.snapshot_json,
+        ).where(message_deliveries.c.snapshot_json.is_not(None))
+    ).mappings()
+    for row in delivery_rows:
+        try:
+            snapshot = json.loads(row["snapshot_json"] or "{}")
+            metadata = json.loads(snapshot.get("metadata_json") or "{}")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        migrated_metadata = _migrate_deferred_metadata_value(
+            metadata,
+            paired_instance_id=paired_instance_id,
+            paired_kind=paired_kind,
+        )
+        if migrated_metadata is None:
+            continue
+        snapshot["metadata_json"] = json.dumps(
+            migrated_metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        snapshot_json = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        snapshot_sha256 = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        connection.execute(
+            update(message_deliveries)
+            .where(message_deliveries.c.id == row["id"])
+            .values(
+                snapshot_json=snapshot_json,
+                snapshot_sha256=snapshot_sha256,
+                updated_at=_utc_now_iso(),
+            )
+        )
+        counts["legacy_deferred_deliveries"] += 1
+    write_marker(
+        state="completed",
+        instance_id=paired_instance_id,
+        instance_kind=paired_kind,
+    )
+    return counts
 
 def _stored_resource_organizations(connection: Connection) -> set[str]:
     raw_value = connection.execute(
@@ -568,6 +1101,8 @@ def _policy_allows(
 ) -> bool:
     if context.is_instance_owner:
         return True
+    if resource_kind == "agent" and context.is_personal_instance:
+        return context.can_use_resource(resource_kind)
     # Skill and Vault ACL rows remain persisted for compatibility, but Editor
     # runtime access intentionally ignores them for validated remote sessions.
     # Direct non-remote contexts still use the stored policy so service-level

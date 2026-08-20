@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
+from sqlalchemy import select
 
 from config.v2_config import V2Config
 from storage import resource_access_service
+from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
+from storage.message_deliveries import enqueue_queued
 from storage.migrations import run_migrations
-from storage.models import resource_access_policies
+from storage.models import agent_runs, agent_sessions, message_deliveries, resource_access_policies, run_definitions, state_meta
 from vibe import permissions
 
 
@@ -18,6 +24,7 @@ def _context(
     role: str | None = "member",
     instance_role: str = "editor",
     access_source: str = "organization_group",
+    instance_kind: str | None = None,
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -28,6 +35,7 @@ def _context(
         instance_role=instance_role,
         instance_access_source=access_source,
         is_remote=True,
+        instance_kind=instance_kind,
     )
 
 
@@ -83,6 +91,55 @@ def test_resource_acl_is_enforced_for_editors_and_unknown_kinds_fail_closed(tmp_
                 resource_access_service.can_use_resource(
                     engineering_member, "future_resource", "future-1", connection=connection
                 )
+    finally:
+        engine.dispose()
+
+
+def test_personal_editor_uses_all_agents_without_organization_acl(tmp_path) -> None:
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as connection:
+            _seed_policies(connection)
+            personal_editor = _context(
+                "personal-user",
+                organization_id=None,
+                role=None,
+                access_source="owner",
+                instance_kind="personal",
+            )
+            organization_editor = _context(
+                "organization-user",
+                instance_kind="organization",
+            )
+
+            assert resource_access_service.can_use_resource(
+                personal_editor, "agent", "private-agent", connection=connection
+            )
+            assert resource_access_service.can_use_resource(
+                personal_editor, "agent", "scoped-agent", connection=connection
+            )
+            assert resource_access_service.can_use_resource(
+                personal_editor, "agent", "unmanaged-agent", connection=connection
+            )
+            assert resource_access_service.filter_accessible_resources(
+                personal_editor,
+                "agent",
+                [
+                    {"id": "private-agent"},
+                    {"id": "scoped-agent"},
+                    {"id": "unmanaged-agent"},
+                ],
+                connection=connection,
+            ) == [
+                {"id": "private-agent"},
+                {"id": "scoped-agent"},
+                {"id": "unmanaged-agent"},
+            ]
+            assert not resource_access_service.can_use_resource(
+                organization_editor, "agent", "private-agent", connection=connection
+            )
     finally:
         engine.dispose()
 
@@ -364,8 +421,19 @@ def test_http_resource_services_reuse_the_parsed_authorization_context() -> None
         assert resource_access_service.resolve_resource_access_context() is context
 
 
-def test_deferred_remote_context_remains_valid_past_authorization_refresh_boundary() -> None:
+def test_deferred_remote_context_remains_valid_past_authorization_refresh_boundary(
+    monkeypatch,
+    tmp_path,
+) -> None:
     from vibe import remote_access
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "organization-instance"
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
 
     issued_at = 1_700_000_000
     context = resource_access_service.ResourceUserContext(
@@ -377,6 +445,8 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
         membership_version="membership-v2",
         instance_role="viewer",
         instance_access_source="organization_group",
+        instance_kind="organization",
+        instance_id="organization-instance",
         claims_issued_at=issued_at,
         is_remote=True,
     )
@@ -399,6 +469,1159 @@ def test_deferred_remote_context_remains_valid_past_authorization_refresh_bounda
     assert before is not None and after is not None
     assert before.subject == after.subject == "member-1"
     assert after.is_active_organization_member is True
+
+
+def test_deferred_personal_context_keeps_instance_kind(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "personal-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="personal-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+    restored = resource_access_service.resource_user_context_from_metadata(metadata)
+
+    assert restored is not None
+    assert restored.is_personal_instance
+
+
+def test_deferred_context_from_previous_pairing_is_rejected(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "current-instance"
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    stale_context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="previous-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, stale_context)
+
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
+def test_deferred_context_does_not_project_personal_bypass_while_reconciling(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Non-interactive metadata must fail closed while the binding is reconciling."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "current-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    from storage import remote_access_authorization_service
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    remote_access_authorization_service.begin_instance_binding_transition(
+        instance_id="current-instance",
+        instance_kind="personal",
+    )
+
+    personal_context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="current-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, personal_context)
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
+@pytest.mark.parametrize("pairing_state", ["disabled", "unreadable", "partial"])
+def test_explicit_deferred_context_requires_current_pairing(
+    monkeypatch,
+    tmp_path,
+    pairing_state: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = pairing_state != "disabled"
+    config.remote_access.vibe_cloud.instance_id = "personal-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    if pairing_state != "partial":
+        config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+    if pairing_state == "unreadable":
+        def fail_load(_cls, *_args, **_kwargs):
+            raise OSError("config unavailable")
+
+        monkeypatch.setattr(V2Config, "load", classmethod(fail_load))
+
+    context = resource_access_service.ResourceUserContext(
+        subject="personal-user",
+        instance_id="personal-instance",
+        instance_role="editor",
+        instance_access_source="owner",
+        instance_kind="personal",
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+
+    assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    assert not resource_access_service.metadata_allows_harness_runtime(metadata)
+
+
+@pytest.mark.parametrize(
+    ("paired_kind", "expected_kind", "should_restore"),
+    [
+        ("personal", "personal", False),
+        ("organization", "organization", False),
+        ("", None, True),
+    ],
+)
+def test_unbound_legacy_deferred_context_cannot_adopt_current_pairing_kind(
+    monkeypatch,
+    tmp_path,
+    paired_kind: str,
+    expected_kind: str | None,
+    should_restore: bool,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_kind = paired_kind
+    config.remote_access.vibe_cloud.instance_id = "paired-instance"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    restored = resource_access_service.resource_user_context_from_metadata(legacy_metadata)
+
+    assert (restored is not None) is should_restore
+    if restored is not None:
+        assert restored.instance_kind == expected_kind
+
+
+def test_kindless_deferred_context_adopts_matching_validated_pairing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "paired-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_id": "paired-instance",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "owner",
+            "vibe_instance_kind": None,
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+
+    restored = resource_access_service.resource_user_context_from_metadata(legacy_metadata)
+
+    assert restored is not None
+    assert restored.is_personal_instance
+
+
+@pytest.mark.parametrize(
+    ("paired_kind", "access_source", "organization_claims"),
+    [
+        ("personal", "owner", False),
+        ("organization", "organization_group", True),
+        ("organization", "email", False),
+    ],
+)
+def test_migrate_legacy_deferred_contexts_binds_definitions_and_queued_deliveries(
+    monkeypatch,
+    tmp_path,
+    paired_kind: str,
+    access_source: str,
+    organization_claims: bool,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "paired-instance"
+    config.remote_access.vibe_cloud.instance_kind = paired_kind
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+
+    legacy_context = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": access_source,
+        "claims_issued_at": 1_700_000_000,
+    }
+    if organization_claims:
+        legacy_context.update(
+            {
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": ["group-1"],
+            }
+        )
+    legacy_metadata = {resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: legacy_context}
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "legacy-task",
+                "name": "legacy task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        assert store.upsert_watch(
+            {
+                "id": "legacy-watch",
+                "name": "legacy watch",
+                "message": "watch",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        assert store.enqueue_definition_run(
+            {
+                "id": "run-1",
+                "definition_id": "legacy-task",
+                "run_type": "scheduled",
+                "source_kind": "scheduler",
+                "prompt": "run",
+                "message": "run",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        ) is not None
+        with engine.begin() as connection:
+            connection.execute(
+                agent_sessions.insert().values(
+                    id="session-1",
+                    scope_id=None,
+                    agent_id=None,
+                    agent_name="default",
+                    agent_backend="opencode",
+                    agent_variant="default",
+                    model=None,
+                    reasoning_effort=None,
+                    session_anchor="anchor-1",
+                    workdir=None,
+                    native_session_id="native-1",
+                    title=None,
+                    status="active",
+                    visibility="foreground",
+                    pinned=0,
+                    agent_status="idle",
+                    composer_draft_text=None,
+                    composer_draft_updated_at=None,
+                    metadata_json="{}",
+                    created_at="2026-08-20T00:00:00Z",
+                    updated_at="2026-08-20T00:00:00Z",
+                    last_active_at=None,
+                )
+            )
+            enqueue_queued(
+                connection,
+                scope_id=None,
+                session_id="session-1",
+                text="queued",
+                metadata=legacy_metadata,
+            )
+            from storage.importer import _run_sqlite_data_migrations
+
+            counts = _run_sqlite_data_migrations(connection)
+            assert _migration_counts(counts) == {
+                "legacy_deferred_definitions": 2,
+                "legacy_deferred_runs": 1,
+                "legacy_deferred_deliveries": 1,
+            }
+
+            definition_rows = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id.in_(("legacy-task", "legacy-watch"))
+                )
+            ).scalars()
+            for raw_metadata in definition_rows:
+                metadata = json.loads(raw_metadata)
+                snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+                assert snapshot["vibe_instance_id"] == "paired-instance"
+                assert snapshot["vibe_instance_kind"] == paired_kind
+                assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
+
+            run_metadata = connection.execute(
+                select(agent_runs.c.metadata_json).where(agent_runs.c.definition_id == "legacy-task")
+            ).scalar_one()
+            run_snapshot = json.loads(run_metadata)[
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+            ]
+            assert run_snapshot["vibe_instance_id"] == "paired-instance"
+            assert run_snapshot["vibe_instance_kind"] == paired_kind
+
+            delivery = connection.execute(
+                select(message_deliveries.c.snapshot_json, message_deliveries.c.snapshot_sha256).where(
+                    message_deliveries.c.session_id == "session-1"
+                )
+            ).mappings().one()
+            snapshot = json.loads(delivery["snapshot_json"])
+            metadata = json.loads(snapshot["metadata_json"])
+            assert metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY][
+                "vibe_instance_id"
+            ] == "paired-instance"
+            assert metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY][
+                "vibe_instance_kind"
+            ] == paired_kind
+            assert delivery["snapshot_sha256"] == hashlib.sha256(
+                delivery["snapshot_json"].encode("utf-8")
+            ).hexdigest()
+
+            assert _migration_counts(_run_sqlite_data_migrations(
+                connection
+            )) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_legacy_migration_keeps_opposite_instance_semantics_unbound(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "personal-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "organization-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+        }
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "organization-task",
+                "name": "organization task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            raw_metadata = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "organization-task"
+                )
+            ).scalar_one()
+            metadata = json.loads(raw_metadata)
+            assert "vibe_instance_id" not in metadata[
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+            ]
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_legacy_migration_does_not_bind_after_later_pairing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "owner",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "legacy-task",
+                "name": "legacy task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            assert connection.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key
+                    == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                )
+            ).scalar_one_or_none()
+
+        config.remote_access.vibe_cloud.enabled = True
+        config.remote_access.vibe_cloud.instance_id = "later-instance"
+        config.remote_access.vibe_cloud.instance_kind = "personal"
+        config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            raw_metadata = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+            metadata = json.loads(raw_metadata)
+            snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+            assert "vibe_instance_id" not in snapshot
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_legacy_migration_retries_when_same_pairing_kind_is_backfilled(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "same-instance"
+    config.remote_access.vibe_cloud.instance_kind = ""
+    config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+    config.save()
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "legacy-task",
+                "name": "legacy task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+
+        config.remote_access.vibe_cloud.instance_kind = "personal"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 1,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            raw_metadata = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+            snapshot = json.loads(raw_metadata)[
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+            ]
+            assert snapshot["vibe_instance_id"] == "same-instance"
+            assert snapshot["vibe_instance_kind"] == "personal"
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_legacy_migration_preserves_instance_id_while_pairing_is_partial(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.instance_id = "same-instance"
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+    legacy_metadata = {
+        resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-user",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        assert store.upsert_scheduled_task(
+            {
+                "id": "legacy-task",
+                "name": "legacy task",
+                "message": "run",
+                "schedule_type": "interval",
+                "created_at": "2026-08-20T00:00:00Z",
+                "updated_at": "2026-08-20T00:00:00Z",
+                "metadata": legacy_metadata,
+            }
+        )
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            marker = json.loads(
+                connection.execute(
+                    select(state_meta.c.value_json).where(
+                        state_meta.c.key
+                        == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                    )
+                ).scalar_one()
+            )
+            assert marker["state"] == "pending"
+            assert marker["instance_id"] == "same-instance"
+
+        config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                "legacy_deferred_definitions": 1,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            raw_metadata = connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+            snapshot = json.loads(raw_metadata)[
+                resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+            ]
+            assert snapshot["vibe_instance_id"] == "same-instance"
+            assert snapshot["vibe_instance_kind"] == "personal"
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_typed_binding_reader_preserves_partial_identity_and_does_not_latch_read_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.instance_id = "same-instance"
+    cloud.instance_kind = "personal"
+    cloud.instance_secret = ""
+    config.save()
+
+    partial = resource_access_service._configured_resource_state()
+    assert partial.status == resource_access_service.RESOURCE_BINDING_STATE_PARTIAL
+    assert partial.instance_id == "same-instance"
+    assert partial.instance_kind == "personal"
+
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    marker = {
+        "schema_version": 2,
+        "state": "pending",
+        "instance_id": "same-instance",
+        "updated_at": "before-read-failure",
+    }
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                state_meta.insert().values(
+                    key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    value_json=json.dumps(marker),
+                    updated_at="before-read-failure",
+                )
+            )
+
+        monkeypatch.setattr(
+            V2Config,
+            "load",
+            classmethod(lambda cls, *args, **kwargs: (_ for _ in ()).throw(OSError("temporary read"))),
+        )
+        unavailable = resource_access_service._configured_resource_state()
+        assert unavailable.status == resource_access_service.RESOURCE_BINDING_STATE_UNAVAILABLE
+
+        with engine.begin() as connection:
+            assert _migration_counts(resource_access_service.migrate_legacy_deferred_resource_contexts(connection)) == {
+                "legacy_deferred_definitions": 0,
+                "legacy_deferred_runs": 0,
+                "legacy_deferred_deliveries": 0,
+            }
+            stored = connection.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                )
+            ).scalar_one()
+            assert json.loads(stored) == marker
+    finally:
+        engine.dispose()
+
+
+_EMPTY_MIGRATION_COUNTS = {
+    "legacy_deferred_definitions": 0,
+    "legacy_deferred_runs": 0,
+    "legacy_deferred_deliveries": 0,
+}
+
+
+def _migration_counts(result: dict) -> dict[str, int]:
+    """Numeric migration counts, ignoring the typed binding-status field."""
+
+    return {
+        key: int(result[key])
+        for key in (
+            "legacy_deferred_definitions",
+            "legacy_deferred_runs",
+            "legacy_deferred_deliveries",
+        )
+    }
+
+
+def _paired_cloud_config(
+    tmp_path,
+    *,
+    enabled: bool = True,
+    instance_id: str = "same-instance",
+    instance_kind: str = "personal",
+    instance_secret: str = "instance-secret",
+) -> V2Config:
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = enabled
+    cloud.instance_id = instance_id
+    cloud.instance_kind = instance_kind
+    cloud.instance_secret = instance_secret
+    config.save()
+    return config
+
+
+def _seed_legacy_scheduled_task(store, *, definition_id: str, snapshot: dict) -> None:
+    assert store.upsert_scheduled_task(
+        {
+            "id": definition_id,
+            "name": definition_id,
+            "message": "run",
+            "schedule_type": "interval",
+            "created_at": "2026-08-20T00:00:00Z",
+            "updated_at": "2026-08-20T00:00:00Z",
+            "metadata": {resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY: snapshot},
+        }
+    )
+
+
+def _legacy_definition_metadata(connection, definition_id: str) -> dict:
+    raw = connection.execute(
+        select(run_definitions.c.metadata_json).where(run_definitions.c.id == definition_id)
+    ).scalar_one()
+    return json.loads(raw)
+
+
+def _stored_migration_marker(connection) -> str | None:
+    return connection.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+        )
+    ).scalar_one_or_none()
+
+
+def test_partial_pairing_marker_records_configured_instance_without_claiming_a_kind(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A deferred opportunity keeps its identity but never a guessed kind."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path, instance_secret="")
+
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            marker = json.loads(_stored_migration_marker(connection))
+
+        assert marker["schema_version"] == 2
+        assert marker["state"] == "pending"
+        assert marker["instance_id"] == "same-instance"
+        # A partial pairing cannot prove its kind, so the marker must not
+        # record one and must not look terminal to a later startup.
+        assert "instance_kind" not in marker
+        assert "completed_at" not in marker
+    finally:
+        engine.dispose()
+
+
+def test_credential_repair_on_the_same_pairing_completes_the_deferred_migration(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = _paired_cloud_config(tmp_path, instance_secret="")
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+
+        config.remote_access.vibe_cloud.instance_secret = "instance-secret"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                **_EMPTY_MIGRATION_COUNTS,
+                "legacy_deferred_definitions": 1,
+            }
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+            snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+            assert snapshot["vibe_instance_id"] == "same-instance"
+            assert snapshot["vibe_instance_kind"] == "personal"
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
+            completed = json.loads(_stored_migration_marker(connection))
+
+        assert completed["state"] == "completed"
+        assert completed["instance_id"] == "same-instance"
+        assert completed["instance_kind"] == "personal"
+        assert completed["completed_at"]
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            assert json.loads(_stored_migration_marker(connection)) == completed
+            assert (
+                _legacy_definition_metadata(connection, "legacy-task") == metadata
+            )
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_transient_configuration_failure_leaves_the_migration_retryable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        from storage.importer import _run_sqlite_data_migrations
+
+        real_load = V2Config.load
+        with monkeypatch.context() as unreadable:
+            unreadable.setattr(
+                V2Config,
+                "load",
+                classmethod(
+                    lambda cls, *args, **kwargs: (_ for _ in ()).throw(OSError("temporary read"))
+                ),
+            )
+            with engine.begin() as connection:
+                assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+                # No first migration opportunity may be recorded from a read
+                # failure; otherwise the retry below would be fenced out.
+                assert _stored_migration_marker(connection) is None
+
+        assert V2Config.load.__func__ is real_load.__func__
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                **_EMPTY_MIGRATION_COUNTS,
+                "legacy_deferred_definitions": 1,
+            }
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is not None
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_unpaired_first_opportunity_cannot_be_adopted_by_a_later_pairing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = _paired_cloud_config(
+        tmp_path,
+        enabled=False,
+        instance_id="",
+        instance_kind="",
+        instance_secret="",
+    )
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "owner",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            sealed = json.loads(_stored_migration_marker(connection))
+
+        assert sealed["state"] == "sealed_unattributed"
+        assert sealed["instance_id"] is None
+
+        cloud = config.remote_access.vibe_cloud
+        cloud.enabled = True
+        cloud.instance_id = "later-instance"
+        cloud.instance_kind = "personal"
+        cloud.instance_secret = "instance-secret"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+            snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+            assert "vibe_instance_id" not in snapshot
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+            assert json.loads(_stored_migration_marker(connection))["state"] == "sealed_unattributed"
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_pending_marker_for_one_instance_cannot_be_adopted_by_another_instance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    config = _paired_cloud_config(tmp_path, instance_id="instance-a", instance_secret="")
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            pending = json.loads(_stored_migration_marker(connection))
+        assert pending["state"] == "pending"
+        assert pending["instance_id"] == "instance-a"
+
+        cloud = config.remote_access.vibe_cloud
+        cloud.instance_id = "instance-b"
+        cloud.instance_secret = "instance-secret"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            sealed = json.loads(_stored_migration_marker(connection))
+            assert sealed["state"] == "sealed_unattributed"
+            # The original owner stays recorded so no later pairing, including
+            # instance A itself, can reopen the sealed opportunity.
+            assert sealed["instance_id"] == "instance-a"
+
+        cloud.instance_id = "instance-a"
+        config.save()
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+            snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+            assert "vibe_instance_id" not in snapshot
+            assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+    finally:
+        store.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("paired_kind", ["organization", "personal"])
+@pytest.mark.parametrize("access_source", ["email", "email_domain", "public_instance"])
+def test_shared_access_source_snapshots_migrate_for_either_pairing_kind(
+    monkeypatch,
+    tmp_path,
+    paired_kind: str,
+    access_source: str,
+) -> None:
+    """``email``/``email_domain``/``public_instance`` are kind-agnostic.
+
+    Neither their presence nor the absence of Organization membership claims
+    is instance-kind evidence, so the still-current pairing decides.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path, instance_id="paired-instance", instance_kind=paired_kind)
+    legacy_snapshot = {
+        "sub": "legacy-editor",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": access_source,
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        from storage.importer import _run_sqlite_data_migrations
+
+        with engine.begin() as connection:
+            assert _migration_counts(_run_sqlite_data_migrations(connection)) == {
+                **_EMPTY_MIGRATION_COUNTS,
+                "legacy_deferred_definitions": 1,
+            }
+            metadata = _legacy_definition_metadata(connection, "legacy-task")
+            snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+            assert snapshot["vibe_instance_id"] == "paired-instance"
+            assert snapshot["vibe_instance_kind"] == paired_kind
+            restored = resource_access_service.resource_user_context_from_metadata(metadata)
+            assert restored is not None
+            assert restored.is_personal_instance is (paired_kind == "personal")
+            # Organization membership is never synthesized by the migration.
+            assert "vibe_organization_id" not in snapshot
+    finally:
+        store.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("marker_json", "expected_state", "expect_marker_preserved"),
+    [
+        pytest.param(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "completed",
+                    "instance_id": None,
+                    "completed_at": "2026-08-19T00:00:00Z",
+                    "updated_at": "2026-08-19T00:00:00Z",
+                }
+            ),
+            "sealed_unattributed",
+            True,
+            id="released_completed_without_instance",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "state": "completed",
+                    "instance_id": "same-instance",
+                    "completed_at": "2026-08-19T00:00:00Z",
+                    "updated_at": "2026-08-19T00:00:00Z",
+                }
+            ),
+            "completed",
+            True,
+            id="released_completed_for_current_instance",
+        ),
+        pytest.param(
+            json.dumps({"instance_id": "same-instance", "completed_at": "2026-08-19T00:00:00Z"}),
+            "completed",
+            True,
+            id="released_marker_without_state_field",
+        ),
+        pytest.param(
+            json.dumps({"instance_id": None}),
+            "sealed_unattributed",
+            False,
+            id="released_marker_without_state_or_instance",
+        ),
+        pytest.param(
+            json.dumps({"state": "pending", "instance_id": "   "}),
+            None,
+            True,
+            id="blank_instance_id",
+        ),
+        pytest.param(
+            json.dumps({"state": "sealed_unattributed", "instance_id": "same-instance"}),
+            "sealed_unattributed",
+            True,
+            id="sealed_for_current_instance",
+        ),
+        pytest.param("not-json", None, True, id="corrupt_marker"),
+        pytest.param(json.dumps(["completed"]), None, True, id="non_object_marker"),
+    ],
+)
+def test_released_migration_marker_shapes_stay_idempotent_and_fail_closed(
+    monkeypatch,
+    tmp_path,
+    marker_json: str,
+    expected_state: str | None,
+    expect_marker_preserved: bool,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    _paired_cloud_config(tmp_path)
+    legacy_snapshot = {
+        "sub": "legacy-user",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "email",
+        "claims_issued_at": 1_700_000_000,
+    }
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    store = SQLiteBackgroundTaskStore(db)
+    engine = create_sqlite_engine(db)
+    try:
+        _seed_legacy_scheduled_task(store, definition_id="legacy-task", snapshot=legacy_snapshot)
+        with engine.begin() as connection:
+            connection.execute(
+                state_meta.insert().values(
+                    key=resource_access_service.LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                    value_json=marker_json,
+                    updated_at="2026-08-19T00:00:00Z",
+                )
+            )
+        from storage.importer import _run_sqlite_data_migrations
+
+        for _ in range(2):
+            with engine.begin() as connection:
+                assert _migration_counts(_run_sqlite_data_migrations(connection)) == _EMPTY_MIGRATION_COUNTS
+                metadata = _legacy_definition_metadata(connection, "legacy-task")
+                snapshot = metadata[resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY]
+                assert "vibe_instance_id" not in snapshot
+                assert resource_access_service.resource_user_context_from_metadata(metadata) is None
+                stored = _stored_migration_marker(connection)
+                if expect_marker_preserved:
+                    # A terminal or unreadable marker is never rewritten, so
+                    # repeated startups cannot churn the released shape.
+                    assert stored == marker_json
+                else:
+                    assert json.loads(stored)["state"] == expected_state
+    finally:
+        store.close()
+        engine.dispose()
 
 
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
