@@ -33,7 +33,6 @@ def _clear_authorization_refresh_process_state():
         remote_access._AUTHORIZATION_REFRESH_FAILURES.clear()
         remote_access._AUTHORIZATION_REFRESH_RESULTS.clear()
         remote_access._AUTHORIZATION_REFRESH_FLIGHTS.clear()
-        remote_access._AUTHORIZATION_REFRESH_FLIGHT_EPOCHS.clear()
     with remote_access._AUTHORIZATION_BACKGROUND_REFRESH_LOCK:
         remote_access._AUTHORIZATION_BACKGROUND_REFRESHES.clear()
     yield
@@ -41,10 +40,12 @@ def _clear_authorization_refresh_process_state():
         remote_access._AUTHORIZATION_REFRESH_FAILURES.clear()
         remote_access._AUTHORIZATION_REFRESH_RESULTS.clear()
         remote_access._AUTHORIZATION_REFRESH_FLIGHTS.clear()
-        remote_access._AUTHORIZATION_REFRESH_FLIGHT_EPOCHS.clear()
 
 
 def _paired_config(tmp_path, *, revision: int = 41) -> V2Config:
+    import os
+
+    os.environ["AVIBE_HOME"] = str(tmp_path)
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -623,10 +624,16 @@ def test_stale_write_is_refused_under_cross_process_config_lock(tmp_path):
 def test_stale_denied_response_does_not_recreate_revoked_row(monkeypatch, tmp_path):
     """A 403 captured before a transition must not recreate a revoked row."""
 
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _paired_config(tmp_path)
-    remote_access._transition_instance_binding(
+    started = remote_access_authorization_service.begin_instance_binding_transition(
         instance_id="inst_123",
         instance_kind="organization",
+    )
+    assert remote_access_authorization_service.complete_instance_binding_transition(
+        instance_id="inst_123",
+        instance_kind="organization",
+        generation=started["generation"],
     )
     cookie = _organization_cookie(config)
     identity = remote_access.parse_session_identity(config, cookie)
@@ -754,19 +761,11 @@ def test_exact_show_page_grants_survive_a_kind_transition_but_not_a_repair(tmp_p
         == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
     )
     assert (
-        remote_access._durable_binding_allows_cached_authorization(
-            reclassified,
-            show_page_identity,
-            show_page,
-        )
+        remote_access.binding_is_ready(reclassified, show_page_identity)
         is True
     )
     assert (
-        remote_access._durable_binding_allows_cached_authorization(
-            reclassified,
-            instance_identity,
-            instance,
-        )
+        remote_access.binding_is_ready(reclassified, instance_identity)
         is False
     )
 

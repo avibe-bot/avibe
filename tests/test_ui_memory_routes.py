@@ -124,6 +124,7 @@ def test_memory_settings_patch_accepts_optional_complete_rerank_endpoint() -> No
         "https://rerank.example.test/v1/inference",
         "rerank-model",
         "rerank-secret",
+        "deepinfra",
     )
 
 

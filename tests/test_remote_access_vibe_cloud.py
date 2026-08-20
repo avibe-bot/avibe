@@ -1970,6 +1970,76 @@ def test_pair_aborts_when_pending_migration_fails(monkeypatch, tmp_path) -> None
     assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
 
 
+def test_pair_redeems_when_config_file_is_absent(monkeypatch, tmp_path) -> None:
+    """A fresh install with no config is authoritative unpaired, not unavailable."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config" / "config.json"
+    if config_path.exists():
+        config_path.unlink()
+
+    redeem_calls: list[str] = []
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        redeem_calls.append(url)
+        return _pair_redeem_response()
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda next_config=None: {"ok": True, "running": True, "paired": True},
+    )
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(remote_access, "_transition_instance_binding", lambda **kwargs: {"ok": True, "ready": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is True
+    assert redeem_calls
+    assert "/pairing/redeem" in redeem_calls[0]
+
+
+def test_binding_transition_initializes_sqlite_before_taking_config_lock(monkeypatch, tmp_path) -> None:
+    """Lock order: ensure_sqlite_state must complete before config_file_lock."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _config().save()
+    order: list[str] = []
+    real_ensure = __import__("storage.importer", fromlist=["ensure_sqlite_state"]).ensure_sqlite_state
+    real_lock = __import__("config.v2_config", fromlist=["config_file_lock"]).config_file_lock
+
+    def tracking_ensure(*args, **kwargs):
+        order.append("sqlite")
+        return real_ensure(*args, **kwargs)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def tracking_lock(*args, **kwargs):
+        order.append("config")
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr("storage.importer.ensure_sqlite_state", tracking_ensure)
+    monkeypatch.setattr("config.v2_config.config_file_lock", tracking_lock)
+    monkeypatch.setattr(
+        "storage.remote_access_authorization_service._ensure_sqlite_state",
+        lambda: tracking_ensure(),
+    )
+
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+
+    assert "sqlite" in order
+    assert "config" in order
+    assert order.index("sqlite") < order.index("config")
+
+
+
 def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
