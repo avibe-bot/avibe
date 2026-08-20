@@ -24,8 +24,8 @@ vi.mock('@/context/ApiContext', () => ({
   useApi: () => api,
 }));
 
-// A1/A2 have not landed, so the Organization directory is the only permissions
-// read this control makes. It is never a show_page Resource request.
+// The Organization directory is the only permissions read this control makes.
+// It is never a show_page Resource request.
 vi.mock('@/features/permissions/api', () => ({
   getPermissions: (...args: unknown[]) => getPermissions(...args),
 }));
@@ -207,10 +207,17 @@ describe('ShowPageSharingSettings', () => {
     ]);
     fireEvent.click(screen.getByRole('option', { name: /Engineering/ }));
 
-    // A group-only change is local until A1/A2: the current endpoint has
-    // nowhere to store it, and an email-only round-trip would wipe the row.
-    await waitFor(() => expect(screen.getByText('Engineering')).toBeTruthy());
-    expect(api.applyShowAccess).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [
+        { kind: 'group', value: 'grp-eng' },
+        { kind: 'email', value: 'guest@example.com' },
+      ],
+    });
+    expect(await screen.findByText('Engineering')).toBeTruthy();
   });
 
   it('narrows the directory from a half-typed query and still accepts any typed email', async () => {
@@ -242,7 +249,7 @@ describe('ShowPageSharingSettings', () => {
       expected_revision: 0,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
-      target_emails: ['outsider@partner.dev'],
+      target_entries: [{ kind: 'email', value: 'outsider@partner.dev' }],
     });
   });
 
@@ -321,39 +328,24 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.getByText('This Organization (Acme)')).toBeTruthy();
     fireEvent.click(toggle);
 
-    await waitFor(() => {
-      expect((screen.getByRole('switch', { name: 'This Organization' }))
-        .getAttribute('aria-checked')).toBe('true');
-    });
-    // Turning the Organization on supersedes nothing: the group and the email stay.
-    // Until A1/A2 land, the current endpoint cannot store those kinds, so the
-    // switch is local-only and must not fire an email-only round-trip.
-    expect(api.applyShowAccess).not.toHaveBeenCalled();
-    expect(screen.getByText('Engineering')).toBeTruthy();
-    expect(screen.getByText('guest@example.com')).toBeTruthy();
-
-    api.applyShowAccess.mockResolvedValue({
-      status: 'applied',
-      show_access: showAccess({
-        access_mode: 'limited',
-        revision: 1,
-        normalized_emails: ['guest@example.com', 'alice@example.com'],
-      }),
-    });
-    fireEvent.change(await audience(), { target: { value: 'alice@example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    // Turning the Organization on supersedes nothing: the group and the email stay.
     expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
       expected_revision: 0,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
-      target_emails: ['alice@example.com', 'guest@example.com'],
+      target_entries: [
+        { kind: 'organization', value: 'org-1' },
+        { kind: 'group', value: 'grp-eng' },
+        { kind: 'email', value: 'guest@example.com' },
+      ],
     });
-    // The email-only round-trip must not wipe the local extras.
-    expect((screen.getByRole('switch', { name: 'This Organization' }))
-      .getAttribute('aria-checked')).toBe('true');
+    await waitFor(() => {
+      expect((screen.getByRole('switch', { name: 'This Organization' }))
+        .getAttribute('aria-checked')).toBe('true');
+    });
     expect(screen.getByText('Engineering')).toBeTruthy();
-    expect(screen.getByText('alice@example.com')).toBeTruthy();
+    expect(screen.getByText('guest@example.com')).toBeTruthy();
   });
 
   it('gives a Personal page an email-only audience', async () => {
@@ -445,61 +437,120 @@ describe('ShowPageSharingSettings', () => {
 
     const remove = await screen.findByRole('button', { name: 'Remove guest@example.com' });
     expect((remove as HTMLButtonElement).disabled).toBe(true);
-    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last email');
+    expect(remove.getAttribute('title')).toBe('Switch to Private to remove the last entry');
     // The same guard covers an Organization that is the only entry left.
     expect((await screen.findByRole('switch', { name: 'This Organization' })).getAttribute(
       'aria-checked',
     )).toBe('false');
   });
 
-  it('refuses Limited with no emails and pins the last email beside extras', async () => {
+  it('saves group-only Limited and reads the group back', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     getPermissions.mockResolvedValue(ORGANIZATION);
-    renderSettings();
-
-    await chooseMode('Limited');
-    expect(await screen.findByText(
-      'Add at least one email before Limited can be saved.',
-    )).toBeTruthy();
-    expect(api.applyShowAccess).not.toHaveBeenCalled();
-
-    const input = await openAudience();
-    fireEvent.click(await screen.findByRole('option', { name: /Engineering/ }));
-    expect(await screen.findByText('Engineering')).toBeTruthy();
-    expect(screen.getByText(
-      'Add at least one email before Limited can be saved.',
-    )).toBeTruthy();
-    expect(api.applyShowAccess).not.toHaveBeenCalled();
-
     api.applyShowAccess.mockResolvedValue({
       status: 'applied',
       show_access: showAccess({
         access_mode: 'limited',
         revision: 1,
-        normalized_emails: ['guest@example.com'],
+        normalized_emails: [],
+        entries: [{ kind: 'group', value: 'grp-eng' }],
       }),
     });
-    fireEvent.change(input, { target: { value: 'guest@example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Add email' }));
+    renderSettings();
+
+    await chooseMode('Limited');
+    expect(await screen.findByText(
+      'Add at least one person, group, or Organization.',
+    )).toBeTruthy();
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+
+    await openAudience();
+    fireEvent.click(await screen.findByRole('option', { name: /Engineering/ }));
     await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
     expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
       expected_revision: 0,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
-      target_emails: ['guest@example.com'],
+      target_entries: [{ kind: 'group', value: 'grp-eng' }],
+    });
+    expect(await screen.findByText('Engineering')).toBeTruthy();
+    expect(screen.queryByText(
+      'Add at least one person, group, or Organization.',
+    )).toBeNull();
+    expect((screen.getByRole('button', { name: 'Remove Engineering' }) as HTMLButtonElement)
+      .disabled).toBe(true);
+  });
+
+  it('saves Organization-only Limited and reads the switch back', async () => {
+    api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({
+        access_mode: 'limited',
+        revision: 1,
+        normalized_emails: [],
+        entries: [{ kind: 'organization', value: 'org-1' }],
+      }),
+    });
+    renderSettings();
+
+    await chooseMode('Limited');
+    fireEvent.click(await screen.findByRole('switch', { name: 'This Organization' }));
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [{ kind: 'organization', value: 'org-1' }],
+    });
+    await waitFor(() => {
+      expect((screen.getByRole('switch', { name: 'This Organization' }))
+        .getAttribute('aria-checked')).toBe('true');
     });
     expect(screen.queryByText(
-      'Add at least one email before Limited can be saved.',
+      'Add at least one person, group, or Organization.',
     )).toBeNull();
+  });
 
-    const removeEmail = screen.getByRole('button', { name: 'Remove guest@example.com' });
-    const removeGroup = screen.getByRole('button', { name: 'Remove Engineering' });
-    expect((removeEmail as HTMLButtonElement).disabled).toBe(true);
+  it('lets the last email be removed while another Limited entry remains', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+        entries: [
+          { kind: 'group', value: 'grp-eng' },
+          { kind: 'email', value: 'guest@example.com' },
+        ],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    api.applyShowAccess.mockResolvedValue({
+      status: 'applied',
+      show_access: showAccess({
+        access_mode: 'limited',
+        revision: 1,
+        normalized_emails: [],
+        entries: [{ kind: 'group', value: 'grp-eng' }],
+      }),
+    });
+    renderSettings();
+
+    const removeEmail = await screen.findByRole('button', { name: 'Remove guest@example.com' });
+    const removeGroup = await screen.findByRole('button', { name: 'Remove Engineering' });
+    expect((removeEmail as HTMLButtonElement).disabled).toBe(false);
     expect((removeGroup as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(removeGroup);
-    expect(screen.queryByRole('button', { name: 'Remove Engineering' })).toBeNull();
-    expect(screen.getByText('guest@example.com')).toBeTruthy();
-    expect(api.applyShowAccess).toHaveBeenCalledTimes(1);
+    fireEvent.click(removeEmail);
+    await waitFor(() => expect(api.applyShowAccess).toHaveBeenCalledTimes(1));
+    expect(api.applyShowAccess).toHaveBeenCalledWith('ses-1', {
+      expected_revision: 0,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [{ kind: 'group', value: 'grp-eng' }],
+    });
+    expect(screen.queryByRole('button', { name: 'Remove guest@example.com' })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Remove Engineering' }) as HTMLButtonElement)
+      .disabled).toBe(true);
   });
 
   it('saves a direct mode change without an Apply button', async () => {
@@ -520,7 +571,7 @@ describe('ShowPageSharingSettings', () => {
       expected_revision: 0,
       target_access_mode: 'public',
       target_share_id: 'stable-link',
-      target_emails: [],
+      target_entries: [],
     });
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
   });
@@ -747,7 +798,10 @@ describe('ShowPageSharingSettings', () => {
       expected_revision: 0,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
-      target_emails: ['first@example.com', 'second@example.com'],
+      target_entries: [
+        { kind: 'email', value: 'first@example.com' },
+        { kind: 'email', value: 'second@example.com' },
+      ],
     });
     expect((screen.getByRole('textbox', { name: 'Custom link' }) as HTMLInputElement).value).toBe(
       'unsaved-link',

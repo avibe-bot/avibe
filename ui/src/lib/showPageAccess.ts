@@ -37,9 +37,11 @@ export type ShowAccess = {
   access_mode: ShowAccessMode;
   share_id: string | null;
   revision: number;
-  /** Pre-A1 backends only report the email audience. Absent `access_entries`,
-   *  this list is read as the email entries so email sharing keeps working. */
+  /** Email projection of the audience. Always present on the live snapshot. */
   normalized_emails: string[];
+  /** A2 live field: heterogeneous `email | group | organization` entries. */
+  entries?: ShowAccessEntry[];
+  /** Pre-A2 / test alias. Read only when `entries` is absent. */
   access_entries?: ShowAccessEntry[];
 };
 
@@ -51,20 +53,14 @@ export type ShowAccessApplyRequest = {
   expected_revision: number;
   target_access_mode: ShowAccessMode;
   target_share_id: string | null;
-  /** Heterogeneous audience. Optional until A1/A2 land the apply contract: the
-   *  current endpoint requires an exact five-key payload, so the wire form
-   *  omits this until that backend accepts it. */
-  target_entries?: ShowAccessEntry[];
-  /** Email projection of `target_entries`. Until A1/A2 land, this is the only
-   *  audience the current endpoint applies. */
-  target_emails: string[];
+  /** Heterogeneous audience. A2's apply contract is XOR with `target_emails`;
+   *  this helper always sends entries so group/org grants persist. */
+  target_entries: ShowAccessEntry[];
 };
 
-/** Wire payload for `/access-settings/apply`. Until A1/A2 land, the route
- *  requires an exact five-key set and 400s on any extra field, so the
- *  heterogeneous audience is held locally and only the email projection is
- *  sent. Once those lanes land, this helper should start including
- *  `target_entries` again. */
+/** Wire payload for `/access-settings/apply`. A2 accepts exactly one of
+ *  `target_emails` or `target_entries`; sending both 400s. This helper emits
+ *  the entry form so a Limited audience of any kind is persistable. */
 export function showAccessApplyPayload(
   expectedRevision: number,
   mode: ShowAccessMode,
@@ -75,7 +71,7 @@ export function showAccessApplyPayload(
     expected_revision: expectedRevision,
     target_access_mode: mode,
     target_share_id: shareId,
-    target_emails: showAccessTargetEmails(mode, entries),
+    target_entries: showAccessTargetEntries(mode, entries),
   };
 }
 
@@ -138,7 +134,8 @@ export function canonicalShowAccessEntries(entries: ShowAccessEntry[]): ShowAcce
 
 export function showAccessEntriesOf(saved: ShowAccess): ShowAccessEntry[] {
   return canonicalShowAccessEntries(
-    saved.access_entries
+    saved.entries
+      ?? saved.access_entries
       ?? saved.normalized_emails.map((value) => ({ kind: 'email' as const, value })),
   );
 }
@@ -179,20 +176,6 @@ export function showAccessTargetEmails(
   return showAccessTargetEntries(mode, entries)
     .filter((entry) => entry.kind === 'email')
     .map((entry) => entry.value);
-}
-
-export function showAccessEmailCount(entries: ShowAccessEntry[]): number {
-  return entries.filter((entry) => entry.kind === 'email').length;
-}
-
-/** Until A1/A2 land, the live store rejects Limited with an empty email list.
- *  Group/Organization extras are local-only, so a Limited draft is wire-valid
- *  only when at least one email would be on the five-key payload. */
-export function showAccessLimitedWireValid(
-  mode: ShowAccessMode,
-  entries: ShowAccessEntry[],
-): boolean {
-  return mode !== 'limited' || showAccessEmailCount(entries) > 0;
 }
 
 /** The Organization directory the audience combobox searches. `null` means this
@@ -269,37 +252,6 @@ export function showAccessDraftChanged(
     || saved.share_id !== shareId
     || showAccessEntriesKey(showAccessEntriesOf(saved))
       !== showAccessEntriesKey(showAccessTargetEntries(mode, entries));
-}
-
-/** True when the five-key apply payload would differ. Group and Organization
- *  entries are invisible to the current endpoint, so a local-only audience
- *  change must not be sent (it would 400 on `target_entries`, or a successful
- *  email-only round-trip would wipe those rows on adopt). */
-export function showAccessWireChanged(
-  saved: ShowAccess,
-  mode: ShowAccessMode,
-  shareId: string | null,
-  entries: ShowAccessEntry[],
-): boolean {
-  return saved.access_mode !== mode
-    || saved.share_id !== shareId
-    || showAccessEntriesKey(
-      saved.normalized_emails.map((value) => ({ kind: 'email' as const, value })),
-    ) !== showAccessEntriesKey(
-      showAccessTargetEmails(mode, entries).map((value) => ({ kind: 'email' as const, value })),
-    );
-}
-
-/** Re-homes group/Organization rows the current endpoint cannot store, on top
- *  of whatever email audience the server just acknowledged. */
-export function showAccessWithLocalExtras(
-  saved: ShowAccess,
-  local: ShowAccessEntry[],
-): ShowAccessEntry[] {
-  return canonicalShowAccessEntries([
-    ...local.filter((entry) => entry.kind !== 'email'),
-    ...showAccessEntriesOf(saved).filter((entry) => entry.kind === 'email'),
-  ]);
 }
 
 function isShowPageAccess(value: unknown): value is ShowPageAccess {

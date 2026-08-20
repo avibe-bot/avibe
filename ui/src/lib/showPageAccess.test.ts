@@ -9,9 +9,6 @@ import {
   showAccessApplyPayload,
   showAccessDirectoryOf,
   showAccessDraftChanged,
-  showAccessLimitedWireValid,
-  showAccessWireChanged,
-  showAccessWithLocalExtras,
   showAccessEntriesOf,
   showAccessSuggestions,
   showAccessTargetEmails,
@@ -93,6 +90,19 @@ describe('Show Page access policy helpers', () => {
       { kind: 'email', value: 'alice@example.com' },
       { kind: 'email', value: 'bob@example.com' },
     ]);
+    // A2 serializes `entries`; the pre-A2 `access_entries` alias still reads.
+    expect(showAccessEntriesOf({
+      ...saved,
+      entries: [
+        { kind: 'email', value: 'bob@example.com' },
+        { kind: 'organization', value: 'org-1' },
+        { kind: 'group', value: 'grp-eng' },
+      ],
+    })).toEqual([
+      { kind: 'organization', value: 'org-1' },
+      { kind: 'group', value: 'grp-eng' },
+      { kind: 'email', value: 'bob@example.com' },
+    ]);
     expect(showAccessEntriesOf({
       ...saved,
       access_entries: [
@@ -105,6 +115,12 @@ describe('Show Page access policy helpers', () => {
       { kind: 'group', value: 'grp-eng' },
       { kind: 'email', value: 'bob@example.com' },
     ]);
+    // `entries` wins when both fields are present.
+    expect(showAccessEntriesOf({
+      ...saved,
+      entries: [{ kind: 'group', value: 'grp-eng' }],
+      access_entries: [{ kind: 'email', value: 'alice@example.com' }],
+    })).toEqual([{ kind: 'group', value: 'grp-eng' }]);
   });
 
   it('keeps email, group, and Organization entries as peers', () => {
@@ -144,7 +160,7 @@ describe('Show Page access policy helpers', () => {
       share_id: 'stable-link',
       revision: 4,
       normalized_emails: ['alice@example.com', 'bob@example.com'],
-      access_entries: [
+      entries: [
         { kind: 'organization', value: 'org-1' },
         { kind: 'email', value: 'alice@example.com' },
         { kind: 'email', value: 'bob@example.com' },
@@ -165,50 +181,46 @@ describe('Show Page access policy helpers', () => {
       'stable-link',
       withoutShowAccessEntry(entries, { kind: 'organization', value: 'org-1' }),
     )).toBe(true);
-    // Until A1/A2 land, the apply route 400s on any extra key, so the wire
-    // form is the five-key set with only the email projection.
+    // A2's apply contract is XOR: exactly one of target_emails / target_entries.
+    // The helper sends entries so group/org grants persist.
     expect(showAccessApplyPayload(4, 'limited', 'stable-link', entries)).toEqual({
       expected_revision: 4,
       target_access_mode: 'limited',
       target_share_id: 'stable-link',
-      target_emails: ['alice@example.com', 'bob@example.com'],
+      target_entries: [
+        { kind: 'organization', value: 'org-1' },
+        { kind: 'email', value: 'alice@example.com' },
+        { kind: 'email', value: 'bob@example.com' },
+      ],
     });
     expect(Object.keys(showAccessApplyPayload(4, 'limited', 'stable-link', entries))).toEqual([
       'expected_revision',
       'target_access_mode',
       'target_share_id',
-      'target_emails',
+      'target_entries',
     ]);
-    expect(showAccessWireChanged(saved, 'limited', 'stable-link', entries)).toBe(false);
-    expect(showAccessWireChanged(
-      saved,
-      'limited',
-      'stable-link',
-      withoutShowAccessEntry(entries, { kind: 'organization', value: 'org-1' }),
-    )).toBe(false);
-    expect(showAccessWireChanged(
-      saved,
-      'limited',
-      'stable-link',
-      withoutShowAccessEntry(entries, { kind: 'email', value: 'alice@example.com' }),
-    )).toBe(true);
-    expect(showAccessWithLocalExtras(
-      { ...saved, access_entries: undefined },
-      entries,
-    )).toEqual([
-      { kind: 'organization', value: 'org-1' },
-      { kind: 'email', value: 'alice@example.com' },
-      { kind: 'email', value: 'bob@example.com' },
-    ]);
-    // Until A1/A2, Limited is only persistable with at least one email.
-    expect(showAccessLimitedWireValid('limited', entries)).toBe(true);
-    expect(showAccessLimitedWireValid('limited', [
-      { kind: 'organization', value: 'org-1' },
+    expect(showAccessApplyPayload(4, 'public', 'stable-link', entries)).toEqual({
+      expected_revision: 4,
+      target_access_mode: 'public',
+      target_share_id: 'stable-link',
+      target_entries: [],
+    });
+    expect(showAccessApplyPayload(4, 'limited', 'stable-link', [
       { kind: 'group', value: 'grp-eng' },
-    ])).toBe(false);
-    expect(showAccessLimitedWireValid('limited', [])).toBe(false);
-    expect(showAccessLimitedWireValid('public', [])).toBe(true);
-    expect(showAccessLimitedWireValid('private', [])).toBe(true);
+    ])).toEqual({
+      expected_revision: 4,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [{ kind: 'group', value: 'grp-eng' }],
+    });
+    expect(showAccessApplyPayload(4, 'limited', 'stable-link', [
+      { kind: 'organization', value: 'org-1' },
+    ])).toEqual({
+      expected_revision: 4,
+      target_access_mode: 'limited',
+      target_share_id: 'stable-link',
+      target_entries: [{ kind: 'organization', value: 'org-1' }],
+    });
   });
 
   it('derives the audience directory only for an Organization Avibe', () => {

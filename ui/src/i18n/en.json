@@ -3634,7 +3634,7 @@
         "organization": "Pick a person or group, or type any email · up to {{count}}",
         "email": "Enter an email and press Enter to add · up to {{count}}"
       },
-      "shareAudienceRequired": "Add at least one email before Limited can be saved.",
+      "shareAudienceRequired": "Add at least one person, group, or Organization.",
       "shareOrganizationGeneric": "This Organization",
       "shareOrganizationNamed": "This Organization ({{name}})",
       "shareGroupBadge": "Group",
@@ -3642,7 +3642,7 @@
       "shareSuggestionNarrow": "More results — keep typing to narrow them down.",
       "loadingShareDirectory": "Loading Organization directory…",
       "removeShareEntry": "Remove {{label}}",
-      "keepOneShareEntry": "Switch to Private to remove the last email",
+      "keepOneShareEntry": "Switch to Private to remove the last entry",
       "sharingErrors": {
         "conflict": "Link access changed elsewhere. The latest version has been loaded.",
         "invalid": "Review the mode, link, and access list.",

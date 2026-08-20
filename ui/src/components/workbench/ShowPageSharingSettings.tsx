@@ -30,11 +30,7 @@ import {
   showAccessEntryKey,
   showAccessSuggestions,
   showAccessApplyPayload,
-  showAccessEmailCount,
-  showAccessLimitedWireValid,
   showAccessTargetEntries,
-  showAccessWireChanged,
-  showAccessWithLocalExtras,
   withoutShowAccessEntry,
   withShowAccessEntry,
   SHOW_ACCESS_ENTRY_MAX_COUNT,
@@ -464,10 +460,7 @@ export function ShowPageSharingSettings({
   const shareIdDirty = Boolean(saved && normalizedShareId !== saved.share_id);
   const entryLimitReached = entries.length >= SHOW_ACCESS_ENTRY_MAX_COUNT;
   const editable = canManage && gate !== 'loading' && !saving;
-  // Until A1/A2, Limited is only persistable with at least one email. Group
-  // and Organization extras stay removable; the last email is what is pinned.
-  const lastEmailPinned = mode === 'limited' && showAccessEmailCount(entries) <= 1;
-  const limitedWireValid = showAccessLimitedWireValid(mode, entries);
+  const lastEntryPinned = mode === 'limited' && entries.length <= 1;
 
   const { suggestions, truncated } = useMemo(
     () => showAccessSuggestions(directory, query, entries),
@@ -491,9 +484,7 @@ export function ShowPageSharingSettings({
     const targetEntries = showAccessTargetEntries(nextMode, nextEntries);
     const nextInvalid =
       (nextMode !== 'private' && (!targetShareId || !isValidShareId(targetShareId)))
-      || (nextMode === 'limited' && (
-        targetEntries.length === 0 || !showAccessLimitedWireValid(nextMode, nextEntries)
-      ));
+      || (nextMode === 'limited' && targetEntries.length === 0);
     if (
       !current
       || savingRef.current
@@ -502,12 +493,6 @@ export function ShowPageSharingSettings({
       || gate === 'loading'
       || !showAccessDraftChanged(current, nextMode, targetShareId, nextEntries)
     ) {
-      return;
-    }
-    // Group/Organization rows are local-only until A1/A2. Hitting the current
-    // endpoint with an unchanged email projection would either 400 or come
-    // back as an email-only snapshot that wipes those rows on adopt.
-    if (!showAccessWireChanged(current, nextMode, targetShareId, nextEntries)) {
       return;
     }
     const generation = generationRef.current;
@@ -544,7 +529,6 @@ export function ShowPageSharingSettings({
         return;
       }
       adopt(result.show_access, preserveShareIdDraftOnSuccess);
-      setEntries(showAccessWithLocalExtras(result.show_access, nextEntries));
       setGate('ready');
       onApplied?.(result.show_access);
     } catch {
@@ -562,7 +546,7 @@ export function ShowPageSharingSettings({
     if (!editable || nextMode === mode) return;
     setMode(nextMode);
     setEmailInvalid(false);
-    if (nextMode === 'limited' && !showAccessLimitedWireValid(nextMode, entries)) return;
+    if (nextMode === 'limited' && entries.length === 0) return;
     void commit(nextMode, savedRef.current?.share_id ?? shareId, entries, shareIdDirty);
   };
 
@@ -593,7 +577,7 @@ export function ShowPageSharingSettings({
 
   const removeEntry = (entry: ShowAccessEntry) => {
     if (!editable) return;
-    if (entry.kind === 'email' && lastEmailPinned) return;
+    if (lastEntryPinned) return;
     applyEntries(withoutShowAccessEntry(entries, entry));
   };
 
@@ -663,7 +647,7 @@ export function ShowPageSharingSettings({
                       disabled={
                         !editable
                         || shareIdInvalid
-                        || !limitedWireValid
+                        || (mode === 'limited' && entries.length === 0)
                       }
                       onClick={saveShareId}
                       aria-label={t('common.save')}
@@ -769,6 +753,7 @@ export function ShowPageSharingSettings({
                         checked={Boolean(organizationEntry)}
                         disabled={
                           !editable
+                          || (Boolean(organizationEntry) && lastEntryPinned)
                           || (!organizationEntry && entryLimitReached)
                         }
                         onCheckedChange={toggleOrganization}
@@ -804,10 +789,10 @@ export function ShowPageSharingSettings({
                           size="icon"
                           variant="ghost"
                           className="size-5 shrink-0"
-                          disabled={!editable || (entry.kind === 'email' && lastEmailPinned)}
+                          disabled={!editable || lastEntryPinned}
                           onClick={() => removeEntry(entry)}
                           aria-label={t('chat.showPage.removeShareEntry', { label })}
-                          title={entry.kind === 'email' && lastEmailPinned
+                          title={lastEntryPinned
                             ? t('chat.showPage.keepOneShareEntry')
                             : t('chat.showPage.removeShareEntry', { label })}
                         >
@@ -818,7 +803,7 @@ export function ShowPageSharingSettings({
                   })}
                 </div>
 
-                {!limitedWireValid ? (
+                {entries.length === 0 ? (
                   <p className="text-[11px] text-destructive-ink">
                     {t('chat.showPage.shareAudienceRequired')}
                   </p>
