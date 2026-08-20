@@ -2240,6 +2240,11 @@ class ShowRuntimeManager:
                 return existing_command
             if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
                 return self._reuse_existing_github_runtime(existing_command)
+        # From here on the artifact the marker describes is being replaced:
+        # ``npm ci`` empties node_modules and the build writes into dist. Drop
+        # the marker first so a failure anywhere below leaves "unknown" rather
+        # than a commit that no longer describes what is on disk.
+        self._write_github_build_marker(source_dir, None)
         if not self._run_install_command([*npm, "ci"], cwd=source_dir):
             return self._reuse_existing_github_runtime(existing_command)
         if not self._run_install_command([*npm, "run", "build"], cwd=source_dir):
@@ -2247,7 +2252,6 @@ class ShowRuntimeManager:
         command = self._github_runtime_command(source_dir, node)
         if not command:
             self._install_reason = "runtime_install_missing_bin"
-            self._write_github_build_marker(source_dir, None)
             return None
         self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
         return command
@@ -2258,9 +2262,12 @@ class ShowRuntimeManager:
     def _read_github_build_marker(self, source_dir: Path) -> str | None:
         """The commit that produced the runtime build currently on disk.
 
-        The marker is written only once a build has finished and its entry
-        point resolved, so it describes the artifact that exists now rather
-        than whatever the working tree happens to be checked out at.
+        The marker describes the artifact that exists now, not whatever the
+        working tree happens to be checked out at. Both halves of that are
+        enforced by when it moves: it is cleared before a rebuild starts
+        replacing the artifact, and written again only once the build finished
+        and its entry point resolved. So a failed, interrupted, or partial
+        rebuild leaves no marker, and the next prepare rebuilds.
         """
         try:
             revision = self._github_build_marker_path(source_dir).read_text(encoding="utf-8").strip()

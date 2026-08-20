@@ -161,3 +161,44 @@ def test_a_failed_build_leaves_no_marker_licensing_a_skip(tmp_path: Path) -> Non
     harness.npm_commands.clear()
     assert harness.manager._install_github_runtime()
     assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
+
+
+# The complete rebuild sequence, asserted by
+# ``test_first_install_builds_and_records_the_commit_it_built``. Each step
+# replaces part of the artifact the marker describes, so each one failing must
+# leave the marker gone.
+@pytest.mark.parametrize("failing_step", [["ci"], ["run", "build"]])
+def test_a_failed_rebuild_retracts_the_marker_it_had_already_earned(tmp_path: Path, failing_step: list[str]) -> None:
+    """The marker describes the artifact on disk, and a rebuild replaces it.
+
+    A rebuild at the commit already recorded is the case that bites: the marker
+    still names that commit while ``npm ci`` has emptied node_modules, so the
+    next ordinary prepare would fetch the same commit, match the marker, find
+    the stale entry point still resolving, and skip the repair forever.
+    """
+    upstream = make_upstream(tmp_path)
+    harness = Harness(tmp_path, upstream)
+    assert harness.manager._install_github_runtime()
+    built = harness.manager._read_github_build_marker(harness.manager._github_source_dir())
+    assert built
+
+    real_run = harness._run
+
+    def fail_one_step(command: list[str], *, cwd: Path | None = None) -> bool:
+        if command[1:] == failing_step:
+            harness.npm_commands.append(command)
+            return False
+        return real_run(command, cwd=cwd)
+
+    harness.manager._run_install_command = fail_one_step  # type: ignore[method-assign]
+    harness.manager.force_install = True
+    harness.npm_commands.clear()
+    harness.manager._install_github_runtime()
+
+    assert harness.manager._read_github_build_marker(harness.manager._github_source_dir()) is None
+
+    harness.manager._run_install_command = real_run  # type: ignore[method-assign]
+    harness.manager.force_install = False
+    harness.npm_commands.clear()
+    assert harness.manager._install_github_runtime()
+    assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]

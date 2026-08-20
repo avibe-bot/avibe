@@ -2592,6 +2592,127 @@ def test_a_no_build_ui_update_leaves_the_next_update_rebuilding_the_ui() -> None
     assert "cd ui && npm run build" in joined
 
 
+def test_invalidating_the_record_reads_back_as_rebuild_everything(tmp_path: Path) -> None:
+    """Executed rather than pattern-matched, so it proves the file really empties.
+
+    ``read_existing_fingerprints`` turns whatever is on disk into the previous
+    values every skip decision compares against, and "no keys" is the only
+    shape that reads as "rebuild everything".
+    """
+    metadata_dir = tmp_path / "metadata"
+    record = metadata_dir / "fingerprints.json"
+    metadata_dir.mkdir()
+    record.write_text(json.dumps({"python": "p", "ui_deps": "d", "ui_source": "s"}), encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    class RecordingRunner:
+        def run(self, command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.invalidate_fingerprints(RecordingRunner(), target, remote=None)
+
+    script = (
+        commands[0][-1]
+        .replace(incus_regression.FINGERPRINT_PATH, str(record))
+        .replace(incus_regression.METADATA_DIR, str(metadata_dir))
+    )
+    subprocess.run(["bash", "-lc", script], check=True)
+
+    assert json.loads(record.read_text(encoding="utf-8")) == {}
+
+
+def test_a_run_that_dies_mid_build_leaves_nothing_licensing_a_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of what a recorded fingerprint means.
+
+    Recording only what was rebuilt is not enough on its own: a rebuild also
+    destroys the artifact the previous record described, so a run that dies
+    part way through leaves a claim about something that no longer exists. If
+    the next update syncs the same inputs -- a rollback, or a rerun after
+    fixing the environment rather than the source -- that claim licenses
+    skipping the rebuild that just failed.
+    """
+    calls = []
+
+    class ExistingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names = daemon_listing(*MASTER_NAMES)
+
+        def run(self, command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout="{}")
+
+    def record(name):
+        def wrapper(*args, **kwargs):
+            calls.append(name)
+
+        return wrapper
+
+    def die_mid_build(*args, **kwargs):
+        calls.append("update_dependencies_and_build")
+        raise RuntimeError("npm run build failed")
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", ExistingRunner)
+    monkeypatch.setattr(incus_regression, "ensure_project_and_instance", record("ensure_project_and_instance"))
+    monkeypatch.setattr(incus_regression, "stop_service_for_update", record("stop_service_for_update"))
+    monkeypatch.setattr(incus_regression, "write_runtime_env", record("write_runtime_env"))
+    monkeypatch.setattr(incus_regression, "migrate_legacy_backend_runtimes", record("migrate_legacy_backend_runtimes"))
+    monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
+    monkeypatch.setattr(incus_regression, "sync_source", record("sync_source"))
+    monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {"python": "new"})
+    monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {"python": "old"})
+    monkeypatch.setattr(incus_regression, "invalidate_fingerprints", record("invalidate_fingerprints"))
+    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", die_mid_build)
+    monkeypatch.setattr(incus_regression, "write_metadata", record("write_metadata"))
+
+    args = argparse.Namespace(
+        target="master",
+        slug=None,
+        host_port=None,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        force_ui=False,
+        reset_mode="none",
+    )
+
+    with pytest.raises(RuntimeError):
+        incus_regression.cmd_up(args)
+
+    assert calls.index("invalidate_fingerprints") < calls.index("update_dependencies_and_build")
+    assert "write_metadata" not in calls
+
+
 def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
     commands = []
 

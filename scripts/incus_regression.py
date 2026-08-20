@@ -1039,6 +1039,31 @@ def reconciled_fingerprints(previous: dict, current: dict, reconciled: Container
     return merged
 
 
+def invalidate_fingerprints(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    """Drop the recorded fingerprints before anything starts rebuilding.
+
+    A recorded fingerprint claims "the artifact in the instance was produced
+    from this input". The moment a rebuild starts, that claim stops holding for
+    the artifact it names: ``npm ci`` empties ``ui/node_modules``, ``npm run
+    build`` writes into ``ui/dist``, ``pip install`` rewrites the venv. A run
+    that dies mid-build would otherwise leave the old claim on disk, and if the
+    next update syncs the same inputs again -- a rollback, or a rerun after
+    fixing the environment rather than the source -- that stale claim licenses
+    skipping the very rebuild that failed.
+
+    Recording nothing reads as "rebuild everything", which is the honest answer
+    while a build is in flight. ``write_metadata`` records the real
+    fingerprints once the artifacts exist.
+    """
+    runner.run(
+        root_exec(
+            target,
+            f"mkdir -p {METADATA_DIR} && cat > {FINGERPRINT_PATH} <<'EOF'\n{{}}\nEOF",
+            remote=remote,
+        )
+    )
+
+
 def write_metadata(runner: Runner, target: RegressionTarget, repo_root: Path, fingerprints: dict, *, remote: str | None) -> None:
     payload = {
         "schema_version": 1,
@@ -1666,6 +1691,7 @@ def cmd_up(args: argparse.Namespace) -> int:
         sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
         fingerprints = compute_fingerprints(repo_root)
         previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)
+        invalidate_fingerprints(runner, target, remote=args.remote)
         reconciled = update_dependencies_and_build(
             runner,
             target,
