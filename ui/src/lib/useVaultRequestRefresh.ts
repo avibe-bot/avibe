@@ -12,8 +12,9 @@ export function shouldPollVaultRequests(eventBridgeConnected: boolean): boolean 
 
 /**
  * Refresh pending Vault requests from `vaults.updated` while the controller
- * event bridge is healthy, with visibility-aware polling only as a degraded
- * fallback. The immediate fallback tick also supplies the initial snapshot.
+ * event bridge is healthy, catching up on `onConnected` for whatever the stream
+ * could not deliver, with visibility-aware polling only as a degraded fallback.
+ * The immediate fallback tick also supplies the initial snapshot.
  */
 export function useVaultRequestRefresh(refresh: () => void | Promise<void>): void {
   const api = useApi();
@@ -21,10 +22,11 @@ export function useVaultRequestRefresh(refresh: () => void | Promise<void>): voi
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) void refresh();
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the poll fallback's level: its recovery comes
+      // with its own `onConnected`, and refetching from both would pay twice.
+      onConnected: () => void refresh(),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => void refresh(),
     });

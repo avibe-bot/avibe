@@ -30,9 +30,26 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class _Subscription:
+    """One subscriber's queue, plus what this broker failed to hand it.
+
+    A bounded queue means "slow subscriber" and "lost events" are the same
+    condition, and the loss is invisible from both ends: the publisher's
+    ``put_nowait`` raised somewhere it cannot report, and the subscriber's socket
+    stays perfectly healthy. Counting the discards here is what lets whoever owns
+    that subscriber's stream tell it that its view has a hole in it.
+    """
+
+    __slots__ = ("queue", "dropped")
+
+    def __init__(self, queue: asyncio.Queue) -> None:
+        self.queue = queue
+        self.dropped = 0
+
+
 class SSEBroker:
     def __init__(self) -> None:
-        self._subscribers: dict[int, asyncio.Queue] = {}
+        self._subscribers: dict[int, _Subscription] = {}
         self._next_id = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         # ``subscribe`` / ``unsubscribe`` run on the event loop thread while
@@ -50,7 +67,7 @@ class SSEBroker:
         with self._lock:
             sub_id = self._next_id
             self._next_id += 1
-            self._subscribers[sub_id] = queue
+            self._subscribers[sub_id] = _Subscription(queue)
             total = len(self._subscribers)
         logger.debug("SSE subscriber %s connected (total=%s)", sub_id, total)
         return sub_id, queue
@@ -65,6 +82,20 @@ class SSEBroker:
     def subscriber_count(self) -> int:
         with self._lock:
             return len(self._subscribers)
+
+    def dropped_count(self, sub_id: int) -> int:
+        """How many events this broker discarded for one subscriber, ever.
+
+        Monotonic for the life of the subscription, so a caller compares it
+        against its own last reading rather than resetting it: two readers of the
+        same subscription must not be able to consume each other's evidence.
+        Returns 0 for an unknown ``sub_id`` -- a subscription that no longer
+        exists has no continuity left to speak for.
+        """
+
+        with self._lock:
+            subscription = self._subscribers.get(sub_id)
+        return subscription.dropped if subscription is not None else 0
 
     def publish(self, event_type: str, data: Any) -> None:
         """Fan a JSON event out to every subscriber.
@@ -82,20 +113,30 @@ class SSEBroker:
         with self._lock:
             if not self._subscribers:
                 return
-            queues = list(self._subscribers.values())
-        for queue in queues:
+            subscriptions = list(self._subscribers.values())
+        for subscription in subscriptions:
             try:
-                loop.call_soon_threadsafe(self._put_nowait, queue, event_type, payload)
+                loop.call_soon_threadsafe(self._put_nowait, subscription, event_type, payload)
             except RuntimeError:
                 # Loop was closed; skip silently — next subscribe will
                 # capture a fresh loop.
                 pass
 
     @staticmethod
-    def _put_nowait(queue: asyncio.Queue, event_type: str, payload: str) -> None:
+    def _put_nowait(subscription: _Subscription, event_type: str, payload: str) -> None:
+        """Hand one event to one subscriber, and record it if that fails.
+
+        Every path here that does not enqueue is a lost event and must count as
+        one: the subscriber has no other way to find out, and a discard nobody
+        counted is a hole in its view that reads exactly like quiet. Runs on the
+        event loop thread via ``call_soon_threadsafe``, same as the generator
+        that reads the count, so the counter needs no lock of its own.
+        """
+
         try:
-            queue.put_nowait((event_type, payload))
+            subscription.queue.put_nowait((event_type, payload))
         except asyncio.QueueFull:
+            subscription.dropped += 1
             logger.warning("SSE subscriber queue full; dropping %s event", event_type)
 
 

@@ -35,12 +35,16 @@ export function canMarkConversationRead({
   );
 }
 
-export function readPageActivity(): boolean {
-  if (typeof document === 'undefined') return false;
-  return isPageActive({
+export function readPageActivitySnapshot(): PageActivitySnapshot {
+  if (typeof document === 'undefined') return { visibilityState: 'hidden', hasFocus: false };
+  return {
     visibilityState: document.visibilityState,
     hasFocus: typeof document.hasFocus !== 'function' || document.hasFocus(),
-  });
+  };
+}
+
+export function readPageActivity(): boolean {
+  return isPageActive(readPageActivitySnapshot());
 }
 
 export type PageActivityTracker = {
@@ -78,22 +82,64 @@ export function createPageActivityTracker(initialActive: boolean): PageActivityT
 // "the page is active" and "the page just came back" — rather than each binding
 // its own focus/visibility listeners and re-deriving them.
 
+/**
+ * Told when the page came back, and when it left. A gap has two ends, and a
+ * listener revalidating across it needs both: evidence that it was away is only
+ * evidence about the gap if it is dated inside it.
+ *
+ * `null` means the page is back from an away period this sampler never saw
+ * begin, which nothing can be dated against. Listeners must read it as the
+ * gap being unaccounted for rather than absent.
+ */
+export type PageReactivationListener = (awaySince: number | null) => void;
+
 const activeListeners = new Set<() => void>();
-const reactivationListeners = new Set<() => void>();
+const reactivationListeners = new Set<PageReactivationListener>();
+
+/**
+ * The ways a page stops being presented, each a different thing the browser
+ * stops doing for it. Declared as a list rather than a bare union so a reason
+ * added here has to be answered in the tests that walk it.
+ */
+export const AWAY_REASONS = ['hidden', 'blurred', 'out-of-sight'] as const;
+
+export type AwayReason = (typeof AWAY_REASONS)[number];
+
+const readAwayReasons = (
+  snapshot: PageActivitySnapshot,
+  outOfSight: boolean,
+): Set<AwayReason> => {
+  const reasons = new Set<AwayReason>();
+  if (snapshot.visibilityState !== 'visible') reasons.add('hidden');
+  if (!snapshot.hasFocus) reasons.add('blurred');
+  if (outOfSight) reasons.add('out-of-sight');
+  return reasons;
+};
 
 let tracker: PageActivityTracker | null = null;
 let detach: (() => void) | null = null;
+// When the current away period began, or null while the page is here. Only this
+// sampler watches the page leave, so only it can date that end of the gap.
+let awaySince: number | null = null;
+// Why it was away as of the last reading, which is what makes a later reading a
+// step further away rather than more of the same.
+let awayReasons: Set<AwayReason> = new Set();
 
 // Copy first: a listener may unsubscribe while the set is being walked.
 const notify = (listeners: Set<() => void>) => {
   for (const listener of [...listeners]) listener();
 };
 
+const notifyReactivated = (gapStart: number | null) => {
+  for (const listener of [...reactivationListeners]) listener(gapStart);
+};
+
 const sample = () => {
   if (!tracker) return;
   const wasActive = tracker.isActive();
   const wasOutOfSight = focusOutOfSight;
-  const active = readPageActivity();
+  const snapshot = readPageActivitySnapshot();
+  const active = isPageActive(snapshot);
   // Re-walk before deciding: what makes an unobservable gap a return is
   // regaining sight of the page, not merely having lost it. An out-of-sight
   // frame reloading itself samples too, and it never left.
@@ -102,8 +148,30 @@ const sample = () => {
   // Either edge is a return: one this document watched happen, or one it could
   // only have missed while focus sat where it cannot look.
   const reactivated = tracker.observe(active) || (active && regainedSight);
+  // Date the away period from the *latest* step further away, not the first sign
+  // of it. Each new reason is the browser taking something else away, so it
+  // opens an interval of its own that earlier evidence cannot speak for: a page
+  // whose focus sits in an embedded frame is out of sight yet still executing,
+  // and the heartbeats it keeps receiving there say nothing about the suspension
+  // that begins when its tab is hidden afterwards. A reason merely going away
+  // leaves the stamp alone, because evidence dated after it was collected in a
+  // state at least this degraded. The stamp is when this sampler *saw* the step,
+  // which is no earlier than the step itself -- a listener attaching mid-gap can
+  // only date it from the reading it took.
+  const reasons = readAwayReasons(snapshot, focusOutOfSight);
+  const wentFurtherAway = [...reasons].some((reason) => !awayReasons.has(reason));
+  awayReasons = reasons;
   if (tracker.isActive() !== wasActive) notify(activeListeners);
-  if (reactivated) notify(reactivationListeners);
+  if (reactivated) {
+    const gapStart = awaySince;
+    // A return ends the interval, and starts a new one only if this very reading
+    // still shows a reason -- coming back to the page while focus stays inside
+    // an embedded frame is proof of receiving now, and out of sight from now on.
+    awaySince = reasons.size > 0 ? Date.now() : null;
+    notifyReactivated(gapStart);
+  } else if (wentFurtherAway) {
+    awaySince = Date.now();
+  }
 };
 
 // Focus events go to the window that holds focus, and Chrome hands focus to an
@@ -247,6 +315,10 @@ const attach = () => {
     releaseFocusChain();
     tracker = null;
     detach = null;
+    // Nobody is watching the page leave any more, so the next attach cannot
+    // date a gap from before it started looking.
+    awaySince = null;
+    awayReasons = new Set();
   };
   // Fold the current reading in once, so a page that mounts while an embedded
   // frame already holds focus starts watching that chain without waiting for an
@@ -254,7 +326,7 @@ const attach = () => {
   sample();
 };
 
-const subscribe = (listeners: Set<() => void>, listener: () => void): (() => void) => {
+const subscribe = <Listener>(listeners: Set<Listener>, listener: Listener): (() => void) => {
   if (typeof document === 'undefined' || typeof window === 'undefined') return () => {};
   listeners.add(listener);
   if (!detach) attach();
@@ -275,8 +347,12 @@ const subscribePageActive = (listener: () => void): (() => void) =>
  * revalidating data that may have gone stale during the gap; a bare `focus`
  * listener over-fires because it cannot tell a return from a focus move that
  * never left the page.
+ *
+ * The listener is handed when the page left, for revalidation that can be
+ * skipped on evidence: see `PageReactivationListener`. A listener that
+ * revalidates unconditionally can keep ignoring it.
  */
-export function onPageReactivated(listener: () => void): () => void {
+export function onPageReactivated(listener: PageReactivationListener): () => void {
   return subscribe(reactivationListeners, listener);
 }
 

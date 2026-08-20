@@ -94,9 +94,45 @@ type FakeApi = {
 
 const apiRef = { current: null as FakeApi | null };
 
+type StreamConnectHandler = NonNullable<WorkbenchEventHandlers['onConnected']>;
+
+const streamConnectHandlers = new Set<StreamConnectHandler>();
+const wrappedApis = new WeakMap<FakeApi, FakeApi>();
+
+/**
+ * Supply the half of the resume edge the real ApiContext owns. Consumers no
+ * longer watch page activity themselves: ApiContext decides whether the shared
+ * event stream can vouch for the gap the page spent away, recycles the ones that
+ * cannot, and announces the replacement through `onConnected`. These fakes stand
+ * in for that context, so the signal has to come from here rather than from every
+ * fake in the file.
+ */
+function withStreamConnect(api: FakeApi | null): FakeApi | null {
+  if (!api) return null;
+  // Consumers key their subscription effect on the api object, so a fresh
+  // wrapper per render would resubscribe forever.
+  const cached = wrappedApis.get(api);
+  if (cached) return cached;
+  const wrapped: FakeApi = {
+    ...api,
+    connectWorkbenchEvents: (handlers) => {
+      const disconnect = api.connectWorkbenchEvents(handlers);
+      const onConnected = handlers.onConnected;
+      if (!onConnected) return disconnect;
+      streamConnectHandlers.add(onConnected);
+      return () => {
+        streamConnectHandlers.delete(onConnected);
+        disconnect();
+      };
+    },
+  };
+  wrappedApis.set(api, wrapped);
+  return wrapped;
+}
+
 vi.mock('./ApiContext', async () => {
   const actual = await vi.importActual<typeof import('./ApiContext')>('./ApiContext');
-  return { ...actual, useApi: () => apiRef.current };
+  return { ...actual, useApi: () => withStreamConnect(apiRef.current) };
 });
 
 // The provider reports its one never-sent refusal through the toast surface, which
@@ -111,26 +147,19 @@ function settle() {
   });
 }
 
-// The inbox reconciles when the page comes back, which is an edge rather than a
-// level: the shared page-activity sampler ignores a `focus` event on a page that
-// never left. Simulate a real gap by hiding the document and revealing it again.
+// The inbox reconciles when a stream starts reaching it. That covers coming back
+// to a page whose stream could not prove it stayed connected -- ApiContext
+// recycles it, and the replacement's handshake is the signal here. It is not the
+// raw visibility edge, which a page whose stream never dropped also sees.
 function simulatePageResume() {
-  const setVisibility = (state: DocumentVisibilityState) => {
-    Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  };
-  setVisibility('hidden');
-  setVisibility('visible');
-  // Drop the shadowing property so the rest of the suite reads jsdom's own getter.
-  Reflect.deleteProperty(document, 'visibilityState');
+  for (const handler of [...streamConnectHandlers]) handler({ sub_id: 1, source: 'browser' });
 }
 
 describe('Workbench session read ownership', () => {
   beforeEach(() => {
     apiRef.current = null;
     // jsdom never reports window focus, so no reading would ever count as "the
-    // page is presented". Model a focused window and let visibility carry the
-    // transitions `simulatePageResume` needs.
+    // page is presented" and nothing would ever be marked read.
     document.hasFocus = () => true;
   });
 
@@ -169,7 +198,7 @@ describe('Workbench session read ownership', () => {
     await settle();
 
     act(() => {
-      handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -264,7 +293,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
@@ -373,7 +402,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 3, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
@@ -528,7 +557,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -737,7 +766,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 3, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {

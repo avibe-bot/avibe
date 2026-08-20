@@ -3,10 +3,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  AWAY_REASONS,
   canMarkConversationRead,
   createPageActivityTracker,
   isPageActive,
   onPageReactivated,
+  type AwayReason,
   type PageActivitySnapshot,
 } from './pageActivity';
 
@@ -132,8 +134,44 @@ describe('onPageReactivated', () => {
     for (const root of shadowed) Reflect.deleteProperty(root, 'activeElement');
     shadowed.length = 0;
     Reflect.deleteProperty(document, 'hasFocus');
+    Reflect.deleteProperty(document, 'visibilityState');
     for (const element of created) element.remove();
     created.length = 0;
+  });
+
+  it('dates the gap from when the page left, once per away period', () => {
+    vi.useFakeTimers();
+    try {
+      document.hasFocus = () => true;
+      const reactivated = listen();
+
+      const leftAt = Date.now();
+      document.hasFocus = () => false;
+      window.dispatchEvent(new Event('blur'));
+      // Time passing while away must not move the stamp: a listener revalidating
+      // across the gap needs when it opened, and "now" is its other end.
+      vi.advanceTimersByTime(30_000);
+      document.hasFocus = () => true;
+      window.dispatchEvent(new Event('focus'));
+
+      expect(reactivated).toHaveBeenCalledTimes(1);
+      expect(reactivated).toHaveBeenLastCalledWith(leftAt);
+
+      // The next gap is its own interval, not a continuation of the last one.
+      vi.advanceTimersByTime(5_000);
+      const leftAgainAt = Date.now();
+      document.hasFocus = () => false;
+      window.dispatchEvent(new Event('blur'));
+      vi.advanceTimersByTime(1_000);
+      document.hasFocus = () => true;
+      window.dispatchEvent(new Event('focus'));
+
+      expect(reactivated).toHaveBeenCalledTimes(2);
+      expect(reactivated).toHaveBeenLastCalledWith(leftAgainAt);
+      expect(leftAgainAt).toBeGreaterThan(leftAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports a system focus loss that arrived at the frame holding focus', () => {
@@ -273,6 +311,83 @@ describe('onPageReactivated', () => {
     frame.dispatchEvent(new Event('load'));
 
     expect(reactivated).not.toHaveBeenCalled();
+  });
+
+  // One entry per member of `AWAY_REASONS`, so a reason added to the module has
+  // to be answered here rather than inheriting whatever the untested case does.
+  type AwayTransition = { reason: AwayReason; enter: () => void; leave: () => void };
+
+  const setVisibility = (visibilityState: DocumentVisibilityState) => {
+    Object.defineProperty(document, 'visibilityState', {
+      value: visibilityState,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  const awayTransitions = (): AwayTransition[] => [
+    {
+      reason: 'hidden',
+      enter: () => setVisibility('hidden'),
+      leave: () => setVisibility('visible'),
+    },
+    {
+      reason: 'blurred',
+      enter: () => {
+        document.hasFocus = () => false;
+        window.dispatchEvent(new Event('blur'));
+      },
+      leave: () => {
+        document.hasFocus = () => true;
+        window.dispatchEvent(new Event('focus'));
+      },
+    },
+    {
+      reason: 'out-of-sight',
+      enter: () => void focusCrossOriginFrame(),
+      leave: () => {
+        focusParent();
+        window.dispatchEvent(new Event('focus'));
+      },
+    },
+  ];
+
+  it('dates the gap from the last step further away, not the first', () => {
+    const transitions = awayTransitions();
+    // The property is over every way of being away, so the list must be the
+    // whole partition -- an unanswered reason would silently drop out of it.
+    expect(transitions.map((transition) => transition.reason).sort()).toEqual(
+      [...AWAY_REASONS].sort(),
+    );
+
+    vi.useFakeTimers();
+    try {
+      for (const first of transitions) {
+        for (const second of transitions) {
+          if (first === second) continue;
+          const step = `${first.reason} then ${second.reason}`;
+          document.hasFocus = () => true;
+          const reactivated = listen();
+
+          // Out of sight is not out of action: a page whose focus moved into an
+          // embedded frame keeps executing, so whatever it received then cannot
+          // vouch for the interval that opens when it is hidden or blurred next.
+          first.enter();
+          vi.advanceTimersByTime(20_000);
+          expect(reactivated, step).not.toHaveBeenCalled();
+          const steppedAt = Date.now();
+          second.enter();
+          vi.advanceTimersByTime(20_000);
+          second.leave();
+          first.leave();
+
+          expect(reactivated, step).toHaveBeenCalled();
+          expect(reactivated.mock.calls[0], step).toEqual([steppedAt]);
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('treats coming back from a cross-origin frame as coming back', () => {

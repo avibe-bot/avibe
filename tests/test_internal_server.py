@@ -1796,6 +1796,96 @@ def test_publish_event_endpoint_emits_allowlisted_bus_event():
     ]
 
 
+def test_internal_events_end_a_subscriber_whose_queue_overflowed(monkeypatch):
+    """The controller feed drops its reader rather than serving it a hole.
+
+    This is the first bounded queue on the controller → UI-server → browser
+    path, and a discard here is the most invisible of the three: the UI server's
+    broker never sees the event, so every id downstream stays contiguous and
+    every socket keeps heartbeating. Ending the stream is what turns the loss
+    into a signal -- the bridge reconnects, the reconnect flips
+    ``workbench.events.bridge.status``, and browsers reconcile once. Announcing
+    the hole down this same stream cannot work: the queue is still full, so the
+    next iteration finds another discard and announces again, starving the
+    payload frames the warning was about.
+    """
+
+    from core import inbox_events
+
+    subscriptions: list[tuple[int, asyncio.Queue]] = []
+    real_subscribe = inbox_events.bus.subscribe
+
+    def tracking_subscribe():
+        # The controller handshake carries no sub_id (the browser feed's does),
+        # so the test learns it the only other way available to a caller.
+        subscription = real_subscribe()
+        subscriptions.append(subscription)
+        return subscription
+
+    monkeypatch.setattr(inbox_events.bus, "subscribe", tracking_subscribe)
+    baseline_subscribers = inbox_events.bus.subscriber_count()
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_until_end() -> tuple[str, int, list[str], bool, int]:
+        app = internal_server.create_app(_build_controller_double())
+        route = next(
+            candidate
+            for candidate in app.routes
+            if getattr(candidate, "path", None) == "/internal/events"
+            and "GET" in (getattr(candidate, "methods", None) or set())
+        )
+        response = await route.endpoint()
+        iterator = response.body_iterator.__aiter__()
+        frames: list[str] = []
+        ended = False
+        try:
+            handshake = decode(await iterator.__anext__())
+            sub_id, queue = subscriptions[-1]
+            # Park the stream inside its read loop before overflowing the queue,
+            # so what this asserts is a discard the reader has to notice on a
+            # later iteration -- not one already covered by the handshake it
+            # just delivered.
+            pending = asyncio.create_task(iterator.__anext__())
+            await asyncio.sleep(0)
+
+            for index in range(queue.maxsize + 3):
+                inbox_events.bus.publish("runs.updated", {"run_id": f"run_{index}"})
+            # One yield runs the whole batch of ``call_soon_threadsafe``
+            # handoffs, so every discard has happened by the time the count is
+            # read.
+            await asyncio.sleep(0)
+            dropped = inbox_events.bus.dropped_count(sub_id)
+
+            # Bounded well below the ``maxsize`` frames still sitting in the
+            # queue: a stream that kept serving them would run out of the budget
+            # rather than end, which is the failure this asserts against.
+            for _ in range(5):
+                awaitable = pending if pending is not None else iterator.__anext__()
+                pending = None
+                try:
+                    frames.append(decode(await asyncio.wait_for(awaitable, timeout=2)))
+                except StopAsyncIteration:
+                    ended = True
+                    break
+        finally:
+            await iterator.aclose()
+        # Read after the generator has exited: its ``finally`` unsubscribes, and
+        # a subscription that no longer exists is owed nothing.
+        return handshake, dropped, frames, ended, inbox_events.bus.subscriber_count()
+
+    handshake, dropped, frames, ended, subscribers_after = asyncio.run(collect_until_end())
+
+    assert "event: connected" in handshake
+    assert dropped == 3
+    assert ended is True
+    # The queue still held ``maxsize`` events, so anything but a short tail here
+    # means the reader kept relaying frames across the gap.
+    assert len(frames) <= 1
+    assert subscribers_after == baseline_subscribers
+
+
 def test_reconcile_platforms_endpoint_calls_controller(monkeypatch):
     controller = _build_controller_double()
     calls = []

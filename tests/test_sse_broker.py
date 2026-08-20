@@ -54,6 +54,53 @@ def test_publish_preserves_repeated_payloads_and_omits_ts():
     assert third_payload == {"type": "queue.updated", "data": {"session_id": "ses2"}}
 
 
+def test_dropped_count_records_what_a_full_queue_discarded():
+    """A subscriber that cannot keep up is a subscriber losing events.
+
+    The queue is bounded, so ``put_nowait`` raises somewhere it cannot report
+    while the subscriber's socket stays perfectly healthy. Unless the broker
+    counts the discard, nobody ever finds out it happened.
+    """
+
+    broker = SSEBroker()
+
+    async def scenario():
+        sub_id, queue = broker.subscribe()
+        overflow = 3
+        for index in range(queue.maxsize + overflow):
+            broker.publish("queue.updated", {"n": index})
+        # ``publish`` hands each event over with ``call_soon_threadsafe``, so
+        # none of them have been enqueued yet; one yield runs the whole batch.
+        await asyncio.sleep(0)
+        first_reading = broker.dropped_count(sub_id)
+        # Monotonic, never reset: whoever acts on the count compares it against
+        # its own last reading, so reading it must not consume it.
+        repeat_reading = broker.dropped_count(sub_id)
+
+        broker.publish("queue.updated", {"n": "one more"})
+        await asyncio.sleep(0)
+        second_reading = broker.dropped_count(sub_id)
+
+        broker.unsubscribe(sub_id)
+        return (
+            queue.maxsize,
+            queue.qsize(),
+            first_reading,
+            repeat_reading,
+            second_reading,
+            broker.dropped_count(sub_id),
+        )
+
+    maxsize, queued, first_reading, repeat_reading, second_reading, after_unsubscribe = asyncio.run(scenario())
+
+    assert queued == maxsize
+    assert first_reading == 3
+    assert repeat_reading == 3
+    assert second_reading == 4
+    # A subscription that no longer exists has no continuity left to speak for.
+    assert after_unsubscribe == 0
+
+
 def test_publish_survives_concurrent_subscribe_churn():
     broker = SSEBroker()
 

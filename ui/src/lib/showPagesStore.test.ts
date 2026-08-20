@@ -94,13 +94,12 @@ describe('ShowPagesInventoryStore', () => {
 
     const close = store.activate();
     await store.reload();
-    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
     expect(store.getSnapshot().pages).toHaveLength(1);
     close();
 
     // Still subscribed, but invalidation-only: a reconnect or a session event
     // with nobody reading must not put a request on a route that renders none.
-    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+    handlers?.onConnected?.();
     handlers?.onSessionActivity?.({
       session_id: 'session-1',
       scope_id: null,
@@ -229,7 +228,15 @@ describe('ShowPagesInventoryStore', () => {
     expect(connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
 
-  it('does not refetch when the initial events connection arrives after the activation read', async () => {
+  // The property rather than a list of cases: with a consumer reading, every
+  // `onConnected` is followed by a read issued after it. No call is exempt, and
+  // none can be singled out either -- the edge says only that a gap needs
+  // closing, so there is nothing on it to tell a first subscription from one
+  // replacing a stream that could not prove it survived. What makes a read
+  // authoritative for a subscription is having started after that subscription
+  // announced itself, and activate()'s read is issued before. Any run of edges
+  // therefore costs its own length in reads.
+  it('reads again after every catch-up edge', async () => {
     let handlers: EventHandlers | undefined;
     const getShowPages = vi.fn().mockResolvedValue({ pages: [page()] });
     const store = new ShowPagesInventoryStore({
@@ -242,14 +249,40 @@ describe('ShowPagesInventoryStore', () => {
 
     const release = store.activate();
     await store.reload();
-    handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
-    await Promise.resolve();
     expect(getShowPages).toHaveBeenCalledTimes(1);
 
-    handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
-    await store.reload();
-    expect(getShowPages).toHaveBeenCalledTimes(2);
+    for (let expected = 2; expected <= 4; expected += 1) {
+      handlers?.onConnected?.();
+      // Asserted before any await: the edge issues the read synchronously, so
+      // a test that awaited `reload()` first would manufacture the very request
+      // it is checking for and pass against a handler that skipped the edge.
+      expect(getShowPages).toHaveBeenCalledTimes(expected);
+      await store.reload();
+    }
     release();
+  });
+
+  it('reads nothing for an established subscription with nobody reading', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi.fn().mockResolvedValue({ pages: [page()] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    store.activate()();
+    await store.reload();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
+
+    // Revalidation waits for demand: the subscription stays open to hear
+    // invalidation, and reactivation re-reads anyway.
+    handlers?.onConnected?.();
+    handlers?.onConnected?.();
+    await Promise.resolve();
+    expect(getShowPages).toHaveBeenCalledTimes(1);
   });
 
   it('withdraws a retained page immediately when access is lost', async () => {

@@ -258,15 +258,21 @@ export class ShowPagesInventoryStore {
 
   private connectEvents(): void {
     if (this.disconnectEvents) return;
-    let connected = false;
     this.disconnectEvents = this.api.connectWorkbenchEvents({
+      // Re-read after EVERY established subscription -- no exempt call, which is
+      // the rule ``WindowLayer``, ``WorkbenchProjectsProvider`` and
+      // ``WorkbenchInboxProvider`` already follow. The exemption this store used
+      // to carry was that activate() had just read, so the first handshake was
+      // covered. It is not: that read is issued in the same tick the EventSource
+      // is created, so the server can answer it before it registers the
+      // subscription, and a mutation in between reaches neither. What makes a
+      // read authoritative for a subscription is having been issued AFTER that
+      // subscription announced itself, and no count of calls can establish it.
+      //
+      // The cost is one extra inventory read per subscription established, not
+      // per handshake: ``invalidateAndReload`` fences the read already in
+      // flight, so activate()'s retries as this one instead of overlapping it.
       onConnected: () => {
-        // activate() already revalidates this subscription's initial connection.
-        // Only later callbacks are reconnects that may cover a missed event gap.
-        if (!connected) {
-          connected = true;
-          return;
-        }
         // Revalidation, so it may wait for a consumer: activation re-reads
         // anyway. Only invalidation has to act with nobody reading.
         if (this.activeConsumers === 0) return;

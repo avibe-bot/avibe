@@ -215,16 +215,11 @@ export const AgentsPage: React.FC = () => {
       return;
     }
     return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          setEventBridgeConnected(true);
-          fetchRunningActiveCount();
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) fetchRunningActiveCount();
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the indicator's level: it comes with its own
+      // `onConnected`, and refetching from both would pay twice for one gap.
+      onConnected: () => fetchRunningActiveCount(),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => fetchRunningActiveCount(),
       onTurnStart: () => fetchRunningActiveCount(),

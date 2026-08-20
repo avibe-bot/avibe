@@ -170,6 +170,10 @@ _AUTHORIZATION_REVOKED_WEBSOCKET_CLOSE_CODE = 4403
 _AUTHORIZATION_UNAVAILABLE_WEBSOCKET_CLOSE_CODE = 4503
 _AUTHORIZATION_CHANGED_WEBSOCKET_CLOSE_CODE = 1012
 _AUTHORIZATION_REVISION_RECHECK_SECONDS = 1.0
+# How often ``GET /api/events`` proves the stream is alive. It doubles as the
+# proxy keep-alive -- Cloudflare Tunnel's default idle is well below 100s, and
+# mid-tier proxies are happier still with something this short.
+WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S = 15.0
 _TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
@@ -11556,6 +11560,42 @@ def _workbench_event_data(payload: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _workbench_event_heartbeat_interval_ms() -> int:
+    return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
+
+
+def _workbench_event_connected_frame(sub_id: int) -> str:
+    """The handshake: this subscription's id, and the cadence it is owed.
+
+    Carrying the cadence here is what lets a client hold a brand-new stream to a
+    deadline. The promise arrives before the first heartbeat does, so a stream
+    that opens and then goes silent has something to have broken -- without it,
+    the client's only options are to trust an unproven stream for a whole window
+    or to watchdog servers that never promised anything.
+
+    A declaration, never proof: a server too old to send this field is simply
+    never held to a cadence, and a client must still wait for a heartbeat before
+    believing the stream is carrying events.
+    """
+    interval_ms = _workbench_event_heartbeat_interval_ms()
+    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms}}}\n\n'
+
+
+def _workbench_event_heartbeat_frame() -> str:
+    """A frame whose only job is to be seen.
+
+    An SSE comment keeps proxies awake but never reaches ``EventSource``, so a
+    client watching a quiet stream cannot distinguish it from a socket that died
+    while the tab was suspended -- iOS in particular leaves such a stream in a
+    zombie ``OPEN`` state with no ``error``. Carrying the cadence lets the client
+    size its own staleness tolerance from the server that sets it, rather than
+    duplicating the interval on both sides -- which is also why the interval
+    belongs in the payload even though nothing else here needs a body.
+    """
+    interval_ms = _workbench_event_heartbeat_interval_ms()
+    return f'event: heartbeat\ndata: {{"interval_ms":{interval_ms}}}\n\n'
+
+
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
     if context is None:
         return True
@@ -11678,9 +11718,10 @@ async def workbench_events():
 
     Browsers open this once and keep it open; the route streams JSON
     events (message.new, session.activity, inbox.unread.changed) as
-    they happen elsewhere in the app, plus a 15-second keep-alive
-    comment line so Cloudflare-style proxies don't kill the idle TCP
-    connection.
+    they happen elsewhere in the app, plus a ``heartbeat`` event every
+    ``WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S`` so Cloudflare-style proxies
+    don't kill the idle TCP connection and the client can tell a quiet
+    stream from a dead one.
 
     Native FastAPI ``StreamingResponse`` so the loop stays async and
     each browser only costs one task, not one OS thread.
@@ -11722,6 +11763,14 @@ async def workbench_events():
 
     async def generate():
         sub_id, queue = broker.subscribe()
+        # Baselined here, before anything can suspend or reach the client. A
+        # fresh subscription is owed everything from this instant on, so the
+        # count is 0 by construction -- reading it late looked equivalent and is
+        # not: the authorization await and the handshake below are suspension
+        # points, and the client can finish its connect catch-up while this
+        # generator is parked between them. A burst discarded in that window
+        # would then become the baseline and never be reported.
+        last_dropped = broker.dropped_count(sub_id)
         try:
             state = await authorization_state()
             if state != "current":
@@ -11730,7 +11779,7 @@ async def workbench_events():
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield f"event: connected\ndata: {{\"sub_id\": {sub_id}}}\n\n"
+            yield _workbench_event_connected_frame(sub_id)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,
@@ -11740,13 +11789,50 @@ async def workbench_events():
                 separators=(",", ":"),
             )
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
+            last_heartbeat_at = time.monotonic()
             while True:
                 state = await authorization_state()
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
                     return
+                # A subscriber that lost an event is not a subscriber any more,
+                # so end its stream and let it reconnect: the fresh subscription
+                # gets an empty queue and the client's reconnect path already
+                # catches consumers up exactly once, with backoff if the load
+                # that overflowed the queue is still going. Announcing the hole
+                # on this stream instead looks cheaper and is not -- the queue
+                # stays full, so the next iteration finds another discard and
+                # announces again, starving the payload frames it was warning
+                # about. Reopening is the actual repair here, unlike the
+                # controller leg, which announces in place because a new socket
+                # would inherit the same severed bridge.
+                #
+                # Checked before the heartbeat: a heartbeat claims this stream is
+                # worth trusting, which stopped being true.
+                dropped = broker.dropped_count(sub_id)
+                if dropped > last_dropped:
+                    logger.warning(
+                        "workbench events: ending subscriber %s after %s dropped event(s)",
+                        sub_id,
+                        dropped - last_dropped,
+                    )
+                    return
+                # A fixed cadence, deliberately not "only when the queue went
+                # quiet". Data frames are no proof of life to a client that may
+                # be filtered out of all of them, and one unconditional clock
+                # means each side has exactly one thing to stamp.
+                since_heartbeat = time.monotonic() - last_heartbeat_at
+                if since_heartbeat >= WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S:
+                    yield _workbench_event_heartbeat_frame()
+                    last_heartbeat_at = time.monotonic()
+                    continue
                 try:
-                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    # Floored so an event arriving just short of the deadline
+                    # cannot spin this loop; the heartbeat is at most that late.
+                    event_type, payload = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=max(0.25, WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S - since_heartbeat),
+                    )
                     state = await authorization_state()
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
@@ -11783,13 +11869,9 @@ async def workbench_events():
                         )
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
-                    state = await authorization_state()
-                    if state != "current":
-                        yield _remote_authorization_sse_frame(state)
-                        return
-                    # 15s keep-alive — Cloudflare Tunnel default idle is well
-                    # below 100s but this still keeps mid-tier proxies happy.
-                    yield ": ping\n\n"
+                    # Nothing to forward. Loop round so the heartbeat is emitted
+                    # by the one branch that owns it, after a fresh auth check.
+                    continue
         except asyncio.CancelledError:
             raise
         finally:

@@ -260,3 +260,42 @@ def test_sqlite_background_store_does_not_bridge_controller_self_updates(tmp_pat
         store.close()
 
     assert bridged == []
+
+
+def test_dropped_count_records_what_a_full_bus_queue_discarded():
+    """The first of the two queues between the controller and a browser.
+
+    A discard here never reaches the UI server's broker at all, so nothing
+    downstream can infer it: the bridge keeps relaying, the browser socket keeps
+    heartbeating, and a proof built on those would vouch for continuity it does
+    not have. The count is what lets ``/internal/events`` end the subscription
+    and make the reconnect announce the gap instead.
+    """
+    import asyncio
+
+    from core.inbox_events import InboxEventBus
+
+    async def scenario():
+        bus = InboxEventBus()
+        sub_id, queue = bus.subscribe()
+        assert bus.dropped_count(sub_id) == 0
+
+        for index in range(queue.maxsize + 3):
+            bus.publish("runs.updated", {"run_id": f"run_{index}"})
+        # publish() hands off via call_soon_threadsafe, so let the loop run it.
+        await asyncio.sleep(0)
+
+        assert queue.qsize() == queue.maxsize
+        assert bus.dropped_count(sub_id) == 3
+        # Monotonic: reading it must not consume another reader's evidence.
+        assert bus.dropped_count(sub_id) == 3
+
+        bus.publish("runs.updated", {"run_id": "run_overflow"})
+        await asyncio.sleep(0)
+        assert bus.dropped_count(sub_id) == 4
+
+        # A subscription that no longer exists has no continuity to speak for.
+        bus.unsubscribe(sub_id)
+        assert bus.dropped_count(sub_id) == 0
+
+    asyncio.run(scenario())
