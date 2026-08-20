@@ -2226,8 +2226,25 @@ class ShowRuntimeManager:
         else:
             if not self._run_install_command([*git, "-C", str(source_dir), "fetch", "--depth", "1", "origin", self.github_ref]):
                 return self._reuse_existing_github_runtime(existing_command)
+            fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
+            if (
+                not self.force_install
+                and existing_command
+                and fetched
+                and self._read_github_build_marker(source_dir) == fetched
+            ):
+                # The runtime already on disk was built from exactly this
+                # commit, so `npm ci` and `npm run build` would spend a minute
+                # reproducing it byte for byte.
+                self._install_reason = None
+                return existing_command
             if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
                 return self._reuse_existing_github_runtime(existing_command)
+        # From here on the artifact the marker describes is being replaced:
+        # ``npm ci`` empties node_modules and the build writes into dist. Drop
+        # the marker first so a failure anywhere below leaves "unknown" rather
+        # than a commit that no longer describes what is on disk.
+        self._write_github_build_marker(source_dir, None)
         if not self._run_install_command([*npm, "ci"], cwd=source_dir):
             return self._reuse_existing_github_runtime(existing_command)
         if not self._run_install_command([*npm, "run", "build"], cwd=source_dir):
@@ -2236,7 +2253,53 @@ class ShowRuntimeManager:
         if not command:
             self._install_reason = "runtime_install_missing_bin"
             return None
+        self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
         return command
+
+    def _github_build_marker_path(self, source_dir: Path) -> Path:
+        return source_dir / ".avibe-runtime-build"
+
+    def _read_github_build_marker(self, source_dir: Path) -> str | None:
+        """The commit that produced the runtime build currently on disk.
+
+        The marker describes the artifact that exists now, not whatever the
+        working tree happens to be checked out at. Both halves of that are
+        enforced by when it moves: it is cleared before a rebuild starts
+        replacing the artifact, and written again only once the build finished
+        and its entry point resolved. So a failed, interrupted, or partial
+        rebuild leaves no marker, and the next prepare rebuilds.
+        """
+        try:
+            revision = self._github_build_marker_path(source_dir).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return revision or None
+
+    def _write_github_build_marker(self, source_dir: Path, revision: str | None) -> None:
+        marker = self._github_build_marker_path(source_dir)
+        try:
+            if revision:
+                marker.write_text(f"{revision}\n", encoding="utf-8")
+            else:
+                marker.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _git_revision(self, git: list[str], source_dir: Path, ref: str) -> str | None:
+        try:
+            result = subprocess.run(
+                [*git, "-C", str(source_dir), "rev-parse", ref],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                **isolated_subprocess_kwargs(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
 
     def _github_runtime_command(self, source_dir: Path, node: list[str]) -> list[str] | None:
         cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
