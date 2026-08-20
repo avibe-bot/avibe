@@ -18,6 +18,11 @@ from storage.models import remote_access_authorizations, state_meta
 INSTANCE_BINDING_STATE_META_KEY = "remote_access.instance_binding.v1"
 INSTANCE_BINDING_STATE_RECONCILING = "reconciling"
 INSTANCE_BINDING_STATE_READY = "ready"
+# A durable, USABLE legacy state: the pairing reconciled successfully but the
+# control plane never reported a recognized kind. No kind-specific bypass is
+# available, and a later authoritative backfill completes it via a normal
+# transition.
+INSTANCE_BINDING_STATE_PENDING_KIND = "pending_kind"
 INSTANCE_BINDING_STATE_INVALID = "invalid"
 INSTANCE_BINDING_GENERATION_KEY = "vibe_instance_binding_generation"
 INSTANCE_BINDING_LOCK_FILENAME = "remote-access-instance-binding.lock"
@@ -314,7 +319,11 @@ def _decode_binding_state(value: Any) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
         state = payload.get("state")
-        if state not in {INSTANCE_BINDING_STATE_RECONCILING, INSTANCE_BINDING_STATE_READY}:
+        if state not in {
+            INSTANCE_BINDING_STATE_RECONCILING,
+            INSTANCE_BINDING_STATE_READY,
+            INSTANCE_BINDING_STATE_PENDING_KIND,
+        }:
             return None
         instance_id = payload.get("instance_id")
         if not isinstance(instance_id, str) or not instance_id.strip():
@@ -475,7 +484,8 @@ def _begin_instance_binding_transition_locked(
         }
     if (
         existing is not None
-        and existing["state"] == INSTANCE_BINDING_STATE_RECONCILING
+        and existing["state"]
+        in {INSTANCE_BINDING_STATE_RECONCILING, INSTANCE_BINDING_STATE_PENDING_KIND}
         and existing["instance_id"] == instance_id
         and existing["instance_kind"] == instance_kind
     ):
@@ -721,6 +731,24 @@ def _reconcile_instance_binding_locked(
         }
 
     if instance_kind is None:
+        # A supported legacy no-kind pairing must stay USABLE: publish the
+        # durable pending_kind state instead of parking in fail-closed
+        # reconciling. A later authoritative backfill runs a new transition.
+        with engine.begin() as conn:
+            existing = _load_binding_state_from_connection(conn)
+            if (
+                existing is not None
+                and existing["state"] == INSTANCE_BINDING_STATE_RECONCILING
+                and existing["instance_id"] == instance_id
+                and existing["generation"] == int(transition["generation"])
+            ):
+                payload, now = _binding_payload(
+                    state=INSTANCE_BINDING_STATE_PENDING_KIND,
+                    instance_id=instance_id,
+                    instance_kind=None,
+                    generation=transition["generation"],
+                )
+                _write_binding_state(conn, payload, now)
         return {
             **transition,
             "ok": True,
@@ -785,28 +813,72 @@ def current_instance_binding_generation(*, ensure: bool = True) -> int:
         return 0
 
 
+def _bootstrap_deferred_migration() -> None:
+    """Run the deferred-context migration for one bootstrap transition."""
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.resource_access_service import (
+        RESOURCE_BINDING_STATE_UNAVAILABLE,
+        RESOURCE_BINDING_STATUS_KEY,
+        migrate_legacy_deferred_resource_contexts,
+    )
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        result = migrate_legacy_deferred_resource_contexts(connection)
+    if result.get(RESOURCE_BINDING_STATUS_KEY) == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        raise RuntimeError("legacy_deferred_context_provenance_unavailable")
+
+
 def binding_is_ready_for_pairing(
     *,
     instance_id: str | None,
     instance_kind: str | None,
     ensure: bool = False,
+    bootstrap: bool = False,
 ) -> bool:
     """True only when the durable binding is ready for this pairing.
 
-    A missing row is a legacy install and stays compatible. Once a row
-    exists, ``reconciling`` / ``invalid`` / mismatched identity means the
-    kind is unavailable to every consumer until reconciliation succeeds.
+    A missing row is compatible ONLY for a no-kind legacy pairing. A known
+    configured kind without a validated durable row is an upgrade artifact:
+    with ``bootstrap=True`` (authorization consumers) it earns a validated
+    row through one real transition; otherwise it fails closed.
+    ``pending_kind`` is the durable usable legacy state; once a row exists,
+    ``reconciling`` / ``invalid`` / mismatched identity means the kind is
+    unavailable to every consumer until reconciliation succeeds.
     """
 
+    current_id = (instance_id or "").strip()
+    current_kind = instance_kind if instance_kind in {"personal", "organization"} else None
     state = load_instance_binding_state(ensure=ensure)
     if state is None:
-        return True
+        # Stay compatible for the legacy no-kind pairing; a known kind with
+        # no validated binding row (the server may have reclassified while
+        # this install was offline) is bootstrapped or fails closed.
+        if current_kind is None:
+            return True
+        if not bootstrap or not current_id:
+            return False
+        try:
+            result = reconcile_instance_binding(
+                instance_id=current_id,
+                instance_kind=current_kind,
+                reconcile=_bootstrap_deferred_migration,
+            )
+        except Exception:
+            return False
+        return bool(result.get("ok") and result.get("ready"))
+    if state.get("state") == INSTANCE_BINDING_STATE_PENDING_KIND:
+        # Usable legacy state: no kind bypass is claimable anyway.
+        return current_kind is None and (
+            not current_id or state.get("instance_id") == current_id
+        )
     if state.get("state") in {INSTANCE_BINDING_STATE_RECONCILING, INSTANCE_BINDING_STATE_INVALID}:
         return False
     if state.get("state") != INSTANCE_BINDING_STATE_READY:
         return False
-    current_id = (instance_id or "").strip()
-    current_kind = instance_kind if instance_kind in {"personal", "organization"} else None
     if current_kind is None:
         # Legacy/invalid no-kind pairing stays usable (fail-open).
         return True

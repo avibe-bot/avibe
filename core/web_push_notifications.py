@@ -110,13 +110,11 @@ def _notification_policy_for_record(config: Any, record: Mapping[str, Any]) -> s
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     instance_kind = str(getattr(cloud, "instance_kind", "") or "")
     if instance_kind in {"personal", "organization"}:
-        from storage import remote_access_authorization_service
+        # C3: the consumer gate (which bootstraps a validated durable binding
+        # on the upgrade path), never a raw config read.
+        from vibe import remote_access
 
-        if not remote_access_authorization_service.binding_is_ready_for_pairing(
-            instance_id=str(getattr(cloud, "instance_id", "") or ""),
-            instance_kind=instance_kind,
-            ensure=False,
-        ):
+        if not remote_access.binding_is_ready(config):
             instance_kind = ""
     if instance_kind == "organization":
         return "organization"
@@ -241,13 +239,11 @@ def _evaluate_record_authorization(
         )
     paired_kind = str(getattr(cloud, "instance_kind", "") or "") if cloud is not None else ""
     if paired_kind in {"personal", "organization"}:
-        from storage import remote_access_authorization_service
+        # C3: the consumer gate (which bootstraps a validated durable binding
+        # on the upgrade path), never a raw config read.
+        from vibe import remote_access
 
-        if not remote_access_authorization_service.binding_is_ready_for_pairing(
-            instance_id=_paired_instance_id(config),
-            instance_kind=paired_kind,
-            ensure=False,
-        ):
+        if not remote_access.binding_is_ready(config):
             return OwnerAuthorizationDecision(
                 user_key=user_key,
                 policy=policy,

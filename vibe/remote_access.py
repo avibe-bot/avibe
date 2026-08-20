@@ -1700,10 +1700,14 @@ def binding_is_ready(config: V2Config, identity: Mapping[str, Any] | None = None
         from storage import remote_access_authorization_service
 
         cloud = config.remote_access.vibe_cloud
+        # bootstrap=True: on the upgrade path a known configured kind with no
+        # durable row earns a validated binding through one real transition
+        # (C2) before any kind-specific bypass is granted.
         return remote_access_authorization_service.binding_is_ready_for_pairing(
             instance_id=str(cloud.instance_id or ""),
             instance_kind=_normalized_instance_kind(cloud.instance_kind),
             ensure=False,
+            bootstrap=True,
         )
     except Exception:
         return False
@@ -4599,54 +4603,77 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         }
-    try:
-        previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
-    except Exception:
-        previous_instance_id = ""
-    config = api.save_config(
-        {
-            "remote_access": {
-                "provider": "vibe_cloud",
-                "vibe_cloud": {
-                    "enabled": True,
-                    "backend_url": backend.base_url,
-                    "instance_id": result["instance_id"],
-                    "instance_kind": instance_kind or "",
-                    "client_id": result["client_id"],
-                    "issuer": result["issuer"],
-                    "authorization_endpoint": result["authorization_endpoint"],
-                    "token_endpoint": result["token_endpoint"],
-                    "jwks_uri": result["jwks_uri"],
-                    "public_url": result["public_url"],
-                    "redirect_uri": result["redirect_uri"],
-                    "tunnel_token": result["tunnel_token"],
-                    "instance_secret": result["instance_secret"],
-                    "session_secret": secrets.token_urlsafe(32),
-                },
-            }
-        }
-    )
-    if previous_instance_id and previous_instance_id != str(result["instance_id"]):
-        try:
-            from storage import remote_access_authorization_service
+    # C2: the pairing save and its binding transition form ONE cross-process
+    # critical section, so two concurrent pair() calls cannot interleave
+    # save A / save B / transition B / transition A. SQLite initializes
+    # before the config lock per the canonical lock order.
+    from storage.importer import ensure_sqlite_state
 
-            remote_access_authorization_service.delete_for_instance(previous_instance_id)
+    ensure_sqlite_state()
+    with config_file_lock():
+        try:
+            previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
         except Exception:
-            logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
-    try:
-        transition = _transition_instance_binding(
-            instance_id=str(result["instance_id"]),
-            instance_kind=instance_kind,
-            previous_instance_id=previous_instance_id or None,
+            previous_instance_id = ""
+        config = api.save_config(
+            {
+                "remote_access": {
+                    "provider": "vibe_cloud",
+                    "vibe_cloud": {
+                        "enabled": True,
+                        "backend_url": backend.base_url,
+                        "instance_id": result["instance_id"],
+                        "instance_kind": instance_kind or "",
+                        "client_id": result["client_id"],
+                        "issuer": result["issuer"],
+                        "authorization_endpoint": result["authorization_endpoint"],
+                        "token_endpoint": result["token_endpoint"],
+                        "jwks_uri": result["jwks_uri"],
+                        "public_url": result["public_url"],
+                        "redirect_uri": result["redirect_uri"],
+                        "tunnel_token": result["tunnel_token"],
+                        "instance_secret": result["instance_secret"],
+                        "session_secret": secrets.token_urlsafe(32),
+                    },
+                }
+            }
         )
-    except Exception as exc:
-        logger.warning("Remote instance binding transition failed after pairing", exc_info=True)
-        return {
-            **status(config),
-            "ok": False,
-            "error": "pairing_reconciliation_failed",
-            "pairing": {"ok": False, "reconciling": True},
-        }
+        if previous_instance_id and previous_instance_id != str(result["instance_id"]):
+            try:
+                from storage import remote_access_authorization_service
+
+                remote_access_authorization_service.delete_for_instance(previous_instance_id)
+            except Exception:
+                logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
+        # Under the held cross-process lock, save_config's returned config IS
+        # the persisted config; verify it still names the instance this call
+        # redeemed before publishing a binding for it.
+        persisted_instance_id = str(config.remote_access.vibe_cloud.instance_id or "")
+        if persisted_instance_id != str(result["instance_id"]):
+            # The persisted pairing is no longer the one this call redeemed;
+            # do not publish a binding for it.
+            return {
+                **status(config),
+                "ok": False,
+                "error": "pairing_reconciliation_failed",
+                "detail": "persisted_instance_mismatch",
+                "pairing": {"ok": False, "reconciling": True},
+            }
+        try:
+            transition = _transition_instance_binding(
+                instance_id=str(result["instance_id"]),
+                instance_kind=instance_kind,
+                previous_instance_id=previous_instance_id or None,
+                hold_config_lock=False,
+            )
+        except Exception:
+            logger.warning("Remote instance binding transition failed after pairing", exc_info=True)
+            return {
+                **status(config),
+                "ok": False,
+                "error": "pairing_reconciliation_failed",
+                "pairing": {"ok": False, "reconciling": True},
+            }
     if not transition.get("ok"):
         return {
             **status(config),
@@ -4904,8 +4931,11 @@ def _store_scoped_authorization(
         and state is not None
         and state.get("state")
         == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
-        and authorization_state == "current"
+        and authorization_state in {"current", "revoked"}
     ):
+        # Revoked writes need the same fence as current writes: a 403 that
+        # raced a reconciliation must not persist a row the completed binding
+        # would then short-circuit on.
         raise RuntimeError("instance_binding_not_ready")
     return remote_access_authorization_service.upsert_scoped(
         reference=reference,
@@ -5237,10 +5267,17 @@ def _fetch_authorization_context(
             revoked_claims = dict(previous_claims)
             if observed_revision is not None:
                 revoked_claims[_AUTHORIZATION_CHECKED_REVISION_KEY] = observed_revision
-            current_generation = (
-                remote_access_authorization_service.current_instance_binding_generation()
+            binding_state = remote_access_authorization_service.load_instance_binding_state(
+                ensure=False
             )
-            if current_generation > int(request_binding_generation):
+            current_generation = int((binding_state or {}).get("generation") or 0)
+            if current_generation > int(request_binding_generation) or (
+                binding_state is not None
+                and binding_state.get("state")
+                == remote_access_authorization_service.INSTANCE_BINDING_STATE_RECONCILING
+            ):
+                # A denial that raced a binding transition (same generation,
+                # reconciling in progress) must not persist a revoked row.
                 return AuthorizationResolution(
                     "unavailable",
                     reason="instance_binding_changed",
