@@ -438,12 +438,14 @@ _REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
     )
 )
 
-# Member-management stays Owner-only even though instance management is now
-# rank-member. Unknown APIs inherit member; list Owner exceptions here.
+# Member-management and instance-wide default routing stay Owner-only even
+# though instance management is now rank-member. Unknown APIs inherit member;
+# list Owner exceptions here.
 _OWNER_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
         ("PUT", r"^/api/permissions/authorized-users$"),
+        ("POST", r"^/api/agents/default$"),
     )
 )
 
@@ -546,9 +548,10 @@ def required_instance_role(method: str, path: str) -> str | None:
     API routes deliberately default to member so a newly added management
     route cannot accidentally become available to editors or viewers, while
     member inherits today's instance-management surface. Pairing identity,
-    member-set mutation, and ownership stay Owner-only: writes under
-    ``/api/remote-access`` default to owner, and allowlist mutation stays
-    Owner-only via ``_OWNER_HTTP_RULES``.
+    member-set mutation, ownership, and instance-wide default-agent routing
+    stay Owner-only: writes under ``/api/remote-access`` default to owner,
+    and allowlist mutation plus ``POST /api/agents/default`` stay Owner-only
+    via ``_OWNER_HTTP_RULES``.
     """
 
     return http_authorization_policy(method, path).minimum_role

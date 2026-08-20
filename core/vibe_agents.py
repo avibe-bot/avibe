@@ -1669,6 +1669,9 @@ class VibeAgentStore:
         user_context: Any = None,
     ) -> None:
         normalized = normalize_agent_name(name)
+        context = resolve_resource_access_context(user_context)
+        if not context.can_manage_access_members:
+            raise VibeAgentAccessError("Agent access is not permitted.")
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             reserve_write_lock(conn)

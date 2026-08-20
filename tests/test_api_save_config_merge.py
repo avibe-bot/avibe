@@ -1619,10 +1619,15 @@ def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_p
     assert recovered.ui.instance_name == "kept"
 
 
-def test_strip_pairing_identity_drops_whole_vibe_cloud_section():
-    payload = {
-        "ack_mode": "message",
-        "remote_access": {
+@pytest.mark.parametrize(
+    "remote_access",
+    (
+        None,
+        False,
+        [],
+        0,
+        "",
+        {
             "provider": "vibe_cloud",
             "vibe_cloud": {
                 "instance_id": "inst-hijacked",
@@ -1630,15 +1635,24 @@ def test_strip_pairing_identity_drops_whole_vibe_cloud_section():
                 "future_pairing_field": "new-secret",
             },
         },
-    }
+    ),
+)
+def test_strip_pairing_identity_drops_remote_access_regardless_of_value(remote_access):
+    """Non-owner config writes cannot carry pairing identity in any value shape."""
+
+    payload = {"ack_mode": "message", "remote_access": remote_access}
 
     stripped = api.strip_pairing_identity_from_config_write(payload)
 
-    assert stripped == {
-        "ack_mode": "message",
-        "remote_access": {"provider": "vibe_cloud"},
-    }
-    assert payload["remote_access"]["vibe_cloud"]["instance_id"] == "inst-hijacked"
+    assert stripped == {"ack_mode": "message"}
+    assert "remote_access" in payload
+    assert payload["remote_access"] == remote_access
+
+
+def test_strip_pairing_identity_leaves_payloads_without_remote_access():
+    payload = {"ack_mode": "message"}
+
+    assert api.strip_pairing_identity_from_config_write(payload) == payload
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():

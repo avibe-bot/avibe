@@ -253,7 +253,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
     route must inherit the same Instance role as the rest of that capability.
     Agent create/import and unknown APIs fail closed to member; allowlist
-    mutation and pairing-identity writes stay owner-only.
+    mutation, pairing-identity writes, and instance-wide default-agent
+    routing stay owner-only.
     """
 
     assert _EDITOR_HTTP_NAMESPACES == (
@@ -348,6 +349,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
         == "owner"
     )
+    assert http_authorization_policy("POST", "/api/agents/default").minimum_role == "owner"
     assert _REMOTE_ACCESS_HTTP_NAMESPACE == "/api/remote-access"
     assert {(method, pattern.pattern) for method, pattern in _REMOTE_ACCESS_MEMBER_HTTP_RULES} == {
         ("GET", r"^/api/remote-access/status$"),
@@ -581,7 +583,31 @@ def test_registered_remote_access_writes_default_to_owner(monkeypatch, tmp_path)
                 assert response.get_json()["error"] == "instance_access_forbidden"
 
 
-def test_member_config_write_cannot_change_pairing_identity(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    "remote_access_payload",
+    (
+        None,
+        False,
+        [],
+        0,
+        "",
+        {
+            "vibe_cloud": {
+                "instance_id": "inst-hijacked",
+                "backend_url": "https://attacker.example",
+                "instance_secret": "stolen-secret",
+                "tunnel_token": "stolen-tunnel",
+                "session_secret": "stolen-session",
+                "enabled": False,
+            }
+        },
+    ),
+)
+def test_member_config_write_cannot_change_pairing_identity(
+    monkeypatch, tmp_path, remote_access_payload
+) -> None:
+    """Member POST /api/config cannot change pairing identity in any value shape."""
+
     from config.v2_config import V2Config
     from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
     from vibe import remote_access
@@ -620,18 +646,7 @@ def test_member_config_write_cannot_change_pairing_identity(monkeypatch, tmp_pat
     headers = csrf_headers(client, base_url="https://alex.avibe.bot")
     response = client.post(
         "/api/config",
-        json={
-            "remote_access": {
-                "vibe_cloud": {
-                    "instance_id": "inst-hijacked",
-                    "backend_url": "https://attacker.example",
-                    "instance_secret": "stolen-secret",
-                    "tunnel_token": "stolen-tunnel",
-                    "session_secret": "stolen-session",
-                    "enabled": False,
-                }
-            }
-        },
+        json={"remote_access": remote_access_payload},
         headers=headers,
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
@@ -709,3 +724,93 @@ def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_pa
     assert owner_response.status_code == 200
     assert owner_response.get_json()["ok"] is True
     assert paired == [("key", "https://avibe.bot", "avibe")]
+
+
+def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None:
+    """Instance-wide default routing stays owner-only, even for a manageable Agent."""
+
+    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
+    from vibe import remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    member = AuthorizationContext(
+        instance_role="member",
+        subject="member-1",
+        email="member@example.com",
+        instance_access_source="email",
+        is_remote=True,
+    )
+    store = VibeAgentStore()
+    try:
+        default_agent = store.ensure_builtin_default_agent(backend="codex")
+        store.set_default_agent_name(default_agent.name)
+        before = store.get_default_agent_name()
+        private_agent = store.create(
+            name="member-private",
+            backend="codex",
+            user_context=member,
+        )
+        with pytest.raises(VibeAgentAccessError):
+            store.set_default_agent_name(private_agent.name, user_context=member)
+        assert store.get_default_agent_name() == before
+    finally:
+        store.close()
+
+    member_client = app.test_client()
+    member_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "member@example.com",
+            "member-1",
+            role="member",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    member_headers = csrf_headers(member_client, base_url="https://alex.avibe.bot")
+    member_response = member_client.post(
+        "/api/agents/default",
+        json={"name": "member-private"},
+        headers=member_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    assert member_response.status_code == 403
+    assert member_response.get_json()["error"] == "instance_access_forbidden"
+    store = VibeAgentStore()
+    try:
+        assert store.get_default_agent_name() == before
+    finally:
+        store.close()
+
+    owner_client = app.test_client()
+    owner_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "owner@example.com",
+            "owner-1",
+            role="owner",
+            access_source="owner",
+        ),
+        domain="alex.avibe.bot",
+    )
+    owner_headers = csrf_headers(owner_client, base_url="https://alex.avibe.bot")
+    owner_response = owner_client.post(
+        "/api/agents/default",
+        json={"name": "member-private"},
+        headers=owner_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    assert owner_response.status_code == 200
+    assert owner_response.get_json()["ok"] is True
+    store = VibeAgentStore()
+    try:
+        assert store.get_default_agent_name() == "member-private"
+    finally:
+        store.close()
