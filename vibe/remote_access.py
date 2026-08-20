@@ -5675,15 +5675,19 @@ def resolve_current_authorization(
             )
         )
     )
+    if kind_mismatch:
+        # A row tagged with the previous kind (or invalidated by a
+        # reclassification) must revalidate before EITHER kind-specific
+        # policy runs — returning it as current under the new kind would let
+        # the old kind's claims outlive the reclassification.
+        if allow_refresh:
+            return _refresh_authorization_context(config, identity, record, now=current)
+        return AuthorizationResolution(
+            "unavailable",
+            reason="authorization_context_missing",
+        )
 
     if instance_kind == "personal":
-        if kind_mismatch:
-            if allow_refresh:
-                return _refresh_authorization_context(config, identity, record, now=current)
-            return AuthorizationResolution(
-                "unavailable",
-                reason="authorization_context_missing",
-            )
         if (
             current_revision is not None
             and signed_revision is not None

@@ -2365,3 +2365,73 @@ def test_known_kind_without_binding_row_bootstraps_a_durable_transition(tmp_path
     assert state["instance_id"] == "inst_123"
     assert state["instance_kind"] == "personal"
     assert state["generation"] >= 1
+
+
+def test_personal_to_organization_reclassification_rejects_stale_personal_row(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression PR #1606 r2: the kind-mismatch refresh must run before the
+    Organization branch too — a stale personal-tagged row must not be served
+    as current under the reclassified Organization policy."""
+
+    config = _paired_config(tmp_path)
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert identity is not None
+    now = int(time.time())
+    stored = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert stored is not None
+    assert stored["claims"]["vibe_instance_kind"] == "personal"
+
+    # Controller heartbeat reclassifies Personal -> Organization.
+    assert remote_access._persist_instance_kind("inst_123", "organization", reconcile=True) is True
+    reclassified = V2Config.load()
+    assert reclassified.remote_access.vibe_cloud.instance_kind == "organization"
+
+    # The old personal-tagged row must not answer under the Organization policy.
+    blocked = remote_access.resolve_current_authorization(
+        reclassified,
+        identity,
+        allow_refresh=False,
+    )
+    assert blocked.current is False
+
+    calls = []
+
+    def refresh(_config, _method, _suffix, payload, **kwargs):
+        calls.append(payload)
+        return _authorization_context_response(
+            config,
+            payload,
+            revision=41,
+            instance_kind="organization",
+        )
+
+    monkeypatch.setattr(remote_access, "_device_json_request", refresh)
+
+    result = remote_access.resolve_current_authorization(reclassified, identity)
+
+    assert result.current is True
+    assert result.refreshed is True
+    assert result.policy == "organization"
+    assert len(calls) == 1
+    revalidated = remote_access_authorization_service.load_reference_record(
+        reference=identity["authorization_ref"],
+        instance_id="inst_123",
+        subject="user-1",
+        now=now,
+    )
+    assert revalidated is not None
+    assert revalidated["claims"]["vibe_instance_kind"] == "organization"
