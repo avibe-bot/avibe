@@ -371,7 +371,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/session$",
         r"^/api/csrf-token$",
         r"^/api/config$",
-        r"^/api/version$",
+        r"^/api/version(?:/local)?$",
         r"^/api/platforms$",
         r"^/api/projects(?:/[^/]+)?$",
         r"^/api/workbench/prefs$",

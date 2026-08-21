@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
 import json
 import logging
 import os
+import shlex
 import subprocess
 import time
+import urllib.error
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,13 +25,18 @@ from config import paths
 # is pure stdlib, so paying for it on every restart costs nothing.
 from storage.backups import find_restorable_backup, next_backup_sequence, restore_sqlite_backup
 from vibe import runtime
+from vibe.build_identity import get_build_identity
 from vibe.upgrade import (
+    LEGACY_PACKAGE_NAME,
+    PACKAGE_NAME,
     RollbackTarget,
+    _names_a_published_release,
     build_upgrade_plan,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    installed_package_name,
 )
 
 
@@ -85,6 +94,195 @@ def _ui_is_serving(started: StartedRuntime) -> bool:
         return False
     host, port = started.ui_health_target
     return runtime.wait_for_ui_server(host, port, timeout=_ROLLBACK_UI_READY_TIMEOUT_SECONDS)
+
+
+def _running_ui_version() -> str | None:
+    """Read the version that is still serving while an upgrade is being staged.
+
+    Releases before the rollback protocol cannot pass a target into the detached
+    supervisor. The old service is still alive when that supervisor starts, so
+    its own version endpoint is the last authoritative answer before the old
+    install is stopped and replaced.
+    """
+
+    from core.services import settings as settings_service
+
+    config = settings_service.load_config(default_factory=settings_service.default_config)
+    host = runtime.effective_ui_bind_host(config)
+    if host in {"0.0.0.0", ""}:
+        host = "127.0.0.1"
+    elif host in {"::", "::0"}:
+        host = "::1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    base_url = f"http://{host}:{config.ui.setup_port}"
+    for endpoint in ("/api/version/local", "/api/version"):
+        try:
+            with urllib.request.urlopen(f"{base_url}{endpoint}", timeout=2.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                continue
+            return None
+        except (OSError, ValueError, TypeError, urllib.error.URLError):
+            return None
+        version = payload.get("current") if isinstance(payload, dict) else None
+        if isinstance(version, str) and _names_a_published_release(version):
+            return version
+    return None
+
+
+def _launcher_from_python(python: str) -> runtime.ServiceLauncher | None:
+    """Pair an interpreter with the service entry point in its install."""
+
+    python_path = Path(python)
+    package_root = python_path.parent.parent / "lib"
+    main_candidates = sorted(package_root.glob("python*/site-packages/vibe/service_main.py"))
+    if not main_candidates:
+        package_root = python_path.parent.parent / "Lib" / "site-packages"
+        main_candidates = sorted(package_root.glob("vibe/service_main.py"))
+    if not main_candidates:
+        return None
+    return runtime.ServiceLauncher(python=python, main=str(main_candidates[0]))
+
+
+def _service_launcher_from_process(pid: int | None) -> runtime.ServiceLauncher | None:
+    """Read the old launcher from a still-running service or UI command line."""
+
+    if not pid:
+        return None
+    command = runtime.get_process_command(pid)
+    if not command:
+        return None
+    try:
+        argv = [arg.strip("\"'") for arg in shlex.split(command, posix=(os.name != "nt"))]
+        if Path(argv[0]).name.lower() == "systemd-run" and "--" in argv:
+            argv = argv[argv.index("--") + 1 :]
+        if not argv or not Path(argv[0]).name.lower().startswith("python"):
+            return None
+        entry = next(
+            (arg for arg in argv[1:] if not arg.startswith("-") and Path(arg).name in {"main.py", "service_main.py"}),
+            None,
+        )
+        if entry is not None:
+            return runtime.ServiceLauncher(python=argv[0], main=entry)
+        # The UI is launched with ``python -c`` rather than service_main.py.
+        # Its interpreter still identifies the install that owns the old code.
+        return _launcher_from_python(argv[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def _legacy_service_launcher(
+    vibe_path: str | None, *, service_pid: int | None = None, ui_pid: int | None = None
+) -> runtime.ServiceLauncher:
+    """Recover the launcher that existed before the package-manager replace.
+
+    The service command is authoritative: the normal ``~/.local/bin/vibe``
+    symlink may already point at the replacement by the time this process starts.
+    """
+
+    for pid in (service_pid, ui_pid):
+        process_launcher = _service_launcher_from_process(pid)
+        if process_launcher is not None:
+            return process_launcher
+
+    fallback = runtime.current_service_launcher()
+    if not vibe_path:
+        return fallback
+
+    try:
+        script = Path(vibe_path).resolve()
+        shebang = script.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        python = shebang[2:].strip().split()[0] if shebang.startswith("#!") else ""
+        python_path = Path(python)
+        if not python or not python_path.is_file():
+            return fallback
+        return _launcher_from_python(str(python_path)) or fallback
+    except (OSError, IndexError, ValueError):
+        return fallback
+
+
+def _launcher_dist_metadata(launcher: runtime.ServiceLauncher) -> list[tuple[str, str]]:
+    """Read all supported distributions from the launcher's site-packages."""
+
+    site_packages = Path(launcher.main).resolve().parent.parent
+    entries: list[tuple[str, str]] = []
+    try:
+        for metadata_path in sorted(site_packages.glob("*.dist-info/METADATA")):
+            payload = email.parser.Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+            name = str(payload.get("Name") or "").strip()
+            version = str(payload.get("Version") or "").strip()
+            if name in {PACKAGE_NAME, LEGACY_PACKAGE_NAME} and version:
+                entries.append((name, version))
+    except (OSError, UnicodeError, ValueError):
+        return []
+    return entries
+
+
+def _launcher_package_name(launcher: runtime.ServiceLauncher, *, version: str | None = None) -> str:
+    """Infer the distribution name that owns a launcher when metadata is stale."""
+
+    metadata = _launcher_dist_metadata(launcher)
+    if version:
+        exact = [name for name, candidate in metadata if candidate == version]
+        if exact:
+            return exact[0]
+
+    executable = launcher.python.replace("\\", "/")
+    for package in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
+        if f"/uv/tools/{package}/" in executable:
+            return package
+    names = {name for name, _version in metadata}
+    if PACKAGE_NAME in names:
+        return PACKAGE_NAME
+    if LEGACY_PACKAGE_NAME in names:
+        return LEGACY_PACKAGE_NAME
+    return installed_package_name(python_executable=launcher.python) or PACKAGE_NAME
+
+
+def _legacy_install_metadata(
+    launcher: runtime.ServiceLauncher, *, package_name: str
+) -> tuple[str, str] | None:
+    """Read the old release metadata from the launcher-owned site-packages.
+
+    A renamed distribution can leave an older ``vibe-remote`` dist-info beside
+    the current ``avibe-os`` install. The launcher identifies which side was
+    running, so unrelated metadata must never win by directory order.
+    """
+
+    try:
+        from vibe import __version__ as replacement_version
+
+        for name, version in _launcher_dist_metadata(launcher):
+            if (
+                name == package_name
+                and version
+                and version != replacement_version
+                and _names_a_published_release(version)
+            ):
+                return version, name
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
+def _discover_legacy_upgrade_target(*, trigger: str, vibe_path: str | None) -> RollbackTarget | None:
+    """Build a rollback target for an upgrade initiated by an older release."""
+
+    if trigger != "upgrade":
+        return None
+    service_pid = _read_recorded_pid()
+    ui_pid = _read_recorded_ui_pid()
+    launcher = _legacy_service_launcher(vibe_path, service_pid=service_pid, ui_pid=ui_pid)
+    version = _running_ui_version()
+    package = _launcher_package_name(launcher, version=version)
+    if version is None:
+        metadata = _legacy_install_metadata(launcher, package_name=package)
+        if metadata is None:
+            return None
+        version, package = metadata
+    return RollbackTarget(version=version, package=package, launcher=launcher)
 
 
 def _now_iso() -> str:
@@ -586,6 +784,20 @@ def _run_restart_job(
     safe_cwd = get_safe_cwd()
     _prune_restart_logs()
 
+    rollback_target_source = "explicit" if rollback_to else None
+    rollback_discovery_error: str | None = None
+    legacy_target_required = trigger == "upgrade" and get_build_identity().kind == "package"
+    if rollback_to is None and trigger == "upgrade":
+        try:
+            rollback_to = _discover_legacy_upgrade_target(trigger=trigger, vibe_path=vibe_path)
+            if rollback_to is not None:
+                rollback_target_source = "running_service"
+        except Exception as exc:
+            # Older releases do not know how to carry a target. Discovery is a
+            # compatibility aid; if it cannot identify one, the job fails closed
+            # before stopping the old runtime rather than creating a dark one.
+            rollback_discovery_error = str(exc)
+
     with log_path.open("a", encoding="utf-8") as log:
         def write(message: str) -> None:
             log.write(f"{_now_iso()} {message}\n")
@@ -669,6 +881,8 @@ def _run_restart_job(
             "rollback_to": rollback_to.version if rollback_to else None,
             "rollback_package": rollback_to.package if rollback_to else None,
             "rollback_launcher": rollback_to.launcher._asdict() if rollback_to else None,
+            "rollback_target_source": rollback_target_source,
+            "rollback_discovery_error": rollback_discovery_error,
             "old_pid": old_pid,
             "new_pid": None,
             "log_path": str(log_path),
@@ -688,6 +902,13 @@ def _run_restart_job(
             _write_status(payload)
             write("restart job started after delay")
             restart_started_at = time.monotonic()
+
+        if legacy_target_required and rollback_to is None:
+            return fail(
+                "legacy upgrade rollback target unavailable; existing runtime was left running",
+                2,
+                started_at=restart_started_at,
+            )
 
         write("stopping UI and service" if restart_ui else "stopping service (Web UI kept running)")
         stop_runtime_started_at = time.monotonic()

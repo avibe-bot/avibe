@@ -109,6 +109,178 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
 
 
+def test_legacy_upgrade_target_reads_the_running_release_and_launcher(monkeypatch, tmp_path):
+    """A pre-rollback release can still hand the new supervisor its target."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
+    python_path = tool_root / "bin" / "python"
+    vibe_path = tool_root / "bin" / "vibe"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    vibe_path.write_text(f"#!{python_path}\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_dir = service_main.parent.parent / "avibe_os-3.0.12.dist-info"
+    metadata_dir.mkdir()
+    (metadata_dir / "METADATA").write_text("Name: avibe-os\nVersion: 3.0.12\n", encoding="utf-8")
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: None)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: f"{python_path} {service_main}",
+    )
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="3.0.12",
+        package="avibe-os",
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_legacy_upgrade_target_prefers_running_version_over_stale_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    tool_root = tmp_path / "venv"
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# replaced release\n", encoding="utf-8")
+    metadata_root = service_main.parent.parent
+    for name, version in (("avibe_os", "3.0.13"), ("vibe_remote", "2.9.4")):
+        metadata_dir = metadata_root / f"{name}-{version}.dist-info"
+        metadata_dir.mkdir()
+        package_name = "avibe-os" if name == "avibe_os" else "vibe-remote"
+        (metadata_dir / "METADATA").write_text(
+            f"Name: {package_name}\nVersion: {version}\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: f"{python_path} {service_main}",
+    )
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.12")
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="3.0.12",
+        package="avibe-os",
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_legacy_upgrade_target_recovers_from_ui_only_process(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    paths.ensure_data_dirs()
+    tool_root = tmp_path / "uv" / "tools" / "vibe-remote"
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# old release\n", encoding="utf-8")
+    metadata_dir = service_main.parent.parent / "vibe_remote-2.9.4.dist-info"
+    metadata_dir.mkdir()
+    (metadata_dir / "METADATA").write_text("Name: vibe-remote\nVersion: 2.9.4\n", encoding="utf-8")
+
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 999)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: 456)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: None if pid == 999 else f'{python_path} -c "from vibe.ui_server import run_ui_server; run_ui_server()"',
+    )
+    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "2.9.4")
+
+    target = restart_supervisor._discover_legacy_upgrade_target(
+        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+    )
+
+    assert target == RollbackTarget(
+        version="2.9.4",
+        package="vibe-remote",
+        launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
+    )
+
+
+def test_service_launcher_from_process_strips_windows_quotes(monkeypatch, tmp_path):
+    python_path = tmp_path / "Program Files" / "uv" / "tools" / "avibe-os" / "Scripts" / "python.exe"
+    service_main = tmp_path / "Program Files" / "uv" / "tools" / "avibe-os" / "Lib" / "site-packages" / "vibe" / "service_main.py"
+    service_main.parent.mkdir(parents=True)
+    service_main.write_text("# old release\n", encoding="utf-8")
+    command = f'"{python_path}" "{service_main}"'
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: command)
+
+    target = restart_supervisor._service_launcher_from_process(123)
+
+    assert target == runtime.ServiceLauncher(python=str(python_path), main=str(service_main))
+
+
+def test_legacy_upgrade_without_target_leaves_packaged_runtime_running(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda **kwargs: pytest.fail("a legacy upgrade without a target must not stop the runtime"),
+    )
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="job-legacy-no-target",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+    )
+
+    assert rc == 2
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["state"] == "failed"
+    assert "existing runtime was left running" in status["error"]
+
+
+def test_failed_legacy_upgrade_uses_discovered_target_for_rollback(monkeypatch, tmp_path):
+    """The v3.0.12 path is recoverable even though it passed no rollback argv."""
+
+    armed = _upgrade_restart_that_dies_after_migrating(monkeypatch, tmp_path, service_running=False)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_discover_legacy_upgrade_target",
+        lambda **kwargs: _rollback_target(),
+    )
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="joblegacy",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="upgrade",
+        rollback_to=None,
+    )
+
+    assert rc == 1
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["rollback_to"] == "3.0.10"
+    assert status["rollback_target_source"] == "running_service"
+    assert status["rollback"]["state"] == "succeeded"
+    assert armed.observed_by_the_rolled_back_version == [["before the upgrade"]]
+
+
 def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -380,6 +552,8 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "get_restart_command", lambda vibe_path=None: ["/bin/vibe"])
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: None)
+    monkeypatch.setattr(restart_supervisor, "_discover_legacy_upgrade_target", lambda **kwargs: None)
+    monkeypatch.setattr(restart_supervisor, "get_build_identity", lambda: SimpleNamespace(kind="source"))
 
     def fake_run(command, **kwargs):
         calls.append(("run", command))
