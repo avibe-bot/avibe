@@ -6396,6 +6396,7 @@ def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path
     assert (runtime_dir / "downloads" / f"{_sha256(archive_path)}.tgz").exists()
     metadata = json.loads((installed_cli.parents[4] / ".vibe-show-runtime.json").read_text(encoding="utf-8"))
     assert metadata["provider"] == "manifest-cache"
+    assert metadata["manifest_sha256"] == manifest.digest
     assert metadata["archive_sha256"] == _sha256(archive_path)
     status = manager.status()
     assert status["installed"] is True
@@ -6554,7 +6555,7 @@ def test_show_runtime_archive_probe_uses_body_free_head_request(monkeypatch, tmp
     assert requests[0].get_method() == "HEAD"
 
 
-def test_show_runtime_manager_manifest_install_dir_includes_manifest_and_archive_identity(monkeypatch, tmp_path):
+def test_show_runtime_manager_manifest_install_dir_includes_runtime_and_archive_identity(monkeypatch, tmp_path):
     old_archive_path = _write_runtime_archive(tmp_path / "old", text="old runtime\n")
     old_manifest_path = _write_runtime_manifest(tmp_path / "old", old_archive_path)
     runtime_dir = tmp_path / "runtime"
@@ -6584,6 +6585,156 @@ def test_show_runtime_manager_manifest_install_dir_includes_manifest_and_archive
     assert new_cli.read_text(encoding="utf-8") == "new runtime\n"
     assert old_cli.read_text(encoding="utf-8") == "old runtime\n"
     assert new_manager.status()["installed_matches_manifest"] is True
+
+
+def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_edits(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path, text="current platform runtime\n")
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    initial_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    )
+    initial_result = initial_manager.prepare()
+    initial_manifest = initial_manager._load_runtime_manifest()
+    assert initial_manifest is not None
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["archives"]["other-platform"] = {
+        "name": "vibe-show-runtime-node-other-platform.tgz",
+        "url": "https://example.test/other-platform.tgz",
+        "sha256": "f" * 64,
+        "size": 1,
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    edited_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+        offline=True,
+    )
+    edited_manifest = edited_manager._load_runtime_manifest()
+    assert edited_manifest is not None
+    assert edited_manifest.digest != initial_manifest.digest
+
+    def _unexpected_archive_resolution(_archive):
+        raise AssertionError("an unrelated platform edit must not trigger archive resolution")
+
+    monkeypatch.setattr(edited_manager, "_resolve_manifest_archive", _unexpected_archive_resolution)
+    edited_result = edited_manager.prepare()
+
+    assert edited_result["ok"] is True
+    assert edited_result["command"] == initial_result["command"]
+    assert edited_result["status"]["installed_matches_manifest"] is True
+
+
+def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_protection(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path, text="previous fingerprint runtime\n")
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    previous_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+    )
+    previous_manifest = previous_manager._load_runtime_manifest()
+    assert previous_manifest is not None
+    archive = previous_manager._manifest_archive_for_platform(previous_manifest)
+    assert archive is not None
+    previous_fingerprint = hashlib.sha256(
+        f"{previous_manifest.digest}:{archive.sha256}".encode("utf-8")
+    ).hexdigest()[:16]
+    previous_install_dir = previous_manager._legacy_manifest_install_dir(previous_manifest, archive) / previous_fingerprint
+    previous_cli = previous_install_dir / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    previous_cli.parent.mkdir(parents=True)
+    previous_cli.write_text("previous fingerprint runtime\n", encoding="utf-8")
+    previous_manager._write_manifest_install_metadata(previous_install_dir, previous_manifest, archive)
+
+    downloads_dir = runtime_dir / "downloads"
+    downloads_dir.mkdir(parents=True)
+    adopted_archive = downloads_dir / f"{archive.sha256}.tgz"
+    adopted_archive.write_bytes(archive_path.read_bytes())
+    os.utime(adopted_archive, (1, 1))
+    stale_sha256 = "e" * 64
+    stale_install_dir = runtime_dir / "versions" / "stale-runtime" / archive.platform / "stale-fingerprint"
+    stale_install_dir.mkdir(parents=True)
+    (stale_install_dir / ".vibe-show-runtime.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "manifest_sha256": "d" * 64,
+                "runtime_version": "stale-runtime",
+                "platform": archive.platform,
+                "archive_name": "stale.tgz",
+                "archive_sha256": stale_sha256,
+                "manifest_source": str(manifest_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_archive = downloads_dir / f"{stale_sha256}.tgz"
+    stale_archive.write_bytes(b"stale")
+    os.utime(stale_archive, (1, 1))
+    (runtime_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "runtime_version": "stale-runtime",
+                "platform": archive.platform,
+                "install_dir": str(stale_install_dir),
+                "manifest_sha256": "d" * 64,
+                "archive_sha256": stale_sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["archives"]["other-platform"] = {
+        "name": "vibe-show-runtime-node-other-platform.tgz",
+        "url": "https://example.test/other-platform.tgz",
+        "sha256": "f" * 64,
+        "size": 1,
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+        offline=True,
+    )
+    current_manifest = manager._load_runtime_manifest()
+    assert current_manifest is not None
+    assert manager._manifest_install_dir(current_manifest, archive) != previous_install_dir
+
+    def _unexpected_archive_resolution(_archive):
+        raise AssertionError("a previous-fingerprint install must be adopted without a download")
+
+    monkeypatch.setattr(manager, "_resolve_manifest_archive", _unexpected_archive_resolution)
+    result = manager.prepare()
+
+    assert result["ok"] is True
+    assert result["command"] == ["/bin/node", str(previous_cli)]
+    assert previous_install_dir.exists() is True
+    assert manager._manifest_install_dir(current_manifest, archive).exists() is False
+    assert archive.sha256 in manager._protected_archive_sha256s()
+    current_pointer = json.loads((runtime_dir / "current.json").read_text(encoding="utf-8"))
+    assert current_pointer["runtime_version"] == current_manifest.runtime_version
+    assert current_pointer["install_dir"] == str(previous_install_dir)
+    assert current_pointer["archive_sha256"] == archive.sha256
+
+    clean_result = manager.clean(keep_previous=0)
+
+    assert str(previous_install_dir) not in clean_result["removed"]
+    assert previous_install_dir.exists() is True
+    assert adopted_archive.exists() is True
+    assert stale_install_dir.exists() is False
+    assert stale_archive.exists() is False
 
 
 def test_show_runtime_clean_prunes_stale_manifest_fingerprints(monkeypatch, tmp_path):

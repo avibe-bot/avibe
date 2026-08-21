@@ -698,9 +698,15 @@ class ShowRuntimeManager:
             archive = manifest.archives.get(platform_tag)
             if archive:
                 installed_dir = self._manifest_install_dir(manifest, archive)
-                installed_matches = self._manifest_install_matches(installed_dir, manifest, archive)
-                if installed_matches and node and node_supported is not False:
-                    installed_command = self._manifest_runtime_command(installed_dir, node)
+                for candidate in self._manifest_install_candidates(manifest, archive):
+                    if not self._manifest_install_matches(candidate, manifest, archive):
+                        continue
+                    installed_dir = candidate
+                    installed_matches = True
+                    if node and node_supported is not False:
+                        installed_command = self._manifest_runtime_command(candidate, node)
+                        if installed_command:
+                            break
         elif not configured_command and self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
             installed_dir = self._archive_install_dir()
             installed_command = self._archive_runtime_command(installed_dir, node or ["node"])
@@ -1635,11 +1641,7 @@ class ShowRuntimeManager:
         archive = self._manifest_archive_for_platform(manifest)
         if not archive:
             return None
-        install_dir = self._manifest_install_dir(manifest, archive)
-        command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
-        if command:
-            return command
-        return self._verified_manifest_runtime_command(self._legacy_manifest_install_dir(manifest, archive), manifest, archive, node)
+        return self._verified_manifest_runtime_command_for_manifest(manifest, archive, node)
 
     @contextlib.contextmanager
     def _install_guard_locked(self, *, timeout_seconds: float = 0.0):
@@ -1797,11 +1799,7 @@ class ShowRuntimeManager:
             archive = self._manifest_archive_for_platform(manifest)
             if not archive:
                 return None
-            install_dir = self._manifest_install_dir(manifest, archive)
-            command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
-            if not command:
-                legacy_install_dir = self._legacy_manifest_install_dir(manifest, archive)
-                command = self._verified_manifest_runtime_command(legacy_install_dir, manifest, archive, node)
+            command = self._verified_manifest_runtime_command_for_manifest(manifest, archive, node)
             return self._reuse_existing_archive_runtime(command)
         except Exception:
             return None
@@ -1820,11 +1818,20 @@ class ShowRuntimeManager:
         if not archive:
             return None
         install_dir = self._manifest_install_dir(manifest, archive)
-        verified_existing_command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
-        if not verified_existing_command:
-            legacy_install_dir = self._legacy_manifest_install_dir(manifest, archive)
-            verified_existing_command = self._verified_manifest_runtime_command(legacy_install_dir, manifest, archive, node)
+        verified_existing_command = self._verified_manifest_runtime_command_for_manifest(
+            manifest,
+            archive,
+            node,
+        )
         if verified_existing_command and not self.force_install:
+            verified_install_dir = next(
+                iter(self._manifest_install_dirs_for_command(verified_existing_command)),
+                None,
+            )
+            if verified_install_dir is None:
+                self._install_reason = "runtime_install_failed"
+                return None
+            self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
             self._install_reason = None
             return verified_existing_command
         archive_path = self._resolve_manifest_archive(archive)
@@ -1981,7 +1988,9 @@ class ShowRuntimeManager:
         return True
 
     def _manifest_install_dir(self, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> Path:
-        fingerprint = hashlib.sha256(f"{manifest.digest}:{archive.sha256}".encode("utf-8")).hexdigest()[:16]
+        fingerprint = hashlib.sha256(
+            f"{manifest.runtime_version}:{archive.platform}:{archive.sha256}".encode("utf-8")
+        ).hexdigest()[:16]
         return (
             self.runtime_dir
             / "versions"
@@ -1992,6 +2001,40 @@ class ShowRuntimeManager:
 
     def _legacy_manifest_install_dir(self, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> Path:
         return self.runtime_dir / "versions" / _safe_path_part(manifest.runtime_version) / _safe_path_part(archive.platform)
+
+    def _manifest_install_candidates(
+        self,
+        manifest: ShowRuntimeManifest,
+        archive: ShowRuntimeArchive,
+    ) -> Iterator[Path]:
+        install_dir = self._manifest_install_dir(manifest, archive)
+        legacy_install_dir = self._legacy_manifest_install_dir(manifest, archive)
+        yield install_dir
+        yield legacy_install_dir
+
+        # Releases before the platform-scoped identity used the manifest digest
+        # in this child directory's fingerprint. Metadata proves that layout.
+        try:
+            candidates = sorted(legacy_install_dir.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return
+        for candidate in candidates:
+            if candidate == install_dir:
+                continue
+            try:
+                payload = json.loads(self._manifest_metadata_path(candidate).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            previous_manifest_sha256 = payload.get("manifest_sha256")
+            if not isinstance(previous_manifest_sha256, str) or not _CONTENT_ADDRESSED_ARCHIVE_RE.fullmatch(
+                f"{previous_manifest_sha256}.tgz"
+            ):
+                continue
+            previous_fingerprint = hashlib.sha256(
+                f"{previous_manifest_sha256}:{archive.sha256}".encode("utf-8")
+            ).hexdigest()[:16]
+            if candidate.name == previous_fingerprint:
+                yield candidate
 
     def _manifest_metadata_path(self, install_dir: Path) -> Path:
         return install_dir / ".vibe-show-runtime.json"
@@ -2008,6 +2051,18 @@ class ShowRuntimeManager:
             return command
         return None
 
+    def _verified_manifest_runtime_command_for_manifest(
+        self,
+        manifest: ShowRuntimeManifest,
+        archive: ShowRuntimeArchive,
+        node: list[str],
+    ) -> list[str] | None:
+        for install_dir in self._manifest_install_candidates(manifest, archive):
+            command = self._verified_manifest_runtime_command(install_dir, manifest, archive, node)
+            if command:
+                return command
+        return None
+
     def _manifest_install_matches(self, install_dir: Path, manifest: ShowRuntimeManifest, archive: ShowRuntimeArchive) -> bool:
         try:
             payload = json.loads(self._manifest_metadata_path(install_dir).read_text(encoding="utf-8"))
@@ -2015,7 +2070,6 @@ class ShowRuntimeManager:
             return False
         return (
             payload.get("provider") == _RUNTIME_SOURCE_MANIFEST
-            and payload.get("manifest_sha256") == manifest.digest
             and payload.get("runtime_version") == manifest.runtime_version
             and payload.get("platform") == archive.platform
             and payload.get("archive_sha256") == archive.sha256
