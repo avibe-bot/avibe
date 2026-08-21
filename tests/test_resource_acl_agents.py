@@ -15,8 +15,11 @@ from core.vibe_agents import (
     ensure_agent_selection_access,
     ensure_default_agent_access,
     ensure_session_agent_access,
+    resolve_effective_default_agent,
 )
+from core.session_turns import SessionTurnManager
 from core.watches import ManagedWatchStore
+from modules.im import MessageContext
 from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies
@@ -404,8 +407,10 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 now="2026-08-13T00:00:00Z",
             )
 
-        # An unusable instance default degrades on create too, so an unpinned
-        # session still starts without pinning anything into the row.
+        # An unusable instance default degrades on create -- and the substitute is
+        # written into the row, because it exists only in this caller's frame of
+        # reference. See
+        # ``test_unpinned_session_dispatches_the_agent_the_default_degraded_to``.
         _set_default_agent_row(store, agents["private"].name)
         with engine.begin() as connection:
             degraded = workbench_sessions_service.create_session(
@@ -414,11 +419,8 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 agent_backend="",
                 user_context=_organization_context("member-1"),
             )
-        assert (degraded["agent_id"], degraded["agent_name"], degraded["agent_backend"]) == (
-            None,
-            None,
-            "",
-        )
+        assert degraded["agent_id"] not in (None, agents["private"].id)
+        assert degraded["agent_backend"]
 
         store.set_default_agent_name(agents["public"].name)
         with engine.begin() as connection:
@@ -448,6 +450,104 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
     )
     assert effective is not None
     assert effective.id == agents["scope"].id
+
+
+def test_unpinned_session_dispatches_the_agent_the_default_degraded_to(monkeypatch, tmp_path) -> None:
+    """Dispatch runs the substitute the default degraded to, not the raw default.
+
+    ``resolve_usable_default_agent`` answers a question about one principal, so
+    its answer only means anything while that principal is in scope. Leaving the
+    Session unpinned threw the answer away: dispatch re-derives the route from
+    ``Controller.resolve_vibe_agent_for_context``, which carries no principal and
+    resolves the *configured* default, pins that inaccessible Agent, and the
+    execution-time recheck in ``_remote_delivery_execution_denial`` then retires
+    the caller's first message. Degrading and not persisting the result is the
+    same as not degrading at all.
+
+    The lock is the real dispatch chokepoint rather than a re-read of the row:
+    ``_delivery_backend_in_transaction`` must satisfy itself from the durable
+    binding and never call the resolver, whose raw answer is still the Agent this
+    caller cannot use.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    engine = get_cached_sqlite_engine()
+    member = _organization_context("member-1", instance_role="member")
+    try:
+        # The configured instance default is another owner's private Agent; the
+        # caller is entitled to others.
+        _set_default_agent_row(store, agents["private"].name)
+        with engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_dispatch_default",
+                now="2026-08-21T00:00:00Z",
+            )
+            session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=member,
+            )
+        assert session["agent_id"] not in (None, agents["private"].id)
+        assert session["agent_backend"]
+
+        resolver_calls: list[str] = []
+
+        def _resolve_raw_default(context, **kwargs):
+            """Stand in for ``Controller.resolve_vibe_agent_for_context``.
+
+            Same behaviour as the real one for an unpinned avibe Session with no
+            override: the configured default, resolved with no principal at all.
+            """
+
+            resolver_calls.append(str(getattr(context, "channel_id", "")))
+            with store.engine.connect() as connection:
+                return resolve_effective_default_agent(connection)
+
+        manager = SessionTurnManager(
+            controller=SimpleNamespace(resolve_vibe_agent_for_context=_resolve_raw_default)
+        )
+        context = MessageContext(user_id="member-1", channel_id=session["id"], platform="avibe")
+        context.platform_specific = {"agent_session_id": session["id"]}
+        with engine.begin() as connection:
+            backend, _resolved = manager._delivery_backend_in_transaction(  # noqa: SLF001
+                connection,
+                session["id"],
+                context,
+            )
+        assert backend == session["agent_backend"]
+        assert resolver_calls == []
+
+        # The gate that retired the first message: the Agent the Session is bound
+        # to is one this caller may actually use.
+        with engine.connect() as connection:
+            reloaded = workbench_sessions_service.get_session(connection, session["id"])
+            effective = ensure_session_agent_access(connection, reloaded, user_context=member)
+        assert effective is not None
+        assert effective.id == session["agent_id"]
+
+        # The configured default is untouched -- degrading is per caller, not a
+        # rewrite of instance routing.
+        with store.engine.connect() as connection:
+            assert resolve_effective_default_agent(connection).id == agents["private"].id
+
+        # An explicit pick is a stated intent, not an advisory hint, so the same
+        # inaccessible Agent still errors instead of silently substituting.
+        with engine.begin() as connection:
+            with pytest.raises(VibeAgentAccessError):
+                workbench_sessions_service.create_session(
+                    connection,
+                    scope_id=scope_id,
+                    agent_backend="",
+                    agent_id=agents["private"].id,
+                    user_context=member,
+                )
+    finally:
+        store.close()
 
 
 def test_personal_install_default_routing_never_degrades(monkeypatch, tmp_path) -> None:

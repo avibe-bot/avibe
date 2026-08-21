@@ -297,6 +297,34 @@ def list_projects(
     ]
 
 
+def _require_visible_project(
+    conn: Connection,
+    context: AuthorizationContext,
+    project_id: str,
+) -> None:
+    """Refuse a Project the caller cannot see, exactly as ``list_projects`` hides it.
+
+    The instance role says whether a principal may administer Projects at all;
+    it does not say *which* Projects. Those are two different questions, and
+    answering only the first is what let a caller who knows an id mutate a
+    restricted Project that ``list_projects`` correctly omits for them.
+
+    ``get_effective_project_role`` is the same helper the list path applies, so
+    the floor here is the visibility floor rather than a second predicate:
+    Instance Owner and Personal installs short-circuit inside it (a Personal
+    install has no Project ACL, so the instance role stays sufficient), an
+    ``inherit`` or absent policy yields the instance role, and a restricted
+    policy yields the caller's binding or nothing at all.
+
+    ``LookupError`` rather than a refusal, matching ``get_project``: a Project
+    the caller may not see must not be distinguishable from one that does not
+    exist, or the 403/404 split enumerates the restricted Projects.
+    """
+
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
+
+
 def get_project(
     conn: Connection,
     project_id: str,
@@ -439,6 +467,7 @@ def update_project(
     degrades to one they can (``core.vibe_agents.resolve_usable_default_agent``).
     """
     context = require_instance_role(authorization_context, "member")
+    _require_visible_project(conn, context, project_id)
     reserve_write_lock(conn)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
@@ -532,6 +561,7 @@ def archive_project(
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = require_instance_role(authorization_context, "member")
+    _require_visible_project(conn, context, project_id)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:

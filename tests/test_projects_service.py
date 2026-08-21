@@ -14,8 +14,13 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
-from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
-from storage import projects_service, resource_access_service, workbench_sessions_service
+from core.vibe_agents import VibeAgentAccessError, VibeAgentStore, ensure_session_agent_access
+from storage import (
+    project_access_service,
+    projects_service,
+    resource_access_service,
+    workbench_sessions_service,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import scope_settings, scopes
@@ -113,6 +118,171 @@ def test_project_crud_follows_can_manage_projects(engine, tmp_path):
                     created["id"],
                     authorization_context=_remote_context(role),
                 )
+
+
+def _acl_context(
+    role: str,
+    *,
+    email: str,
+    instance_kind: str | None = "organization",
+) -> AuthorizationContext:
+    return AuthorizationContext(
+        instance_role=role,
+        subject=email,
+        email=email,
+        instance_access_source="email",
+        is_remote=True,
+        instance_kind=instance_kind,
+    )
+
+
+def _restrict_project_to(conn, project_id: str, email: str, *, access_role: str = "editor") -> None:
+    result = project_access_service.apply_project_access_intent(
+        conn,
+        {
+            "project_id": project_id,
+            "revision": 1,
+            "mode": "restricted",
+            "bindings": [
+                {
+                    "principal_kind": "email",
+                    "principal_value": email,
+                    "access_role": access_role,
+                }
+            ],
+        },
+    )
+    assert result.outcome == "applied"
+
+
+def test_project_mutations_follow_the_acl_that_hides_them(engine, tmp_path):
+    """Whether a member administers Projects and *which* are separate questions.
+
+    ``can_manage_projects`` answers the first; the Project ACL answers the second.
+    Checking only the first is what let a member who knew a Project id PATCH or
+    archive a restricted Project that ``list_projects`` and ``get_project``
+    correctly hide from them -- the read half was ACL-checked and the write half
+    was not, which is the wrong way round for an asymmetry to fall.
+
+    The floor is the ACL's *visibility* floor rather than a second predicate: a
+    member holding an explicit editor binding has an effective Project role of
+    editor, so demanding a "member" Project role would refuse exactly the
+    Projects the list shows them.
+    """
+
+    folder = tmp_path / "restricted"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Restricted",
+            authorization_context=_remote_context("owner"),
+        )
+        _restrict_project_to(conn, project["id"], "insider@example.com")
+
+    excluded = _acl_context("member", email="outsider@example.com")
+    included = _acl_context("member", email="insider@example.com")
+
+    with engine.connect() as conn:
+        visible_to_excluded = {
+            listed["id"] for listed in projects_service.list_projects(conn, authorization_context=excluded)
+        }
+        visible_to_included = {
+            listed["id"] for listed in projects_service.list_projects(conn, authorization_context=included)
+        }
+    assert project["id"] not in visible_to_excluded
+    assert project["id"] in visible_to_included
+
+    # Hidden by the list, hidden by every mutation: LookupError, the same signal
+    # ``get_project`` already raises, so a 404 does not enumerate the Projects a
+    # caller is excluded from.
+    with engine.begin() as conn:
+        with pytest.raises(LookupError):
+            projects_service.get_project(conn, project["id"], authorization_context=excluded)
+        with pytest.raises(LookupError):
+            projects_service.update_project(
+                conn,
+                project["id"],
+                display_name="Stolen",
+                authorization_context=excluded,
+            )
+        with pytest.raises(LookupError):
+            projects_service.archive_project(
+                conn,
+                project["id"],
+                authorization_context=excluded,
+            )
+
+    with engine.connect() as conn:
+        assert projects_service.get_project(conn, project["id"])["display_name"] == "Restricted"
+
+    # A bound member and the Instance Owner are both unaffected.
+    with engine.begin() as conn:
+        assert (
+            projects_service.update_project(
+                conn,
+                project["id"],
+                display_name="Insider Renamed",
+                authorization_context=included,
+            )["display_name"]
+            == "Insider Renamed"
+        )
+        assert (
+            projects_service.update_project(
+                conn,
+                project["id"],
+                display_name="Owner Renamed",
+                authorization_context=_remote_context("owner"),
+            )["display_name"]
+            == "Owner Renamed"
+        )
+        projects_service.archive_project(
+            conn,
+            project["id"],
+            authorization_context=included,
+        )
+
+
+def test_personal_instance_member_mutates_without_a_project_acl(engine, tmp_path):
+    """A Personal install has no Project ACL, so the instance role stays sufficient.
+
+    ``get_effective_project_role`` short-circuits on Personal, which is why the
+    visibility floor above needs no Personal special case -- even with a
+    restricted policy row present, a Personal member keeps the role they came in
+    with.
+    """
+
+    folder = tmp_path / "personal"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Personal",
+            authorization_context=_remote_context("owner"),
+        )
+        _restrict_project_to(conn, project["id"], "someone-else@example.com")
+
+    personal_member = _acl_context("member", email="member@example.com", instance_kind="personal")
+    with engine.connect() as conn:
+        assert project["id"] in {
+            listed["id"]
+            for listed in projects_service.list_projects(conn, authorization_context=personal_member)
+        }
+    with engine.begin() as conn:
+        renamed = projects_service.update_project(
+            conn,
+            project["id"],
+            display_name="Personal Renamed",
+            authorization_context=personal_member,
+        )
+        assert renamed["display_name"] == "Personal Renamed"
+        projects_service.archive_project(
+            conn,
+            project["id"],
+            authorization_context=personal_member,
+        )
 
 
 def test_create_project_is_idempotent_by_path(engine, tmp_path):
@@ -704,8 +874,9 @@ def test_project_default_agent_is_advisory_and_degrades_at_use_time(engine, tmp_
 
             # ``member-2`` shares neither the private owner nor the scoped group,
             # so the default is unusable for them. The session is still created;
-            # it simply stays unpinned and follows the effective default at
-            # dispatch instead of adopting the project's hint.
+            # it drops the project's hint and falls back to an Agent this caller
+            # may actually use, which is written into the row so dispatch runs it
+            # rather than re-deriving the hint without a principal.
             with engine.begin() as conn:
                 session = workbench_sessions_service.create_session(
                     conn,
@@ -713,11 +884,12 @@ def test_project_default_agent_is_advisory_and_degrades_at_use_time(engine, tmp_
                     agent_backend="",
                     user_context=other,
                 )
-            assert (session["agent_id"], session["agent_name"], session["agent_backend"]) == (
-                None,
-                None,
-                "",
-            )
+            assert session["agent_id"] != agent_id
+            assert session["agent_name"] != f"member-{level}"
+            with engine.connect() as conn:
+                assert (
+                    ensure_session_agent_access(conn, session, user_context=other) is not None
+                )
 
             # Degrading applies to the advisory hint only. Naming the same Agent
             # explicitly is a stated intent and still fails closed.

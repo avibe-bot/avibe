@@ -293,6 +293,64 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     assert hidden_action.status_code != 403 or hidden_action.get_json().get("code") != "remote_execution_disabled"
 
 
+def test_member_project_mutations_are_bounded_by_the_acl_that_hides_them(monkeypatch, tmp_path) -> None:
+    """Instance role admits the route; the Project ACL still picks the Project.
+
+    ``can_manage_projects`` is instance-wide Project administration, but every
+    one of these routes names a single Project, and the instance role says
+    nothing about which. The middleware used to skip member-tier routes
+    entirely, so a member who knew an id could PATCH or archive a Project that
+    ``GET /api/projects`` and ``GET /api/projects/<id>`` already hid from them.
+
+    404 on every hidden Project, matching the read path: a 403/404 split would
+    let a caller enumerate the restricted Projects they are excluded from.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+
+    def _patch(client, project_id, headers, name):
+        return client.patch(
+            f"/api/projects/{project_id}",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+            json={"display_name": name},
+        )
+
+    def _archive(client, project_id, headers):
+        return client.delete(
+            f"/api/projects/{project_id}",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+        )
+
+    # Bound to neither Project: the list is empty, and so is what they can touch.
+    excluded = _remote_client(config, role="member", email="carol@example.com")
+    excluded_headers = csrf_headers(excluded, REMOTE_ORIGIN)
+    assert _get(excluded, "/api/projects").get_json()["projects"] == []
+    for project_id in (ids["project_a"], ids["project_b"]):
+        assert _get(excluded, f"/api/projects/{project_id}").status_code == 404
+        assert _patch(excluded, project_id, excluded_headers, "Stolen").status_code == 404
+        assert _archive(excluded, project_id, excluded_headers).status_code == 404
+
+    # An explicit editor binding is below "member", and that is the point: the
+    # floor for these routes is the ACL's visibility floor, so the Projects the
+    # list shows are exactly the Projects that can be mutated.
+    included = _remote_client(config, role="member", email="alice@example.com")
+    included_headers = csrf_headers(included, REMOTE_ORIGIN)
+    assert {row["id"] for row in _get(included, "/api/projects").get_json()["projects"]} == {
+        ids["project_a"]
+    }
+    renamed = _patch(included, ids["project_a"], included_headers, "Alice Renamed")
+    assert renamed.status_code == 200
+    assert renamed.get_json()["display_name"] == "Alice Renamed"
+    assert _patch(included, ids["project_b"], included_headers, "Stolen").status_code == 404
+    assert _archive(included, ids["project_b"], included_headers).status_code == 404
+    assert _archive(included, ids["project_a"], included_headers).status_code == 200
+
+
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)

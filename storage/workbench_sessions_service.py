@@ -433,6 +433,7 @@ def create_session(
         VibeAgentAccessError,
         ensure_agent_selection_access,
         ensure_default_agent_access,
+        resolve_effective_default_agent,
         resolve_resource_access_context,
     )
 
@@ -461,14 +462,35 @@ def create_session(
         if agent_backend and not resource_context.has_role("editor"):
             raise VibeAgentAccessError("Agent access is not permitted.")
         if not agent_backend and not resource_context.is_instance_owner:
-            # Validate the effective global default without pinning it into the
-            # Session. An empty selector must keep following the global default
-            # at dispatch time.
-            ensure_default_agent_access(
+            # Resolve the effective global default *for this caller*. An empty
+            # selector normally stays empty, so the Session keeps following the
+            # global default at dispatch time -- but a default that degraded has
+            # to be written down, because the substitute exists only in this
+            # caller's frame of reference.
+            #
+            # Dispatch short-circuits on the durable binding
+            # (``SessionTurnManager._resolve_delivery_backend``). A Session left
+            # unpinned instead reaches
+            # ``Controller.resolve_vibe_agent_for_context``, which carries no
+            # principal, re-resolves the raw configured default, and pins that
+            # inaccessible Agent -- after which the remote execution recheck in
+            # ``_remote_delivery_execution_denial`` sees an explicit binding the
+            # caller cannot use and retires their first message. Persisting the
+            # substitute is what makes the degradation actually execute.
+            usable_default = ensure_default_agent_access(
                 conn,
                 user_context=resource_context,
                 missing_is_error=True,
             )
+            configured_default = resolve_effective_default_agent(conn)
+            if (
+                usable_default is not None
+                and configured_default is not None
+                and usable_default.id != configured_default.id
+            ):
+                agent_id = usable_default.id
+                agent_name = usable_default.name
+                agent_backend = usable_default.backend
 
     if agent_name or agent_id:
         selected_agent = ensure_agent_selection_access(

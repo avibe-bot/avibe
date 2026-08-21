@@ -2950,8 +2950,21 @@ def enforce_project_role_capabilities():
         if minimum_instance_role is not None
         else required_instance_role(request.method, request.path)
     )
-    if minimum_instance_role not in {"viewer", "editor"}:
+    if minimum_instance_role not in {"viewer", "editor", "member"}:
         return None
+    # A ``member`` route is instance-wide Project administration, but it still
+    # names one Project, and the instance role does not say *which* Projects the
+    # caller may touch. Ceiling this at "editor" is what let a member mutate a
+    # restricted Project by id that ``list_projects`` hides from them.
+    #
+    # The floor for those routes is the Project ACL's *visibility* floor, not
+    # "member": a member holding an explicit editor binding on a restricted
+    # Project has an effective Project role of editor, so demanding a "member"
+    # Project role would refuse the very Projects the list shows them. The
+    # instance-role half of the authorization is already enforced by the HTTP
+    # policy before this hook runs; this half only asks whether the Project is
+    # theirs to see.
+    required_project_role = "viewer" if minimum_instance_role == "member" else minimum_instance_role
     resource = _project_access_resource(request.path)
     if resource is None:
         return None
@@ -2971,7 +2984,7 @@ def enforce_project_role_capabilities():
             if kind == "project"
             else project_access_service.get_effective_session_role(conn, context, resource_id)
         )
-    if not project_access_service.role_allows(role, minimum_instance_role):
+    if not project_access_service.role_allows(role, required_project_role):
         return jsonify({"ok": False, "error": "not_found"}), 404
     return None
 
