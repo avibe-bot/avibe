@@ -68,7 +68,12 @@ const agentMutations = (before: unknown, stepData: unknown): ConfigMutation[] =>
 
     const owned: Record<string, unknown> = {};
     if (typeof submitted.enabled === 'boolean') owned.enabled = submitted.enabled;
-    if (typeof submitted.cli_path === 'string') owned.cli_path = submitted.cli_path;
+    // ``cli_path`` has a different owner from the wizard's enable toggle:
+    // install_agent and the provider runtime card persist it at the moment
+    // they discover or edit the path. Replaying that asynchronously derived
+    // value on Continue would turn an already-committed install result back
+    // into a stale browser snapshot. Keep the field in the step data for
+    // display, but never emit it from this mutation builder.
     return configChanges(previousAgents[backend], owned, ['agents', backend]);
   });
 };

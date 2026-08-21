@@ -32,8 +32,24 @@ describe('wizard config mutations', () => {
       stepData,
       after: { ...before, ...stepData },
     }))).toEqual({
-      agents: { opencode: { enabled: false, cli_path: '/opt/opencode' } },
+      agents: { opencode: { enabled: false } },
     });
+  });
+
+  it('does not replay an installer-owned cli path on Continue', () => {
+    const before = {
+      agents: { opencode: { enabled: true, cli_path: 'old-path' } },
+    };
+    const stepData = {
+      agents: { opencode: { enabled: true, cli_path: '/newly-installed/opencode' } },
+    };
+
+    expect(buildWizardStepMutations({
+      stepId: 'agents',
+      before,
+      stepData,
+      after: { ...before, ...stepData },
+    })).toEqual([]);
   });
 
   it('does not resend mount-time agents from a later platform step', () => {

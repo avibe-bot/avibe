@@ -735,20 +735,39 @@ def _apply_list_ops(base: dict, list_ops: dict) -> dict:
             current = current.get(part)
         return current
 
+    if not isinstance(list_ops, dict):
+        raise ValueError("Config list operations must be an object")
+
+    def _validated_operands(ops: dict, name: str) -> list[str]:
+        if name not in ops:
+            return []
+        values = ops[name]
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ValueError(
+                f"Config list operation '{name}' must be an array of non-empty strings"
+            )
+        return values
+
     for dotted, ops in list_ops.items():
-        if not isinstance(ops, dict):
-            continue
-        if str(dotted) not in _LIST_OPS_ALLOWED_PATHS:
+        if not isinstance(dotted, str) or dotted not in _LIST_OPS_ALLOWED_PATHS:
             raise ValueError(
                 f"Config list operation path '{dotted}' is not supported"
             )
+        if not isinstance(ops, dict):
+            raise ValueError(f"Config list operation '{dotted}' must be an object")
+        unknown = set(ops) - {"add", "remove"}
+        if unknown:
+            names = ", ".join(sorted(str(name) for name in unknown))
+            raise ValueError(f"Config list operation '{dotted}' has unknown keys: {names}")
         target = _resolve(merged, dotted)
         if not isinstance(target, list):
-            continue
-        additions = ops.get("add")
-        removals = ops.get("remove")
-        next_list = [item for item in target if item not in (removals or [])]
-        for item in additions or []:
+            raise ValueError(f"Config list operation target '{dotted}' is not a list")
+        additions = _validated_operands(ops, "add")
+        removals = _validated_operands(ops, "remove")
+        next_list = [item for item in target if item not in removals]
+        for item in additions:
             if item not in next_list:
                 next_list.append(item)
         # Write back through the dotted path.
@@ -1033,6 +1052,8 @@ def save_config(
     # marker in the payload, and a bare operation payload must not
     # bypass them.
     raw_list_ops = payload.pop(_LIST_OPS_PAYLOAD_KEY, None)
+    if raw_list_ops is not None and not isinstance(raw_list_ops, dict):
+        raise ValueError("Config list operations must be an object")
     list_ops_touches_platforms = isinstance(raw_list_ops, dict) and any(
         str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
     )

@@ -1791,3 +1791,22 @@ def test_list_ops_reject_unwhitelisted_paths(monkeypatch, tmp_path):
         api.save_config(
             {"__avibe_list_ops": {"model_hub.sources": {"add": ["rogue"]}}}
         )
+
+
+@pytest.mark.parametrize(
+    "operations",
+    [
+        {"add": 1},
+        {"remove": 1},
+        {"add": ["discord", 1]},
+        {"remove": [""]},
+        {"add": ["discord"], "replace": ["slack"]},
+    ],
+)
+def test_list_ops_reject_malformed_operands(monkeypatch, tmp_path, operations):
+    """Malformed list operations are client errors, never a server 500."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    with pytest.raises(ValueError, match="Config list operation"):
+        api.save_config({"__avibe_list_ops": {"platforms.enabled": operations}})
