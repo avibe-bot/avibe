@@ -45,8 +45,9 @@ describe('mobile Show Page app route', () => {
     const surface = header.parentElement;
     expect(surface?.className).toContain('h-full');
     expect(surface?.className).toContain('w-full');
+    expect(surface?.className).toContain('pb-[env(safe-area-inset-bottom)]');
     expect(surface?.className).not.toContain('rounded');
     expect(surface?.className).not.toContain('border border-border');
-    expect(screen.getByTitle('chat.showPage.title').getAttribute('src')).toBe('/show/session-1/');
+    expect(screen.getByTitle('chat.showPage.title').getAttribute('src')).toBe('/show/session-1/?vibe-embed=1');
   });
 });

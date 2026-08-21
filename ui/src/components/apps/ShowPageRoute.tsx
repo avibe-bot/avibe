@@ -6,7 +6,7 @@ import { ArrowLeft, MonitorX, PinOff } from 'lucide-react';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { showPagePrivatePath } from '../../apps/showPageAvatar';
+import { showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { Button } from '../ui/button';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
@@ -91,7 +91,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
 
   const label = title || t('apps.showPage.label');
   const missing = !sessionId || state === 'missing';
-  const src = missing ? null : showPagePrivatePath(sessionId);
+  const src = missing ? null : showPageEmbeddedPath(showPagePrivatePath(sessionId));
   const {
     state: annotationState,
     setIframe,
@@ -102,7 +102,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   } = useShowPageAnnotation(src);
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-background pt-[env(safe-area-inset-top)]">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-background pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
       <header className="flex shrink-0 items-center gap-3 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur">
         <Button
           type="button"
