@@ -2333,7 +2333,7 @@ def test_repair_show_runtime_reinstalls_unstartable_runtime_and_verifies_recover
     prepared = []
     verifier_results = iter(
         [
-            SimpleNamespace(available=False, reason="runtime_start_failed"),
+            SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
             SimpleNamespace(available=True, reason=None),
         ]
     )
@@ -2408,7 +2408,7 @@ def test_repair_show_runtime_reports_runtime_that_still_cannot_start(monkeypatch
         return SimpleNamespace(
             ensure=lambda: asyncio.sleep(
                 0,
-                result=SimpleNamespace(available=False, reason="runtime_start_failed"),
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
             ),
             stop=lambda: verifier_stops.append(True),
         )
@@ -2418,7 +2418,7 @@ def test_repair_show_runtime_reports_runtime_that_still_cannot_start(monkeypatch
     result = cli._repair_show_runtime()
 
     assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_failed"
+    assert result["reason"] == "runtime_start_health_timeout"
     assert "could not start" in result["message"]
     assert prepared == [True]
     assert verifier_stops == [True, True]

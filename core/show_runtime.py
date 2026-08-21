@@ -117,6 +117,11 @@ SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS = 30.0
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
 _CAPABILITY_RETRYABLE_STATUS_CODES = {408, 429}
+_STARTUP_READY_TIMEOUT_SECONDS = 10.0
+_STARTUP_POLL_INTERVAL_SECONDS = 0.05
+_STARTUP_URL_TIMEOUT_REASON = "runtime_start_url_timeout"
+_STARTUP_PROCESS_UNAVAILABLE_REASON = "runtime_start_process_unavailable"
+_STARTUP_HEALTH_TIMEOUT_REASON = "runtime_start_health_timeout"
 _MISSING = object()
 
 
@@ -402,6 +407,7 @@ class ShowRuntimeManager:
             with self.stdout_path.open("w", encoding="utf-8") as stdout, self.stderr_path.open(
                 "w", encoding="utf-8"
             ) as stderr:
+                startup_deadline = asyncio.get_running_loop().time() + _STARTUP_READY_TIMEOUT_SECONDS
                 self._process = subprocess.Popen(
                     [
                         *command,
@@ -421,19 +427,25 @@ class ShowRuntimeManager:
                     text=True,
                     **isolated_subprocess_kwargs(),
                 )
-            base_url = await self._read_startup_url()
+            base_url = await self._read_startup_url(deadline=startup_deadline)
             process = self._process
-            if (
-                not base_url
-                or process is None
-                or process.poll() is not None
-                or not await self._healthy(base_url)
-                or process.poll() is not None
-            ):
+            if process is None or process.poll() is not None:
                 self.stop()
                 return self._publish_runtime_availability(
                     ShowRuntimeServingState.START_FAILED,
-                    runtime_reason="runtime_start_failed",
+                    runtime_reason=_STARTUP_PROCESS_UNAVAILABLE_REASON,
+                )
+            if not base_url:
+                self.stop()
+                return self._publish_runtime_availability(
+                    ShowRuntimeServingState.START_FAILED,
+                    runtime_reason=_STARTUP_URL_TIMEOUT_REASON,
+                )
+            if reason := await self._wait_for_startup_health(base_url, process, deadline=startup_deadline):
+                self.stop()
+                return self._publish_runtime_availability(
+                    ShowRuntimeServingState.START_FAILED,
+                    runtime_reason=reason,
                 )
             self._base_url = base_url
             return self._publish_runtime_availability(ShowRuntimeServingState.SERVING, base_url)
@@ -691,10 +703,11 @@ class ShowRuntimeManager:
         except Exception:
             return False
 
-    async def _read_startup_url(self) -> str | None:
-        deadline = asyncio.get_running_loop().time() + 10
-        while asyncio.get_running_loop().time() < deadline:
-            if self._process and self._process.poll() is not None:
+    async def _read_startup_url(self, *, deadline: float) -> str | None:
+        loop = asyncio.get_running_loop()
+        while loop.time() < deadline:
+            process = self._process
+            if process is None or process.poll() is not None:
                 return None
             try:
                 text = self.stdout_path.read_text(encoding="utf-8")
@@ -704,8 +717,35 @@ class ShowRuntimeManager:
                 marker = "Vibe Show Runtime listening at "
                 if marker in line:
                     return line.split(marker, 1)[1].strip()
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
         return None
+
+    async def _wait_for_startup_health(
+        self,
+        base_url: str,
+        process: subprocess.Popen[str],
+        *,
+        deadline: float,
+    ) -> str | None:
+        loop = asyncio.get_running_loop()
+        while True:
+            if process.poll() is not None:
+                return _STARTUP_PROCESS_UNAVAILABLE_REASON
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _STARTUP_HEALTH_TIMEOUT_REASON
+            try:
+                healthy = await asyncio.wait_for(self._healthy(base_url), timeout=remaining)
+            except TimeoutError:
+                return _STARTUP_HEALTH_TIMEOUT_REASON
+            if process.poll() is not None:
+                return _STARTUP_PROCESS_UNAVAILABLE_REASON
+            if healthy:
+                return None
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _STARTUP_HEALTH_TIMEOUT_REASON
+            await asyncio.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, remaining))
 
     def stop(self) -> None:
         process = self._process
