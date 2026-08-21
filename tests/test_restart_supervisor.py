@@ -8,6 +8,8 @@ import sqlite3
 import sys
 import textwrap
 import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +74,41 @@ def _fake_pinned_install(calls, installs, *, pin: str = "vibe-remote==3.0.10"):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return run
+
+
+@contextmanager
+def _serve_version_endpoints(responses):
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            status, content_type, body = responses[self.path]
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, requests
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def _point_running_ui_probe_at(monkeypatch, port):
+    from core.services import settings as settings_service
+
+    config = SimpleNamespace(ui=SimpleNamespace(setup_port=port))
+    monkeypatch.setattr(settings_service, "load_config", lambda **_kwargs: config)
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
 
 
 def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_path):
@@ -171,17 +208,63 @@ def test_legacy_upgrade_target_prefers_running_version_over_stale_metadata(monke
         "get_process_command",
         lambda pid: f"{python_path} {service_main}",
     )
-    monkeypatch.setattr(restart_supervisor, "_running_ui_version", lambda: "3.0.12")
-
-    target = restart_supervisor._discover_legacy_upgrade_target(
-        trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
-    )
+    responses = {
+        "/api/version/local": (200, "text/html", b"<!doctype html><title>Avibe</title>"),
+        "/api/version": (200, "application/json", b'{"current":"3.0.12"}'),
+    }
+    with _serve_version_endpoints(responses) as (port, requests):
+        _point_running_ui_probe_at(monkeypatch, port)
+        target = restart_supervisor._discover_legacy_upgrade_target(
+            trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+        )
 
     assert target == RollbackTarget(
         version="3.0.12",
         package="avibe-os",
         launcher=runtime.ServiceLauncher(python=str(python_path), main=str(service_main)),
     )
+    assert requests == ["/api/version/local", "/api/version"]
+
+
+def test_running_ui_version_falls_back_from_missing_new_endpoint(monkeypatch):
+    responses = {
+        "/api/version/local": (404, "application/json", b'{"detail":"Not Found"}'),
+        "/api/version": (200, "application/json", b'{"current":"3.0.12"}'),
+    }
+    with _serve_version_endpoints(responses) as (port, requests):
+        _point_running_ui_probe_at(monkeypatch, port)
+
+        version = restart_supervisor._running_ui_version()
+
+    assert version == "3.0.12"
+    assert requests == ["/api/version/local", "/api/version"]
+
+
+def test_legacy_upgrade_target_stays_unavailable_when_all_identity_sources_are_invalid(
+    monkeypatch, tmp_path
+):
+    tool_root = tmp_path / "uv" / "tools" / "avibe-os"
+    python_path = tool_root / "bin" / "python"
+    service_main = tool_root / "lib" / "python3.12" / "site-packages" / "vibe" / "service_main.py"
+    python_path.parent.mkdir(parents=True)
+    service_main.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    service_main.write_text("# replaced release without trusted metadata\n", encoding="utf-8")
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_pid", lambda: 123)
+    monkeypatch.setattr(restart_supervisor, "_read_recorded_ui_pid", lambda: None)
+    monkeypatch.setattr(runtime, "get_process_command", lambda _pid: f"{python_path} {service_main}")
+    responses = {
+        "/api/version/local": (200, "text/html", b"<!doctype html><title>Avibe</title>"),
+        "/api/version": (200, "application/json", b'{"current":"not-a-release"}'),
+    }
+    with _serve_version_endpoints(responses) as (port, requests):
+        _point_running_ui_probe_at(monkeypatch, port)
+        target = restart_supervisor._discover_legacy_upgrade_target(
+            trigger="upgrade", vibe_path=str(tmp_path / "retargeted-vibe")
+        )
+
+    assert target is None
+    assert requests == ["/api/version/local", "/api/version"]
 
 
 def test_legacy_upgrade_target_recovers_from_ui_only_process(monkeypatch, tmp_path):
