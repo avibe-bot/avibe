@@ -92,6 +92,11 @@ def test_run_deletes_only_old_tool_call_traces(state) -> None:
     assert remaining == {"boundary", "new-trace", "old-visible", "old-other-type"}
 
 
+def test_cutoff_rejects_oversized_window() -> None:
+    with pytest.raises(ValueError, match="between"):
+        agent_events_retention.cutoff_iso(1_000_000, now=_NOW)
+
+
 def test_messages_are_never_touched(state) -> None:
     engine = state
     _seed_event(engine, event_id="old-trace", created_at=datetime(2026, 5, 1, tzinfo=timezone.utc))

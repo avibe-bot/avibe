@@ -83,6 +83,17 @@ def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatc
     cli.build_parser()
 
 
+def test_retention_help_ignores_oversized_configured_window(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"runtime": {"agent_events_trace_retention_days": 1_000_000}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+
+    assert cli._configured_trace_retention_days("en") == 30
+
+
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):
     _make_fake_uv_tool(tmp_path, revisions=["20260606_0018"])
     db_path = tmp_path / "state" / "vibe.sqlite"

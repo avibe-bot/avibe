@@ -130,6 +130,7 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
         ("agent_events_trace_retention_days", "90"),
         ("agent_events_trace_retention_days", 0),
         ("agent_events_trace_retention_days", True),
+        ("agent_events_trace_retention_days", 1_000_000),
     ],
 )
 def test_save_config_rejects_malformed_trace_retention_policy(monkeypatch, tmp_path, field, value):

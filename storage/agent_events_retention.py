@@ -43,9 +43,13 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.engine import Connection
 
 from storage.models import agent_events, state_meta
+from vibe.trace_retention_policy import (
+    MAX_RETENTION_DAYS,
+    MIN_RETENTION_DAYS,
+    validate_retention_days,
+)
 
 DEFAULT_RETENTION_DAYS = 30
-MIN_RETENTION_DAYS = 1
 MIN_RUN_INTERVAL_SECONDS = 24 * 3600
 DELETE_BATCH_ROWS = 1000
 LEASE_TTL_SECONDS = 3600
@@ -105,7 +109,9 @@ def resolve_policy(config: Any) -> RetentionPolicy:
     days = getattr(runtime, "agent_events_trace_retention_days", None)
     if not isinstance(enabled, bool):
         return RetentionPolicy(False, DEFAULT_RETENTION_DAYS, True)
-    if not isinstance(days, int) or isinstance(days, bool) or days < MIN_RETENTION_DAYS:
+    try:
+        validate_retention_days(days)
+    except ValueError:
         return RetentionPolicy(False, DEFAULT_RETENTION_DAYS, True)
     if recovered:
         return RetentionPolicy(False, days, True)
@@ -138,8 +144,12 @@ def _parse_iso(value: str) -> Optional[datetime]:
 
 
 def normalize_retention_days(retention_days: Any) -> int:
+    """Normalize legacy callers without allowing an oversized cutoff."""
+
     try:
         days = int(retention_days)
+        if days > MAX_RETENTION_DAYS:
+            raise ValueError
     except (TypeError, ValueError):
         return DEFAULT_RETENTION_DAYS
     return max(MIN_RETENTION_DAYS, days)
@@ -148,7 +158,12 @@ def normalize_retention_days(retention_days: Any) -> int:
 def cutoff_iso(retention_days: int, *, now: Optional[datetime] = None) -> str:
     """Rows strictly older than this instant are eligible."""
     moment = now or _utc_now()
-    return _iso(moment - timedelta(days=normalize_retention_days(retention_days)))
+    days = validate_retention_days(retention_days)
+    try:
+        cutoff = moment - timedelta(days=days)
+    except OverflowError as exc:
+        raise ValueError("retention window produces an unrepresentable cutoff") from exc
+    return _iso(cutoff)
 
 
 def eligible_filter(cutoff: str):

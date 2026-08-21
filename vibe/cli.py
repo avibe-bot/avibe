@@ -369,8 +369,12 @@ def _configured_trace_retention_days(language: str) -> int:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         runtime = payload.get("runtime") if isinstance(payload, dict) else None
         value = runtime.get("agent_events_trace_retention_days") if isinstance(runtime, dict) else None
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
-            return value
+        from vibe.trace_retention_policy import validate_retention_days
+
+        try:
+            return validate_retention_days(value)
+        except ValueError:
+            pass
     except Exception:
         pass
     del language
@@ -6811,11 +6815,18 @@ def cmd_data_retention(args):
         config_recovered = policy.recovered
         if days_override is not None:
             retention_days = int(days_override)
-            if retention_days < agent_events_retention.MIN_RETENTION_DAYS:
+            try:
+                agent_events_retention.validate_retention_days(retention_days)
+            except ValueError:
                 # Never silently clamp an explicit window: --days 0 would
                 # delete everything older than one day after normalization.
                 print(
-                    i18n_t("data.retention.invalidDays", language, minimum=agent_events_retention.MIN_RETENTION_DAYS),
+                    i18n_t(
+                        "data.retention.invalidDays",
+                        language,
+                        minimum=agent_events_retention.MIN_RETENTION_DAYS,
+                        maximum=agent_events_retention.MAX_RETENTION_DAYS,
+                    ),
                     file=sys.stderr,
                 )
                 return 1

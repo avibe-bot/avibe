@@ -1609,8 +1609,11 @@ class Controller:
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
             logger.error("Failed to start idle session cleanup: %s", e, exc_info=True)
-        if self.trace_retention_task is None or self.trace_retention_task.done():
-            self.trace_retention_task = asyncio.create_task(self._agent_events_retention_loop())
+        try:
+            if self.trace_retention_task is None or self.trace_retention_task.done():
+                self.trace_retention_task = asyncio.create_task(self._agent_events_retention_loop())
+        except Exception as e:
+            logger.error("Failed to start agent trace-event retention: %s", e, exc_info=True)
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""

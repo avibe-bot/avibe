@@ -41,6 +41,7 @@ from config.platform_registry import (
 from modules.agents.catalog import DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
+from vibe.trace_retention_policy import validate_retention_days
 
 logger = logging.getLogger(__name__)
 
@@ -2563,14 +2564,10 @@ class RuntimeConfig:
             raise ValueError(
                 "Config 'runtime.agent_events_trace_retention_enabled' must be a boolean"
             )
-        if (
-            not isinstance(self.agent_events_trace_retention_days, int)
-            or isinstance(self.agent_events_trace_retention_days, bool)
-            or self.agent_events_trace_retention_days < 1
-        ):
-            raise ValueError(
-                "Config 'runtime.agent_events_trace_retention_days' must be an integer >= 1"
-            )
+        validate_retention_days(
+            self.agent_events_trace_retention_days,
+            field="Config 'runtime.agent_events_trace_retention_days'",
+        )
 
 
 @dataclass
