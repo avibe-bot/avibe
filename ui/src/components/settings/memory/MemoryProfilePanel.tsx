@@ -5,8 +5,9 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { useApi } from '../../../context/ApiContext';
-import type { MemoryItemsResult, MemoryProfile } from '../../../context/ApiContext';
+import type { MemoryItem, MemoryItemsResult, MemoryProfile } from '../../../context/ApiContext';
 import { useMemoryResource } from './useMemoryResource';
+import { memoryOriginLabelKey } from './memoryOrigin';
 
 type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
 type Translate = (key: string) => string;
@@ -59,6 +60,23 @@ export const StructuredMemoryProfile: React.FC<{ profile: MemoryProfile; t: Tran
   </div>
 );
 
+export const MemoryProfileItemBlock: React.FC<{ item: MemoryItem; t: Translate }> = ({ item, t }) => (
+  <div className="rounded-xl border border-border bg-surface px-4 py-3">
+    <div className="mb-3 flex items-center gap-2">
+      <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
+      {memoryOriginLabelKey(item.origin) ? (
+        <Badge variant="outline">{t(memoryOriginLabelKey(item.origin)!)}</Badge>
+      ) : null}
+      {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
+    </div>
+    {item.profile ? (
+      <StructuredMemoryProfile profile={item.profile} t={t} />
+    ) : (
+      <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
+    )}
+  </div>
+);
+
 export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -94,6 +112,11 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
           {t('memory.profile.refresh')}
         </Button>
       </div>
+      {data?.warnings.includes('memory_search_partial') ? (
+        <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted">
+          {t('memory.profile.partial')}
+        </div>
+      ) : null}
       {error ? (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       ) : loading && items === null ? (
@@ -112,17 +135,11 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
       ) : (
         <div className="flex flex-col gap-2">
           {items.map((item, index) => (
-            <div key={`${item.kind}:${item.date ?? ''}:${index}`} className="rounded-xl border border-border bg-surface px-4 py-3">
-              <div className="mb-3 flex items-center gap-2">
-                <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
-                {item.date ? <span className="font-mono text-[10.5px] text-muted">{item.date}</span> : null}
-              </div>
-              {item.profile ? (
-                <StructuredMemoryProfile profile={item.profile} t={t} />
-              ) : (
-                <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{item.text}</p>
-              )}
-            </div>
+            <MemoryProfileItemBlock
+              key={`${item.kind}:${item.date ?? ''}:${index}`}
+              item={item}
+              t={t}
+            />
           ))}
           <p className="px-1 text-[11px] text-muted">{t('memory.profile.sourceNote')}</p>
         </div>

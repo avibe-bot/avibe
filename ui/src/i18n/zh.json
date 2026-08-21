@@ -4114,6 +4114,11 @@
     "title": "记忆",
     "betaTitle": "记忆 · Beta",
     "subtitle": "Avibe 会从你的对话和 Agent 的工作记录中提炼记忆，让它越来越懂你。你可以在这里查看、搜索或清除这些记忆。",
+    "origin": {
+      "user": "用户记忆",
+      "agent": "Agent 记忆",
+      "both": "用户 + Agent"
+    },
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
       "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"
@@ -4364,6 +4369,7 @@
       "loading": "正在加载画像…",
       "empty": "还没有画像——继续聊天，消息处理后再来看看。",
       "loadFailed": "无法加载你的画像。",
+      "partial": "有一个画像来源未能加载，当前显示的画像可能不完整。",
       "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
       "disabledHint": "启用记忆后即可查看画像。",
       "refresh": "刷新",
@@ -4386,7 +4392,7 @@
       "projectLabel": "记忆项目",
       "projectDefault": "默认",
       "projectAll": "我的全部项目",
-      "partial": "部分项目未能搜索，结果可能不完整。",
+      "partial": "部分用户记忆、Agent 记忆或项目记忆来源未能搜索，结果可能不完整。",
       "truncated": "搜索在查完所有项目前停止，结果可能不完整。",
       "browse": {
         "sortLabel": "记忆片段排序",

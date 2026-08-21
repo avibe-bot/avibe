@@ -53,3 +53,21 @@ scenarios:
     kind: happy_path
     layer: contract
     test: tests/test_memory_cli.py::test_agentic_cli_builds_bounded_internal_recall_policy
+  - id: MEMORY-SEARCH-008
+    name: Derived Agent owners are stable, cross-user isolated, and session-disjoint
+    status: covered
+    kind: authorization
+    layer: contract
+    test: tests/test_memory_store.py::test_assistant_owner_derivation_and_read_session_refs_are_stable_and_disjoint
+  - id: MEMORY-SEARCH-009
+    name: Dual-owner recall labels results and exact duplicates retain both origins
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_memory_module.py::test_dual_owner_search_is_concurrent_and_merges_score_dedupe_and_origins
+  - id: MEMORY-SEARCH-010
+    name: Agentic dual-owner recall spends at most one agentic provider leg
+    status: covered
+    kind: budget
+    layer: contract
+    test: tests/test_memory_module.py::test_agentic_recall_interleaves_per_leg_rank_with_only_one_agentic_leg

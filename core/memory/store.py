@@ -1048,11 +1048,15 @@ class MemoryStore:
         principal_id: str,
         project_ref: str,
         session_id: str,
+        memory_owner_id: str | None = None,
     ) -> ProviderSessionRef:
-        """Resolve trusted caller context into the current canonical provider identity."""
+        """Resolve trusted caller context into an owner-scoped provider identity."""
 
         if not is_principal_id(principal_id) or not is_project_id(project_ref):
             raise ValueError("invalid Memory scope")
+        owner_id = principal_id if memory_owner_id is None else memory_owner_id
+        if owner_id not in {principal_id, derive_assistant_memory_owner_id(principal_id)}:
+            raise ValueError("invalid Memory owner")
         if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
             raise ValueError("invalid Memory session")
         with self._transaction() as conn:
@@ -1060,12 +1064,12 @@ class MemoryStore:
             if meta.clear_in_progress:
                 raise RuntimeError("Memory clear is in progress")
             return ProviderSessionRef(
-                principal_id=principal_id,
+                principal_id=owner_id,
                 epoch=meta.epoch,
                 project_ref=project_ref,
                 session_id=_provider_session_ref(
                     meta.scope_key,
-                    principal_id,
+                    owner_id,
                     project_ref,
                     session_id,
                     meta.epoch,
@@ -3935,6 +3939,26 @@ def is_principal_id(value: object) -> bool:
     )
 
 
+def derive_assistant_memory_owner_id(principal_id: str) -> str:
+    """Derive the server-owned assistant Memory identity for one caller."""
+
+    if not is_principal_id(principal_id):
+        raise ValueError("invalid Memory principal")
+    return f"{principal_id}-agent"
+
+
+def is_memory_owner_id(value: object) -> bool:
+    """Return whether a value is a user or derived assistant Memory owner."""
+
+    if is_principal_id(value):
+        return True
+    return (
+        isinstance(value, str)
+        and value.endswith("-agent")
+        and is_principal_id(value[:-6])
+    )
+
+
 def is_project_id(value: object) -> bool:
     """Compatibility alias for persisted project ids. Do not use on new writes."""
 
@@ -3962,9 +3986,9 @@ def _upsert_memory_project(
 
 def _provider_session_ref(
     scope_key: bytes,
-    principal_id: str,
+    memory_owner_id: str,
     project_ref: str,
     session_id: str,
     epoch: int,
 ) -> str:
-    return f"src--{_keyed_digest(scope_key, f'{principal_id}:{project_ref}:{session_id}')}--e{epoch}"
+    return f"src--{_keyed_digest(scope_key, f'{memory_owner_id}:{project_ref}:{session_id}')}--e{epoch}"

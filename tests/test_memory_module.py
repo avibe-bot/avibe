@@ -22,7 +22,7 @@ from core.memory.module import (
     MemoryModule,
 )
 from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, derive_assistant_memory_owner_id
 from core.memory.types import (
     CLOSED_MEMORY_ERROR_CODES,
     CaptureAccepted,
@@ -40,11 +40,14 @@ from core.memory.types import (
     OperationFailed,
     RecallItems,
     RecallPolicy,
+    ProviderSearchItem,
+    memory_item_payload,
 )
 
 
 PROJECT = "default"
 PRINCIPAL = "u-11111111111111111111111111111111"
+ASSISTANT_OWNER = derive_assistant_memory_owner_id(PRINCIPAL)
 
 
 @pytest.fixture(autouse=True)
@@ -305,7 +308,7 @@ async def test_provider_replacement_updates_reads_and_claim_delivery(tmp_path: P
         "query",
         principal_id=PRINCIPAL,
         project_id=PROJECT,
-    ) == MemoryItems(items=replacement.search_items)
+    ) == MemoryItems(items=(replace(replacement.search_items[0], origin="user"),))
     assert await module.capture(_request()) == CaptureAccepted()
     assert await module.drain() == 1
     assert original.captures == []
@@ -600,13 +603,13 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     module, _store, _provider = _module(tmp_path, provider=provider)
 
     assert await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
-        items=provider.search_items
+        items=(replace(provider.search_items[0], origin="user"),)
     )
     assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
-        items=provider.profile_items
+        items=(replace(provider.profile_items[0], origin="user"),)
     )
-    assert provider.search_scopes == [(PRINCIPAL, PROJECT)]
-    assert provider.profile_scopes == [(PRINCIPAL, PROJECT)]
+    assert provider.search_scopes == [(PRINCIPAL, PROJECT), (ASSISTANT_OWNER, PROJECT)]
+    assert provider.profile_scopes == [(PRINCIPAL, PROJECT), (ASSISTANT_OWNER, PROJECT)]
     assert await module.search(
         "x" * (MAX_QUERY_BYTES + 1),
         principal_id=PRINCIPAL,
@@ -614,8 +617,8 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     ) == OperationFailed(error="memory_input_too_large")
 
     provider.search_items = tuple(MemoryItem(kind="fact", text=str(index)) for index in range(9))
-    assert await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
-        error="memory_provider_response_invalid"
+    assert await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
+        warnings=("memory_search_partial",)
     )
     provider.search_items = ()
     provider.search_failure = RuntimeError("provider-search-body-canary")
@@ -643,18 +646,18 @@ async def test_profile_bounds_accept_structured_data_only_on_profile_items(tmp_p
     module, _store, _provider = _module(tmp_path, provider=provider)
 
     assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
-        items=provider.profile_items
+        items=(replace(provider.profile_items[0], origin="user"),)
     )
 
     provider.profile_items = (MemoryItem(kind="fact", text="{}", profile=profile),)
-    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
-        error="memory_provider_response_invalid"
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
+        warnings=("memory_search_partial",)
     )
     provider.profile_items = (
         MemoryItem(kind="profile", text="{}", profile=MemoryProfile(summary="bad\x00value")),
     )
-    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
-        error="memory_provider_response_invalid"
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
+        warnings=("memory_search_partial",)
     )
 
 
@@ -951,11 +954,11 @@ async def test_keyword_recall_skips_health_and_succeeds_without_embedding(tmp_pa
     )
 
     assert result == RecallItems(
-        items=provider.search_items,
+        items=(replace(provider.search_items[0], origin="user"),),
         requested_mode="keyword",
         effective_mode="keyword",
     )
-    assert provider.search_policies == [("keyword", False, None)]
+    assert provider.search_policies == [("keyword", False, None), ("keyword", False, None)]
 
 
 @pytest.mark.parametrize("mode", ["vector", "hybrid"])
@@ -1002,7 +1005,10 @@ async def test_auto_recall_selects_only_keyword_or_hybrid(
     assert isinstance(result, RecallItems)
     assert result.requested_mode == "auto"
     assert result.effective_mode == effective_mode
-    assert provider.search_policies == [(effective_mode, True, None)]
+    assert provider.search_policies == [
+        (effective_mode, True, None),
+        (effective_mode, True, None),
+    ]
 
 
 @pytest.mark.parametrize("missing_capability", ["embed", "llm", "rerank"])
@@ -1236,13 +1242,13 @@ async def test_agentic_recall_reaches_provider_with_policy_timeout(
     )
 
     assert result == RecallItems(
-        items=provider.search_items,
+        items=(replace(provider.search_items[0], origin="user"),),
         requested_mode="agentic",
         effective_mode="agentic",
     )
-    assert provider.search_policies == [("agentic", True, None)]
+    assert provider.search_policies == [("agentic", True, None), ("hybrid", True, None)]
     assert resolve_timeouts == [5.0]
-    assert provider.search_timeouts == [3.0]
+    assert provider.search_timeouts == [3.0, None]
     telemetry = [
         record.getMessage()
         for record in caplog.records
@@ -1276,7 +1282,16 @@ async def test_current_session_overlay_uses_the_trusted_canonical_reference(tmp_
 
     assert isinstance(result, RecallItems)
     assert result.current_session_overlay is True
-    assert provider.search_policies == [("keyword", True, expected_ref)]
+    assistant_ref = store.provider_session_ref(
+        principal_id=PRINCIPAL,
+        memory_owner_id=ASSISTANT_OWNER,
+        project_ref=PROJECT,
+        session_id="trusted-current-session",
+    )
+    assert provider.search_policies == [
+        ("keyword", True, expected_ref),
+        ("keyword", True, assistant_ref),
+    ]
     assert expected_ref.principal_id == PRINCIPAL
     assert expected_ref.project_ref == PROJECT
     assert expected_ref.session_id != "trusted-current-session"
@@ -1309,8 +1324,8 @@ async def test_recall_makes_one_search_and_never_falls_back(tmp_path: Path) -> N
     )
 
     assert result == OperationFailed(error="memory_processing_failed")
-    assert provider.search_scopes == [(PRINCIPAL, PROJECT)]
-    assert provider.search_policies == [("hybrid", True, None)]
+    assert provider.search_scopes == [(PRINCIPAL, PROJECT), (ASSISTANT_OWNER, PROJECT)]
+    assert provider.search_policies == [("hybrid", True, None), ("hybrid", True, None)]
 
 
 async def test_failure_log_is_a_bounded_read_without_creating_state(tmp_path: Path) -> None:
@@ -1360,6 +1375,237 @@ async def test_malformed_unicode_returns_closed_capture_and_search_errors(tmp_pa
     )
 
 
+async def test_dual_owner_search_is_concurrent_and_merges_score_dedupe_and_origins(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-SEARCH-009."""
+
+    both_started = asyncio.Event()
+
+    class ConcurrentProvider(FakeMemoryProvider):
+        started = 0
+
+        async def search(self, *args, **kwargs):
+            self.started += 1
+            if self.started == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            return await super().search(*args, **kwargs)
+
+    provider = ConcurrentProvider(
+        search_items_by_owner={
+            PRINCIPAL: (
+                ProviderSearchItem(
+                    item=MemoryItem(kind="fact", text="release plan"),
+                    score=0.7,
+                    episode_id="user-duplicate",
+                    timestamp="2026-08-20T00:00:00Z",
+                    provider_rank=1,
+                    queried_owner=PRINCIPAL,
+                ),
+                ProviderSearchItem(
+                    item=MemoryItem(kind="fact", text="I plan to release"),
+                    score=0.9,
+                    episode_id="user-paraphrase",
+                    timestamp="2026-08-19T00:00:00Z",
+                    provider_rank=0,
+                    queried_owner=PRINCIPAL,
+                ),
+            ),
+            ASSISTANT_OWNER: (
+                ProviderSearchItem(
+                    item=MemoryItem(kind="episode", text="release plan"),
+                    score=0.8,
+                    episode_id="agent-duplicate",
+                    timestamp="2026-08-21T00:00:00Z",
+                    provider_rank=0,
+                    queried_owner=ASSISTANT_OWNER,
+                ),
+                ProviderSearchItem(
+                    item=MemoryItem(kind="fact", text="The user plans to release"),
+                    score=0.6,
+                    episode_id=None,
+                    timestamp=None,
+                    provider_rank=1,
+                    queried_owner=ASSISTANT_OWNER,
+                ),
+            ),
+        }
+    )
+    _set_embed_capability(provider, True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.search("release", principal_id=PRINCIPAL, project_id=PROJECT)
+
+    assert isinstance(result, MemoryItems)
+    assert [(item.kind, item.text, item.origin) for item in result.items] == [
+        ("fact", "I plan to release", "user"),
+        ("episode", "release plan", "both"),
+        ("fact", "The user plans to release", "agent"),
+    ]
+    assert provider.started == 2
+
+
+async def test_dual_owner_search_marks_selected_duplicate_after_merge_limit(
+    tmp_path: Path,
+) -> None:
+    def hit(
+        *, owner: str, text: str, score: float, rank: int
+    ) -> ProviderSearchItem:
+        return ProviderSearchItem(
+            item=MemoryItem(kind="fact", text=text),
+            score=score,
+            episode_id=f"{owner}-{rank}",
+            timestamp=None,
+            provider_rank=rank,
+            queried_owner=owner,
+        )
+
+    provider = FakeMemoryProvider(
+        search_items_by_owner={
+            PRINCIPAL: (
+                hit(owner=PRINCIPAL, text="shared", score=0.9, rank=0),
+                hit(owner=PRINCIPAL, text="user only", score=0.8, rank=1),
+            ),
+            ASSISTANT_OWNER: (
+                hit(owner=ASSISTANT_OWNER, text="agent only", score=0.7, rank=0),
+                hit(owner=ASSISTANT_OWNER, text="shared", score=0.6, rank=1),
+            ),
+        }
+    )
+    _set_embed_capability(provider, True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.search(
+        "shared", principal_id=PRINCIPAL, project_id=PROJECT, limit=2
+    )
+
+    assert result == MemoryItems(
+        items=(
+            MemoryItem(kind="fact", text="shared", origin="both"),
+            MemoryItem(kind="fact", text="user only", origin="user"),
+        )
+    )
+
+
+async def test_dual_owner_search_does_not_collapse_whitespace_variants(
+    tmp_path: Path,
+) -> None:
+    provider = FakeMemoryProvider(
+        search_items_by_owner={
+            PRINCIPAL: (
+                ProviderSearchItem(
+                    item=MemoryItem(kind="fact", text="shared"),
+                    score=0.9,
+                    episode_id="user-shared",
+                    timestamp=None,
+                    provider_rank=0,
+                    queried_owner=PRINCIPAL,
+                ),
+            ),
+            ASSISTANT_OWNER: (
+                ProviderSearchItem(
+                    item=MemoryItem(kind="fact", text=" shared "),
+                    score=0.8,
+                    episode_id="agent-shared",
+                    timestamp=None,
+                    provider_rank=0,
+                    queried_owner=ASSISTANT_OWNER,
+                ),
+            ),
+        }
+    )
+    _set_embed_capability(provider, True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.search("shared", principal_id=PRINCIPAL, project_id=PROJECT)
+
+    assert result == MemoryItems(
+        items=(
+            MemoryItem(kind="fact", text="shared", origin="user"),
+            MemoryItem(kind="fact", text=" shared ", origin="agent"),
+        )
+    )
+
+
+async def test_dual_owner_partial_failure_and_labeled_profiles(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(
+        search_items=(MemoryItem(kind="fact", text="user result"),),
+        search_failures_by_owner={
+            ASSISTANT_OWNER: MemoryProviderFailure("memory_processing_failed"),
+        },
+        profile_items_by_owner={
+            PRINCIPAL: (MemoryItem(kind="profile", text="user profile"),),
+            ASSISTANT_OWNER: (MemoryItem(kind="profile", text="agent profile"),),
+        },
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    search = await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT)
+    profile = await module.profile(principal_id=PRINCIPAL, project_id=PROJECT)
+
+    assert search == MemoryItems(
+        items=(MemoryItem(kind="fact", text="user result", origin="user"),),
+        warnings=("memory_search_partial",),
+    )
+    assert profile == MemoryItems(
+        items=(
+            MemoryItem(kind="profile", text="user profile", origin="user"),
+            MemoryItem(kind="profile", text="agent profile", origin="agent"),
+        )
+    )
+
+
+async def test_agentic_recall_interleaves_per_leg_rank_with_only_one_agentic_leg(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-SEARCH-010."""
+
+    def hits(owner: str, prefix: str) -> tuple[ProviderSearchItem, ...]:
+        return tuple(
+            ProviderSearchItem(
+                item=MemoryItem(kind="fact", text=f"{prefix}{rank}"),
+                score=100.0 - rank,
+                episode_id=f"{prefix}-{rank}",
+                timestamp=None,
+                provider_rank=rank,
+                queried_owner=owner,
+            )
+            for rank in range(2)
+        )
+
+    provider = FakeMemoryProvider(
+        agentic_budget_enforced_flag=True,
+        search_items_by_owner={
+            PRINCIPAL: hits(PRINCIPAL, "user-"),
+            ASSISTANT_OWNER: hits(ASSISTANT_OWNER, "agent-"),
+        },
+    )
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    result = await module.recall(
+        "connect",
+        policy=RecallPolicy(
+            mode="agentic",
+            max_results=4,
+            timeout_seconds=5,
+            max_model_calls=1,
+            cost_budget_tokens=1_000,
+        ),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert isinstance(result, RecallItems)
+    assert [(item.text, item.origin) for item in result.items] == [
+        ("user-0", "user"),
+        ("agent-0", "agent"),
+        ("user-1", "user"),
+        ("agent-1", "agent"),
+    ]
+    assert [method for method, _include, _session in provider.search_policies] == [
+        "agentic",
+        "hybrid",
+    ]
 async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Path) -> None:
     class CountingStore(MemoryStore):
         def __init__(self, path: Path) -> None:
@@ -1404,6 +1650,13 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
 
     assert "MemoryProviderPort" not in memory.__all__
     assert "ProviderCapture" not in memory.__all__
+
+
+def test_memory_item_origin_is_optional_in_legacy_payloads() -> None:
+    assert "origin" not in memory_item_payload(MemoryItem(kind="fact", text="legacy"))
+    assert memory_item_payload(
+        MemoryItem(kind="fact", text="shared", origin="both")
+    )["origin"] == "both"
 
 
 def test_memory_list_result_types_are_public() -> None:

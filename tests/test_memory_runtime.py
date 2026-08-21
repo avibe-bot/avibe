@@ -68,6 +68,7 @@ from core.memory.types import (
     MemoryProfile,
     MemoryProfileExplicitInfo,
     OperationFailed,
+    RecallItems,
     RecallPolicy,
     CaptureAttachment,
     CaptureRequest,
@@ -110,6 +111,35 @@ async def test_all_project_agentic_recall_is_rejected_before_project_access() ->
     )
 
     assert result == OperationFailed(error="memory_invalid_input")
+
+
+async def test_all_projects_preserves_successful_project_partial_warnings() -> None:
+    class Module:
+        async def resolve_recall_mode(self, _policy):
+            return "hybrid"
+
+        async def recall(self, _query, **kwargs):
+            return RecallItems(
+                items=(MemoryItem(kind="fact", text=kwargs["project_id"], origin="user"),),
+                requested_mode="hybrid",
+                effective_mode="hybrid",
+                warnings=("memory_search_partial",),
+            )
+
+    runtime = SimpleNamespace(
+        module=Module(),
+        list_memory_projects=lambda _principal_id: ("default", "notes"),
+    )
+    result = await MemoryRuntime._recall_all_projects(
+        runtime,
+        "query",
+        policy=RecallPolicy(mode="hybrid", max_results=8),
+        principal_id=PRINCIPAL,
+    )
+
+    assert isinstance(result, RecallItems)
+    assert [item.text for item in result.items] == ["default", "notes"]
+    assert result.warnings == ("memory_search_partial",)
 
 
 def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:

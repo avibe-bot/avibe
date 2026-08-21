@@ -23,6 +23,7 @@ import type {
 } from '../../../context/ApiContext';
 import { copyTextToClipboard } from '../../../lib/utils';
 import { useMemoryResource } from './useMemoryResource';
+import { memoryOriginLabelKey } from './memoryOrigin';
 
 type MemoryItemsOk = Extract<MemoryRecallResult, { status: 'ok' }>;
 type MemoryListOk = Extract<MemoryListResult, { status: 'ok' }>;
@@ -464,6 +465,9 @@ export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) =
                 <div key={index} className="rounded-lg border border-border bg-surface px-4 py-3">
                   <div className="mb-1 flex items-center gap-2">
                     <Badge variant="secondary">{t(`memory.kind.${item.kind}`)}</Badge>
+                    {memoryOriginLabelKey(item.origin) ? (
+                      <Badge variant="outline">{t(memoryOriginLabelKey(item.origin)!)}</Badge>
+                    ) : null}
                     {item.project && (project === 'all' || item.project !== 'default') ? (
                       <Badge variant="outline">
                         {item.project === 'default' ? t('memory.search.projectDefault') : item.project}

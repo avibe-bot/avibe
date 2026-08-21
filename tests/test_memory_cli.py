@@ -216,6 +216,38 @@ def test_memory_list_human_surfaces_truncation_warning(
     assert "2026-08-14T12:00:00Z Subject" in captured.out
 
 
+@pytest.mark.parametrize("operation", ["search", "profile"])
+@pytest.mark.parametrize(
+    ("language", "warning"),
+    [
+        (
+            "en",
+            "Some user, Agent, or project Memory sources could not be loaded. Results may be incomplete.",
+        ),
+        ("zh", "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"),
+    ],
+)
+def test_memory_read_human_surfaces_partial_warning(
+    operation,
+    language,
+    warning,
+    capsys,
+) -> None:
+    cli._print_memory_cli_human(
+        operation,
+        {
+            "status": "ok",
+            "items": [{"kind": "fact", "text": "Visible result", "date": None}],
+            "warnings": ["memory_search_partial"],
+        },
+        language=language,
+    )
+
+    captured = capsys.readouterr()
+    assert warning in captured.err
+    assert "Visible result" in captured.out
+
+
 def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
     args = cli.build_parser().parse_args(["memory", "list"])
 
@@ -415,6 +447,33 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
         "IM 附件捕获：可用",
         "来源原因：记忆 sidecar 不可用",
     ]
+
+
+def test_memory_cli_human_labels_origins_and_preserves_legacy_items(capsys) -> None:
+    cli._print_memory_cli_human(
+        "search",
+        {
+            "items": [
+                {"kind": "fact", "text": "Direct", "date": "2026-08-21", "origin": "user"},
+                {"kind": "fact", "text": "Recorded", "date": None, "origin": "agent"},
+                {"kind": "fact", "text": "Shared", "date": None, "origin": "both"},
+                {"kind": "fact", "text": "Legacy", "date": None},
+            ]
+        },
+        language="en",
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        "[User memory] 2026-08-21 Direct",
+        "[Agent memory] Recorded",
+        "[User + Agent] Shared",
+        "Legacy",
+    ]
+
+
+def test_memory_prompt_explains_owner_labels_and_profile_separation() -> None:
+    assert "label `origin` as `user`, `agent`, or `both`" in _MEMORY_CLI_PROMPT
+    assert "never merge them into one attributed profile" in _MEMORY_CLI_PROMPT
 
 
 def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(

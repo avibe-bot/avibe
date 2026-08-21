@@ -27,6 +27,7 @@ from core.memory.types import (
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
+    ProviderSearchItem,
     ProviderSessionRef,
     is_memory_error_code,
     MemoryPreflightDiagnostic,
@@ -510,7 +511,7 @@ class EverOSPort:
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
         agentic_telemetry: AgenticRecallTelemetry | None = None,
-    ) -> tuple[MemoryItem, ...]:
+    ) -> tuple[ProviderSearchItem, ...]:
         response_metadata: dict[str, str] = {}
         try:
             data = await self._search_data(
@@ -1206,14 +1207,14 @@ def _map_search_items(
     *,
     principal_id: str,
     limit: int,
-) -> tuple[MemoryItem, ...]:
+) -> tuple[ProviderSearchItem, ...]:
     episodes = data.get("episodes", [])
     if not isinstance(episodes, list):
         raise MemoryProviderFailure("memory_provider_response_invalid")
     if len(episodes) > _MAX_RESPONSE_COLLECTION:
         raise MemoryProviderFailure("memory_provider_response_invalid")
 
-    items: list[MemoryItem] = []
+    items: list[ProviderSearchItem] = []
     for episode in episodes:
         if len(items) >= limit:
             break
@@ -1221,9 +1222,21 @@ def _map_search_items(
             continue
         if episode.get("user_id") != principal_id:
             continue
+        episode_id = _strict_receipt_id(episode.get("id"))
+        episode_score = _provider_score(episode)
+        episode_timestamp = _first_record_timestamp(episode)
         text = _episode_text(episode)
         if text is not None:
-            items.append(MemoryItem(kind="episode", text=text, date=_record_date(episode)))
+            items.append(
+                ProviderSearchItem(
+                    item=MemoryItem(kind="episode", text=text, date=_record_date(episode)),
+                    score=episode_score,
+                    episode_id=episode_id,
+                    timestamp=episode_timestamp,
+                    provider_rank=len(items),
+                    queried_owner=principal_id,
+                )
+            )
         if len(items) >= limit:
             break
         facts = episode.get("atomic_facts", [])
@@ -1238,8 +1251,35 @@ def _map_search_items(
                 continue
             text = _safe_text(fact.get("content"))
             if text is not None:
-                items.append(MemoryItem(kind="fact", text=text, date=_record_date(fact, episode)))
+                fact_score = _provider_score(fact)
+                items.append(
+                    ProviderSearchItem(
+                        item=MemoryItem(kind="fact", text=text, date=_record_date(fact, episode)),
+                        score=fact_score if fact_score is not None else episode_score,
+                        episode_id=episode_id,
+                        timestamp=_first_record_timestamp(fact, episode),
+                        provider_rank=len(items),
+                        queried_owner=principal_id,
+                    )
+                )
     return tuple(items)
+
+
+def _provider_score(record: dict[str, Any]) -> float | None:
+    for key in ("score", "relevance_score"):
+        value = record.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+    return None
+
+
+def _first_record_timestamp(*records: dict[str, Any]) -> str | None:
+    for record in records:
+        for key in ("timestamp", "created_at", "createdAt", "date"):
+            timestamp = _record_timestamp(record.get(key))
+            if timestamp is not None:
+                return timestamp
+    return None
 
 
 def _map_episode_page(
@@ -2010,7 +2050,7 @@ class MemoryProviderPort(Protocol):
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
         agentic_telemetry: AgenticRecallTelemetry | None = None,
-    ) -> tuple[MemoryItem, ...]: ...
+    ) -> tuple[ProviderSearchItem, ...]: ...
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
@@ -2040,7 +2080,8 @@ class FakeMemoryProvider:
 
     healthy: bool = True
     processing_healthy_flag: bool = True
-    search_items: tuple[MemoryItem, ...] = ()
+    search_items: tuple[MemoryItem | ProviderSearchItem, ...] = ()
+    search_items_by_owner: dict[str, tuple[MemoryItem | ProviderSearchItem, ...]] = field(default_factory=dict)
     profile_items: tuple[MemoryItem, ...] = ()
     list_page: MemoryListPage = field(
         default_factory=lambda: MemoryListPage(
@@ -2064,7 +2105,10 @@ class FakeMemoryProvider:
     add_results: Deque[AddResult] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
+    search_failures_by_owner: dict[str, BaseException] = field(default_factory=dict)
     profile_failure: BaseException | None = None
+    profile_items_by_owner: dict[str, tuple[MemoryItem, ...]] = field(default_factory=dict)
+    profile_failures_by_owner: dict[str, BaseException] = field(default_factory=dict)
     list_failure: BaseException | None = None
     health_failure: BaseException | None = None
     agentic_budget_enforced_flag: bool = False
@@ -2123,22 +2167,43 @@ class FakeMemoryProvider:
         session_ref: ProviderSessionRef | None = None,
         timeout_seconds: float | None = None,
         agentic_telemetry: AgenticRecallTelemetry | None = None,
-    ) -> tuple[MemoryItem, ...]:
+    ) -> tuple[ProviderSearchItem, ...]:
         self.search_scopes.append((principal_id, project_id))
         self.search_policies.append((method, include_profile, session_ref))
         self.search_timeouts.append(timeout_seconds)
         if method == "agentic" and agentic_telemetry is not None:
             agentic_telemetry.round = self.agentic_round
         del query, limit
-        if self.search_failure is not None:
-            raise self.search_failure
-        return self.search_items
+        failure = self.search_failures_by_owner.get(principal_id, self.search_failure)
+        if failure is not None:
+            raise failure
+        raw_items = self.search_items_by_owner.get(
+            principal_id,
+            () if principal_id.endswith("-agent") else self.search_items,
+        )
+        return tuple(
+            item
+            if isinstance(item, ProviderSearchItem)
+            else ProviderSearchItem(
+                item=item,
+                score=None,
+                episode_id=None,
+                timestamp=None,
+                provider_rank=rank,
+                queried_owner=principal_id,
+            )
+            for rank, item in enumerate(raw_items)
+        )
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
         self.profile_scopes.append((principal_id, project_id))
-        if self.profile_failure is not None:
-            raise self.profile_failure
-        return self.profile_items
+        failure = self.profile_failures_by_owner.get(principal_id, self.profile_failure)
+        if failure is not None:
+            raise failure
+        return self.profile_items_by_owner.get(
+            principal_id,
+            () if principal_id.endswith("-agent") else self.profile_items,
+        )
 
     async def list_episodes(
         self,

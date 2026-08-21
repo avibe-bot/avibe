@@ -26,6 +26,7 @@ from core.memory.project_ids import (
 from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
 from core.memory.everos_insight.patches import boundary_request
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+from core.memory.store import is_memory_owner_id
 from core.memory.types import MAX_AGENTIC_TIMEOUT_SECONDS
 
 
@@ -33,7 +34,6 @@ _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _AGENTIC_TIMEOUT_HEADER = "X-Avibe-Memory-Agentic-Timeout-Seconds"
 _AGENTIC_ROUND_HEADER = "X-Avibe-Memory-Agentic-Round"
-_PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
 _SESSION_PATTERN = re.compile(r"src--[0-9a-f]{64}--e(?:0|[1-9][0-9]*)\Z")
 _AGENTIC_ROUND_STATE: contextvars.ContextVar[dict[str, str] | None] = (
     contextvars.ContextVar("avibe_memory_agentic_round", default=None)
@@ -582,7 +582,7 @@ def _validate_get(payload: dict[str, Any]) -> str | None:
 
 
 def _valid_principal(value: object) -> bool:
-    return isinstance(value, str) and _PRINCIPAL_PATTERN.fullmatch(value) is not None
+    return is_memory_owner_id(value)
 
 
 def _valid_session(value: object) -> bool:
