@@ -779,11 +779,6 @@
         "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."
       },
       "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
-    },
-    "alert": {
-      "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",
-      "engine": "Memory processing paused at {occurred_at}: the Memory engine reported an internal error. Try repairing the Memory runtime. Queued captures: {queued}.",
-      "recovered": "Memory processing recovered at {occurred_at}. Queued captures: {queued}."
     }
   },
   "language": {

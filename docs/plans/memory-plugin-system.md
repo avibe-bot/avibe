@@ -181,7 +181,7 @@ The `core/memory/` package is the ownership boundary:
 |---|---|
 | `module.py` | Provider-independent capture, search, profile, status, failure log, and idempotent clear |
 | `store.py` | Dedicated SQLite metadata, principal derivation, queue state, deduplication, tombstones, and recovery markers |
-| `worker.py` | Health-gated add/flush delivery, retry classification, flush observations, and processing alerts |
+| `worker.py` | Health-gated add/flush delivery, retry classification, flush observations, and processing health event reconciliation |
 | `everos.py` | Bounded mapping between the module contract and EverOS public HTTP operations |
 | `runtime.py` | Enable/disable/reconcile lifecycle and composition of the module, worker, and sidecar |
 | `process.py` / `sidecar.py` | Owned child process, private UDS, request allowlist, environment, restart, and shutdown |
