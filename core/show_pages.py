@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import re
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import stat as stat_module
 from collections.abc import Iterable, Mapping
@@ -21,11 +21,16 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from config.v2_config import V2Config, config_file_lock
 from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
-from core.show_git import format_agent_contract
+from core.show_runtime_failures import (
+    ShowRuntimeFailureClass,
+    ShowRuntimeRecoveryAction,
+    ShowRuntimeRetryDisposition,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import agent_sessions, show_page_access_entries, show_pages
 from storage.pagination import PageRequest, PageResult, page_sequence
+from vibe.i18n import t
 
 VISIBILITY_PRIVATE = "private"
 VISIBILITY_LIMITED = "limited"
@@ -80,7 +85,14 @@ SHARE_ID_BYTES = 8
 SHOW_EVENT_WRITE_TOKEN_COOKIE = "vibe_show_event_token"
 SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
 SHOW_CLI_EVENT_TOKEN_HEADER = "X-Vibe-Show-Cli-Token"
-SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
+SHOW_PAGE_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
+
+
+_SHOW_RUNTIME_RECOVERY_STATUS_KEY = {
+    ShowRuntimeRetryDisposition.CONTINUOUS: "retrying",
+    ShowRuntimeRetryDisposition.CONFIRMATION_PENDING: "confirming",
+    ShowRuntimeRetryDisposition.MANUAL_ONLY: "manualOnly",
+}
 # Only the head of index.html is scanned for the icon <link> (it lives in <head>,
 # at the top). Bounds the per-page read so a huge inline page can't stall
 # /api/show-pages or allocate a large string (§7.1f review).
@@ -2267,29 +2279,67 @@ def _default_index_html(session_id: str) -> str:
 """
 
 
-def show_page_runtime_recovery_html(session_id: str) -> str:
+def show_page_runtime_recovery_html(
+    session_id: str,
+    *,
+    reason: str,
+    failure_class: ShowRuntimeFailureClass,
+    retry_disposition: ShowRuntimeRetryDisposition,
+    recovery_action: ShowRuntimeRecoveryAction,
+    retry_authorized: bool,
+    language: str = "en",
+) -> str:
     session_id = validate_session_id(session_id)
     escaped = _escape_html(session_id)
-    loading_delay = f"{SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS}s"
-    prompt = (
-        "Please repair this avibe Show Page. Open the Show Page workspace for session "
-        f"{session_id}, read the local Show Page/runtime instructions, then replace src/App.tsx "
-        "with a polished React page. Use the shadcn-style components from @/components/ui and "
-        "Tailwind CSS v4. Keep the existing CSS imports and customize standard shadcn variables "
-        "such as --background, --foreground, --primary, --border, and --radius. Do not edit "
-        "index.html unless it is required. If the browser shows "
-        "Ready to visualize, check src/App.tsx, src/main.tsx, src/styles.css, and the Vite/browser "
-        "console for compile or runtime errors. Make the page responsive and verify it renders.\n\n"
-        "Show Page history contract:\n"
-        f"{format_agent_contract(numbered=True, session_id=session_id)}"
+    current_reason = reason
+    escaped_reason = _escape_html(current_reason)
+    loading_delay = "0s"
+    translate = lambda key: _escape_html(t(f"show.runtimeRecovery.{key}", language))
+    message_key = _show_runtime_recovery_message_key(reason, failure_class=failure_class)
+    status_key = _SHOW_RUNTIME_RECOVERY_STATUS_KEY[retry_disposition]
+    surface_action = recovery_action if retry_authorized else ShowRuntimeRecoveryAction.NO_LOCAL_ACTION
+    if surface_action is ShowRuntimeRecoveryAction.REPAIR:
+        action_card = f"""<div class="show-recovery-card">
+            <h2>{translate("repairHeading")}</h2>
+            <p>{translate("repairMessage")}</p>
+            <p><code>vibe doctor repair show-runtime</code></p>
+            <div class="show-recovery-actions">
+              <button class="show-recovery-button" id="show-runtime-retry-now" type="button">{translate("retryNow")}</button>
+            </div>
+          </div>"""
+    elif surface_action is ShowRuntimeRecoveryAction.CHANGE_SETTING:
+        action_card = f"""<div class="show-recovery-card">
+            <h2>{translate("settingsHeading")}</h2>
+            <p>{translate("settingsMessage")}</p>
+            <p><code>{escaped_reason}</code></p>
+            <div class="show-recovery-actions">
+              <button class="show-recovery-button" id="show-runtime-retry-now" type="button">{translate("retryNow")}</button>
+            </div>
+          </div>"""
+    else:
+        if recovery_action is ShowRuntimeRecoveryAction.NO_LOCAL_ACTION:
+            no_action_heading = "unsupportedHeading"
+            no_action_message = "unsupportedMessage"
+        elif retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY:
+            no_action_heading = "viewerActionHeading"
+            no_action_message = "viewerActionMessage"
+        else:
+            no_action_heading = "ownerActionHeading"
+            no_action_message = "ownerActionMessage"
+        action_card = f"""<div class="show-recovery-card">
+            <h2>{translate(no_action_heading)}</h2>
+            <p>{translate(no_action_message)}</p>
+          </div>"""
+    recovery_script = _show_runtime_recovery_script(
+        retry_disposition=retry_disposition,
+        retry_authorized=retry_authorized and surface_action is not ShowRuntimeRecoveryAction.NO_LOCAL_ACTION,
     )
-    escaped_prompt = _escape_html(prompt)
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{_escape_html(language)}" data-show-runtime-reason="{escaped_reason}" data-show-runtime-class="{failure_class.value}" data-show-runtime-retry-disposition="{retry_disposition.value}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Show Page recovery {escaped}</title>
+    <title>{translate("title")}</title>
     <style>
       :root {{
         color-scheme: light;
@@ -2446,43 +2496,118 @@ def show_page_runtime_recovery_html(session_id: str) -> str:
   </head>
   <body>
     <main class="show-recovery-shell">
-      <div class="show-recovery-loading">Loading Show Page</div>
+      <div class="show-recovery-loading">{translate("loading")}</div>
       <section class="show-recovery-panel">
-        <div class="show-recovery-eyebrow">Vibe Show recovery</div>
-        <h1>Ready to visualize</h1>
-        <p>The managed Show runtime did not respond, so avibe is showing this recovery page instead of serving a raw app shell.</p>
+        <div class="show-recovery-eyebrow">{translate("eyebrow")}</div>
+        <h1>{translate("heading")}</h1>
+        <p>{translate(message_key)}</p>
         <div class="show-recovery-grid">
+          {action_card}
           <div class="show-recovery-card">
-            <h2>Ask your agent to fix the Show Page</h2>
-            <textarea id="show-recovery-agent-prompt" readonly>{escaped_prompt}</textarea>
-            <div class="show-recovery-actions">
-              <button class="show-recovery-button" type="button" data-copy-prompt>Copy prompt</button>
-              <button class="show-recovery-button secondary" type="button" onclick="window.location.reload()">Retry</button>
-            </div>
-          </div>
-          <div class="show-recovery-card">
-            <h2>What to check</h2>
-            <ul>
-              <li>Wait a moment and refresh if the runtime is still starting.</li>
-              <li>Ask the agent to inspect Vite and browser console errors.</li>
-              <li>The main file to edit is <code>src/App.tsx</code>.</li>
-              <li>Use shared UI imports like <code>@/components/ui/card</code>.</li>
-            </ul>
+            <h2>{translate("statusHeading")}</h2>
+            <p>{translate(status_key)}</p>
+            <p>{translate("reasonLabel")}: <code>{escaped_reason}</code></p>
           </div>
         </div>
-        <p>Session: <code>{escaped}</code></p>
+        <p>{translate("sessionLabel")}: <code>{escaped}</code></p>
       </section>
     </main>
-    <script>
-      document.querySelector("[data-copy-prompt]")?.addEventListener("click", async (event) => {{
-        const prompt = document.getElementById("show-recovery-agent-prompt")?.value || "";
-        await navigator.clipboard.writeText(prompt);
-        event.currentTarget.textContent = "Copied";
-      }});
-    </script>
+    {recovery_script}
   </body>
 </html>
 """
+
+
+def _show_runtime_recovery_script(
+    *,
+    retry_disposition: ShowRuntimeRetryDisposition,
+    retry_authorized: bool,
+) -> str:
+    automatic_script = "" if retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY else """
+      const currentReason = document.documentElement.dataset.showRuntimeReason;
+      const currentClass = document.documentElement.dataset.showRuntimeClass;
+      const currentDisposition = document.documentElement.dataset.showRuntimeRetryDisposition;
+      let retryDelayMs = __RETRY_DELAY__;
+      const checkRuntime = async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+        try {
+          const response = await fetch(window.location.href, {
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: { "X-Avibe-Show-Recovery-Poll": "1" },
+          });
+          if (!response.headers.get("X-Avibe-Show-Recovery")) {
+            window.location.reload();
+            return;
+          }
+          const nextReason = response.headers.get("X-Avibe-Show-Recovery-Reason");
+          const nextClass = response.headers.get("X-Avibe-Show-Recovery-Class");
+          const nextDisposition = response.headers.get("X-Avibe-Show-Recovery-Disposition");
+          if (nextReason !== currentReason || nextClass !== currentClass || nextDisposition !== currentDisposition) {
+            window.location.reload();
+            return;
+          }
+        } catch (_error) {}
+        retryDelayMs = Math.min(30000, retryDelayMs * 2);
+        void checkRuntime();
+      };
+      void checkRuntime();
+    """
+    automatic_script = automatic_script.replace(
+        "__RETRY_DELAY__",
+        "6000" if retry_disposition is ShowRuntimeRetryDisposition.CONFIRMATION_PENDING else "3000",
+    )
+    explicit_script = "" if not retry_authorized else """
+      const retryNow = async () => {
+        const button = document.getElementById("show-runtime-retry-now");
+        if (button) button.disabled = true;
+        try {
+          await fetch(window.location.href, {
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: { "X-Avibe-Show-Recovery-Retry": "1" },
+          });
+        } catch (_error) {}
+        window.location.reload();
+      };
+      document.getElementById("show-runtime-retry-now")?.addEventListener("click", retryNow);
+    """
+    if not automatic_script and not explicit_script:
+        return ""
+    return f"""<script>
+      {explicit_script}
+      {automatic_script}
+    </script>"""
+
+
+def _show_runtime_recovery_message_key(
+    reason: str | None,
+    *,
+    failure_class: ShowRuntimeFailureClass,
+) -> str:
+    if failure_class is ShowRuntimeFailureClass.CONFIGURED and reason and reason.endswith("_unavailable_offline"):
+        return "offlineMessage"
+    if reason in {"runtime_archive_download_failed", "runtime_manifest_download_failed"}:
+        return "downloadMessage"
+    if reason in {"runtime_node_missing", "runtime_node_unsupported"}:
+        return "nodeMessage"
+    if reason == "runtime_platform_unsupported":
+        return "platformMessage"
+    if reason in {
+        "runtime_archive_checksum_mismatch",
+        "runtime_archive_size_mismatch",
+        "runtime_manifest_invalid",
+    }:
+        return "verificationMessage"
+    if reason in {"runtime_source_unsupported", "runtime_archive_url_unsupported"}:
+        return "configurationMessage"
+    if reason in {"VIBE_INSTALL_SKIP_SHOW_RUNTIME", "VIBE_SHOW_RUNTIME_AUTO_INSTALL"}:
+        return "policyMessage"
+    if reason and reason.startswith("runtime_start_"):
+        return "startMessage"
+    if reason and (reason.startswith("runtime_install_") or reason in {"runtime_git_missing", "runtime_npm_missing"}):
+        return "installMessage"
+    return "unavailableMessage"
 
 
 def _escape_html(value: str) -> str:

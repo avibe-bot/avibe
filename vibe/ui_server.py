@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import psutil
@@ -80,6 +80,9 @@ from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 from vibe.ui_memory_routes import register_memory_routes
+
+if TYPE_CHECKING:
+    from core.show_runtime import ShowRuntimeUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -12895,8 +12898,8 @@ def _show_page_file_not_found_response():
     return response
 
 
-def _show_page_runtime_unavailable_response():
-    return jsonify({"error": "show_runtime_unavailable"}), 503
+def _show_page_runtime_unavailable_response(reason: str):
+    return jsonify({"error": "show_runtime_unavailable", "reason": reason}), 503
 
 
 def _show_page_runtime_timeout_response():
@@ -12922,14 +12925,16 @@ def _is_show_annotation_asset(asset_path: str) -> bool:
 
 
 def _show_page_runtime_error_response(asset_path: str, exc: Exception):
-    from core.show_runtime import ShowRuntimeRequestTimeoutError
+    from core.show_runtime import ShowRuntimeRequestTimeoutError, ShowRuntimeUnavailableError
 
     if _is_show_page_api_handler_path(asset_path) and isinstance(
         exc,
         ShowRuntimeRequestTimeoutError,
     ):
         return _show_page_runtime_timeout_response()
-    return _show_page_runtime_unavailable_response()
+    if not isinstance(exc, ShowRuntimeUnavailableError):
+        raise AssertionError("Show Runtime error response requires owner-published evidence")
+    return _show_page_runtime_unavailable_response(exc.reason)
 
 
 def _is_show_page_entry_asset(asset_path: str) -> bool:
@@ -13097,10 +13102,57 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, confine_to
     return any(part.startswith(".") for part in workspace_relative.parts)
 
 
-def _show_page_recovery_response(session_id: str):
+def _show_page_runtime_failure_evidence(exc: "ShowRuntimeUnavailableError"):
+    return (
+        exc.reason,
+        exc.failure_class,
+        exc.retry_disposition,
+        exc.recovery_action,
+    )
+
+
+def _log_show_runtime_unavailable(reason: str, *, public: bool, fallback: bool) -> None:
+    if fallback:
+        target = "fallback public Show Page response" if public else "fallback Show Page response"
+    else:
+        target = "static public Show Page" if public else "static Show Page"
+    message = f"Show runtime unavailable (%s); serving {target}"
+    if request.headers.get("X-Avibe-Show-Recovery-Poll") == "1":
+        logger.debug(message, reason)
+        return
+    logger.warning(message, reason, exc_info=True)
+
+
+def _show_page_recovery_response(
+    session_id: str,
+    *,
+    reason: str,
+    failure_class,
+    retry_disposition,
+    recovery_action,
+    retry_authorized: bool,
+):
     from core.show_pages import show_page_runtime_recovery_html
 
-    return Response(show_page_runtime_recovery_html(session_id), status=200, mimetype="text/html; charset=utf-8")
+    response = Response(
+        show_page_runtime_recovery_html(
+            session_id,
+            reason=reason,
+            failure_class=failure_class,
+            retry_disposition=retry_disposition,
+            recovery_action=recovery_action,
+            retry_authorized=retry_authorized,
+            language=_request_ui_language(),
+        ),
+        status=200,
+        mimetype="text/html; charset=utf-8",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Avibe-Show-Recovery"] = "1"
+    response.headers["X-Avibe-Show-Recovery-Reason"] = reason
+    response.headers["X-Avibe-Show-Recovery-Class"] = failure_class.value
+    response.headers["X-Avibe-Show-Recovery-Disposition"] = retry_disposition.value
+    return response
 
 
 def _show_page_file_response(root: Path, asset_path: str):
@@ -13131,6 +13183,12 @@ def _show_page_runtime_failure_response(
     session_id: str,
     asset_path: str,
     starlette_request: FastAPIRequest,
+    *,
+    reason: str,
+    failure_class,
+    retry_disposition,
+    recovery_action,
+    retry_authorized: bool,
 ):
     if not _is_show_page_spa_route_request(asset_path, starlette_request):
         return None
@@ -13138,7 +13196,14 @@ def _show_page_runtime_failure_response(
         static_response = _show_page_file_response(page_dir, asset_path)
         if static_response.status_code != 404:
             return static_response
-    return _show_page_recovery_response(session_id)
+    return _show_page_recovery_response(
+        session_id,
+        reason=reason,
+        failure_class=failure_class,
+        retry_disposition=retry_disposition,
+        recovery_action=recovery_action,
+        retry_authorized=retry_authorized,
+    )
 
 
 def _show_session_event_error_response(exc: Exception):
@@ -14138,7 +14203,7 @@ async def show_runtime_vendor_asset(vendor_path: str):
     runtime_path = f"{_SHOW_RUNTIME_VENDOR_PREFIX}/{quote(vendor_path, safe='/@:-._~')}"
     if request._request.url.query:
         runtime_path = f"{runtime_path}?{request._request.url.query}"
-    from core.show_runtime import get_show_runtime_manager
+    from core.show_runtime import ShowRuntimeUnavailableError, get_show_runtime_manager
 
     forwarded_headers = _show_runtime_forwarded_headers(request._request.headers)
     try:
@@ -14148,8 +14213,8 @@ async def show_runtime_vendor_asset(vendor_path: str):
             headers=forwarded_headers,
             body=None,
         )
-    except Exception:
-        return _show_page_runtime_unavailable_response()
+    except ShowRuntimeUnavailableError as exc:
+        return _show_page_runtime_unavailable_response(exc.reason)
     response_headers = {
         key: value
         for key, value in proxied.headers.items()
@@ -14266,6 +14331,7 @@ async def _show_page_runtime_response(
     external_prefix: str | None = None,
     inject_show_config: bool = False,
     show_authenticated: bool = False,
+    runtime_retry_authorized: bool = False,
     show_config_session_id: str | None = None,
     include_annotation_bootstrap: bool = True,
 ):
@@ -14313,6 +14379,10 @@ async def _show_page_runtime_response(
         envelope=envelope,
         headers=forwarded_headers,
         body=body or None,
+        automatic=not (
+            runtime_retry_authorized
+            and starlette_request.headers.get("X-Avibe-Show-Recovery-Retry") == "1"
+        ),
         **request_options,
     )
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
@@ -14894,12 +14964,14 @@ def redirect_private_show_page_to_canonical_path(session_id):
 async def serve_private_show_page(session_id, asset_path):
     from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
 
+    authorization_context = _request_authorization_context()
+    runtime_retry_authorized = _has_runtime_owner_access(authorization_context)
     store = ShowPageStore()
     try:
         try:
             page = store.require_access(
                 session_id,
-                user_context=_request_authorization_context(),
+                user_context=authorization_context,
             )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
@@ -14930,7 +15002,7 @@ async def serve_private_show_page(session_id, asset_path):
         # §3.2: /show reads admit every Instance Viewer, but the route forwards
         # mutation methods straight to Show Runtime — keep Viewers read-only.
         if request.method not in {"GET", "HEAD"} and not _show_page_mutation_allowed(
-            _request_authorization_context()
+            authorization_context
         ):
             return _show_page_access_forbidden_response()
         if asset_path.strip("/") == "__show/me":
@@ -14946,6 +15018,11 @@ async def serve_private_show_page(session_id, asset_path):
         page_dir = ensure_show_page_dir(page.session_id)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
+            from core.show_runtime import (
+                ShowRuntimeRequestTimeoutError,
+                ShowRuntimeUnavailableError,
+            )
+
             try:
                 starlette_request = request._request
                 response = await _show_page_runtime_response(
@@ -14954,8 +15031,14 @@ async def serve_private_show_page(session_id, asset_path):
                     starlette_request,
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=can_annotate,
+                    runtime_retry_authorized=runtime_retry_authorized,
                 )
-            except Exception as exc:
+            except (ShowRuntimeUnavailableError, ShowRuntimeRequestTimeoutError) as exc:
+                if isinstance(exc, ShowRuntimeRequestTimeoutError):
+                    return _show_page_runtime_error_response(asset_path, exc)
+                reason, failure_class, retry_disposition, recovery_action = (
+                    _show_page_runtime_failure_evidence(exc)
+                )
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
@@ -14963,11 +15046,13 @@ async def serve_private_show_page(session_id, asset_path):
                     page.session_id,
                     asset_path,
                     request._request,
+                    reason=reason,
+                    failure_class=failure_class,
+                    retry_disposition=retry_disposition,
+                    recovery_action=recovery_action,
+                    retry_authorized=runtime_retry_authorized,
                 )
-                if response is not None:
-                    logger.debug("Show runtime unavailable; serving fallback Show Page response", exc_info=True)
-                else:
-                    logger.debug("Show runtime unavailable; serving static Show Page", exc_info=True)
+                _log_show_runtime_unavailable(reason, public=False, fallback=response is not None)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if request.method in {"GET", "HEAD"}:
@@ -15441,6 +15526,11 @@ async def serve_public_show_page(share_id, asset_path):
         page_dir = ensure_show_page_dir(page.session_id)
         response = None
         if request.method in {"GET", "HEAD"} or _is_show_api_asset(asset_path):
+            from core.show_runtime import (
+                ShowRuntimeRequestTimeoutError,
+                ShowRuntimeUnavailableError,
+            )
+
             try:
                 starlette_request = request._request
                 show_authenticated = False
@@ -15453,10 +15543,16 @@ async def serve_public_show_page(share_id, asset_path):
                     external_prefix=f"/p/{quote(share_id, safe='')}",
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=show_authenticated,
+                    runtime_retry_authorized=False,
                     show_config_session_id=share_id,
                     include_annotation_bootstrap=not limited_guest,
                 )
-            except Exception as exc:
+            except (ShowRuntimeUnavailableError, ShowRuntimeRequestTimeoutError) as exc:
+                if isinstance(exc, ShowRuntimeRequestTimeoutError):
+                    return _show_page_runtime_error_response(asset_path, exc)
+                reason, failure_class, retry_disposition, recovery_action = (
+                    _show_page_runtime_failure_evidence(exc)
+                )
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
                     return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
@@ -15464,11 +15560,13 @@ async def serve_public_show_page(share_id, asset_path):
                     page.session_id,
                     asset_path,
                     request._request,
+                    reason=reason,
+                    failure_class=failure_class,
+                    retry_disposition=retry_disposition,
+                    recovery_action=recovery_action,
+                    retry_authorized=False,
                 )
-                if response is not None:
-                    logger.debug("Show runtime unavailable; serving fallback public Show Page response", exc_info=True)
-                else:
-                    logger.debug("Show runtime unavailable; serving static public Show Page", exc_info=True)
+                _log_show_runtime_unavailable(reason, public=True, fallback=response is not None)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if limited_guest:

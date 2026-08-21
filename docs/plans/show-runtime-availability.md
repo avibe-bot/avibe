@@ -502,23 +502,271 @@ serves a verified archive.
 
 ### W4 — Bounded retry instead of a lifetime latch (repo: `avibe`)
 
-Replace `_install_attempted` with the module's existing retry convention
-(`_install_retry_deadline` / `_install_retry_attempt`, mirroring
-`_capability_retry_deadline` and `_show_runtime_capability_retry_delay`), and
-classify `_install_reason`:
+Replace `_install_attempted` with bounded, request-driven retry records. The
+failure model has five values because the available evidence does not always
+prove whether a condition will heal:
 
-- **transient** — `runtime_archive_download_failed`,
-  `runtime_manifest_download_failed`: exponential backoff, roughly 5 s → 5 min.
-- **permanent** — `runtime_platform_unsupported`, `runtime_node_unsupported`,
-  `runtime_archive_checksum_mismatch`, `runtime_source_unsupported`,
-  `runtime_archive_url_unsupported`: stay latched.
-- **configured** — `*_unavailable_offline`: neither retry nor latch.
+- **transient** — archive or manifest download failures: exponential backoff,
+  roughly 5 s → 5 min;
+- **configured** — offline refusal and missing or unsupported local
+  prerequisites (`node`, `git`, `npm`, or an explicit command): wait until the
+  prerequisite evidence changes or the user explicitly retries;
+- **permanent** — unsupported platform, source, or archive URL: wait for changed
+  configuration or explicit intent;
+- **checksum** — a verified checksum mismatch: wait for changed evidence or
+  explicit intent;
+- **unclassified** — startup URL/process/health failures,
+  `runtime_proxy_failed`, generic install failures, and meaning-poor manifest or
+  archive failures. Make exactly one timed confirmation attempt for the same
+  evidence identity, then stop automatic attempts. Promoting this value to
+  transient retries an actually permanent failure forever; promoting it to
+  terminal abandons a recoverable failure. It is therefore a real third
+  behavior, not a default branch.
+
+Install-lock contention is not a member of that list. It proves another process
+owns admission, so this operation did not run. The page may continue checking,
+but the losing caller records no failure and installs no backoff caused by
+Avibe's own concurrency.
+
+The recovery surface must explain an unclassified stop in human copy: what
+happened, that automatic retries have stopped after the confirmation, and the
+concrete explicit action (`vibe doctor repair show-runtime` or **Retry now**)
+that bypasses the gate. A reason token alone strands the user and is not an
+acceptable refusal.
 
 Retries are request-driven; introduce no new background timer. Then ensure all
 three opportunities actually attempt installation: installer
 (`install.sh` `prepare_show_runtime`, `install.ps1` `Prepare-ShowRuntime`),
 startup reconcile (`vibe/api.py` `reconcile_startup_dependencies`), and the
 `/show/` request path.
+
+**Failure classification is published by the failure owner.** The install
+dimension publishes its class together with the install reason; the runtime
+dimension does the same for startup and proxy failures. The page consumes that
+class and never rebuilds it from a reason string. Existing startup evidence can
+prove whether the URL appeared, whether the child stayed alive, and whether
+health answered, but it cannot prove whether the same observation will
+self-heal; those reasons are therefore unclassified. `runtime_proxy_failed` has
+the same limitation. Missing or too-old Node and missing git/npm are configured
+because a local prerequisite change is the recovery event. Unsupported
+platform/source/URL is permanent. Evidence-poor manifest and archive failures
+remain unclassified rather than acquiring confidence they do not carry.
+
+**A retry identity contains only operation preconditions.** The inclusion rule is
+a predicate, not a remembered exclusion list: an input belongs in the identity
+if and only if no Avibe operation writes it. Derive Avibe's write-set from the
+code, then apply that predicate to every admission input. Re-resolve the result
+before honoring any automatic backoff; it performs no network I/O. Included
+inputs are source configuration, the manifest pin that ships in the wheel,
+configured local source-file fingerprints, the user's explicitly configured
+runtime executable fingerprint, and the Node/git/npm executable fingerprints.
+The explicit runtime is external input because Avibe never writes it; a resolved
+managed runtime is output because Avibe does. Excluded outputs include
+`current.json`, a resolved managed runtime command, install metadata, and every
+managed install tree: the operation writes or replaces them, so including them
+makes its own side effects decide whether it may run again. "One confirmation
+per identity" would then be unbounded in disguise. Product state answers whether
+a runtime can be used; precondition evidence answers whether an operation may
+run again. A healthy installed command bypasses the install gate entirely, which
+already provides recovery after an out-of-process repair or pointer switch
+without making product state part of the backoff identity.
+
+**Classification vocabulary is shared; retry ownership is not.** Install,
+startup, and Runtime request transport have independent retry records because
+they answer different questions. A failed install is not evidence about runtime
+startability, and a successful start is not evidence that a Runtime request can
+be served. Every manager admission decision receives intent explicitly:
+automatic callers pass `automatic=True`, while explicit user actions pass false
+and bypass a live install or startup gate unconditionally. The request owner does
+not gate ordinary requests at all: a bound on automatic confirmation must never
+become a bound on user-initiated work, or an earlier asset failure could refuse a
+request after the Runtime recovered. Request failures increment and successful
+requests clear their record regardless of who initiated them; the browser alone
+uses the published disposition to decide whether to continue automatic polling.
+
+A forced replacement is accounted from the operation outcome (`ok`) only. If
+replacement reports `ok=false` while a healthy existing command remains on disk,
+only the replacement-operation backoff is recorded; no startup/use backoff is
+installed, and `ensure()` continues serving the existing runtime. Replacement
+failure and runtime unusability are independent facts.
+
+**Retry behavior is published by the retry owner, not derived from failure
+class.** The review breaker on PR #1640 found five instances of one property
+failure in the retry work: a consumer manufactured an answer that an owner
+should publish. A request header stood in for authorization; a retry write after
+lock release stood in for the serialized admission outcome; failure class stood
+in for retry eligibility; the spelling of a reason token stood in for the
+dimension that owned it; and install-lock contention was promoted from "did not
+run" to "ran and failed." The third instance was explicitly approved in an
+earlier ruling: the page-side class-to-retry-mode table was praised as stronger
+than the requested owner-published classification. It was the same forbidden
+derivation one step later. Classification describes the evidence's cause;
+retry disposition describes what the owner will do next. Neither is a proxy for
+the other.
+
+The install retry owner therefore publishes its disposition inside the install
+dimension, and the start retry owner publishes independently inside the runtime
+dimension. The request transport owner publishes its disposition through the
+typed unavailable error produced by that operation; it does not overwrite the
+runtime dimension, because a request failure is not evidence that startup
+failed. The closed vocabulary is `continuous`, `confirmation_pending`, and
+`manual_only`. The policy dimension publishes its own `configured` class and
+`manual_only` disposition for both automatic-install opt-outs. The recovery page
+projects these values and never consults failure class, reason prefixes, or a
+default branch to decide whether to poll. A new value without rendering support
+fails visibly instead of acquiring a confident false behavior.
+
+**Admission accounting is atomic with admission.** The provider result,
+exception normalization, and retry-record write converge while the serialized
+install guard is still held. A second admission cannot pass the retry gate or
+acquire the guard without seeing the first outcome. A failed guard acquisition
+is published as `not_applicable`, because no provider ran; only an operation that
+actually ran and failed may create a backoff. Writing retry state after releasing
+the guard, or checking the gate once before and again after acquisition, gives
+the property two owners and reopens the race.
+
+The next reviewed head exposed the same missing property in startup admission:
+`Popen` and every earlier or later startup exception could escape after the gate
+without publishing a retry outcome. The prior ruling had quantified atomic
+admission over install only, even though it named start as a retry owner in the
+next paragraph. This is the third governance error of the same form in this
+workstream: head five bounded an artifact when a property was at risk; head six
+bounded owners when the risk lived in their shared type; this ruling bounded one
+dimension when the property covered every retry-owning dimension. Enumerating
+visible sites is not a substitute for stating a property with its universal
+quantifier.
+
+The terminal rule is therefore independent of operation and dimension: for every
+retry owner, one exception-closed span covers **gate (when one exists) -> attempt
+-> publication**, and every exit publishes exactly one outcome through the same
+owner. Install publishes before releasing its serialized guard; startup covers
+workspace/cache establishment, orphan cleanup, log creation, process spawn,
+startup URL discovery, and health confirmation; request transport covers the
+shared `request()` / `request_global()` HTTP attempt. Ordinary exceptions become
+structured failures. Cancellation and other `BaseException` exits publish first
+and then propagate. Success, failure, gate refusal, and exception paths all
+converge at one completion publisher; no return or exception site writes retry
+state itself.
+
+`not_applicable` means an attempt was not owed. Install-guard contention is the
+canonical case because another holder is already making progress. `failed`
+means an attempt was owed and did not succeed. A command that resolved and then
+became missing or non-executable is a configured startup failure; other
+establishment/readiness exceptions remain honestly unclassified, receive one
+confirmation, and then name the explicit recovery action.
+
+The exit inventory is executable evidence rather than a review assertion. An AST
+test discovers every manager retry-record attribute and requires exactly one
+writer for each; this owner set now contains install, start, and request transport,
+so adding a fourth record makes a stale two- or three-owner assertion fail. A
+separate gate census discovers every `_active_retry` caller and proves that only
+install and start are backoff-gated; request transport deliberately is not. For
+each owner, the exit inventory requires one completion-publisher call in a
+`finally`, one normal return after publication, one propagated `BaseException`
+raise after publication, and a `BaseException` handler around the attempt span.
+The proof becomes incomplete if retry storage no longer follows the discovered
+attribute shape, a completion publisher gains fallible I/O, or an operation gains
+another exit path; such a change must extend the inventory and move the boundary
+rather than relying on the old assertion.
+
+The fourth findings-bearing head exposed a deeper failure in how the prior proof
+obligations were chosen. Each ruling named the right principle and then allowed
+an example list, a type check, or an unnamed second path to stand in for the
+principle's extent. The request path kept a second, unclosed exception route; the
+precondition predicate was recorded as an extensional exclusion list and thereby
+excluded a user-owned executable that Avibe never writes; and the page introduced
+its own confirmation counter even though no earlier example had named that kind
+of derived decision. Each proof obligation had been derived from the preceding
+round's findings, so it was rigorous over exactly the domain that the prior round
+had taught us to inspect and could not fail on the next round's defects. The AST
+admission inventory is the concrete example: correct over `_active_retry`
+callers, and provably blind to transport exception closure, explicit-command
+fingerprints, and a browser-owned retry budget. Evidence that cannot fail outside
+the last finding's domain is not evidence. This is the fourth governance
+admission for PR #1640.
+
+The runtime request span is therefore exception-closed as well. `request()` and
+`request_global()` share one manager-owned transport boundary and one independent
+request retry record. Reusing the start record is structurally incapable of
+bounding this failure: every request calls `ensure()`, whose healthy fast path
+publishes successful startup immediately before transport and clears the start
+record. It is also a dimension crossing. The request record uses the same local
+precondition identity as install and startup: source configuration, manifest pin,
+and command fingerprints are included because Avibe does not write them; PID,
+`base_url`, and spawn paths are excluded because Avibe does. This is the
+write-set predicate deciding an input that the former exclusion list could not.
+
+An ordinary transport exception publishes runtime reason, class, retry
+disposition, and recovery action through `ShowRuntimeUnavailableError` before it
+reaches the UI. The first unchanged unclassified failure schedules one automatic
+confirmation; the second publishes `manual_only`. A successful request is the
+only operation that clears this record. For a public viewer, the terminal copy
+therefore names the action that viewer can perform: reload the page to try a real
+request again, then contact the instance owner if it still fails. Stopping polling
+without such an action would reproduce the original stuck-page defect.
+
+The API's explicit total-deadline error remains a distinct
+`ShowRuntimeRequestTimeoutError` response. A raw default `httpx` transport timeout
+now becomes the structured unavailable error instead of escaping; this is a
+deliberate caller-visible contract change, and tests assert its reason, class,
+disposition, action, and original cause. Internal capability and health probes
+close their own transport exceptions into their narrower capability/health
+results. The UI catches only the two typed outcomes and projects the unavailable
+error's four fields. Its former fallback, which fabricated all four values for an
+arbitrary exception and could permanently stop a public page, is deleted. An
+unknown programming exception remains loud rather than acquiring recovery
+evidence no owner published.
+
+The browser owns pacing, never retry eligibility. It waits with bounded delay
+while the published disposition remains `continuous` or
+`confirmation_pending`, and reloads when the owner-published recovery facts
+change. It has no `checksRemaining` counter: a failed HTTP poll did not reach
+manager admission and therefore cannot consume the manager's one confirmation.
+Only the retry owner changes the disposition to `manual_only`.
+
+Two censuses are merge evidence for this property:
+
+1. Enumerate every recovery fact consumed by the page or an admission gate — the
+   unavailable exception's reason/class/disposition/action, the corresponding
+   response headers and document dataset, authorization plus the retry request,
+   and retry identity/deadline. For every value, name exactly one producer; every
+   other site is a projection, and defaulting branches are deleted rather than
+   repaired. The executable census also enumerates every direct `AsyncClient`
+   path in the manager and requires external requests to converge through the
+   transport owner. It becomes incomplete if a new header, dataset key, gate
+   input, exception route, or direct HTTP client appears without extending the
+   census. The request retry record is discovered with the other owners; start
+   success cannot clear it, while a successful request must.
+2. Enumerate every retry-identity input and apply the write-set predicate above.
+   The executable census fixes the complete set of manager attributes and helper
+   inputs, proves that the manager assigns those attributes only during
+   construction, and pairs two consuming tests: changing managed install output
+   does not change identity, while replacing a user-configured executable does.
+   It becomes incomplete if a helper begins reading a new fact or an Avibe
+   operation begins writing an included path without extending the write-set.
+
+The pre-committed boundary is now explicit: if a fifth findings-bearing head
+returns a finding inside a property PR #1640 already claims to own, split the PR
+at that property boundary instead of issuing a fourth site ruling. Green tests do
+not override that decision.
+
+**Explicit retry is authorized by the control-plane owner.** The recovery header
+expresses a request; it never grants authority. Avibe is a personal, single-user
+control plane, so only the authenticated instance owner — the same subject that
+could run `vibe runtime prepare` — may bypass automatic bounds and spend local
+compute on an install or spawn. Public and limited share-link viewers always
+remain automatic, even when they send the header, and the page does not render a
+Retry now action they cannot use. This is authorization rather than rate
+limiting: an owner pressing the button is the intended unconditional bypass.
+
+Recovery action is another owner-published value, separate from disposition.
+There are exactly three user obligations the page can truthfully present: run a
+repair, change a setting or prerequisite the owner controls, or accept that no
+local action can help. Policy reasons retain the exact setting token and select
+the second obligation; unsupported platform selects the third. Every other
+failure selects repair unless its owning evidence says otherwise. Adding a case
+extends this closed data domain instead of adding a page branch that reinterprets
+the nearest reason or class.
 
 **Through one admission path.** This requirement was missing from the first
 version of this spec, and its absence produced four review findings across two
@@ -1120,6 +1368,14 @@ adopted as the managed baseline.
 - Poll so the page self-recovers once the runtime installs, without a manual
   reload.
 
+Recovery copy projects the user's obligation separately from the retry
+disposition. A repair command is shown only when local repair can address the
+failure; a deliberate policy opt-out names the setting to change; and an
+unsupported platform states that no local repair or retry changes the fact. The
+page never maps failure class to retry behavior. Install, runtime, and policy
+publish their disposition and recovery action inside their own dimensions, with
+no flat top-level mirror for a consumer to mispair.
+
 All user-visible strings go through `vibe/i18n/`.
 
 **Prove readiness; do not accept a proxy for it.** Two findings on PR #1634's
@@ -1134,12 +1390,12 @@ as a rule because the reduced signal looked adequate each time.
   inherits this, including `vibe doctor`'s repair verifier, which is what made it
   a finding here. A freshly started runtime must answer a request before it
   counts as serving.
-- The recovery page's poll decides whether to keep waiting by checking that it is
-  still the recovery page, not by comparing the current failure reason. A failure
-  that changes from transient to `checksum` or configured therefore keeps
-  displaying the old copy forever. The poll must carry the reason from the
-  admission outcome above and re-render when it changes, including into a
-  terminal state where polling stops.
+- The recovery page's poll decides whether to keep waiting from the manager-owned
+  disposition, not from a browser counter. It verifies that the response is still
+  the recovery page and compares the owner-published reason, class, and disposition
+  with the current document. Any change re-renders the page, including a move to a
+  terminal state where the owner stops polling. A failed poll consumes no
+  confirmation because manager admission never happened.
 
 **A probe proves only the state it was calibrated for.** The first attempt at the
 fix above reused `_healthy()` exactly as the already-running path calls it: one
@@ -1382,8 +1638,10 @@ real `~/.avibe`.
 - W3.3: the npm tarball's outer sha256 is *not* used for verification; the inner
   archive is verified after extraction; the mirror base URL is used when the
   primary registry is unreachable.
-- W4: reason classification; backoff schedule; permanent reasons stay latched;
-  offline neither retries nor latches.
+- W4: owner-published failure classification; independent install/start backoff
+  schedules; exactly one confirmation for unclassified evidence; prerequisite
+  identity changes and explicit intent invalidate a gate without conflating a
+  failed replacement with runtime usability.
 - W5: reason-specific copy; terminal failures render immediately; i18n coverage.
 
 **Pipeline tests**: extend `tests/test_show_runtime_manifest_packaging.py` with
