@@ -12308,20 +12308,21 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         command = command_value if isinstance(command_value, list) else []
         if not command:
             return None, "runtime_command_missing"
-        with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
-            verification_root = Path(verification_root_value)
-            verifier = ShowRuntimeManager(
-                command=shlex.join(str(part) for part in command),
-                workspace_root=verification_root / "show",
-                runtime_dir=verification_root / "runtime",
-                auto_install=False,
-            )
-            try:
-                return asyncio.run(verifier.ensure()), None
-            except Exception as exc:  # noqa: BLE001
-                return None, str(exc)
-            finally:
-                verifier.stop()
+        try:
+            with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
+                verification_root = Path(verification_root_value)
+                verifier = ShowRuntimeManager(
+                    command=shlex.join(str(part) for part in command),
+                    workspace_root=verification_root / "show",
+                    runtime_dir=verification_root / "runtime",
+                    auto_install=False,
+                )
+                try:
+                    return asyncio.run(verifier.ensure()), None
+                finally:
+                    verifier.stop()
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
 
     language = _configured_cli_language()
     if before.get("installed"):

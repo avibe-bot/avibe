@@ -736,7 +736,7 @@ class ShowRuntimeManager:
                 return _STARTUP_HEALTH_TIMEOUT_REASON
             try:
                 healthy = await asyncio.wait_for(self._healthy(base_url), timeout=remaining)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 return _STARTUP_HEALTH_TIMEOUT_REASON
             if process.poll() is not None:
                 return _STARTUP_PROCESS_UNAVAILABLE_REASON
@@ -2597,7 +2597,7 @@ class ShowRuntimeManager:
         if not archive:
             return self._reuse_existing_archive_runtime(existing_command)
         archive_digest = _file_sha256(archive)
-        if existing_command and self._archive_manifest_matches(archive_digest):
+        if not self.force_install and existing_command and self._archive_manifest_matches(archive_digest):
             self._install_reason = None
             return existing_command
         tmp_dir = Path(tempfile.mkdtemp(prefix="prebuilt-", dir=self.runtime_dir))

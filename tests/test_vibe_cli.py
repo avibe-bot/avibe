@@ -2458,6 +2458,68 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     assert "VIBE_INSTALL_SKIP_SHOW_RUNTIME" in captured.err
 
 
+@pytest.mark.parametrize("failure_phase", ["temporary_directory", "verifier", "cleanup"])
+def test_repair_show_runtime_reports_verification_workspace_failures(monkeypatch, tmp_path, failure_phase):
+    prepared = []
+
+    class VerificationDirectory:
+        def __init__(self, *args, **kwargs):
+            if failure_phase == "temporary_directory":
+                raise OSError("verification workspace failed")
+
+        def __enter__(self):
+            root = tmp_path / "verification"
+            root.mkdir(exist_ok=True)
+            return str(root)
+
+        def __exit__(self, exc_type, exc, traceback):
+            if failure_phase == "cleanup":
+                raise OSError("verification workspace failed")
+            return False
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": True,
+            "provider": "archive",
+            "platform": "linux-x64",
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+            "status": {"install_dir": str(tmp_path / "installed")},
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "archive",
+            "platform": "linux-x64",
+            "install_dir": str(tmp_path / "installed"),
+            "archive": {"url": str(tmp_path / "runtime.tgz")},
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        if failure_phase == "verifier":
+            raise OSError("verification workspace failed")
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(0, result=SimpleNamespace(available=True, reason=None)),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr(cli.tempfile, "TemporaryDirectory", VerificationDirectory)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_start_failed"
+    assert result["start_error"] == "verification workspace failed"
+    assert prepared == [True]
+
+
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
     paths.ensure_data_dirs()
     restart_path = runtime.get_restart_status_path()

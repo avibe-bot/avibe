@@ -6352,6 +6352,34 @@ def test_show_runtime_manager_reports_health_timeout_after_retrying(monkeypatch,
     assert stopped_live_processes == [False, True]
 
 
+def test_show_runtime_manager_bounds_in_flight_health_probe_by_shared_deadline(monkeypatch, tmp_path):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    monkeypatch.setattr("core.show_runtime._STARTUP_READY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(1, result=True))
+    monkeypatch.setattr(manager, "stop", lambda: setattr(manager, "_process", None))
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.available is False
+    assert result.reason == "runtime_start_health_timeout"
+
+
 def test_show_runtime_manager_reports_url_timeout_separately(monkeypatch, tmp_path):
     class FakeProcess:
         def poll(self):
@@ -6733,6 +6761,34 @@ def test_show_runtime_manager_refreshes_stale_prebuilt_archive(monkeypatch, tmp_
 
     assert asyncio.run(manager._resolve_managed_command()) == ["/bin/node", str(installed_cli)]
     assert installed_cli.read_text(encoding="utf-8") == "new runtime\n"
+
+
+def test_show_runtime_manager_force_refreshes_matching_prebuilt_archive(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archive-root"
+    archive_cli = archive_root / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    archive_cli.parent.mkdir(parents=True)
+    archive_cli.write_text("healthy runtime\n", encoding="utf-8")
+    archive_path = tmp_path / "vibe-show-runtime-node.tgz"
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(archive_root / "node_modules", arcname="node_modules")
+
+    runtime_dir = tmp_path / "runtime"
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="archive",
+        archive_path=archive_path,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    first = manager.prepare()
+    installed_cli = Path(first["command"][1])
+    installed_cli.write_text("corrupt runtime\n", encoding="utf-8")
+
+    repaired = manager.prepare(force=True)
+
+    assert repaired["ok"] is True
+    assert installed_cli.read_text(encoding="utf-8") == "healthy runtime\n"
 
 
 def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path):
