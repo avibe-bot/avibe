@@ -269,7 +269,10 @@ Result for an agent `remember` of "用户准备在 23 号做发布":
   Deterministic near-duplicate detection over paraphrases is explicitly out
   of scope;
 - partial failure: one failed leg degrades to the other leg's results plus the
-  existing `memory_search_partial` warning;
+  existing `memory_search_partial` warning. The all-projects aggregator
+  (`MemoryRuntime._recall_all_projects`) currently drops `result.warnings`
+  from successful per-project recalls; it must propagate them so a
+  single-leg degradation stays visible on the `all` surface;
 - `include_current_session` overlays: each leg carries its **own** derived
   session filter (the assistant leg filters on the assistant session), since
   `filters.session_id` is also what returns that leg's unprocessed buffer
@@ -302,9 +305,13 @@ which is acceptable for short factual records.
 principal shape (`_PRINCIPAL_RE` / `_PRINCIPAL_GLOB`) and scopes MemCells by
 exact caller principal, so assistant-owned processing would silently vanish
 from scoped and admin diagnostics. The insight reader gains the same trusted
-caller→owner expansion as the read path: a caller's scoped view covers its
-principal owner and its derived assistant owner, with owner-shape matching
-widened accordingly and insight tests covering assistant-owned entries. This
+caller→owner expansion as the read path, stated as a property over the whole
+reader rather than a predicate list: a caller's scoped view covers its
+principal owner and its derived assistant owner wherever the reader matches,
+scopes, or correlates by owner — list, capture↔MemCell correlation, and
+detail queries alike (queue rows stay keyed by the caller principal, so
+correlation joins translate caller→owner rather than comparing raw IDs).
+Insight tests cover assistant-owned entries at list and detail level. This
 ships in the same PR as the write-path switch — the processing log must never
 have a window where accepted captures are invisible to diagnostics.
 
@@ -424,8 +431,10 @@ nothing).
    everos_insight owner expansion (§6a), fixtures and unit + contract +
    scenario tests. The moment this lands, new agent captures are immediately
    searchable and labeled through PR A's reader.
-3. **PR C — docs + regression close-out.** User documentation, the Incus
-   regression checklist, and any residual scenario catalog updates.
+   User documentation for the changed Memory semantics ships in this PR,
+   since this is the PR that activates the user-visible behavior.
+3. **PR C — regression close-out.** The Incus regression checklist and any
+   residual scenario catalog updates.
 
 This document is the plan of record; material scope changes update it in the
 same PR that implements them.
