@@ -112,6 +112,11 @@ export const MemoryProfilePanel: React.FC<{ enabled: boolean }> = ({ enabled }) 
           {t('memory.profile.refresh')}
         </Button>
       </div>
+      {data?.warnings.includes('memory_search_partial') ? (
+        <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-muted">
+          {t('memory.profile.partial')}
+        </div>
+      ) : null}
       {error ? (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       ) : loading && items === null ? (

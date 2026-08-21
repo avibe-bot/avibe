@@ -522,10 +522,16 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
             print(i18n_t("memory.cli.sourceReason", language, reason=reason_label))
         return
 
+    warnings = result.get("warnings")
     if operation == "list":
-        warnings = result.get("warnings")
         if isinstance(warnings, list) and "memory_list_truncated" in warnings:
             print(i18n_t("memory.cli.listWarning.truncated", language), file=sys.stderr)
+    elif (
+        operation in {"search", "profile"}
+        and isinstance(warnings, list)
+        and "memory_search_partial" in warnings
+    ):
+        print(i18n_t("memory.cli.readWarning.partial", language), file=sys.stderr)
 
     items = result.get("items")
     if not isinstance(items, list) or not items:

@@ -4369,6 +4369,7 @@
       "loading": "Loading profile…",
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
+      "partial": "One profile source could not be loaded. The profile shown here may be incomplete.",
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
@@ -4391,7 +4392,7 @@
       "projectLabel": "Memory project",
       "projectDefault": "Default",
       "projectAll": "All my projects",
-      "partial": "Some projects could not be searched. These results may be incomplete.",
+      "partial": "Some user, Agent, or project Memory sources could not be searched. These results may be incomplete.",
       "truncated": "Search stopped before every project was checked. These results may be incomplete.",
       "browse": {
         "sortLabel": "Episode order",

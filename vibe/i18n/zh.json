@@ -784,6 +784,9 @@
       "listWarning": {
         "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
       },
+      "readWarning": {
+        "partial": "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"
+      },
       "partialRestartWarning": "记忆设置内容暂不可用：Web UI 已重启，但服务仍在运行，\n  两者共享的记忆访问凭证仅存在于运行中的进程内。\n  请先运行 'vibe stop'，再运行 'vibe'，以同时重启两者。"
     }
   },

@@ -216,6 +216,38 @@ def test_memory_list_human_surfaces_truncation_warning(
     assert "2026-08-14T12:00:00Z Subject" in captured.out
 
 
+@pytest.mark.parametrize("operation", ["search", "profile"])
+@pytest.mark.parametrize(
+    ("language", "warning"),
+    [
+        (
+            "en",
+            "Some user, Agent, or project Memory sources could not be loaded. Results may be incomplete.",
+        ),
+        ("zh", "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"),
+    ],
+)
+def test_memory_read_human_surfaces_partial_warning(
+    operation,
+    language,
+    warning,
+    capsys,
+) -> None:
+    cli._print_memory_cli_human(
+        operation,
+        {
+            "status": "ok",
+            "items": [{"kind": "fact", "text": "Visible result", "date": None}],
+            "warnings": ["memory_search_partial"],
+        },
+        language=language,
+    )
+
+    captured = capsys.readouterr()
+    assert warning in captured.err
+    assert "Visible result" in captured.out
+
+
 def test_memory_list_parser_defaults_match_everos_page_semantics() -> None:
     args = cli.build_parser().parse_args(["memory", "list"])
 

@@ -784,6 +784,9 @@
       "listWarning": {
         "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."
       },
+      "readWarning": {
+        "partial": "Some user, Agent, or project Memory sources could not be loaded. Results may be incomplete."
+      },
       "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
     }
   },
