@@ -116,6 +116,8 @@ type SelectedReadOutcome =
 
 type SelectedCoordinator = {
   desiredName: string | null;
+  desiredOpenDetail: boolean;
+  desiredSource: 'user' | 'auto' | 'passive';
   intentGeneration: number;
   readGenerations: Map<string, number>;
   accepted: VibeAgentFull | null;
@@ -131,6 +133,8 @@ type SelectedCoordinator = {
 
 const createSelectedCoordinator = (): SelectedCoordinator => ({
   desiredName: null,
+  desiredOpenDetail: false,
+  desiredSource: 'passive',
   intentGeneration: 0,
   readGenerations: new Map(),
   accepted: null,
@@ -237,6 +241,7 @@ export const AgentsPage: React.FC = () => {
   const onboardingVersionRef = useRef(createAgentRequestVersion());
   const selectedCoordinatorRef = useRef(createSelectedCoordinator());
   const selectedMountedRef = useRef(true);
+  const catchUpEpochRef = useRef(0);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -314,7 +319,7 @@ export const AgentsPage: React.FC = () => {
   }, []);
 
   const scheduleSelectedReadRef = useRef<
-    ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean }) => Promise<SelectedReadOutcome> | null)
+    ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean; refreshDefinitions?: boolean }) => Promise<SelectedReadOutcome> | null)
   >(null);
   const retireSelectedIdentityRef = useRef<
     ((identity: string, options?: { refreshDefinitions?: boolean }) => SelectedRetirement) | null
@@ -329,31 +334,45 @@ export const AgentsPage: React.FC = () => {
     coordinator.accepted = agent;
     if (agent?.name) coordinator.retired.delete(agent.name);
     setSelected(agent);
+    if (agent && coordinator.desiredName === agent.name && coordinator.desiredOpenDetail) {
+      setDetailOpen(true);
+    }
   }, []);
 
-  const beginSelectedIntent = useCallback((identity: string | null, options: { auto?: boolean } = {}) => {
-    const coordinator = selectedCoordinatorRef.current;
-    if (coordinator.desiredName && coordinator.desiredName !== identity) {
-      advanceSelectedRead(coordinator, coordinator.desiredName);
-    }
-    if (identity) advanceSelectedRead(coordinator, identity);
-    if (identity && !options.auto) {
-      coordinator.retired.delete(identity);
-      coordinator.autoSelectDismissed = false;
-      coordinator.autoSelectReason = null;
-    }
-    const debt = identity ? coordinator.reconciliationDebt.get(identity) : null;
-    if (debt) debt.scheduled = false;
-    coordinator.intentGeneration += 1;
-    coordinator.desiredName = identity;
-    return { intentGeneration: coordinator.intentGeneration, identity };
-  }, []);
+  const beginSelectedIntent = useCallback(
+    (
+      identity: string | null,
+      options: { auto?: boolean; openDetail?: boolean; source?: 'user' | 'auto' | 'passive' } = {},
+    ) => {
+      const coordinator = selectedCoordinatorRef.current;
+      if (coordinator.desiredName && coordinator.desiredName !== identity) {
+        advanceSelectedRead(coordinator, coordinator.desiredName);
+      }
+      if (identity) advanceSelectedRead(coordinator, identity);
+      if (identity && !options.auto) {
+        coordinator.retired.delete(identity);
+        coordinator.autoSelectDismissed = false;
+        coordinator.autoSelectReason = null;
+      }
+      const debt = identity ? coordinator.reconciliationDebt.get(identity) : null;
+      if (debt) debt.scheduled = false;
+      coordinator.intentGeneration += 1;
+      coordinator.desiredName = identity;
+      coordinator.desiredOpenDetail = Boolean(identity && options.openDetail);
+      coordinator.desiredSource = options.source ?? (options.auto ? 'auto' : 'user');
+      return { intentGeneration: coordinator.intentGeneration, identity };
+    },
+    [],
+  );
 
   const rollbackSelectedIntent = useCallback(() => {
     const coordinator = selectedCoordinatorRef.current;
     if (coordinator.desiredName) advanceSelectedRead(coordinator, coordinator.desiredName);
     const acceptedIdentity = coordinator.accepted?.name ?? null;
-    return beginSelectedIntent(acceptedIdentity && !coordinator.retired.has(acceptedIdentity) ? acceptedIdentity : null);
+    return beginSelectedIntent(
+      acceptedIdentity && !coordinator.retired.has(acceptedIdentity) ? acceptedIdentity : null,
+      { source: 'passive', openDetail: false },
+    );
   }, [beginSelectedIntent]);
 
 
@@ -362,7 +381,7 @@ export const AgentsPage: React.FC = () => {
   // reconnect snapshot with a stale cached promise.
   const refresh = useCallback(() => {
     const token = definitionsVersionRef.current.begin();
-    const request = (async () => {
+    const request = (async (): Promise<boolean> => {
       setLoading(true);
       clearResourceError('definitions');
       try {
@@ -373,7 +392,7 @@ export const AgentsPage: React.FC = () => {
         // A read issued before a stream gap may finish after the catch-up read.
         // Only the latest request may publish its snapshot, so an older response
         // cannot roll the Definitions list back to pre-gap state.
-        if (!definitionsVersionRef.current.isCurrent(token)) return;
+        if (!definitionsVersionRef.current.isCurrent(token)) return false;
         setAgents(result.agents);
         setDefaultName(result.default_agent_name);
         // List omission is authoritative retirement evidence. The coordinator
@@ -391,13 +410,13 @@ export const AgentsPage: React.FC = () => {
           for (const identity of retired) {
             retireSelectedIdentityRef.current?.(identity, { refreshDefinitions: false });
           }
-          definitionsVersionRef.current.invalidate();
-          void refreshRef.current();
         }
+        return true;
       } catch (err) {
         if (definitionsVersionRef.current.isCurrent(token)) {
           setResourceError('definitions', errorMessage(err) ?? String(err));
         }
+        return false;
       } finally {
         if (definitionsVersionRef.current.isCurrent(token)) setLoading(false);
       }
@@ -431,8 +450,16 @@ export const AgentsPage: React.FC = () => {
         // entity. Keep that accepted entity eligible for reconnect/debt
         // reconciliation instead of leaving visible A with no desired A.
         coordinator.desiredName = acceptedCanResume ? acceptedIdentity : null;
+        // A vanished pending selection must not transfer its mobile drill-down
+        // request to the fallback identity.
+        coordinator.desiredOpenDetail = false;
+        coordinator.desiredSource = 'passive';
       }
-      if (coordinator.accepted?.name === identity) commitSelected(null);
+      if (coordinator.accepted?.name === identity) {
+        coordinator.desiredOpenDetail = false;
+        coordinator.desiredSource = 'passive';
+        commitSelected(null);
+      }
       if (!coordinator.desiredName && !coordinator.accepted && !coordinator.autoSelectDismissed) {
         coordinator.autoSelectReason = 'replacement';
       }
@@ -496,6 +523,7 @@ export const AgentsPage: React.FC = () => {
       intentGeneration?: number;
       expectedCodes?: readonly string[];
       debtVersion?: number;
+      refreshDefinitions?: boolean;
     }): Promise<SelectedReadOutcome> => {
       const coordinator = selectedCoordinatorRef.current;
       const isCurrent = () =>
@@ -525,7 +553,9 @@ export const AgentsPage: React.FC = () => {
           options.expectedCodes &&
           SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(result) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])
         ) {
-          const retirement = retireSelectedIdentityRef.current?.(options.identity);
+          const retirement = retireSelectedIdentityRef.current?.(options.identity, {
+            refreshDefinitions: options.refreshDefinitions !== false,
+          });
           finishDebt(false);
           if (retirement?.resumedIdentity) {
             return {
@@ -543,7 +573,9 @@ export const AgentsPage: React.FC = () => {
       } catch (err) {
         if (!isCurrent()) return { kind: 'stale' };
         if (options.expectedCodes && SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-          const retirement = retireSelectedIdentityRef.current?.(options.identity);
+          const retirement = retireSelectedIdentityRef.current?.(options.identity, {
+            refreshDefinitions: options.refreshDefinitions !== false,
+          });
           finishDebt(false);
           if (retirement?.resumedIdentity) {
             return {
@@ -566,7 +598,7 @@ export const AgentsPage: React.FC = () => {
   const scheduleSelectedRead = useCallback(
     (
       identity: string,
-      options: { expectedCodes?: readonly string[]; debtOnly?: boolean } = {},
+      options: { expectedCodes?: readonly string[]; debtOnly?: boolean; refreshDefinitions?: boolean } = {},
     ): Promise<SelectedReadOutcome> | null => {
       if (!selectedMountedRef.current || !identity) return null;
       const coordinator = selectedCoordinatorRef.current;
@@ -587,6 +619,7 @@ export const AgentsPage: React.FC = () => {
         readGeneration,
         intentGeneration,
         expectedCodes: options.expectedCodes,
+        refreshDefinitions: options.refreshDefinitions,
         debtVersion,
       }).then((outcome) => {
         if (debtVersion !== undefined) {
@@ -668,18 +701,21 @@ export const AgentsPage: React.FC = () => {
     [setResourceError, t],
   );
 
-  const reconcileSelected = useCallback(async () => {
+  const reconcileSelected = useCallback(async (edgeEpoch?: number) => {
     const coordinator = selectedCoordinatorRef.current;
     let transactionIntentGeneration = coordinator.intentGeneration;
     let identity = coordinator.desiredName;
     const attempted = new Set<string>();
     while (selectedMountedRef.current && identity && !attempted.has(identity)) {
+      if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
       if (coordinator.intentGeneration !== transactionIntentGeneration) return;
       attempted.add(identity);
       if (coordinator.mutations.has(identity)) return;
       const outcome = await scheduleSelectedReadRef.current?.(identity, {
         expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+        refreshDefinitions: false,
       });
+      if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
       if (!outcome || outcome.kind !== 'expected-retired') return;
       if (
         outcome.intentGeneration !== coordinator.intentGeneration ||
@@ -690,6 +726,13 @@ export const AgentsPage: React.FC = () => {
       identity = outcome.resumedIdentity;
     }
   }, []);
+
+  const reconcileGap = useCallback(async () => {
+    const edgeEpoch = ++catchUpEpochRef.current;
+    const applied = await refreshRef.current();
+    if (!applied || !selectedMountedRef.current || catchUpEpochRef.current !== edgeEpoch) return;
+    await reconcileSelected(edgeEpoch);
+  }, [reconcileSelected]);
 
   useEffect(() => {
     selectedMountedRef.current = true;
@@ -765,8 +808,7 @@ export const AgentsPage: React.FC = () => {
       // The bridge report is only the indicator's level: it comes with its own
       // `onConnected`, and refetching from both would pay twice for one gap.
       onConnected: () => {
-        void refreshRef.current();
-        void reconcileSelected();
+        void reconcileGap();
         void refreshOnboarding();
         void fetchRunningActiveCount();
       },
@@ -777,11 +819,10 @@ export const AgentsPage: React.FC = () => {
       onTurnEnd: () => fetchRunningActiveCount(),
       onSessionStatus: () => fetchRunningActiveCount(),
       onAuthorizationChanged: () => {
-        void refreshRef.current();
-        void reconcileSelected();
+        void reconcileGap();
       },
     });
-  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, refreshOnboarding, reconcileSelected]);
+  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, reconcileGap, refreshOnboarding]);
 
   useEffect(() => {
     if (!capabilities.can_use_agents) return;
@@ -832,7 +873,7 @@ export const AgentsPage: React.FC = () => {
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false, auto = false) => {
-      beginSelectedIntent(name, { auto });
+      beginSelectedIntent(name, { auto, openDetail, source: auto ? 'auto' : 'user' });
       clearResourceError('selection');
       const outcome = await scheduleSelectedReadRef.current?.(name);
       if (outcome?.kind === 'failed') {
@@ -844,9 +885,6 @@ export const AgentsPage: React.FC = () => {
           });
         }
       }
-      // Enter the mobile drill-down only once the detail has actually loaded —
-      // never optimistically, or a failed fetch hides the list with no panel.
-      if (outcome?.kind === 'published' && openDetail) setDetailOpen(true);
     },
     [beginSelectedIntent, clearResourceError],
   );
@@ -1213,6 +1251,7 @@ export const AgentsPage: React.FC = () => {
         {selected && (
           <div className={clsx('self-start rounded-2xl border border-border-strong bg-surface p-5', !detailOpen && 'max-lg:hidden')}>
             <AgentDetailPanel
+              key={selected.id}
               agent={selected}
               isDefault={defaultName === selected.name}
               canEdit={canEditAgents}
@@ -1726,6 +1765,14 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
     });
   };
 
+  // Inline controls are background mutations: the coordinator records and
+  // renders failures, while this single owner consumes the rejection so JSX
+  // callbacks never create unhandled promises. The modal save intentionally
+  // bypasses this helper so EditorDialog can keep a failed draft open.
+  const consumeBackgroundMutation = (operation: Promise<unknown>) => {
+    void operation.catch(() => undefined);
+  };
+
   // Only user Agents can be renamed; the backend moves every durable name
   // reference in the same transaction.
   const commitRename = async () => {
@@ -1806,7 +1853,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         <Switch
           checked={agent.enabled}
           onCheckedChange={(next) => {
-            void onChange({ enabled: next }).catch(() => undefined);
+            consumeBackgroundMutation(onChange({ enabled: next }));
           }}
           disabled={!canEdit}
           title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
@@ -1890,7 +1937,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               return;
             }
             markFieldSubmitted('description');
-            void submitFields({ description: canonical || null }, ['description']).catch(() => undefined);
+              consumeBackgroundMutation(submitFields({ description: canonical || null }, ['description']));
           }}
           disabled={locked}
           title={lockHint}
@@ -1950,7 +1997,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                   patch.reasoning_effort = fallback;
                 }
               }
-              void submitFields(patch, patch.reasoning_effort ? ['model', 'effort'] : ['model']).catch(() => undefined);
+              consumeBackgroundMutation(submitFields(patch, patch.reasoning_effort ? ['model', 'effort'] : ['model']));
             }}
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
@@ -1977,7 +2024,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                   markFieldEdit('effort');
                   markFieldSubmitted('effort');
                   setEffort(opt);
-                  void submitFields({ reasoning_effort: opt }, ['effort']).catch(() => undefined);
+                  consumeBackgroundMutation(submitFields({ reasoning_effort: opt }, ['effort']));
                 }}
                 className={clsx(
                   'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',
@@ -2055,7 +2102,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                 return;
               }
               markFieldSubmitted('systemPrompt');
-              void submitFields({ system_prompt: canonical || null }, ['systemPrompt']).catch(() => undefined);
+              consumeBackgroundMutation(submitFields({ system_prompt: canonical || null }, ['systemPrompt']));
             }}
             readOnly={!canEdit}
             title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}

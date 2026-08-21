@@ -401,6 +401,73 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
 
+  it('orders a list-first gap retirement before the same-edge accepted-A read', async () => {
+    const agentA = brief('agent-a', 'A before gap');
+    const agentB = brief('agent-b', 'B pending');
+    const staleB = deferred<ReturnType<typeof fullAgent>>();
+    const catchupA = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+      .mockReturnValueOnce(staleB.promise)
+      .mockReturnValueOnce(catchupA.promise);
+    const listVibeAgents = vi.fn()
+      .mockResolvedValueOnce(listResult([agentA, agentB]))
+      .mockResolvedValueOnce(listResult(agentA));
+    const api = makeApi(listVibeAgents, getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('A before gap')).toBeTruthy());
+    fireEvent.click(screen.getByText('agent-b').closest('button')!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
+    expect(listVibeAgents).toHaveBeenCalledTimes(2);
+
+    act(() => catchupA.resolve(fullAgent({ ...agentA, description: 'A after gap' }, 'A changed prompt')));
+    await waitFor(() => expect(screen.getByDisplayValue('A after gap')).toBeTruthy());
+    act(() => staleB.resolve(fullAgent(agentB, 'stale B')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('A after gap')).toBeTruthy();
+    expect(getVibeAgent.mock.calls.slice(3).some(([name]) => name === 'agent-b')).toBe(false);
+  });
+
+  it('carries a row-tap drill-down intent through a reconnect replacement read', async () => {
+    const agentA = brief('agent-a', 'A');
+    const agentB = brief('agent-b', 'B');
+    const staleB = deferred<ReturnType<typeof fullAgent>>();
+    const freshB = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+      .mockReturnValueOnce(staleB.promise)
+      .mockReturnValueOnce(freshB.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([agentA, agentB])), getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    fireEvent.click(screen.getByText('agent-b').closest('button')!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    act(() => freshB.resolve(fullAgent({ ...agentB, description: 'B after reconnect' }, 'B after reconnect')));
+    await waitFor(() => expect(screen.getByDisplayValue('B after reconnect')).toBeTruthy());
+    const detail = screen.getByDisplayValue('B after reconnect').closest('.self-start');
+    expect(detail?.className).not.toContain('max-lg:hidden');
+    act(() => staleB.resolve(fullAgent(agentB, 'stale B')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('B after reconnect')).toBeTruthy();
+  });
+
   it('lets a successful PATCH win over a reconnect GET that settles later', async () => {
     const initial = { ...brief('agent-a', 'before patch'), model: 'old-model' };
     const server = { ...initial, description: 'server description', model: 'server-model' };
@@ -488,6 +555,59 @@ describe('AgentsPage reconnect reconciliation', () => {
     });
     expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-b', { cache: false });
     expect(getVibeAgent).toHaveBeenNthCalledWith(4, 'agent-a', { cache: false });
+  });
+
+  it.each([
+    { label: 'A succeeds', failA: false },
+    { label: 'A fails', failA: true },
+  ])('isolates field settlement across A/B panel instances when $label', async ({ failA }) => {
+    const agentA = brief('agent-a', 'A initial');
+    const agentB = brief('agent-b', 'B initial');
+    const readB = deferred<ReturnType<typeof fullAgent>>();
+    const drainB = deferred<ReturnType<typeof fullAgent>>();
+    const patchA = deferred<unknown>();
+    const patchB = deferred<unknown>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agentA, 'A prompt'))
+      .mockReturnValueOnce(readB.promise)
+      .mockReturnValueOnce(drainB.promise);
+    const updateVibeAgent = vi.fn()
+      .mockReturnValueOnce(patchA.promise)
+      .mockReturnValueOnce(patchB.promise);
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult([agentA, agentB])),
+      getVibeAgent,
+      undefined,
+      undefined,
+      updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('A initial')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('A initial'), { target: { value: 'A local' } });
+    fireEvent.blur(screen.getByDisplayValue('A local'));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { description: 'A local' }));
+
+    fireEvent.click(screen.getByText('agent-b').closest('button')!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    act(() => readB.resolve(fullAgent(agentB, 'B prompt')));
+    await waitFor(() => expect(screen.getByDisplayValue('B initial')).toBeTruthy());
+
+    fireEvent.change(screen.getByDisplayValue('B initial'), { target: { value: 'B local' } });
+    fireEvent.blur(screen.getByDisplayValue('B local'));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-b', { description: 'B local' }));
+
+    act(() => (failA ? patchA.reject({ message: 'A failed' }) : patchA.resolve({ ok: true })));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('B local')).toBeTruthy();
+
+    act(() => patchB.resolve({ ok: true }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    act(() => drainB.resolve(fullAgent({ ...agentB, description: 'B authoritative' }, 'B final prompt')));
+    await waitFor(() => expect(screen.getByDisplayValue('B authoritative')).toBeTruthy());
   });
 
   it('keeps the current selection intent when DELETE fails', async () => {
@@ -1303,31 +1423,25 @@ describe('AgentsPage reconnect reconciliation', () => {
   });
 
   it.each(['agent_not_found', 'agent_access_forbidden'] as const)(
-    'retires an expected disappearance before an older list response can auto-select A (%s)',
+    'retires an expected disappearance without recursively refreshing Definitions (%s)',
     async (code) => {
       const agentA = brief('agent-a', 'A');
-      const agentB = brief('agent-b', 'B');
-      const oldList = deferred<ReturnType<typeof listResult>>();
-      const freshList = deferred<ReturnType<typeof listResult>>();
       const getVibeAgent = vi.fn()
         .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
-        .mockRejectedValueOnce({ code, message: 'gone' })
-        .mockResolvedValue(fullAgent(agentB, 'B fresh'));
-      const listVibeAgents = vi.fn()
-        .mockResolvedValueOnce(listResult(agentA))
-        .mockReturnValueOnce(oldList.promise)
-        .mockReturnValueOnce(freshList.promise);
+        .mockRejectedValueOnce({ code, message: 'gone' });
+      const listVibeAgents = vi.fn().mockResolvedValue(listResult(agentA));
       const api = makeApi(listVibeAgents, getVibeAgent);
       renderPage(api);
 
       await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
       act(() => handlers?.onConnected?.());
       await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
-      await waitFor(() => expect(listVibeAgents).toHaveBeenCalledTimes(3));
-      act(() => oldList.resolve(listResult(agentA)));
-      act(() => freshList.resolve(listResult(agentB)));
-      await waitFor(() => expect(screen.getByDisplayValue('B')).toBeTruthy());
-      expect(getVibeAgent.mock.calls.slice(2).some(([name]) => name === 'agent-a')).toBe(false);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(listVibeAgents).toHaveBeenCalledTimes(2);
+      expect(screen.queryByDisplayValue('A')).toBeNull();
       expect(showToast).not.toHaveBeenCalled();
     },
   );
