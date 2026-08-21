@@ -1824,6 +1824,14 @@ class ShowRuntimeManager:
             node,
         )
         if verified_existing_command and not self.force_install:
+            verified_install_dir = next(
+                iter(self._manifest_install_dirs_for_command(verified_existing_command)),
+                None,
+            )
+            if verified_install_dir is None:
+                self._install_reason = "runtime_install_failed"
+                return None
+            self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
             self._install_reason = None
             return verified_existing_command
         archive_path = self._resolve_manifest_archive(archive)

@@ -6654,7 +6654,6 @@ def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_prote
     previous_cli.parent.mkdir(parents=True)
     previous_cli.write_text("previous fingerprint runtime\n", encoding="utf-8")
     previous_manager._write_manifest_install_metadata(previous_install_dir, previous_manifest, archive)
-    previous_manager._write_current_manifest_pointer(previous_manifest, archive, previous_install_dir)
 
     downloads_dir = runtime_dir / "downloads"
     downloads_dir.mkdir(parents=True)
@@ -6681,6 +6680,19 @@ def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_prote
     stale_archive = downloads_dir / f"{stale_sha256}.tgz"
     stale_archive.write_bytes(b"stale")
     os.utime(stale_archive, (1, 1))
+    (runtime_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest-cache",
+                "runtime_version": "stale-runtime",
+                "platform": archive.platform,
+                "install_dir": str(stale_install_dir),
+                "manifest_sha256": "d" * 64,
+                "archive_sha256": stale_sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["archives"]["other-platform"] = {
@@ -6711,6 +6723,10 @@ def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_prote
     assert previous_install_dir.exists() is True
     assert manager._manifest_install_dir(current_manifest, archive).exists() is False
     assert archive.sha256 in manager._protected_archive_sha256s()
+    current_pointer = json.loads((runtime_dir / "current.json").read_text(encoding="utf-8"))
+    assert current_pointer["runtime_version"] == current_manifest.runtime_version
+    assert current_pointer["install_dir"] == str(previous_install_dir)
+    assert current_pointer["archive_sha256"] == archive.sha256
 
     clean_result = manager.clean(keep_previous=0)
 
