@@ -198,7 +198,11 @@ commits. Therefore the lifecycle fence (scope resolution and admission
 locking) remains keyed by the caller principal exactly as today, and the
 owner fan-out happens *beneath* that fence: inside the held admission, the
 terminal path derives both owner session refs for the caller's scope and
-flushes each. Owner-aware validation applies only where an owner (not a
+flushes each; both flush tasks are scheduled concurrently under the shared
+terminal deadline, so a stalled first leg cannot starve the second
+(`SessionFlushCoordinator.final_flush` handles one session today), and the
+terminal-boundary test covers a slow first leg. Owner-aware validation
+applies only where an owner (not a
 caller) flows — fence keys and access-control gates keep `is_principal_id`.
 
 ### 4. `ProviderSessionRef` compatibility (Blocker 3)
@@ -267,7 +271,12 @@ Result for an agent `remember` of "用户准备在 23 号做发布":
   them, so the promised merge cannot be built on `MemoryItem` alone. The port
   returns an internal scored result type (provider score, stable episode ID,
   timestamp, owner) to the module; the module merges on that type and only
-  then projects to `MemoryItem`. The public payload shape is unchanged;
+  then projects to `MemoryItem`. Score and episode ID stay *optional*: the
+  accepted provider contract allows search responses without either
+  (`tests/test_memory_everos.py:692-710`), so requiring them would reject
+  valid responses. When absent, ordering falls back deterministically to
+  provider rank, then timestamp, then normalized text; metadata-free
+  response coverage is retained. The public payload shape is unchanged;
 - merge: when both legs ran the same method, merge by EverOS score
   (comparable LR-calibrated values), tie-break by timestamp then stable ID.
   When the legs ran different methods (agentic recall: user leg agentic,
