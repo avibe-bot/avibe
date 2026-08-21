@@ -80,6 +80,7 @@ type AgentRequestToken = { version: number; identity: string | null };
 type AgentRequestVersion = {
   begin: (identity?: string | null) => AgentRequestToken;
   invalidate: () => number;
+  current: () => number;
   isCurrent: (token: AgentRequestToken) => boolean;
 };
 
@@ -99,6 +100,7 @@ type SelectedMutationOperation = {
   identity: string;
   sequence: number;
   failure?: unknown;
+  joinedDetailBarrier?: boolean;
   resolve?: (result: SelectedMutationResult) => void;
 };
 
@@ -123,10 +125,10 @@ type SelectedRetirement = {
 type SelectedReadContinuation = { nextIdentity: string; intentGeneration: number };
 
 type SelectedReadOutcome =
-  | { kind: 'published' }
+  | { kind: 'published'; continuation?: SelectedReadContinuation }
   | { kind: 'failed'; error?: unknown; continuation?: SelectedReadContinuation }
-  | { kind: 'stale' }
-  | { kind: 'expected-retired'; continuation: SelectedReadContinuation };
+  | { kind: 'stale'; continuation?: SelectedReadContinuation }
+  | { kind: 'expected-retired'; continuation?: SelectedReadContinuation };
 
 type SelectedCoordinator = {
   desiredName: string | null;
@@ -136,12 +138,15 @@ type SelectedCoordinator = {
   readGenerations: Map<string, number>;
   accepted: VibeAgentFull | null;
   acceptedGeneration: number;
+  activeReads: Map<string, Promise<SelectedReadOutcome>>;
+  activeReadCauses: Map<string, 'selection' | 'reconcile' | 'continuation' | 'debt'>;
   nextBatchId: number;
   nextOperationId: number;
   nextMutationVersion: number;
   mutations: Map<string, SelectedMutationBatch>;
   reconciliationDebt: Map<string, SelectedReconciliationDebt>;
   retired: Set<string>;
+  retiredAtDefinitionsVersion: Map<string, number>;
   autoSelectReason: AutoSelectReason | null;
   autoSelectDismissed: boolean;
 };
@@ -164,12 +169,15 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
   readGenerations: new Map(),
   accepted: null,
   acceptedGeneration: 0,
+  activeReads: new Map(),
+  activeReadCauses: new Map(),
   nextBatchId: 0,
   nextOperationId: 0,
   nextMutationVersion: 0,
   mutations: new Map(),
   reconciliationDebt: new Map(),
   retired: new Set(),
+  retiredAtDefinitionsVersion: new Map(),
   autoSelectReason: 'initial',
   autoSelectDismissed: false,
 });
@@ -210,6 +218,7 @@ const createAgentRequestVersion = (): AgentRequestVersion => {
   return {
     begin: (identity = null) => ({ version: ++version, identity }),
     invalidate: () => ++version,
+    current: () => version,
     isCurrent: (token) => token.version === version,
   };
 };
@@ -382,10 +391,13 @@ export const AgentsPage: React.FC = () => {
       refreshDefinitions?: boolean;
       rollbackOnFailure?: boolean;
       clearSelectionError?: boolean;
+      followContinuation?: boolean;
+      allowSupersede?: boolean;
+      cause?: 'selection' | 'reconcile' | 'continuation' | 'debt';
     }) => Promise<SelectedReadOutcome> | null)
   >(null);
   const retireSelectedIdentityRef = useRef<
-    ((identity: string, options?: { refreshDefinitions?: boolean }) => SelectedRetirement) | null
+    ((identity: string, options?: { refreshDefinitions?: boolean; cause?: unknown }) => SelectedRetirement) | null
   >(null);
 
   const commitSelected = useCallback((agent: VibeAgentFull | null) => {
@@ -395,7 +407,15 @@ export const AgentsPage: React.FC = () => {
     if (agent?.name) advanceSelectedRead(coordinator, agent.name);
     coordinator.acceptedGeneration += 1;
     coordinator.accepted = agent;
-    if (agent?.name) coordinator.retired.delete(agent.name);
+    if (agent?.name) {
+      coordinator.retired.delete(agent.name);
+      coordinator.retiredAtDefinitionsVersion.delete(agent.name);
+      if (coordinator.desiredSource === 'auto' && coordinator.desiredName === agent.name) {
+        // Auto-selection is consumed only by an authoritative publication. A
+        // failed attempt leaves the reason pending for the next external edge.
+        coordinator.autoSelectReason = null;
+      }
+    }
     setSelected(agent);
     if (agent && coordinator.desiredName === agent.name && coordinator.desiredOpenDetail) {
       setDetailOpen(true);
@@ -415,6 +435,7 @@ export const AgentsPage: React.FC = () => {
       if (identity) advanceSelectedRead(coordinator, identity);
       if (identity && !options.auto) {
         coordinator.retired.delete(identity);
+        coordinator.retiredAtDefinitionsVersion.delete(identity);
         coordinator.autoSelectDismissed = false;
         coordinator.autoSelectReason = null;
       }
@@ -475,13 +496,23 @@ export const AgentsPage: React.FC = () => {
         // Only the latest request may publish its snapshot, so an older response
         // cannot roll the Definitions list back to pre-gap state.
         if (!definitionsVersionRef.current.isCurrent(token)) return;
-        setAgents(result.agents);
+        const coordinator = selectedCoordinatorRef.current;
+        const visibleAgents = result.agents.filter((agent) => {
+          const retiredAt = coordinator.retiredAtDefinitionsVersion.get(agent.name);
+          if (retiredAt === undefined) return true;
+          if (token.version > retiredAt) {
+            coordinator.retired.delete(agent.name);
+            coordinator.retiredAtDefinitionsVersion.delete(agent.name);
+            return true;
+          }
+          return false;
+        });
+        setAgents(visibleAgents);
         setDefaultName(result.default_agent_name);
         // List omission is authoritative retirement evidence. The coordinator
         // owns all desired/accepted transitions; stale list responses cannot
         // re-select an identity after retirement because the retired set is
         // updated before the next render.
-        const coordinator = selectedCoordinatorRef.current;
         const currentIdentities = [coordinator.accepted?.name, coordinator.desiredName].filter(
           (identity): identity is string => Boolean(identity),
         );
@@ -510,7 +541,7 @@ export const AgentsPage: React.FC = () => {
   refreshRef.current = refresh;
 
   const retireSelectedIdentity = useCallback(
-    (identity: string, options: { refreshDefinitions?: boolean } = {}) => {
+    (identity: string, options: { refreshDefinitions?: boolean; cause?: unknown } = {}) => {
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.retired.has(identity)) {
         return { retired: false, resumedIdentity: null, intentGeneration: coordinator.intentGeneration };
@@ -524,11 +555,16 @@ export const AgentsPage: React.FC = () => {
           !coordinator.autoSelectDismissed,
       );
       coordinator.retired.add(identity);
+      coordinator.retiredAtDefinitionsVersion.set(identity, definitionsVersionRef.current.current());
       advanceSelectedRead(coordinator, identity);
+      // A detail-level tombstone is Definitions evidence too. Remove the row
+      // in the same transition, while the retirement watermark prevents an
+      // older in-flight list response from resurrecting it.
+      setAgents((current) => current.filter((agent) => agent.name !== identity));
       const debt = coordinator.reconciliationDebt.get(identity);
       coordinator.reconciliationDebt.delete(identity);
       for (const waiter of debt?.waiters.splice(0) ?? []) {
-        waiter.resolve({ ok: false, error: { code: 'agent_not_found' } });
+        waiter.resolve({ ok: false, error: options.cause ?? { code: 'agent_not_found' } });
       }
       if (pendingIdentity) {
         coordinator.intentGeneration += 1;
@@ -645,59 +681,48 @@ export const AgentsPage: React.FC = () => {
           ? { nextIdentity: rollback.identity, intentGeneration: rollback.intentGeneration }
           : undefined;
       };
-      try {
-        const params = options.expectedCodes ? { cache: false, expectedCodes: options.expectedCodes } : { cache: false };
-        const result = await api.getVibeAgent(options.identity, params);
+      // All selected-read terminal states pass through this one owner. The
+      // executor only obtains a server result; retirement, debt completion,
+      // rollback and error publication are decided here for both transport
+      // shapes (HTTP ok:false and rejected requests).
+      const finalizeSelectedRead = (value: unknown): SelectedReadOutcome => {
         if (!isCurrent()) return { kind: 'stale' };
-        if (result.ok && result.agent?.name === options.identity) {
+        const result = value as {
+          ok?: boolean;
+          agent?: VibeAgentFull;
+        } | null;
+        if (result?.ok && result.agent?.name === options.identity) {
           if (options.clearSelectionError !== false) clearResourceError('selection');
           commitSelected(result.agent);
           finishDebt(true);
           return { kind: 'published' };
         }
-        if (
-          options.expectedCodes &&
-          SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(result) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])
-        ) {
+        const code = errorCodeOf(value);
+        if (options.expectedCodes?.includes(code ?? '')) {
           const retirement = retireSelectedIdentityRef.current?.(options.identity, {
-            refreshDefinitions: options.refreshDefinitions !== false,
+            refreshDefinitions: options.refreshDefinitions === true,
+            cause: value,
           });
-          if (retirement?.resumedIdentity) {
-            return {
-              kind: 'expected-retired',
-              continuation: {
-                nextIdentity: retirement.resumedIdentity,
-                intentGeneration: retirement.intentGeneration,
-              },
-            };
-          }
-          return { kind: 'failed' };
+          return {
+            kind: 'expected-retired',
+            continuation: retirement?.resumedIdentity
+              ? {
+                  nextIdentity: retirement.resumedIdentity,
+                  intentGeneration: retirement.intentGeneration,
+                }
+              : undefined,
+          };
         }
         const continuation = continuationFor();
-        setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
-        finishDebt(false, result);
-        return { kind: 'failed', error: result, continuation };
+        setResourceError('selection', errorMessage(value) || tRef.current('errorBoundary.title'));
+        finishDebt(false, value);
+        return { kind: 'failed', error: value, continuation };
+      };
+      try {
+        const params = options.expectedCodes ? { cache: false, expectedCodes: options.expectedCodes } : { cache: false };
+        return finalizeSelectedRead(await api.getVibeAgent(options.identity, params));
       } catch (err) {
-        if (!isCurrent()) return { kind: 'stale' };
-        if (options.expectedCodes && SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-          const retirement = retireSelectedIdentityRef.current?.(options.identity, {
-            refreshDefinitions: options.refreshDefinitions !== false,
-          });
-          if (retirement?.resumedIdentity) {
-            return {
-              kind: 'expected-retired',
-              continuation: {
-                nextIdentity: retirement.resumedIdentity,
-                intentGeneration: retirement.intentGeneration,
-              },
-            };
-          }
-          return { kind: 'failed' };
-        }
-        const continuation = continuationFor();
-        setResourceError('selection', errorMessage(err) || tRef.current('errorBoundary.title'));
-        finishDebt(false, err);
-        return { kind: 'failed', error: err, continuation };
+        return finalizeSelectedRead(err);
       }
     },
     [api, clearResourceError, commitSelected, rollbackSelectedIntent, setResourceError],
@@ -712,11 +737,20 @@ export const AgentsPage: React.FC = () => {
         refreshDefinitions?: boolean;
         rollbackOnFailure?: boolean;
         clearSelectionError?: boolean;
+        followContinuation?: boolean;
+        allowSupersede?: boolean;
+        cause?: 'selection' | 'reconcile' | 'continuation' | 'debt';
       } = {},
     ): Promise<SelectedReadOutcome> | null => {
       if (!selectedMountedRef.current || !identity) return null;
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.retired.has(identity) || coordinator.desiredName !== identity) return null;
+      const activeRead = coordinator.activeReads.get(identity);
+      const cause = options.cause ?? 'selection';
+      if (
+        activeRead &&
+        !(options.allowSupersede === true && !(cause === 'reconcile' && coordinator.activeReadCauses.get(identity) === 'continuation'))
+      ) return activeRead;
       // User selection is an explicit intent and may read immediately even
       // while that identity has a pending mutation. Passive/debt drains wait
       // for acknowledgements so they cannot publish an intermediate snapshot.
@@ -728,7 +762,7 @@ export const AgentsPage: React.FC = () => {
       if (debt) debt.scheduled = true;
       const readGeneration = advanceSelectedRead(coordinator, identity);
       const intentGeneration = coordinator.intentGeneration;
-      return launchSelectedRead({
+      const read = launchSelectedRead({
         identity,
         readGeneration,
         intentGeneration,
@@ -737,6 +771,35 @@ export const AgentsPage: React.FC = () => {
         rollbackOnFailure: options.rollbackOnFailure,
         clearSelectionError: options.clearSelectionError,
         debtVersion,
+      });
+      coordinator.activeReads.set(identity, read);
+      coordinator.activeReadCauses.set(identity, cause);
+      void read.then(() => {
+        if (coordinator.activeReads.get(identity) === read) {
+          coordinator.activeReads.delete(identity);
+          coordinator.activeReadCauses.delete(identity);
+        }
+      });
+      if (options.followContinuation === false) return read;
+      return read.then(async (outcome) => {
+        const continuation = outcome.continuation;
+        if (
+          !continuation ||
+          !selectedMountedRef.current ||
+          coordinator.intentGeneration !== continuation.intentGeneration ||
+          coordinator.desiredName !== continuation.nextIdentity
+        ) return outcome;
+        if (!coordinator.reconciliationDebt.has(continuation.nextIdentity)) return outcome;
+        const follow = scheduleSelectedReadRef.current?.(continuation.nextIdentity, {
+          expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
+          debtOnly: true,
+          refreshDefinitions: false,
+          rollbackOnFailure: false,
+          clearSelectionError: false,
+          followContinuation: false,
+          cause: 'continuation',
+        });
+        return follow ? await follow : outcome;
       });
     },
     [launchSelectedRead],
@@ -757,9 +820,11 @@ export const AgentsPage: React.FC = () => {
       coordinator.mutations.set(identity, batch);
     }
     beginResourceError('mutation');
-    if (!batch.operations.length) mutationErrorSequenceRef.current = 0;
     batch.pending += 1;
     batch.version = ++coordinator.nextMutationVersion;
+    // Keep the error watermark monotonic across batches. A delayed drain from
+    // older work must never republish after this operation has begun.
+    mutationErrorSequenceRef.current = Math.max(mutationErrorSequenceRef.current, batch.version);
     // A pre-mutation Definitions snapshot cannot publish after the detail
     // barrier. The settled transaction starts the next list publication.
     definitionsVersionRef.current.invalidate();
@@ -789,10 +854,12 @@ export const AgentsPage: React.FC = () => {
       const version = batch.version;
       coordinator.mutations.delete(identity);
       const operations = [...batch.operations];
-      const firstFailure = operations.find((candidate) => candidate.failure)?.failure;
       for (const candidate of operations) {
         if (candidate.failure !== undefined) {
-          publishMutationError(candidate.failure, candidate.sequence);
+          // The batch is one publication edge, so expose a PATCH failure at
+          // the batch watermark even when that operation started before a
+          // sibling. Caller completion still uses the operation's own error.
+          publishMutationError(candidate.failure, batch.version);
         }
       }
       const priorDebt = coordinator.reconciliationDebt.get(identity);
@@ -803,17 +870,17 @@ export const AgentsPage: React.FC = () => {
           waiters: priorDebt?.waiters ?? [],
         });
       }
-      const baseResult: SelectedMutationResult = firstFailure
-        ? { ok: false, error: firstFailure }
-        : { ok: true };
       const currentDebt = coordinator.reconciliationDebt.get(identity);
       const shouldDrain = Boolean(
         currentDebt &&
           coordinator.desiredName === identity &&
           !coordinator.retired.has(identity),
       );
+      for (const candidate of operations) {
+        candidate.joinedDetailBarrier = shouldDrain && candidate.failure === undefined;
+      }
       const transaction = (async (): Promise<SelectedMutationResult> => {
-        let detailResult: SelectedMutationResult = baseResult;
+        let detailResult: SelectedMutationResult = { ok: true };
         if (shouldDrain && currentDebt) {
           const completion = new Promise<SelectedMutationResult>((resolve) => {
             currentDebt.waiters.push({ resolve });
@@ -822,10 +889,12 @@ export const AgentsPage: React.FC = () => {
             debtOnly: true,
             expectedCodes: SELECTED_DISAPPEARANCE_CODES,
             rollbackOnFailure: false,
+            allowSupersede: true,
+            cause: 'debt',
           });
           if (!drain && !currentDebt.scheduled) {
             const waiters = currentDebt.waiters.splice(0);
-            for (const waiter of waiters) waiter.resolve(baseResult);
+            for (const waiter of waiters) waiter.resolve({ ok: true });
           }
           detailResult = await completion;
         }
@@ -838,10 +907,11 @@ export const AgentsPage: React.FC = () => {
         if (candidate.failure !== undefined) {
           return { ok: false, error: candidate.failure };
         }
-        if (!detailResult.ok) {
+        if (candidate.joinedDetailBarrier && !detailResult.ok) {
           publishMutationError(detailResult.error, candidate.sequence);
+          return detailResult;
         }
-        return detailResult;
+        return { ok: true };
       });
       for (const candidate of operations) {
         if (candidate.resolve) void resultFor(candidate).then(candidate.resolve);
@@ -856,6 +926,7 @@ export const AgentsPage: React.FC = () => {
     let transactionIntentGeneration = coordinator.intentGeneration;
     let identity = coordinator.desiredName;
     let preserveSelectionError = false;
+    let continueDebtOnly = false;
     const attempted = new Set<string>();
     while (selectedMountedRef.current && identity && !attempted.has(identity)) {
       if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
@@ -866,12 +937,14 @@ export const AgentsPage: React.FC = () => {
         expectedCodes: SELECTED_DISAPPEARANCE_CODES,
         refreshDefinitions: false,
         clearSelectionError: !preserveSelectionError,
+        debtOnly: continueDebtOnly && Boolean(coordinator.reconciliationDebt.get(identity)),
+        followContinuation: false,
+        allowSupersede: true,
+        cause: 'reconcile',
       });
       if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
       if (!outcome) return;
-      const continuation = outcome.kind === 'expected-retired' || outcome.kind === 'failed'
-        ? outcome.continuation
-        : undefined;
+      const continuation = outcome.continuation;
       if (!continuation) return;
       if (
         continuation.intentGeneration !== coordinator.intentGeneration ||
@@ -881,6 +954,7 @@ export const AgentsPage: React.FC = () => {
       transactionIntentGeneration = continuation.intentGeneration;
       identity = continuation.nextIdentity;
       preserveSelectionError = true;
+      continueDebtOnly = true;
     }
   }, []);
 
@@ -916,7 +990,6 @@ export const AgentsPage: React.FC = () => {
     ) return;
     const available = agents.filter((agent) => !coordinator.retired.has(agent.name));
     const target = (defaultName && available.find((a) => a.name === defaultName)) || available[0];
-    coordinator.autoSelectReason = null;
     if (target) void selectAgent(target.name, false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultName, agents]);
@@ -1032,16 +1105,7 @@ export const AgentsPage: React.FC = () => {
     async (name: string, openDetail = false, auto = false) => {
       beginSelectedIntent(name, { auto, openDetail, source: auto ? 'auto' : 'user' });
       clearResourceError('selection');
-      const outcome = await scheduleSelectedReadRef.current?.(name);
-      if (outcome?.kind === 'failed') {
-        const rollbackIdentity = selectedCoordinatorRef.current.desiredName;
-        if (rollbackIdentity && rollbackIdentity !== name) {
-          void scheduleSelectedReadRef.current?.(rollbackIdentity, {
-            debtOnly: true,
-            expectedCodes: SELECTED_DISAPPEARANCE_CODES,
-          });
-        }
-      }
+      await scheduleSelectedReadRef.current?.(name, { allowSupersede: true, cause: 'selection' });
     },
     [beginSelectedIntent, clearResourceError],
   );
@@ -1151,7 +1215,7 @@ export const AgentsPage: React.FC = () => {
     try {
       const result = await api.removeVibeAgent(name);
       if (result.ok) {
-        retireSelectedIdentityRef.current?.(name);
+        retireSelectedIdentityRef.current?.(name, { refreshDefinitions: true });
         void refreshOnboarding();
       } else {
         setResourceError('mutation', errorMessage(result) || t('errorBoundary.title'), errorGeneration);

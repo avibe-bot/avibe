@@ -1586,6 +1586,51 @@ describe('AgentsPage reconnect reconciliation', () => {
   });
 
   it.each([
+    { label: 'rejected', reject: true, code: 'agent_not_found' },
+    { label: 'ok-false', reject: false, code: 'agent_access_forbidden' },
+  ])('drains accepted-A debt after pending B disappears on the same edge ($label)', async ({ reject, code }) => {
+    const agentA = { ...brief('agent-a', 'A before'), model: 'a-model' };
+    const agentB = brief('agent-b', 'B');
+    const pendingB = deferred<ReturnType<typeof fullAgent>>();
+    const patch = deferred<unknown>();
+    const catchupB = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+      .mockReturnValueOnce(pendingB.promise)
+      .mockReturnValueOnce(catchupB.promise)
+      .mockResolvedValueOnce(fullAgent({ ...agentA, description: 'A after debt' }, 'A reconciled'));
+    const updateVibeAgent = vi.fn().mockReturnValue(patch.promise);
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult([agentA, agentB])),
+      getVibeAgent,
+      undefined,
+      undefined,
+      updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('A before')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('A before'), { target: { value: 'A local' } });
+    fireEvent.blur(screen.getByDisplayValue('A local'));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByText('agent-b').closest('button')!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    act(() => patch.resolve({ ok: true }));
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    if (reject) act(() => catchupB.reject({ code, message: 'B disappeared' }));
+    else act(() => catchupB.resolve({ ok: false, code, message: 'B disappeared' } as never));
+
+    await waitFor(() => expect(screen.getByDisplayValue('A after debt')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenNthCalledWith(4, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
+    expect(screen.queryByText('agent-b')).toBeNull();
+  });
+
+  it.each([
     { label: 'HTTP ok false', rejected: false, result: { ok: false, message: 'delete rejected' } },
     { label: 'transport rejection', rejected: true, result: { code: 'delete_failed', message: 'delete failed' } },
   ])('keeps an in-flight selection read valid after DELETE $label', async ({ rejected, result }) => {
@@ -1660,6 +1705,7 @@ describe('AgentsPage reconnect reconciliation', () => {
       });
       expect(listVibeAgents).toHaveBeenCalledTimes(2);
       expect(screen.queryByDisplayValue('A')).toBeNull();
+      expect(screen.queryByText('agent-a')).toBeNull();
       expect(showToast).not.toHaveBeenCalled();
     },
   );
@@ -2021,6 +2067,25 @@ describe('AgentsPage reconnect reconciliation', () => {
       cache: false,
       expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
     });
+  });
+
+  it('retains auto-selection after a transient detail failure until the next edge', async () => {
+    const agent = brief('agent-a', 'A');
+    const getVibeAgent = vi.fn()
+      .mockRejectedValueOnce({ message: 'temporary detail failure' })
+      .mockResolvedValueOnce(fullAgent({ ...agent, description: 'A recovered' }, 'prompt'));
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      getVibeAgent,
+    );
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByText('temporary detail failure')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenCalledTimes(1);
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.getByDisplayValue('A recovered')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', { cache: false });
   });
 
   it('does not resume A when a newer C intent wins during the B catch-up read', async () => {
