@@ -360,7 +360,10 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(secondRow).not.toBeNull();
     fireEvent.click(secondRow!);
     await waitFor(() => expect(screen.getByDisplayValue('another agent')).toBeTruthy());
-    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-b', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-b', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
     expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
 
@@ -382,7 +385,10 @@ describe('AgentsPage reconnect reconciliation', () => {
 
     act(() => handlers?.onConnected?.());
     await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
-    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-b', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-b', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
     expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-b', {
       cache: false,
       expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
@@ -400,6 +406,73 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.getByDisplayValue('B')).toBeTruthy());
     expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
   });
+
+  it('does not reuse an invalidated A debt stage after B fails', async () => {
+    const agentA = brief('agent-a', 'A');
+    const agentB = brief('agent-b', 'B');
+    const patch = deferred<unknown>();
+    const oldDebt = deferred<ReturnType<typeof fullAgent>>();
+    const pendingB = deferred<ReturnType<typeof fullAgent>>();
+    const freshDebt = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+      .mockReturnValueOnce(oldDebt.promise)
+      .mockReturnValueOnce(pendingB.promise)
+      .mockReturnValueOnce(freshDebt.promise);
+    const updateVibeAgent = vi.fn().mockReturnValue(patch.promise);
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult([agentA, agentB])),
+      getVibeAgent,
+      undefined,
+      undefined,
+      updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('A'), { target: { value: 'A edited' } });
+    fireEvent.blur(screen.getByDisplayValue('A edited'));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledTimes(1));
+    act(() => patch.resolve({ ok: true }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByText('agent-b').closest('button')!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    act(() => pendingB.reject({ code: 'agent_backend_unavailable', message: 'B unavailable' }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(4));
+
+    act(() => freshDebt.resolve(fullAgent({ ...agentA, description: 'A after B' }, 'fresh A')));
+    await waitFor(() => expect(screen.getByDisplayValue('A after B')).toBeTruthy());
+    act(() => oldDebt.resolve(fullAgent(agentA, 'stale A')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('A after B')).toBeTruthy();
+    expect(getVibeAgent).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['agent_not_found', 'agent_access_forbidden'] as const)(
+    'tombstones a stale row on direct selection without a repeat read (%s)',
+    async (code) => {
+      const agentA = brief('agent-a', 'A');
+      const agentB = brief('agent-b', 'B');
+      const getVibeAgent = vi.fn()
+        .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+        .mockRejectedValueOnce({ code, message: 'B disappeared' });
+      const listVibeAgents = vi.fn().mockResolvedValue(listResult([agentA, agentB]));
+      const api = makeApi(listVibeAgents, getVibeAgent);
+      renderPage(api);
+
+      await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+      fireEvent.click(screen.getByText('agent-b').closest('button')!);
+      await waitFor(() => expect(screen.queryByText('agent-b')).toBeNull());
+      expect(screen.getByDisplayValue('A')).toBeTruthy();
+      expect(getVibeAgent).toHaveBeenCalledTimes(2);
+      expect(listVibeAgents).toHaveBeenCalledTimes(2);
+      expect(showToast).not.toHaveBeenCalled();
+    },
+  );
 
   it('orders a list-first gap retirement before the same-edge accepted-A read', async () => {
     const agentA = brief('agent-a', 'A before gap');
@@ -595,8 +668,14 @@ describe('AgentsPage reconnect reconciliation', () => {
       cache: false,
       expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
     });
-    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-b', { cache: false });
-    expect(getVibeAgent).toHaveBeenNthCalledWith(4, 'agent-a', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-b', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(4, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
   });
 
   it.each([
@@ -1490,7 +1569,10 @@ describe('AgentsPage reconnect reconciliation', () => {
     fireEvent.click(rowA!);
     await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(screen.getByDisplayValue('A after return')).toBeTruthy());
-    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
   });
 
   it.each([
@@ -1534,7 +1616,10 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.getByText('A mutation failed')).toBeTruthy();
     fireEvent.click(screen.getByText('agent-a').closest('button')!);
     await waitFor(() => expect(screen.getByDisplayValue('A after failed return')).toBeTruthy());
-    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
   });
 
   it.each([
@@ -1703,7 +1788,9 @@ describe('AgentsPage reconnect reconciliation', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(listVibeAgents).toHaveBeenCalledTimes(2);
+      // Detail retirement schedules one bounded Definitions follow-up so a
+      // replacement identity can be discovered; it must not recurse further.
+      expect(listVibeAgents).toHaveBeenCalledTimes(3);
       expect(screen.queryByDisplayValue('A')).toBeNull();
       expect(screen.queryByText('agent-a')).toBeNull();
       expect(showToast).not.toHaveBeenCalled();
@@ -2085,7 +2172,10 @@ describe('AgentsPage reconnect reconciliation', () => {
     act(() => handlers?.onConnected?.());
     await waitFor(() => expect(screen.getByDisplayValue('A recovered')).toBeTruthy());
     expect(getVibeAgent).toHaveBeenCalledTimes(2);
-    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
   });
 
   it('does not resume A when a newer C intent wins during the B catch-up read', async () => {

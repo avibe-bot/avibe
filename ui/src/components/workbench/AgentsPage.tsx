@@ -115,6 +115,26 @@ type SelectedReconciliationDebt = {
 };
 
 type AutoSelectReason = 'initial' | 'replacement';
+type SelectedReadPurpose = 'selection' | 'reconcile' | 'continuation' | 'debt';
+
+type SelectedReadStage = {
+  key: string;
+  identity: string;
+  intentGeneration: number;
+  readGeneration: number;
+  debtVersion?: number;
+  obligationId: number;
+  purpose: SelectedReadPurpose;
+  expectedCodes?: readonly string[];
+  debtOnly: boolean;
+  refreshDefinitions: boolean;
+  rollbackOnFailure: boolean;
+  clearSelectionError: boolean;
+  invalidated: boolean;
+  promise: Promise<SelectedReadOutcome>;
+  resolve: (outcome: SelectedReadOutcome) => void;
+  settled: boolean;
+};
 
 type SelectedRetirement = {
   retired: boolean;
@@ -138,8 +158,11 @@ type SelectedCoordinator = {
   readGenerations: Map<string, number>;
   accepted: VibeAgentFull | null;
   acceptedGeneration: number;
-  activeReads: Map<string, Promise<SelectedReadOutcome>>;
-  activeReadCauses: Map<string, 'selection' | 'reconcile' | 'continuation' | 'debt'>;
+  stages: Map<string, SelectedReadStage>;
+  stageQueue: SelectedReadStage[];
+  stageDrainActive: boolean;
+  obligationAttempts: Map<number, Set<string>>;
+  nextObligationId: number;
   nextBatchId: number;
   nextOperationId: number;
   nextMutationVersion: number;
@@ -169,8 +192,11 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
   readGenerations: new Map(),
   accepted: null,
   acceptedGeneration: 0,
-  activeReads: new Map(),
-  activeReadCauses: new Map(),
+  stages: new Map(),
+  stageQueue: [],
+  stageDrainActive: false,
+  obligationAttempts: new Map(),
+  nextObligationId: 0,
   nextBatchId: 0,
   nextOperationId: 0,
   nextMutationVersion: 0,
@@ -185,6 +211,9 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
 const advanceSelectedRead = (coordinator: SelectedCoordinator, identity: string): number => {
   const next = (coordinator.readGenerations.get(identity) ?? 0) + 1;
   coordinator.readGenerations.set(identity, next);
+  for (const stage of coordinator.stages.values()) {
+    if (stage.identity === identity && stage.readGeneration < next) stage.invalidated = true;
+  }
   return next;
 };
 
@@ -371,6 +400,14 @@ export const AgentsPage: React.FC = () => {
       onboardingVersionRef.current.invalidate();
       const coordinator = selectedCoordinatorRef.current;
       for (const identity of coordinator.readGenerations.keys()) advanceSelectedRead(coordinator, identity);
+      for (const stage of coordinator.stageQueue.splice(0)) {
+        stage.invalidated = true;
+        if (!stage.settled) {
+          stage.settled = true;
+          stage.resolve({ kind: 'stale' });
+        }
+      }
+      coordinator.stages.clear();
       for (const batch of coordinator.mutations.values()) {
         for (const operation of batch.operations.splice(0)) {
           operation.resolve?.({ ok: false, error: new Error('Agent page unmounted') });
@@ -391,11 +428,11 @@ export const AgentsPage: React.FC = () => {
       refreshDefinitions?: boolean;
       rollbackOnFailure?: boolean;
       clearSelectionError?: boolean;
-      followContinuation?: boolean;
-      allowSupersede?: boolean;
-      cause?: 'selection' | 'reconcile' | 'continuation' | 'debt';
+      purpose?: SelectedReadPurpose;
+      obligationId?: number;
     }) => Promise<SelectedReadOutcome> | null)
   >(null);
+  const drainSelectedStagesRef = useRef<(() => void) | null>(null);
   const retireSelectedIdentityRef = useRef<
     ((identity: string, options?: { refreshDefinitions?: boolean; cause?: unknown }) => SelectedRetirement) | null
   >(null);
@@ -521,7 +558,18 @@ export const AgentsPage: React.FC = () => {
         );
         if (retired.length > 0) {
           for (const identity of retired) {
-            retireSelectedIdentityRef.current?.(identity, { refreshDefinitions: false });
+            const retirement = retireSelectedIdentityRef.current?.(identity, { refreshDefinitions: false });
+            if (retirement?.resumedIdentity) {
+              const resumedDebt = coordinator.reconciliationDebt.get(retirement.resumedIdentity);
+              scheduleSelectedReadRef.current?.(retirement.resumedIdentity, {
+                expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+                debtOnly: Boolean(resumedDebt),
+                rollbackOnFailure: false,
+                clearSelectionError: false,
+                purpose: 'continuation',
+                obligationId: catchUpEpochRef.current || token.version,
+              });
+            }
           }
         }
         settleBarrier(true);
@@ -587,7 +635,11 @@ export const AgentsPage: React.FC = () => {
       }
       clearResourceError('selection');
       if (options.refreshDefinitions !== false) {
-        definitionsVersionRef.current.invalidate();
+        // The causal follow-up itself must not resurrect the tombstone. Mark
+        // the identity through the version that this refresh is about to
+        // publish; a later external Definitions edge may reintroduce it.
+        const followUpVersion = definitionsVersionRef.current.invalidate() + 1;
+        coordinator.retiredAtDefinitionsVersion.set(identity, followUpVersion);
         void refreshRef.current();
       }
       return {
@@ -698,7 +750,7 @@ export const AgentsPage: React.FC = () => {
           return { kind: 'published' };
         }
         const code = errorCodeOf(value);
-        if (options.expectedCodes?.includes(code ?? '')) {
+        if ((options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES).includes(code ?? '')) {
           const retirement = retireSelectedIdentityRef.current?.(options.identity, {
             refreshDefinitions: options.refreshDefinitions === true,
             cause: value,
@@ -737,74 +789,135 @@ export const AgentsPage: React.FC = () => {
         refreshDefinitions?: boolean;
         rollbackOnFailure?: boolean;
         clearSelectionError?: boolean;
-        followContinuation?: boolean;
-        allowSupersede?: boolean;
-        cause?: 'selection' | 'reconcile' | 'continuation' | 'debt';
+        purpose?: SelectedReadPurpose;
+        obligationId?: number;
       } = {},
     ): Promise<SelectedReadOutcome> | null => {
       if (!selectedMountedRef.current || !identity) return null;
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.retired.has(identity) || coordinator.desiredName !== identity) return null;
-      const activeRead = coordinator.activeReads.get(identity);
-      const cause = options.cause ?? 'selection';
-      if (
-        activeRead &&
-        !(options.allowSupersede === true && !(cause === 'reconcile' && coordinator.activeReadCauses.get(identity) === 'continuation'))
-      ) return activeRead;
-      // User selection is an explicit intent and may read immediately even
-      // while that identity has a pending mutation. Passive/debt drains wait
-      // for acknowledgements so they cannot publish an intermediate snapshot.
-      if (coordinator.mutations.has(identity) && options.debtOnly) return null;
+      const purpose = options.purpose ?? 'selection';
       const debt = coordinator.reconciliationDebt.get(identity);
       if (options.debtOnly && !debt) return null;
-      if (debt && options.debtOnly && debt.scheduled) return null;
-      const debtVersion = debt?.version;
-      if (debt) debt.scheduled = true;
-      const readGeneration = advanceSelectedRead(coordinator, identity);
+      if (coordinator.mutations.has(identity) && options.debtOnly) return null;
+      const debtVersion = options.debtOnly ? debt?.version : undefined;
+      if (debtVersion !== undefined) debt!.scheduled = true;
+      const obligationId = options.obligationId ?? ++coordinator.nextObligationId;
       const intentGeneration = coordinator.intentGeneration;
-      const read = launchSelectedRead({
+      const existing = [...coordinator.stages.values()].find(
+        (stage) =>
+          !stage.invalidated &&
+          !stage.settled &&
+          stage.identity === identity &&
+          stage.intentGeneration === intentGeneration &&
+          stage.debtVersion === debtVersion &&
+          stage.purpose === purpose &&
+          stage.obligationId === obligationId,
+      );
+      if (existing) return existing.promise;
+
+      // A new compatible stage is the only place that advances an identity's
+      // read generation. This invalidates every older stage, including a
+      // promise that was already started before a newer selection intent.
+      const nextReadGeneration = advanceSelectedRead(coordinator, identity);
+      const key = [identity, intentGeneration, nextReadGeneration, debtVersion ?? '-', purpose, obligationId].join('::');
+      let resolveStage!: (outcome: SelectedReadOutcome) => void;
+      const promise = new Promise<SelectedReadOutcome>((resolve) => {
+        resolveStage = resolve;
+      });
+      const stage: SelectedReadStage = {
+        key,
         identity,
-        readGeneration,
         intentGeneration,
-        expectedCodes: options.expectedCodes,
-        refreshDefinitions: options.refreshDefinitions,
-        rollbackOnFailure: options.rollbackOnFailure,
-        clearSelectionError: options.clearSelectionError,
+        readGeneration: nextReadGeneration,
         debtVersion,
-      });
-      coordinator.activeReads.set(identity, read);
-      coordinator.activeReadCauses.set(identity, cause);
-      void read.then(() => {
-        if (coordinator.activeReads.get(identity) === read) {
-          coordinator.activeReads.delete(identity);
-          coordinator.activeReadCauses.delete(identity);
-        }
-      });
-      if (options.followContinuation === false) return read;
-      return read.then(async (outcome) => {
+        obligationId,
+        purpose,
+        expectedCodes: options.expectedCodes,
+        debtOnly: Boolean(options.debtOnly),
+        refreshDefinitions: Boolean(options.refreshDefinitions),
+        rollbackOnFailure: options.rollbackOnFailure !== false,
+        clearSelectionError: options.clearSelectionError !== false,
+        invalidated: false,
+        promise,
+        resolve: resolveStage,
+        settled: false,
+      };
+      coordinator.stages.set(key, stage);
+      coordinator.stageQueue.push(stage);
+      drainSelectedStagesRef.current?.();
+      return promise;
+    },
+    [],
+  );
+  scheduleSelectedReadRef.current = scheduleSelectedRead;
+
+  const drainSelectedStages = useCallback(() => {
+    const coordinator = selectedCoordinatorRef.current;
+    if (coordinator.stageDrainActive) return;
+    coordinator.stageDrainActive = true;
+    while (selectedMountedRef.current && coordinator.stageQueue.length > 0) {
+      const stage = coordinator.stageQueue.shift()!;
+      if (stage.invalidated || !selectedMountedRef.current) {
+        stage.settled = true;
+        stage.resolve({ kind: 'stale' });
+        if (coordinator.stages.get(stage.key) === stage) coordinator.stages.delete(stage.key);
+        continue;
+      }
+      void (async () => {
+        const outcome = await launchSelectedRead({
+          identity: stage.identity,
+          readGeneration: stage.readGeneration,
+          intentGeneration: stage.intentGeneration,
+          expectedCodes: stage.expectedCodes,
+          debtVersion: stage.debtVersion,
+          refreshDefinitions: stage.refreshDefinitions,
+          rollbackOnFailure: stage.rollbackOnFailure,
+          clearSelectionError: stage.clearSelectionError,
+        });
+        stage.settled = true;
+        stage.resolve(outcome);
+        if (coordinator.stages.get(stage.key) === stage) coordinator.stages.delete(stage.key);
         const continuation = outcome.continuation;
         if (
           !continuation ||
           !selectedMountedRef.current ||
           coordinator.intentGeneration !== continuation.intentGeneration ||
           coordinator.desiredName !== continuation.nextIdentity
-        ) return outcome;
-        if (!coordinator.reconciliationDebt.has(continuation.nextIdentity)) return outcome;
-        const follow = scheduleSelectedReadRef.current?.(continuation.nextIdentity, {
-          expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
-          debtOnly: true,
-          refreshDefinitions: false,
-          rollbackOnFailure: false,
-          clearSelectionError: false,
-          followContinuation: false,
-          cause: 'continuation',
-        });
-        return follow ? await follow : outcome;
-      });
-    },
-    [launchSelectedRead],
-  );
-  scheduleSelectedReadRef.current = scheduleSelectedRead;
+        ) {
+          drainSelectedStagesRef.current?.();
+          return;
+        }
+        const attempted = coordinator.obligationAttempts.get(stage.obligationId) ?? new Set<string>();
+        const nextDebt = coordinator.reconciliationDebt.get(continuation.nextIdentity);
+        // A failed/retired user selection rolls back the visible intent but
+        // does not start a passive read immediately. Reconnect or an existing
+        // mutation debt is the external edge that may reconcile the fallback.
+        if (stage.purpose === 'selection' && !nextDebt) {
+          drainSelectedStagesRef.current?.();
+          return;
+        }
+        if (!attempted.has(continuation.nextIdentity)) {
+          attempted.add(continuation.nextIdentity);
+          coordinator.obligationAttempts.set(stage.obligationId, attempted);
+          scheduleSelectedReadRef.current?.(continuation.nextIdentity, {
+            expectedCodes: stage.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
+            debtOnly: Boolean(nextDebt),
+            refreshDefinitions: false,
+            rollbackOnFailure: false,
+            clearSelectionError: false,
+            purpose: 'continuation',
+            obligationId: stage.obligationId,
+          });
+        }
+        drainSelectedStagesRef.current?.();
+      })();
+    }
+    coordinator.stageDrainActive = false;
+  }, [launchSelectedRead]);
+  drainSelectedStagesRef.current = () => {
+    void drainSelectedStages();
+  };
 
   const beginSelectedMutation = useCallback((identity: string) => {
     const coordinator = selectedCoordinatorRef.current;
@@ -831,7 +944,7 @@ export const AgentsPage: React.FC = () => {
     const debt = coordinator.reconciliationDebt.get(identity);
     if (debt) debt.scheduled = false;
     advanceSelectedRead(coordinator, identity);
-    const operation = { id: ++coordinator.nextOperationId, batchId: batch.id, identity, sequence: batch.version };
+      const operation = { id: ++coordinator.nextOperationId, batchId: batch.id, identity, sequence: batch.version };
     batch.operations.push(operation);
     return operation;
   }, [beginResourceError]);
@@ -889,8 +1002,8 @@ export const AgentsPage: React.FC = () => {
             debtOnly: true,
             expectedCodes: SELECTED_DISAPPEARANCE_CODES,
             rollbackOnFailure: false,
-            allowSupersede: true,
-            cause: 'debt',
+            purpose: 'debt',
+            obligationId: version,
           });
           if (!drain && !currentDebt.scheduled) {
             const waiters = currentDebt.waiters.splice(0);
@@ -923,39 +1036,28 @@ export const AgentsPage: React.FC = () => {
 
   const reconcileSelected = useCallback(async (edgeEpoch?: number) => {
     const coordinator = selectedCoordinatorRef.current;
-    let transactionIntentGeneration = coordinator.intentGeneration;
-    let identity = coordinator.desiredName;
-    let preserveSelectionError = false;
-    let continueDebtOnly = false;
-    const attempted = new Set<string>();
-    while (selectedMountedRef.current && identity && !attempted.has(identity)) {
-      if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
-      if (coordinator.intentGeneration !== transactionIntentGeneration) return;
-      attempted.add(identity);
-      if (coordinator.mutations.has(identity)) return;
-      const outcome = await scheduleSelectedReadRef.current?.(identity, {
-        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
-        refreshDefinitions: false,
-        clearSelectionError: !preserveSelectionError,
-        debtOnly: continueDebtOnly && Boolean(coordinator.reconciliationDebt.get(identity)),
-        followContinuation: false,
-        allowSupersede: true,
-        cause: 'reconcile',
-      });
-      if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
-      if (!outcome) return;
-      const continuation = outcome.continuation;
-      if (!continuation) return;
-      if (
-        continuation.intentGeneration !== coordinator.intentGeneration ||
-        coordinator.desiredName !== continuation.nextIdentity ||
-        attempted.has(continuation.nextIdentity)
-      ) return;
-      transactionIntentGeneration = continuation.intentGeneration;
-      identity = continuation.nextIdentity;
-      preserveSelectionError = true;
-      continueDebtOnly = true;
-    }
+    const identity = coordinator.desiredName;
+    if (!identity || coordinator.mutations.has(identity)) return;
+    if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
+    if (
+      edgeEpoch !== undefined &&
+      [...coordinator.stages.values()].some(
+        (stage) =>
+          !stage.invalidated &&
+          !stage.settled &&
+          stage.identity === identity &&
+          stage.obligationId === edgeEpoch,
+      )
+    ) return;
+    const debt = coordinator.reconciliationDebt.get(identity);
+    scheduleSelectedReadRef.current?.(identity, {
+      expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+      refreshDefinitions: true,
+      clearSelectionError: true,
+      debtOnly: Boolean(debt),
+      purpose: 'reconcile',
+      obligationId: edgeEpoch ?? ++coordinator.nextObligationId,
+    });
   }, []);
 
   const reconcileGap = useCallback(async () => {
@@ -1105,7 +1207,12 @@ export const AgentsPage: React.FC = () => {
     async (name: string, openDetail = false, auto = false) => {
       beginSelectedIntent(name, { auto, openDetail, source: auto ? 'auto' : 'user' });
       clearResourceError('selection');
-      await scheduleSelectedReadRef.current?.(name, { allowSupersede: true, cause: 'selection' });
+      await scheduleSelectedReadRef.current?.(name, {
+        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+        refreshDefinitions: true,
+        purpose: auto ? 'selection' : 'selection',
+        obligationId: selectedCoordinatorRef.current.intentGeneration,
+      });
     },
     [beginSelectedIntent, clearResourceError],
   );
