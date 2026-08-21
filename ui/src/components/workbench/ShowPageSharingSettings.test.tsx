@@ -151,6 +151,40 @@ describe('ShowPageSharingSettings', () => {
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
   });
 
+  it('stacks Access as title, select, then status, and lets the audience row fill the panel', async () => {
+    api.getShowAccessSettings.mockResolvedValue({
+      show_access: showAccess({
+        access_mode: 'limited',
+        normalized_emails: ['guest@example.com'],
+      }),
+    });
+    getPermissions.mockResolvedValue(ORGANIZATION);
+    renderSettings();
+
+    const trigger = await screen.findByRole('button', { name: 'Access: Limited' });
+    const title = screen.getByText('Access');
+    const status = screen.getByRole('status');
+    // One vertical stack: the title, the mode select, and the autosave status
+    // are siblings in that order -- no label-left/control-right row.
+    const stack = trigger.parentElement;
+    expect(title.parentElement).toBe(stack);
+    expect(status.parentElement).toBe(stack);
+    expect(Array.from(stack?.children ?? [])).toEqual([title, trigger, status]);
+    expect(status.textContent).toContain('Changes save automatically');
+    // The select stays its own fixed width instead of stretching to the panel.
+    expect(trigger.className).toContain('w-40');
+
+    // The audience field, by contrast, adapts to the container: the input takes
+    // the free space and the add button ends the row at its right edge.
+    const input = await audience();
+    const add = screen.getByRole('button', { name: 'Add email' });
+    const row = add.parentElement;
+    expect(input.parentElement?.className).toContain('flex-1');
+    expect(row?.lastElementChild).toBe(add);
+    expect(row?.parentElement?.className).toContain('w-full');
+    expect(row?.parentElement?.className).not.toMatch(/max-w-/);
+  });
+
   it('starts an Organization page as Private with no audience field', async () => {
     api.getShowAccessSettings.mockResolvedValue({ show_access: showAccess() });
     getPermissions.mockResolvedValue(ORGANIZATION);
