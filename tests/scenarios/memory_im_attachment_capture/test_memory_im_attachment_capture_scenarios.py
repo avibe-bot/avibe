@@ -109,6 +109,7 @@ def test_bound_slack_dm_attachment_reaches_search_with_redacted_call_log(
             "kind": "fact",
             "text": "Captured Slack attachment screenshot.png",
             "date": None,
+            "origin": "user",
         }
     ]
 
