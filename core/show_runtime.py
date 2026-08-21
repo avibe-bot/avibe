@@ -1060,6 +1060,28 @@ class ShowRuntimeManager:
         self._install_reason = None
         return command
 
+    def _remove_managed_runtime_tree_for_replacement(self, path: Path, *, label: str) -> bool:
+        """Invalidate cached install facts before removing managed runtime bytes."""
+        self._managed_command = None
+        self._availability = replace(
+            self._availability,
+            install=ShowRuntimeInstallState.ABSENT,
+            command=None,
+            install_reason=None,
+            install_failure_class=None,
+        )
+        try:
+            if os.path.lexists(path):
+                shutil.rmtree(path)
+        except OSError:
+            logger.warning("Failed to remove the %s Show Runtime tree before replacement", label, exc_info=True)
+            self._install_reason = "runtime_install_failed"
+            return False
+        if os.path.lexists(path):
+            self._install_reason = "runtime_install_failed"
+            return False
+        return True
+
     def _install_managed_runtime_locked(self, *, force: bool, offline: bool) -> list[str] | None:
         command: list[str] | None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
@@ -2422,8 +2444,13 @@ class ShowRuntimeManager:
                     verified_existing_command,
                     replacement_required=force,
                 )
-            if install_dir.exists():
-                shutil.rmtree(install_dir)
+            if os.path.lexists(install_dir):
+                if not self._remove_managed_runtime_tree_for_replacement(install_dir, label="manifest"):
+                    return self._managed_install_operation_command(
+                        None,
+                        replacement_required=force,
+                    )
+                verified_existing_command = None
             install_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp_dir), str(install_dir))
             self._write_manifest_install_metadata(install_dir, manifest, archive)
@@ -2738,8 +2765,13 @@ class ShowRuntimeManager:
                     existing_command,
                     replacement_required=force,
                 )
-            if install_dir.exists():
-                shutil.rmtree(install_dir)
+            if os.path.lexists(install_dir):
+                if not self._remove_managed_runtime_tree_for_replacement(install_dir, label="archive"):
+                    return self._managed_install_operation_command(
+                        None,
+                        replacement_required=force,
+                    )
+                existing_command = None
             install_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp_dir), str(install_dir))
             self._write_archive_manifest(archive_digest)
@@ -2899,6 +2931,11 @@ class ShowRuntimeManager:
                     existing_command,
                     replacement_required=False,
                 )
+            if replacement_required and not self._github_source_allows_replacement(git, source_dir):
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=True,
+                )
             if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
                 return self._managed_install_operation_command(
                     existing_command,
@@ -2911,18 +2948,7 @@ class ShowRuntimeManager:
         self._write_github_build_marker(source_dir, None)
         if replacement_required:
             build_output = source_dir / "packages" / "runtime" / "dist"
-            try:
-                if os.path.lexists(build_output):
-                    shutil.rmtree(build_output)
-            except OSError:
-                logger.warning("Failed to remove the GitHub Show Runtime build before replacement", exc_info=True)
-                self._install_reason = "runtime_install_failed"
-                return self._managed_install_operation_command(
-                    None,
-                    replacement_required=True,
-                )
-            if os.path.lexists(build_output):
-                self._install_reason = "runtime_install_failed"
+            if not self._remove_managed_runtime_tree_for_replacement(build_output, label="GitHub"):
                 return self._managed_install_operation_command(
                     None,
                     replacement_required=True,
@@ -2998,6 +3024,31 @@ class ShowRuntimeManager:
             return None
         return result.stdout.strip() or None
 
+    def _github_source_allows_replacement(self, git: list[str], source_dir: Path) -> bool:
+        """Refuse forced replacement when it would build from locally modified inputs."""
+        try:
+            result = subprocess.run(
+                [*git, "-C", str(source_dir), "status", "--porcelain", "--untracked-files=all"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                **isolated_subprocess_kwargs(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("Failed to inspect the GitHub Show Runtime source tree", exc_info=True)
+            self._install_reason = "runtime_install_failed"
+            return False
+        if result.returncode != 0:
+            self._install_reason = "runtime_install_failed"
+            return False
+        dirty_entries = [line for line in result.stdout.splitlines() if line != "?? .avibe-runtime-build"]
+        if dirty_entries:
+            logger.warning("Refusing forced Show Runtime replacement because the GitHub source tree has local changes")
+            self._install_reason = "runtime_github_source_dirty"
+            return False
+        return True
+
     def _github_runtime_command(self, source_dir: Path, node: list[str]) -> list[str] | None:
         cli_path = source_dir / "packages" / "runtime" / "dist" / "cli.js"
         if not cli_path.exists():
@@ -3021,18 +3072,7 @@ class ShowRuntimeManager:
             package_json.write_text('{"private":true,"type":"module"}\n', encoding="utf-8")
         if replacement_required:
             managed_tree = install_root / "node_modules"
-            try:
-                if os.path.lexists(managed_tree):
-                    shutil.rmtree(managed_tree)
-            except OSError:
-                logger.warning("Failed to remove the npm Show Runtime tree before replacement", exc_info=True)
-                self._install_reason = "runtime_install_failed"
-                return self._managed_install_operation_command(
-                    None,
-                    replacement_required=True,
-                )
-            if os.path.lexists(managed_tree):
-                self._install_reason = "runtime_install_failed"
+            if not self._remove_managed_runtime_tree_for_replacement(managed_tree, label="npm"):
                 return self._managed_install_operation_command(
                     None,
                     replacement_required=True,
@@ -3094,18 +3134,23 @@ class ShowRuntimeManager:
         return self.runtime_dir / "source" / "github" / repo_part / ref_part
 
     def _run_install_command(self, command: list[str], *, cwd: Path | None = None) -> bool:
-        with self.install_log_path.open("a", encoding="utf-8") as log:
-            log.write(f"$ {' '.join(command)}\n")
-            result = subprocess.run(
-                command,
-                cwd=str(cwd) if cwd else None,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=300,
-                check=False,
-                **isolated_subprocess_kwargs(),
-            )
+        try:
+            with self.install_log_path.open("a", encoding="utf-8") as log:
+                log.write(f"$ {' '.join(command)}\n")
+                result = subprocess.run(
+                    command,
+                    cwd=str(cwd) if cwd else None,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=300,
+                    check=False,
+                    **isolated_subprocess_kwargs(),
+                )
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("Show Runtime install command failed", exc_info=True)
+            self._install_reason = "runtime_install_failed"
+            return False
         if result.returncode != 0:
             self._install_reason = "runtime_install_failed"
             return False

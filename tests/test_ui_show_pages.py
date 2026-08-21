@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import ssl
 import struct
@@ -8298,6 +8299,31 @@ def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):
     assert called == [False]
 
 
+def test_show_runtime_destructive_replacement_invalidates_cached_install_before_removal(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    managed_tree = runtime_dir / "package" / "node_modules"
+    managed_bin = managed_tree / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    manager._publish_install_availability(command=[str(managed_bin)])
+    real_rmtree = shutil.rmtree
+
+    def remove_after_observing_invalidated_state(path):
+        assert manager._managed_command is None
+        assert manager._availability.command is None
+        assert manager._availability.install.value == "absent"
+        real_rmtree(path)
+
+    monkeypatch.setattr("core.show_runtime.shutil.rmtree", remove_after_observing_invalidated_state)
+
+    assert manager._remove_managed_runtime_tree_for_replacement(managed_tree, label="test") is True
+
+
 def test_show_runtime_manager_forced_npm_replacement_fails_when_old_tree_remains(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
@@ -8309,6 +8335,7 @@ def test_show_runtime_manager_forced_npm_replacement_fails_when_old_tree_remains
         runtime_dir=runtime_dir,
         runtime_source="npm",
     )
+    manager._managed_command = [str(managed_bin)]
     install_calls = []
     monkeypatch.setattr(
         "core.show_runtime._resolve_command",
@@ -8340,6 +8367,7 @@ def test_show_runtime_manager_forced_npm_replacement_removes_old_tree_before_ins
         runtime_dir=runtime_dir,
         runtime_source="npm",
     )
+    manager._managed_command = [str(managed_bin)]
     monkeypatch.setattr(
         "core.show_runtime._resolve_command",
         lambda command: ["/bin/npm"] if command == "npm" else None,
@@ -8382,23 +8410,32 @@ def test_show_runtime_manager_forced_npm_replacement_reports_delegate_exception(
         runtime_dir=runtime_dir,
         runtime_source="npm",
     )
+    manager._managed_command = [str(managed_bin)]
     monkeypatch.setattr(
         "core.show_runtime._resolve_command",
         lambda command: ["/bin/npm"] if command == "npm" else None,
     )
 
+    install_calls = []
+
     def fail_install(*_args, **_kwargs):
+        install_calls.append(True)
         assert not managed_bin.parent.parent.exists()
         raise install_error
 
     monkeypatch.setattr("core.show_runtime.subprocess.run", fail_install)
 
     result = manager.prepare(force=True)
+    retried = manager.prepare()
 
     assert result["ok"] is False
     assert result["reason"] == "runtime_install_failed"
     assert result["install"]["state"] == "failed"
     assert result["status"]["installed"] is False
+    assert retried["ok"] is False
+    assert retried["reason"] == "runtime_install_failed"
+    assert manager._managed_command is None
+    assert install_calls == [True, True]
     assert managed_bin.exists() is False
 
 
