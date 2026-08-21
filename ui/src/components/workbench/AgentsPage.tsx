@@ -95,9 +95,16 @@ type SelectedMutationBatch = {
 
 type SelectedMutationResult = { ok: true } | { ok: false; error: unknown };
 
+type SelectedReconciliationWaiter = {
+  resolve: (result: SelectedMutationResult) => void;
+  mutationFailure?: unknown;
+  errorGeneration?: number;
+};
+
 type SelectedReconciliationDebt = {
   version: number;
   scheduled: boolean;
+  waiters: SelectedReconciliationWaiter[];
 };
 
 type AutoSelectReason = 'initial' | 'replacement';
@@ -108,11 +115,13 @@ type SelectedRetirement = {
   intentGeneration: number;
 };
 
+type SelectedReadContinuation = { nextIdentity: string; intentGeneration: number };
+
 type SelectedReadOutcome =
   | { kind: 'published' }
-  | { kind: 'failed' }
+  | { kind: 'failed'; error?: unknown; continuation?: SelectedReadContinuation }
   | { kind: 'stale' }
-  | { kind: 'expected-retired'; resumedIdentity: string; intentGeneration: number };
+  | { kind: 'expected-retired'; continuation: SelectedReadContinuation };
 
 type SelectedCoordinator = {
   desiredName: string | null;
@@ -159,6 +168,19 @@ const selectedReadIsCurrent = (
   identity: string,
   generation: number,
 ): boolean => coordinator.readGenerations.get(identity) === generation;
+
+const releaseSelectedDebtWaiters = (coordinator: SelectedCoordinator, identity: string) => {
+  const debt = coordinator.reconciliationDebt.get(identity);
+  if (!debt || debt.waiters.length === 0) return;
+  // Leaving an identity supersedes its in-flight read. The mutation itself is
+  // already terminal, so settle callers now; any retained debt is evidence for
+  // the next authoritative read when the identity is selected again.
+  debt.scheduled = false;
+  const waiters = debt.waiters.splice(0);
+  for (const waiter of waiters) {
+    waiter.resolve(waiter.mutationFailure ? { ok: false, error: waiter.mutationFailure } : { ok: true });
+  }
+};
 
 type ResourceErrorOwner = 'definitions' | 'selection' | 'mutation';
 type ResourceErrors = Record<ResourceErrorOwner, string | null>;
@@ -314,12 +336,22 @@ export const AgentsPage: React.FC = () => {
       for (const batch of coordinator.mutations.values()) {
         for (const resolve of batch.waiters.splice(0)) resolve({ ok: false, error: new Error('Agent page unmounted') });
       }
+      for (const debt of coordinator.reconciliationDebt.values()) {
+        for (const waiter of debt.waiters.splice(0)) waiter.resolve({ ok: false, error: new Error('Agent page unmounted') });
+      }
+      coordinator.reconciliationDebt.clear();
       coordinator.mutations.clear();
     };
   }, []);
 
   const scheduleSelectedReadRef = useRef<
-    ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean; refreshDefinitions?: boolean }) => Promise<SelectedReadOutcome> | null)
+    ((identity: string, options?: {
+      expectedCodes?: readonly string[];
+      debtOnly?: boolean;
+      refreshDefinitions?: boolean;
+      rollbackOnFailure?: boolean;
+      clearSelectionError?: boolean;
+    }) => Promise<SelectedReadOutcome> | null)
   >(null);
   const retireSelectedIdentityRef = useRef<
     ((identity: string, options?: { refreshDefinitions?: boolean }) => SelectedRetirement) | null
@@ -346,6 +378,7 @@ export const AgentsPage: React.FC = () => {
     ) => {
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.desiredName && coordinator.desiredName !== identity) {
+        releaseSelectedDebtWaiters(coordinator, coordinator.desiredName);
         advanceSelectedRead(coordinator, coordinator.desiredName);
       }
       if (identity) advanceSelectedRead(coordinator, identity);
@@ -443,7 +476,11 @@ export const AgentsPage: React.FC = () => {
       );
       coordinator.retired.add(identity);
       advanceSelectedRead(coordinator, identity);
+      const debt = coordinator.reconciliationDebt.get(identity);
       coordinator.reconciliationDebt.delete(identity);
+      for (const waiter of debt?.waiters.splice(0) ?? []) {
+        waiter.resolve({ ok: false, error: { code: 'agent_not_found', message: 'Agent is no longer available' } });
+      }
       if (pendingIdentity) {
         coordinator.intentGeneration += 1;
         // A pending selection can disappear without invalidating the accepted
@@ -524,6 +561,8 @@ export const AgentsPage: React.FC = () => {
       expectedCodes?: readonly string[];
       debtVersion?: number;
       refreshDefinitions?: boolean;
+      rollbackOnFailure?: boolean;
+      clearSelectionError?: boolean;
     }): Promise<SelectedReadOutcome> => {
       const coordinator = selectedCoordinatorRef.current;
       const isCurrent = () =>
@@ -532,19 +571,41 @@ export const AgentsPage: React.FC = () => {
         coordinator.desiredName === options.identity &&
         !coordinator.retired.has(options.identity) &&
         (options.intentGeneration === undefined || coordinator.intentGeneration === options.intentGeneration);
-      const finishDebt = (published: boolean) => {
+      const finishDebt = (published: boolean, error?: unknown) => {
         if (options.debtVersion === undefined) return;
         const debt = coordinator.reconciliationDebt.get(options.identity);
         if (!debt || debt.version !== options.debtVersion) return;
-        if (published) coordinator.reconciliationDebt.delete(options.identity);
-        else debt.scheduled = false;
+        if (!published) {
+          debt.scheduled = false;
+          const waiters = debt.waiters.splice(0);
+          for (const waiter of waiters) {
+            waiter.resolve({ ok: false, error: waiter.mutationFailure ?? error });
+          }
+          return;
+        }
+        coordinator.reconciliationDebt.delete(options.identity);
+        const waiters = debt.waiters.splice(0);
+        for (const waiter of waiters) {
+          if (waiter.mutationFailure) {
+            waiter.resolve({ ok: false, error: waiter.mutationFailure });
+          } else {
+            waiter.resolve({ ok: true });
+          }
+        }
+      };
+      const continuationFor = () => {
+        if (options.rollbackOnFailure === false) return undefined;
+        const rollback = rollbackSelectedIntent();
+        return rollback.identity && rollback.identity !== options.identity
+          ? { nextIdentity: rollback.identity, intentGeneration: rollback.intentGeneration }
+          : undefined;
       };
       try {
         const params = options.expectedCodes ? { cache: false, expectedCodes: options.expectedCodes } : { cache: false };
         const result = await api.getVibeAgent(options.identity, params);
         if (!isCurrent()) return { kind: 'stale' };
         if (result.ok && result.agent?.name === options.identity) {
-          clearResourceError('selection');
+          if (options.clearSelectionError !== false) clearResourceError('selection');
           commitSelected(result.agent);
           finishDebt(true);
           return { kind: 'published' };
@@ -556,40 +617,42 @@ export const AgentsPage: React.FC = () => {
           const retirement = retireSelectedIdentityRef.current?.(options.identity, {
             refreshDefinitions: options.refreshDefinitions !== false,
           });
-          finishDebt(false);
           if (retirement?.resumedIdentity) {
             return {
               kind: 'expected-retired',
-              resumedIdentity: retirement.resumedIdentity,
-              intentGeneration: retirement.intentGeneration,
+              continuation: {
+                nextIdentity: retirement.resumedIdentity,
+                intentGeneration: retirement.intentGeneration,
+              },
             };
           }
           return { kind: 'failed' };
         }
-        rollbackSelectedIntent();
+        const continuation = continuationFor();
         setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
-        finishDebt(false);
-        return { kind: 'failed' };
+        finishDebt(false, result);
+        return { kind: 'failed', error: result, continuation };
       } catch (err) {
         if (!isCurrent()) return { kind: 'stale' };
         if (options.expectedCodes && SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
           const retirement = retireSelectedIdentityRef.current?.(options.identity, {
             refreshDefinitions: options.refreshDefinitions !== false,
           });
-          finishDebt(false);
           if (retirement?.resumedIdentity) {
             return {
               kind: 'expected-retired',
-              resumedIdentity: retirement.resumedIdentity,
-              intentGeneration: retirement.intentGeneration,
+              continuation: {
+                nextIdentity: retirement.resumedIdentity,
+                intentGeneration: retirement.intentGeneration,
+              },
             };
           }
           return { kind: 'failed' };
         }
-        rollbackSelectedIntent();
+        const continuation = continuationFor();
         setResourceError('selection', errorMessage(err) || tRef.current('errorBoundary.title'));
-        finishDebt(false);
-        return { kind: 'failed' };
+        finishDebt(false, err);
+        return { kind: 'failed', error: err, continuation };
       }
     },
     [api, clearResourceError, commitSelected, rollbackSelectedIntent, setResourceError],
@@ -598,7 +661,13 @@ export const AgentsPage: React.FC = () => {
   const scheduleSelectedRead = useCallback(
     (
       identity: string,
-      options: { expectedCodes?: readonly string[]; debtOnly?: boolean; refreshDefinitions?: boolean } = {},
+      options: {
+        expectedCodes?: readonly string[];
+        debtOnly?: boolean;
+        refreshDefinitions?: boolean;
+        rollbackOnFailure?: boolean;
+        clearSelectionError?: boolean;
+      } = {},
     ): Promise<SelectedReadOutcome> | null => {
       if (!selectedMountedRef.current || !identity) return null;
       const coordinator = selectedCoordinatorRef.current;
@@ -620,13 +689,9 @@ export const AgentsPage: React.FC = () => {
         intentGeneration,
         expectedCodes: options.expectedCodes,
         refreshDefinitions: options.refreshDefinitions,
+        rollbackOnFailure: options.rollbackOnFailure,
+        clearSelectionError: options.clearSelectionError,
         debtVersion,
-      }).then((outcome) => {
-        if (debtVersion !== undefined) {
-          const currentDebt = coordinator.reconciliationDebt.get(identity);
-          if (currentDebt?.version === debtVersion && outcome.kind !== 'published') currentDebt.scheduled = false;
-        }
-        return outcome;
       });
     },
     [launchSelectedRead],
@@ -678,22 +743,53 @@ export const AgentsPage: React.FC = () => {
       if (failures.length > 0) {
         setResourceError('mutation', errorMessage(failures[0]) || t('errorBoundary.title'), errorGeneration);
       }
+      const priorDebt = coordinator.reconciliationDebt.get(identity);
       if (!coordinator.retired.has(identity)) {
-        coordinator.reconciliationDebt.set(identity, { version, scheduled: false });
+        coordinator.reconciliationDebt.set(identity, {
+          version,
+          scheduled: false,
+          waiters: priorDebt?.waiters ?? [],
+        });
       }
       void refreshRef.current();
-      const drain = scheduleSelectedReadRef.current?.(identity, {
-        debtOnly: true,
-        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
-      });
-      const completion = drain?.then((outcome) => outcome.kind === 'published'
-        ? ({ ok: true } as const)
-        : ({ ok: false, error: new Error('Agent reconciliation failed') } as const))
-        ?? Promise.resolve({ ok: failures.length === 0 } as SelectedMutationResult);
-      const resultPromise = completion.then((result) => {
-        if (failures.length > 0) return { ok: false, error: failures[0] } as const;
-        return result;
-      });
+      const baseResult = failures.length > 0
+        ? ({ ok: false, error: failures[0] } as const)
+        : ({ ok: true } as const);
+      const currentDebt = coordinator.reconciliationDebt.get(identity);
+      const shouldDrain = Boolean(
+        currentDebt &&
+          coordinator.desiredName === identity &&
+          !coordinator.retired.has(identity),
+      );
+      let resultPromise: Promise<SelectedMutationResult>;
+      if (!shouldDrain || !currentDebt) {
+        resultPromise = Promise.resolve(baseResult);
+      } else {
+        const completion = new Promise<SelectedMutationResult>((resolve) => {
+          currentDebt.waiters.push({
+            mutationFailure: failures[0],
+            errorGeneration,
+            resolve: (result) => {
+              if (!result.ok && !failures.length) {
+                setResourceError('mutation', errorMessage(result.error) || t('errorBoundary.title'), errorGeneration);
+              }
+              resolve(result);
+            },
+          });
+        });
+        const drain = scheduleSelectedReadRef.current?.(identity, {
+          debtOnly: true,
+          expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+          rollbackOnFailure: false,
+        });
+        if (!drain) {
+          const waiters = currentDebt.waiters.splice(0);
+          for (const waiter of waiters) waiter.resolve(baseResult);
+          resultPromise = Promise.resolve(baseResult);
+        } else {
+          resultPromise = completion;
+        }
+      }
       const waiters = batch.waiters.splice(0);
       for (const resolve of waiters) void resultPromise.then(resolve);
       return resultPromise;
@@ -705,6 +801,7 @@ export const AgentsPage: React.FC = () => {
     const coordinator = selectedCoordinatorRef.current;
     let transactionIntentGeneration = coordinator.intentGeneration;
     let identity = coordinator.desiredName;
+    let preserveSelectionError = false;
     const attempted = new Set<string>();
     while (selectedMountedRef.current && identity && !attempted.has(identity)) {
       if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
@@ -714,16 +811,22 @@ export const AgentsPage: React.FC = () => {
       const outcome = await scheduleSelectedReadRef.current?.(identity, {
         expectedCodes: SELECTED_DISAPPEARANCE_CODES,
         refreshDefinitions: false,
+        clearSelectionError: !preserveSelectionError,
       });
       if (edgeEpoch !== undefined && catchUpEpochRef.current !== edgeEpoch) return;
-      if (!outcome || outcome.kind !== 'expected-retired') return;
+      if (!outcome) return;
+      const continuation = outcome.kind === 'expected-retired' || outcome.kind === 'failed'
+        ? outcome.continuation
+        : undefined;
+      if (!continuation) return;
       if (
-        outcome.intentGeneration !== coordinator.intentGeneration ||
-        coordinator.desiredName !== outcome.resumedIdentity ||
-        attempted.has(outcome.resumedIdentity)
+        continuation.intentGeneration !== coordinator.intentGeneration ||
+        coordinator.desiredName !== continuation.nextIdentity ||
+        attempted.has(continuation.nextIdentity)
       ) return;
-      transactionIntentGeneration = outcome.intentGeneration;
-      identity = outcome.resumedIdentity;
+      transactionIntentGeneration = continuation.intentGeneration;
+      identity = continuation.nextIdentity;
+      preserveSelectionError = true;
     }
   }, []);
 
