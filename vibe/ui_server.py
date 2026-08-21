@@ -6623,19 +6623,31 @@ async def config_post():
     # falsy shapes that happen to exist today.
     payload = request.json
     authorization_context = getattr(g, "authorization_context", None)
-    editor_write = authorization_context is not None and not authorization_context.can_manage_instance
-    if editor_write:
+    # Persisting a credential is an Owner act, so the write schema is selected
+    # by ownership and by nothing else. ``can_manage_instance`` used to pick it,
+    # which stopped being an owner test the moment a member acquired that
+    # capability: a member fell past this branch into a filter that removed only
+    # ``remote_access``, and every other section — ``slack.bot_token``,
+    # ``discord.bot_token``, ``lark.app_secret``, gateway secrets — reached the
+    # save path and was reconciled onto the live platform.
+    #
+    # There is one non-owner write schema and it is ``_EDITOR_CONFIG_WRITE_FIELDS``,
+    # a closed allowlist of non-secret preferences. Closed is the whole point:
+    # no credential-bearing section has to be enumerated here, and a secret
+    # added to ``api._PLATFORM_SECRET_FIELDS`` (or to any config section) is
+    # unreachable below Owner by construction rather than by remembering to add
+    # it to a strip list. Pairing identity is covered by the same rule —
+    # ``remote_access`` is not on the allowlist, so it is refused outright
+    # instead of silently dropped.
+    non_owner_write = (
+        authorization_context is not None and not authorization_context.can_manage_access_members
+    )
+    if non_owner_write:
         try:
             payload = api.editor_config_write_payload(payload)
         except ValueError as exc:
             code = api.editor_config_write_error_code(exc)
             return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
-    elif (
-        authorization_context is not None
-        and not authorization_context.can_manage_access_members
-        and isinstance(payload, dict)
-    ):
-        payload = api.strip_pairing_identity_from_config_write(payload)
     remote_access_runtime = None
     try:
         (
@@ -6648,11 +6660,11 @@ async def config_post():
             payload,
         )
     except ValueError as exc:
-        # Same chokepoint as the allowlist rejection above: an Editor write
+        # Same chokepoint as the allowlist rejection above: a non-owner write
         # answers with a stable code whichever layer refused it, including
         # value validation raised deep inside ``V2Config.from_payload``. Owner
         # saves keep the descriptive message the Settings pages already show.
-        if editor_write:
+        if non_owner_write:
             code = api.editor_config_write_error_code(exc)
             return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
         message = str(exc)
@@ -8166,6 +8178,11 @@ def projects_create():
             )
     except (FileNotFoundError, NotADirectoryError) as err:
         return jsonify({"error": str(err)}), 400
+    except LookupError as err:
+        # The folder is already held by a Project this caller cannot see, so
+        # create-or-reuse answers exactly as the id-keyed routes do rather than
+        # reusing, reviving, or duplicating it.
+        return jsonify({"error": str(err)}), 404
     return jsonify(project), 201
 
 

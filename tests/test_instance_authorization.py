@@ -894,7 +894,13 @@ def test_access_administration_handlers_gate_without_the_route_policy(monkeypatc
 def test_member_config_write_cannot_change_pairing_identity(
     monkeypatch, tmp_path, remote_access_payload
 ) -> None:
-    """Member POST /api/config cannot change pairing identity in any value shape."""
+    """Member POST /api/config cannot change pairing identity in any value shape.
+
+    The refusal is the Editor allowlist, which every writer below Owner now runs:
+    ``remote_access`` is not a field they may set, so the write is rejected
+    outright rather than accepted with one key quietly removed. Stored pairing is
+    asserted unchanged either way — the point is the identity, not the status code.
+    """
 
     from config.v2_config import V2Config
     from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
@@ -940,7 +946,11 @@ def test_member_config_write_cannot_change_pairing_identity(
         environ_base=remote_peer(),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
+    assert response.get_json()["error"] == {
+        "code": "editor_config_write_forbidden",
+        "message": "editor_config_write_forbidden",
+    }
     after = V2Config.load().remote_access.vibe_cloud
     assert after.instance_id == before.instance_id == "inst_123"
     assert after.backend_url == before.backend_url == "https://backend.example"

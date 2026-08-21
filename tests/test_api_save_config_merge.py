@@ -1637,22 +1637,22 @@ def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_p
         },
     ),
 )
-def test_strip_pairing_identity_drops_remote_access_regardless_of_value(remote_access):
-    """Non-owner config writes cannot carry pairing identity in any value shape."""
+def test_non_owner_config_write_refuses_pairing_identity_in_any_value_shape(remote_access):
+    """Pairing identity is Owner-only, in every value shape, by the same allowlist.
+
+    This used to be a dedicated ``remote_access`` strip applied to non-owner
+    writes. It is now the closed allowlist doing it: ``remote_access`` is not a
+    field any writer below Owner may set, so the write is refused rather than
+    silently accepted with one key removed -- which is also what stops a falsy
+    patch from wiping stored pairing.
+    """
 
     payload = {"ack_mode": "message", "remote_access": remote_access}
 
-    stripped = api.strip_pairing_identity_from_config_write(payload)
+    with pytest.raises(ValueError) as excinfo:
+        api.editor_config_write_payload(payload)
 
-    assert stripped == {"ack_mode": "message"}
-    assert "remote_access" in payload
-    assert payload["remote_access"] == remote_access
-
-
-def test_strip_pairing_identity_leaves_payloads_without_remote_access():
-    payload = {"ack_mode": "message"}
-
-    assert api.strip_pairing_identity_from_config_write(payload) == payload
+    assert api.editor_config_write_error_code(excinfo.value) == "editor_config_write_forbidden"
 
 
 def test_editor_config_write_payload_keeps_messaging_fields_only():

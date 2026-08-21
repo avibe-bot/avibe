@@ -351,6 +351,57 @@ def test_member_project_mutations_are_bounded_by_the_acl_that_hides_them(monkeyp
     assert _archive(included, ids["project_a"], included_headers).status_code == 200
 
 
+def test_member_cannot_reach_a_hidden_project_through_its_folder(monkeypatch, tmp_path) -> None:
+    """``POST /api/projects`` is create-or-reuse, so it is also a Project lookup.
+
+    The middleware only sees routes that name a Project id, and this one names a
+    folder, so the whole visibility rule for it lives in the service. A member
+    excluded from the Project gets the same 404 the id-keyed routes answer with
+    -- not its payload, and not a revived copy of it.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    project_b_dir = str((tmp_path / "project-b").resolve())
+
+    # ``alice`` is bound to project_a only; project_b is restricted to a group
+    # she is not in, so it is hidden from her exactly as the list shows.
+    alice = _remote_client(config, role="member", email="alice@example.com")
+    headers = csrf_headers(alice, REMOTE_ORIGIN)
+    assert {row["id"] for row in _get(alice, "/api/projects").get_json()["projects"]} == {
+        ids["project_a"]
+    }
+
+    hidden = alice.post(
+        "/api/projects",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={"folder_path": project_b_dir, "display_name": "Stolen"},
+    )
+    assert hidden.status_code == 404
+    assert "project_b" not in json.dumps(hidden.get_json())
+
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    owner_view = {
+        row["id"]: row for row in _get(owner, "/api/projects").get_json()["projects"]
+    }
+    assert owner_view[ids["project_b"]]["display_name"] == "B"
+
+    # Reuse still works for a folder the caller can see, so the refusal above is
+    # the ACL and not create-or-reuse breaking.
+    project_a_dir = str((tmp_path / "project-a").resolve())
+    visible = alice.post(
+        "/api/projects",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={"folder_path": project_a_dir, "display_name": "Ignored On Reuse"},
+    )
+    assert visible.status_code == 201
+    assert visible.get_json()["id"] == ids["project_a"]
+
+
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
@@ -516,6 +567,85 @@ def test_editor_config_write_always_answers_with_a_renderable_code(monkeypatch, 
     assert accepted.status_code == 200
     assert V2Config.load().ack_mode == "reaction"
     assert V2Config.load().runtime.default_cwd == "."
+
+
+def test_no_non_owner_can_persist_a_credential_through_the_config_write(monkeypatch, tmp_path) -> None:
+    """Persisting a secret is an Owner act, and the allowlist closes that by shape.
+
+    The write schema used to be selected with ``can_manage_instance``, which
+    stopped being an owner test once a member held that capability: the member
+    fell past the Editor allowlist into a filter that removed only
+    ``remote_access``, so platform bot tokens and gateway secrets reached the
+    save path and were reconciled onto the live platform.
+
+    The enumeration comes from ``api._PLATFORM_SECRET_FIELDS`` and
+    ``api._GATEWAY_SECRET_FIELDS`` rather than from the four fields a review
+    happened to name, and the assertion is over the allowlist rather than over
+    those tables: a secret added to either table -- or a credential-bearing
+    section nobody has written down yet -- is unreachable below Owner because
+    it is absent from ``_EDITOR_CONFIG_WRITE_FIELDS``, not because someone
+    remembered to strip it. ``remote_access`` rides the same rule, which is why
+    the pairing-specific filter it used to need is gone.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, _ids = _setup_state(tmp_path)
+
+    secret_sections = {
+        section: fields for section, fields in api._PLATFORM_SECRET_FIELDS.items()
+    }
+    secret_sections["remote_access"] = ("provider",)
+    secret_sections["gateway"] = api._GATEWAY_SECRET_FIELDS
+    assert set(secret_sections) & api._EDITOR_CONFIG_WRITE_FIELDS == set()
+
+    def _stored_secrets() -> dict:
+        loaded = V2Config.load()
+        state = {
+            f"{section}.{field}": getattr(getattr(loaded, section, None), field, None)
+            for section, fields in secret_sections.items()
+            if section != "remote_access"
+            for field in fields
+        }
+        cloud = loaded.remote_access.vibe_cloud
+        state["remote_access.instance_id"] = cloud.instance_id
+        state["remote_access.client_id"] = cloud.client_id
+        state["remote_access.session_secret"] = cloud.session_secret
+        return state
+
+    baseline = _stored_secrets()
+    assert baseline["slack.bot_token"] == ""
+    assert baseline["remote_access.instance_id"] == "inst_123"
+
+    for role in ("member", "editor"):
+        client = _remote_client(config, role=role, email=f"{role}@example.com")
+        headers = csrf_headers(client, REMOTE_ORIGIN)
+        for section, fields in secret_sections.items():
+            for field in fields:
+                response = client.post(
+                    "/api/config",
+                    base_url=REMOTE_ORIGIN,
+                    environ_base=REMOTE_PEER,
+                    headers=headers,
+                    json={section: {field: "stolen-credential"}},
+                )
+                assert response.status_code == 400, (role, section, field)
+                assert response.get_json()["error"] == {
+                    "code": "editor_config_write_forbidden",
+                    "message": "editor_config_write_forbidden",
+                }, (role, section, field)
+
+        # Refused, not merely unpersisted: the allowlisted preference still
+        # saves, so the refusals above are the schema and not a dead endpoint.
+        accepted = client.post(
+            "/api/config",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+            json={"ack_mode": "reaction"},
+        )
+        assert accepted.status_code == 200, role
+
+    assert _stored_secrets() == baseline
+    assert V2Config.load().ack_mode == "reaction"
 
 
 def test_config_write_requires_an_object_body_whatever_the_role(monkeypatch, tmp_path) -> None:

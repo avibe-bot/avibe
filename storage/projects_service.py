@@ -59,8 +59,12 @@ def _resolve_folder(folder_path: str) -> Path:
     return folder
 
 
-def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[str, Any]]:
-    """Find an existing avibe *project* scope whose folder matches ``workdir``.
+def _find_project_by_workdir(
+    conn: Connection,
+    context: AuthorizationContext,
+    workdir: str,
+) -> Optional[dict[str, Any]]:
+    """Find the visible avibe *project* scope whose folder matches ``workdir``.
 
     Only avibe project scopes are considered: IM channel scopes can carry
     their own ``scope_settings.workdir``, so matching across all scopes would
@@ -69,6 +73,15 @@ def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[st
     so it lines up with how projects are stored. When legacy duplicates share a
     path, prefer an active row, then the most recently seen, so the pick is
     deterministic.
+
+    The visibility check lives *here* rather than in the caller, because a
+    folder path is a lookup key exactly as much as a project id is. Gating the
+    one caller would leave the next one free to skip it; gating the resolver
+    means every way of reaching a project row goes through the same check
+    ``list_projects`` applies. A hidden match raises ``LookupError`` — the same
+    404 the id-keyed paths answer with — rather than reporting "no match":
+    reporting no match would mint a second project scope over a folder a
+    restricted project already owns, which is a worse outcome than refusing.
     """
 
     row = (
@@ -96,6 +109,7 @@ def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[st
     )
     if row is None:
         return None
+    _require_visible_project(conn, context, str(row["native_id"]))
     return {"scope_id": row["scope_id"], "native_id": row["native_id"], "enabled": row["enabled"]}
 
 
@@ -375,13 +389,18 @@ def create_project(
     after archiving, without a dedicated unarchive endpoint. The caller's
     ``display_name`` is intentionally ignored on reuse so re-opening a folder
     never clobbers a name the user set earlier; renaming stays explicit.
+
+    Reuse is a project lookup, so it carries the same visibility rule as every
+    other one: ``_find_project_by_workdir`` refuses a match the caller cannot
+    see, which is what stops a folder path from being a side door onto a
+    restricted project's payload — or onto reviving an archived one.
     """
 
     context = require_instance_role(authorization_context, "member")
     folder = _resolve_folder(folder_path)
     now = _utc_now_iso()
 
-    existing = _find_project_by_workdir(conn, str(folder))
+    existing = _find_project_by_workdir(conn, context, str(folder))
     if existing is not None:
         scope_id = existing["scope_id"]
         if not existing["enabled"]:

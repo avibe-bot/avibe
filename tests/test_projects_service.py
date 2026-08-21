@@ -244,6 +244,163 @@ def test_project_mutations_follow_the_acl_that_hides_them(engine, tmp_path):
         )
 
 
+def test_every_project_entry_point_resolves_through_the_visibility_check():
+    """Every way into a Project row goes through the check ``list_projects`` uses.
+
+    The enumeration is taken from the module, not written down here: each round
+    of review found one more entry point that resolved a Project without the
+    ACL -- first mutation by id, then create-or-reuse by folder path -- because
+    each fix named the paths it knew about. Reading the call graph instead means
+    an entry point added later is covered on the day it is added, and one that
+    stops applying the check fails here rather than in a review.
+
+    "Reaching" is transitive on purpose: ``create_project`` never calls the
+    check itself, it calls the resolver that does, which is exactly where the
+    check belongs -- at the lookup rather than at each of its callers.
+    """
+
+    import ast
+    import inspect
+
+    gates = {"_require_visible_project", "can_read_project", "filter_accessible_projects"}
+    tree = ast.parse(inspect.getsource(projects_service))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def _calls(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+        return names
+
+    def _reaches_gate(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        if name in seen or name not in functions:
+            return False
+        called = _calls(functions[name])
+        if called & gates:
+            return True
+        return any(_reaches_gate(callee, seen | {name}) for callee in called)
+
+    # Public + takes a Connection: that is precisely the set of functions that
+    # return or mutate Project rows on behalf of an HTTP caller. ``make_directory``
+    # touches no rows and takes no connection, so it falls out by construction.
+    entry_points = {
+        name
+        for name, node in functions.items()
+        if not name.startswith("_")
+        and any(arg.arg == "conn" for arg in node.args.args)
+    }
+    assert entry_points >= {
+        "list_projects",
+        "get_project",
+        "get_project_workdir",
+        "create_project",
+        "update_project",
+        "archive_project",
+    }
+    ungated = sorted(name for name in entry_points if not _reaches_gate(name))
+    assert ungated == [], f"Project entry points that never reach a visibility check: {ungated}"
+
+
+def test_folder_path_is_not_a_side_door_onto_a_hidden_project(engine, tmp_path):
+    """Create-or-reuse is a Project lookup, so it carries the visibility rule too.
+
+    A folder path is a lookup key exactly as much as a Project id is. Reuse
+    resolved the match without the ACL, so a member who submitted the folder of
+    a restricted Project they are excluded from got its payload back -- and,
+    when the Project was archived, revived it on the way, since reuse is also
+    the unarchive path.
+
+    Applying the *same* check the list applies carries one declared consequence:
+    ``get_effective_project_role`` returns nothing for an inactive Project below
+    the Instance Owner, so restoring an archived Project by re-opening its
+    folder is Owner-only. That is not a new rule, it is the existing one finally
+    reaching this path -- ``list_projects(include_archived=True)``,
+    ``get_project``, ``update_project``, and ``archive_project`` already answer
+    a non-owner with nothing for an archived Project.
+    """
+
+    folder = tmp_path / "hidden"
+    folder.mkdir()
+    owner = _remote_context("owner")
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Hidden",
+            authorization_context=owner,
+        )
+        _restrict_project_to(conn, project["id"], "insider@example.com")
+
+    excluded = _acl_context("member", email="outsider@example.com")
+    included = _acl_context("member", email="insider@example.com")
+
+    with engine.begin() as conn:
+        with pytest.raises(LookupError):
+            projects_service.create_project(
+                conn,
+                str(folder),
+                display_name="Stolen",
+                authorization_context=excluded,
+            )
+
+    # The bound member reaches the same folder normally, so the refusal above is
+    # the ACL talking and not create-or-reuse breaking for everyone.
+    with engine.begin() as conn:
+        reused = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Ignored On Reuse",
+            authorization_context=included,
+        )
+    assert reused["id"] == project["id"]
+    assert reused["display_name"] == "Hidden"
+
+    # Archived: invisible to every non-owner, so reuse cannot revive it either.
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, project["id"], authorization_context=owner)
+        for context in (excluded, included):
+            with pytest.raises(LookupError):
+                projects_service.create_project(
+                    conn,
+                    str(folder),
+                    display_name="Revived",
+                    authorization_context=context,
+                )
+
+    # Refused without side effects: still archived, still named as its owner
+    # left it, and no duplicate scope minted over the same folder.
+    with engine.connect() as conn:
+        owned = projects_service.list_projects(
+            conn,
+            include_archived=True,
+            authorization_context=owner,
+        )
+    assert len(owned) == 1
+    assert owned[0]["id"] == project["id"]
+    assert owned[0]["display_name"] == "Hidden"
+    assert owned[0]["archived"] is True
+
+    # The Owner still restores it the documented way, by re-opening the folder.
+    with engine.begin() as conn:
+        restored = projects_service.create_project(
+            conn,
+            str(folder),
+            authorization_context=owner,
+        )
+    assert restored["id"] == project["id"]
+    assert restored["archived"] is False
+
+
 def test_personal_instance_member_mutates_without_a_project_acl(engine, tmp_path):
     """A Personal install has no Project ACL, so the instance role stays sufficient.
 
@@ -390,7 +547,10 @@ def test_path_lookup_ignores_non_project_scopes(engine, tmp_path):
 
     with engine.begin() as conn:
         # The channel sharing the path is not a project match...
-        assert projects_service._find_project_by_workdir(conn, workdir) is None
+        assert (
+            projects_service._find_project_by_workdir(conn, _remote_context("owner"), workdir)
+            is None
+        )
         # ...so creating a project for it mints a real avibe project scope.
         proj = projects_service.create_project(conn, workdir)
 
@@ -491,7 +651,7 @@ def test_duplicate_path_pick_prefers_active_then_recent(engine, tmp_path):
     _insert_project("avibe::project::proj_active", enabled=1, last_seen="2026-05-01T00:00:00Z")
 
     with engine.begin() as conn:
-        found = projects_service._find_project_by_workdir(conn, workdir)
+        found = projects_service._find_project_by_workdir(conn, _remote_context("owner"), workdir)
 
     # Active wins over the more-recent archived row.
     assert found is not None
