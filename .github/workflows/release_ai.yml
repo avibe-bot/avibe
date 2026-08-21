@@ -566,14 +566,12 @@ jobs:
             has_marker="true"
           fi
 
-          # Source 2: an already-created release body. A silent release is often
-          # set up by pre-creating the release with the marker comment in its body
-          # (e.g. via 'gh release create --notes-file'). Both this job (official
-          # tags) and the later softprops step (gh-v* tags) replace the body with
-          # release.md, which would otherwise STRIP that marker — so this applies
-          # to ALL tags, not just official ones. Require the STRICT HTML-comment
-          # form here: a body that merely DOCUMENTS the marker text as prose
-          # (e.g. notes about this workflow) is not an intent to go silent.
+          # Source 2: an already-created release body. This keeps reruns and
+          # releases created by the legacy process idempotent; new releases carry
+          # intent in the annotated tag instead. Replacing the body with release.md
+          # would otherwise STRIP that marker, so this applies to ALL tags. Require
+          # the STRICT HTML-comment form: prose that merely documents the marker is
+          # not an intent to go silent.
           if [ "$has_marker" != "true" ]; then
             EXISTING_BODY=$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null || true)
             if echo "$EXISTING_BODY" | grep -qE "$MARKER_COMMENT_RE"; then
@@ -593,7 +591,14 @@ jobs:
             mv release.md.tmp release.md
           fi
 
+          SOURCE_SHA="$(git rev-parse "${TAG}^{commit}")"
+          READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} -->"
+          if ! grep -qF "$READY_MARKER" release.md; then
+            printf '\n\n%s\n' "$READY_MARKER" >> release.md
+          fi
+
       - name: Download release artifacts
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: release-dist
@@ -607,20 +612,11 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            ARGS=(release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release.md)
-            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
-              ARGS+=(--prerelease)
-            fi
-            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
-              ARGS+=(--latest)
-            else
-              ARGS+=(--latest=false)
-            fi
-            gh "${ARGS[@]}" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
-          else
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release.md
-          fi
+          python scripts/github_release.py update-notes \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --title "$TAG" \
+            --notes-file release.md
 
           existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           temporary="$(mktemp -d)"
@@ -669,6 +665,12 @@ jobs:
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_assets[@]}" --clobber
 
+          python scripts/github_release.py finalize \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --prerelease "${{ steps.release_type.outputs.prerelease }}" \
+            --latest false
+
       - name: Update official release notes
         if: ${{ !startsWith(steps.tag.outputs.tag, 'gh-v') }}
         env:
@@ -676,24 +678,8 @@ jobs:
         shell: bash
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if ! gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            ARGS=(release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --notes-file release.md)
-            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
-              ARGS+=(--prerelease)
-            fi
-            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
-              ARGS+=(--latest)
-            fi
-            gh "${ARGS[@]}" || gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --notes-file release.md
-          else
-            EDIT_ARGS=(release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --notes-file release.md)
-            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
-              EDIT_ARGS+=(--prerelease)
-            else
-              EDIT_ARGS+=(--prerelease=false)
-            fi
-            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
-              EDIT_ARGS+=(--latest)
-            fi
-            gh "${EDIT_ARGS[@]}"
-          fi
+          python scripts/github_release.py update-notes \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --title "$TAG" \
+            --notes-file release.md
