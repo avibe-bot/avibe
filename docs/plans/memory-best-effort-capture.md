@@ -152,7 +152,13 @@ BestEffortMemoryWriter.offer()
 one ordered worker consumes the ready head slot
         |
         v
+durably open one content-free provider-call gap
+        |
+        v
 EverOSPort.add / flush
+        |
+        v
+record every valid request id and close that gap atomically
 ```
 
 Suggested starting constants, fixed rather than user settings:
@@ -223,8 +229,8 @@ Reset, Rebuild fencing, and `reset_for_clear(target_epoch=...)` already
 own `memory_meta.epoch`. A second identity format would add crash windows
 without removing the outbox.
 
-After migration, `state/memory/memory.sqlite` contains identity plus one
-bounded, content-free display-provenance table. It contains no delivery work,
+After migration, `state/memory/memory.sqlite` contains identity plus bounded,
+content-free display-provenance tables. They contain no delivery work,
 retry state, flush schedule, captured text, or attachment path:
 
 ```text
@@ -248,26 +254,43 @@ memory_projects
   last_written_at
 
 memory_call_provenance
+  provenance_id        # local row key; request_id is deliberately non-unique
   request_id
   operation_kind       # add | flush
+  outcome_class        # acknowledged | rejected | unknown
   principal_id
   project_id
   session_id
   message_ids_json     # exact EverOS message ids, at most 100
   recorded_at_ms
+
+memory_call_provenance_gap
+  gap_id               # local operation token, never sent to EverOS
+  started_at_ms
+  ended_at_ms          # null while the outcome is still unknown
+  operation_kind       # add | flush | migration
+  reason               # call_unobserved | migration_unknown
 ```
 
 `memory_call_provenance` replaces the correlation and authorization facts
 that Processing Record currently reads from `memory_capture_queue` and
 `memory_flush_settlements`. It is observer metadata, not an outbox:
 
-- after an acknowledged add, write the returned request id with its one exact
-  `m_<session>_<provider timestamp>_000` message id
-- after an acknowledged flush, write the returned request id with the bounded
-  message-id list from that session's `PendingFlush`
+- record every syntactically valid, bounded request id observed in an EverOS
+  response, whether its result is an acknowledged add/flush, `AddRejected`,
+  `FlushRejected`, another terminal non-success, or an otherwise unclassifiable
+  response whose id can still be validated
+- an add row carries its one exact `m_<session>_<provider timestamp>_000`
+  message id; a flush row carries the bounded message-id list from that
+  session's `PendingFlush`
 - retain at most 5,000 provenance rows and at most 14 days, matching Provider
-  Call Log retention; enforce both bounds after each provenance write and at
-  boot with the same policy values
+  Call Log retention, but prune only complete request-id groups: age-prune a
+  group only when its newest `recorded_at_ms` is older than the cutoff, then
+  delete the oldest whole groups until the row count is at most 5,000
+- never retain a subset of a request-id group. If one reused group alone exceeds
+  the row limit, delete that whole group; missing provenance remains fail-closed
+- enforce both bounds after each provenance write and at boot with the same
+  policy values
 - for every user-scoped read, require all rows for the request id to resolve to
   exactly one principal/project; ambiguous or missing provenance never
   broadens visibility
@@ -277,30 +300,65 @@ that Processing Record currently reads from `memory_capture_queue` and
   scope is the authorization fact: requiring memcell membership there would
   reject the branch precisely because the call is unlinked
 
-A provenance write failure never retries an EverOS add or flush. It marks the
-Processing Record capture-correlation source unavailable for that observation
-and emits content-free diagnostics; ordinary capture remains best-effort.
-Clear's `reset_for_clear` deletes every provenance row with the catalog and
-watermark reset; Factory Reset deletes it with `state/memory`.
+The single ordered worker makes correlation loss restart-safe without turning
+observer state into delivery state:
+
+1. Before every EverOS add or flush attempt, the worker durably inserts one open
+   `memory_call_provenance_gap` row. It also closes any stale open row at this
+   attempt's start time. If this preflight identity transaction fails, the
+   best-effort item is skipped and EverOS is not called.
+2. If the result contains a valid request id, one transaction inserts every
+   provenance row for that call and deletes its open gap. This applies to
+   acknowledged, rejected, and unknown classifications; any separately allowed
+   uncommitted retry starts only after that observer transaction commits. A
+   provenance transaction failure leaves the already-committed gap open and
+   never causes a provider retry.
+3. If a result has no valid request id and proves no request left Avibe, close
+   the gap before any permitted retry; if closing fails, drop the item. The retry
+   opens a new gap. A timeout, truncated or malformed response, or other result
+   without a trustworthy request id leaves the gap open because the provider may
+   have observed the call.
+4. At boot, close a stale open gap at boot time. Until then an open gap covers
+   `[started_at_ms, infinity)`. A Processing Record call whose observation time
+   overlaps any gap reports the correlation source unavailable instead of
+   silently disappearing from a scoped result.
+
+A gap is global observer state rather than a principal/project authorization
+fact: no scoped reader may bypass an overlapping gap. Gap metadata is also
+bounded to 14 days and 256 ranges. When it exceeds the count bound, coalesce the
+oldest ranges into a wider range rather than dropping coverage. Delete a closed
+range only when it is wholly older than the Provider Call Log retention cutoff;
+an open range is never age-deleted. This may hide a good observation
+conservatively, but cannot authorize the wrong scope. Clear's `reset_for_clear`
+deletes provenance rows and gaps with the catalog and watermark reset; Factory
+Reset deletes them with `state/memory`.
 
 The independently maintained Provider Call Log is not an input to identity
-migration or writer admission. Historical migration copies non-null,
-unambiguous add/flush correlations from the released Memory store and applies
-the same 5,000-row / 14-day limits using their capture/settlement observation
-times; it does not open or filter against the call-log database. A malformed
-observer-only correlation or timestamp is skipped with a content-free count.
-An absent, corrupt, incompatible, or unreadable call log therefore makes the
-Processing Record calls section unavailable/warned through its existing
-projection, but cannot block v4 migration or capture startup.
+migration or writer admission. Historical migration copies every valid bounded
+add/flush request id from the released Memory store, including rejected rows and
+every scope row for a reused id, then applies the same whole-group 5,000-row /
+14-day policy using capture/settlement observation times. It does not open or
+filter against the call-log database. Any observer-only correlation that cannot
+be translated safely creates or widens a `migration_unknown` gap over the
+retained observation horizon instead of being silently skipped. An absent,
+corrupt, incompatible, or unreadable call log therefore makes the Processing
+Record calls section unavailable/warned through its existing projection, but
+cannot block v4 migration or capture startup.
 
 `processing_fault_*` / `processing_alert_*` / `processing_recovery_*`
 stop being written. They may be dropped in the v4 table rebuild or left
 unused; they are not an input to retry, Repair, or IM notification.
 
-`last_provider_timestamp_ms` remains durable. Each accepted offer assigns
-`max(occurred_at_ms, last_provider_timestamp_ms + 1)` and persists the
-new watermark in the same identity transaction as the catalog upsert for
-named projects. That is a small identity write, not an outbox.
+`last_provider_timestamp_ms` remains durable. Under the short process-local
+admission critical section, a capture first proves that capacity is available,
+reads the current watermark, and computes
+`max(occurred_at_ms, last_provider_timestamp_ms + 1)` with a checked upper
+bound. If the candidate exceeds `MAX_PROVIDER_TIMESTAMP_MS`, return the existing
+`timestamp_invalid` outcome before catalog upsert, watermark mutation, slot
+charge, attachment pin, or task creation. Otherwise persist the new watermark in
+the same identity transaction as the catalog upsert for named projects, charge
+the ordered slot, and only then release the critical section. That section has
+no attachment or provider await; the identity write is not an outbox.
 
 That identity transaction preserves `MAX_NAMED_MEMORY_PROJECTS`: an existing
 named-project row may be updated at the limit, but inserting a 17th distinct
@@ -406,11 +464,14 @@ would accept captures:
      `manual_required`) and terminal rows, without logging payload text
    - collect `attachment_bundle` ids
    - copy `memory_meta` identity columns and `memory_projects`
-   - before dropping delivery tables, copy non-null add/flush request
-     correlation into `memory_call_provenance`, independently bounded to its
-     5,000-row / 14-day window; do not open the optional Provider Call Log, skip
-     malformed observer-only rows with a count, and preserve the fail-closed
-     rule for request ids that resolve to more than one scope
+   - before dropping delivery tables, copy every valid bounded add/flush request
+     id into `memory_call_provenance`, including rejected operations and every
+     scope row for a reused id; prune only complete request-id groups to the
+     5,000-row / 14-day window and preserve ambiguity as fail-closed
+   - do not open the optional Provider Call Log; if observer-only request-id or
+     timestamp data cannot be translated safely, create or widen one bounded
+     `migration_unknown` gap over the retained horizon and count it without
+     storing source data
    - drop delivery tables, indexes, and settlement triggers
    - rebuild `memory_meta` without requiring delivery columns if this
      PR drops them
@@ -425,9 +486,9 @@ would accept captures:
    collected leftover pin bundles.
 7. Emit one content-free structured log: discarded nonterminal count,
    discarded terminal count, discarded bundle count. Never log text,
-   paths, or digests that can recover a message. Also count skipped malformed
-   provenance rows and a busy post-commit checkpoint without treating either
-   as a capture-startup failure.
+   paths, or digests that can recover a message. Also count provenance rows
+   covered by a migration gap and a busy post-commit checkpoint without treating
+   either as a capture-startup failure.
 8. Start `BestEffortMemoryWriter` against the preserved watermark and
    catalog.
 
@@ -515,11 +576,11 @@ Processing-fault durable notification and ACK in `MemoryStore` /
 events. Processing Record may show process-local admission-window occupancy
 labelled as volatile; it must not show a durable missed-capture backlog.
 
-Processing Record and Provider Call Log otherwise retain their current
-scope and correlation behavior through `memory_call_provenance`. The reader's
-capture-source availability probe and request-id joins move to that table;
-they do not silently omit request-id call branches merely because the
-delivery tables are gone.
+Processing Record and Provider Call Log otherwise retain their current scope
+and correlation behavior through `memory_call_provenance` and
+`memory_call_provenance_gap`. The reader's capture-source availability probe and
+request-id joins move to those tables; they do not silently omit request-id call
+branches merely because the delivery tables are gone.
 
 ## Control plane that stays
 
@@ -547,8 +608,9 @@ only after the replacement is admitted. This is the replacement for
 `quiesce_claims()`, not an outbox drain.
 
 Clear's queue primitive becomes: identity `reset_for_clear` (epoch bump,
-catalog wipe, watermark zero, call-provenance wipe) with no capture-queue
-DELETE. The other three surfaces (provider root, call log, attachments) stay.
+catalog wipe, watermark zero, call-provenance and gap wipe) with no
+capture-queue DELETE. The other three surfaces (provider root, call log,
+attachments) stay.
 
 Factory Reset still deletes `memory` and `state/memory`. The v4 store is just
 another file under `state/memory`.
@@ -559,7 +621,7 @@ Likely:
 
 ```text
 core/memory/ingest.py      # BestEffortMemoryWriter
-core/memory/identity.py    # meta + projects + watermark + bounded call provenance
+core/memory/identity.py    # meta + projects + watermark + bounded provenance/gaps
                            # or store.py reduced to that surface
 core/memory/migrate_store.py  # v0..v3 recognition + v3→v4 strip
 ```
@@ -611,8 +673,14 @@ Do not ship those doc edits in this planning PR.
 - Every unreadable clear-intent shape keeps migration, sidecar startup, and
   writer startup blocked without modifying the marker or SQLite identity.
 - Retained add/flush request ids migrate to bounded call provenance before
-  delivery tables are dropped; ambiguous cross-scope request ids remain
-  unauthorized.
+  delivery tables are dropped, including rejected calls and every scope row for
+  reused ids; ambiguous cross-scope request ids remain unauthorized.
+- Provenance age and row-count pruning deletes complete request-id groups only;
+  it cannot turn a reused ambiguous id into a uniquely authorized id, including
+  when one group alone exceeds the row bound.
+- A malformed observer correlation creates a bounded retained-horizon migration
+  gap; after restart, overlapping Processing Record observations still report
+  correlation unavailable rather than silently disappearing.
 - Interrupted strip (kill before commit) retries and still preserves
   identity.
 - v4 file is refused by a v3-only opener without writes (contract test
@@ -644,6 +712,9 @@ Do not ship those doc edits in this planning PR.
   or identity mutation. An already accepted barrier remains ordered after all
   earlier slots and before every later accepted slot.
 - Watermark persists across writer restart and is monotonic.
+- With the watermark already at `MAX_PROVIDER_TIMESTAMP_MS`, the next otherwise
+  valid capture returns `timestamp_invalid` without changing the watermark or
+  catalog and without charging a slot, pinning, or creating a task.
 - Named-project upsert still happens on accepted capture; the current
   16-project test still rejects the 17th distinct slug and accepts reuse at
   the limit without advancing rejected-capture state.
@@ -651,6 +722,17 @@ Do not ship those doc edits in this planning PR.
   safe text-only degradation, while ambiguous or unclassified attachment
   failures never resubmit the caption.
 - Logs never include captured text, credentials, or absolute paths.
+- Every provider attempt durably opens a gap before the RPC. A failed preflight
+  write skips the item without calling EverOS; timeout/unknown responses and an
+  injected provenance-commit failure leave a gap that remains fail-closed after
+  restart and is closed at the next attempt or boot.
+- Valid bounded request ids from acknowledged, rejected, and otherwise
+  unclassifiable add/flush responses are recorded with their outcome and scope.
+  Provenance failure never causes a provider retry, while a separately allowed
+  proven-uncommitted retry first settles the old observer gap and opens a new
+  one.
+- Gap compaction coalesces old ranges without losing covered time, and age
+  deletion removes only closed ranges wholly outside Call Log retention.
 
 ### Compatibility with retained surfaces
 
@@ -666,9 +748,10 @@ Do not ship those doc edits in this planning PR.
   `ProviderSessionRef` and provider-session digest; no `-agent` write owner is
   introduced by this cut.
 - Processing Record authorizes and correlates historical migrated calls and
-  new add/flush calls through bounded `memory_call_provenance`, including
-  linked memcell membership, unique-scope unlinked list/detail,
-  source-availability, retention, and ambiguous-request-id tests.
+  new add/flush calls through bounded provenance and gap metadata, including
+  rejected calls, linked memcell membership, unique-scope unlinked list/detail,
+  restart-safe source unavailability, whole-request-id-group retention, and
+  ambiguous-request-id tests.
 
 ## Implementation sequence
 
@@ -693,7 +776,8 @@ after adding migrator and writer tests. Line count is not acceptance.
 - [ ] Implement v4 identity schema and released-shape migrator.
 - [ ] Implement `BestEffortMemoryWriter` and switch capture to `offer()`.
 - [ ] Replace capture-table Processing Record joins with bounded call
-      provenance and migrate retained correlations before dropping the tables.
+      provenance plus durable gaps, and migrate retained correlations before
+      dropping the tables.
 - [ ] Replace session final-flush waits with a best-effort barrier.
 - [ ] Replace claim quiescence with writer pause/quiesce around Rebuild/Repair.
 - [ ] Stop writing processing-fault ACK / `manual_required` / settlements.
