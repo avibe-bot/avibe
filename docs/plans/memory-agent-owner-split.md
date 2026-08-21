@@ -221,17 +221,17 @@ Consequences:
 - old rows load in new code unchanged (they are all user-owned, and owner ==
   principal for those);
 - new *user* rows are byte-identical to old ones — rollback-safe;
-- new *assistant* rows under rollback keep addressing the assistant owner:
-  the old delivery path deserializes the persisted ref and sends
-  `session_ref.principal_id` as `sender_id` unchanged (`_queue_from_row` →
-  coordinator → `EverOSPort.add`), so in-flight agent rows still write to
-  `u-…-agent` on EverOS. The old read path does not query that owner, so
-  those memories are invisible until re-upgrade — preserved, not lost, and
-  nothing crashes. Old-code recovery revalidation that re-derives digests
-  from the caller principal will not match an assistant ref and may park such
-  rows as untrusted rather than deliver them; re-upgrade restores both
-  delivery and visibility. This bounded invisible-until-upgrade window is the
-  accepted rollback degradation;
+- new *assistant* rows under rollback split into two cases. **Delivered**
+  rows are preserved: their memories live under `u-…-agent` on EverOS,
+  invisible to the old read path until re-upgrade restores the fan-out.
+  **Pending** rows are not deliverable by old code: the old sidecar guard
+  rejects the suffixed owner with 403 (`sidecar.py:36,88-98`), `EverOSPort.add`
+  maps that to a non-retryable `AddRejected`, and terminal settlement
+  dead-letters the row and scrubs its payload (`store.py:2684-2692`). Rows
+  still queued at rollback time are therefore lost, not parked. This is the
+  accepted degradation: downgrade compatibility cannot be added to
+  already-released code, the exposure is bounded to the undelivered queue at
+  the rollback instant, and nothing crashes;
 - Load fixtures: keep a fixture of the released four-field shape plus a
   pre-owner-split queue row and assert both load and deliver (persisted-shape
   rule).
@@ -268,11 +268,15 @@ Result for an agent `remember` of "用户准备在 23 号做发布":
   returns an internal scored result type (provider score, stable episode ID,
   timestamp, owner) to the module; the module merges on that type and only
   then projects to `MemoryItem`. The public payload shape is unchanged;
-- merge: keep EverOS scores (both legs are the same method over
-  LR-calibrated episode scores), tie-break by timestamp then stable ID, trim
-  to the caller's limit after merging;
+- merge: when both legs ran the same method, merge by EverOS score
+  (comparable LR-calibrated values), tie-break by timestamp then stable ID.
+  When the legs ran different methods (agentic recall: user leg agentic,
+  assistant leg hybrid), raw scores are not comparable, so merge by per-leg
+  rank interleave instead — deterministic, no cross-method score comparison.
+  Trim to the caller's limit after merging;
 - dedupe: normalized exact-match only. When both owners hold the same
-  normalized text, the merged item keeps the higher-scored hit and carries
+  normalized text, the merged item keeps the better hit (higher score for
+  same-method legs, better per-leg rank otherwise) and carries
   `origin="both"` — collapsing must never erase one side's provenance.
   Paraphrase duplicates ("我 23 号准备做发布" vs "用户准备在 23 号做发布") are
   *not* merged; they coexist and are distinguished by origin labels.
@@ -345,6 +349,11 @@ changes recall output, since its CLI examples are live contract surface.
 - No migration of existing memories: EverOS output carries no provenance, so
   old agent-recorded facts cannot be reliably identified inside the user
   owner. They stay where they are.
+- The same stance covers the upgrade window's queue: a pre-split pending row
+  with `provenance="agent"` carries a user-owned ref and delivers to the
+  user owner — exactly where pre-split semantics put every agent memory, so
+  this cannot leak anything the old contract did not already share. No
+  rederivation of legacy rows.
 - The dual-owner search reads both owners, so pre-split agent records remain
   findable (labeled as user-owner since that is where they physically live).
 - No text-similarity-based guessing migration, ever.
@@ -361,9 +370,11 @@ changes recall output, since its CLI examples are live contract surface.
 
 ## Acceptance criteria (invariants)
 
-1. **Ownership routing.** For every capture, the provider-visible owner is a
-   pure function of `provenance`: `user_input` → caller principal, `agent` →
-   that caller's derived assistant owner. No code path sends an assistant
+1. **Ownership routing.** For every capture accepted at or after the split,
+   the provider-visible owner is a pure function of `provenance`:
+   `user_input` → caller principal, `agent` → that caller's derived assistant
+   owner. Pre-split queue rows deliver under the contract they were enqueued
+   with (user owner) — consistent with the no-migration stance in §8. No code path sends an assistant
    capture under the principal or vice versa (assert by seeding one capture
    of each provenance and inspecting the provider payloads).
 2. **Session disjointness.** For any (raw session, project, epoch), the two
