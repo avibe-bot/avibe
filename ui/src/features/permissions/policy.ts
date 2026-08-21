@@ -24,6 +24,12 @@ export function hasDuplicateAccessEntries(entries: AccessEntry[]): boolean {
   return new Set(keys).size !== keys.length;
 }
 
+const ACCESS_ROLE_RANK: Record<AccessEntry['role'], number> = {
+  viewer: 1,
+  editor: 2,
+  member: 3,
+};
+
 export function requiresAccessNarrowing(
   current: AccessEntry | null,
   next: AccessEntry,
@@ -35,7 +41,7 @@ export function requiresAccessNarrowing(
   ) {
     return true;
   }
-  return current.role === 'editor' && next.role === 'viewer';
+  return ACCESS_ROLE_RANK[next.role] < ACCESS_ROLE_RANK[current.role];
 }
 
 export function hasDuplicateProjectBindings(bindings: ProjectBinding[]): boolean {

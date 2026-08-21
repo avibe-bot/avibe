@@ -35,7 +35,8 @@ _ACCESS_MODES = frozenset({"allowlist", "public"})
 _PERMISSION_AUTHORITIES = frozenset({"instance", "cloud"})
 _REQUIRED_PERMISSION_CAPABILITY = "instance.permissions.read"
 _PRINCIPAL_KINDS = frozenset({"email", "email_domain", "organization_group"})
-_ACCESS_ROLES = frozenset({"viewer", "editor"})
+_ACCESS_ROLES = frozenset({"viewer", "editor", "member"})
+_PROJECT_ACCESS_ROLES = frozenset({"viewer", "editor"})
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted"})
 _PROJECT_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
@@ -275,7 +276,7 @@ def _validate_project(value: Any) -> dict[str, Any]:
         _require_keys(binding, "principal_kind", "principal_value", "access_role")
         _require_enum(binding["principal_kind"], _PRINCIPAL_KINDS)
         _require_nonempty_string(binding["principal_value"])
-        _require_enum(binding["access_role"], _ACCESS_ROLES)
+        _require_enum(binding["access_role"], _PROJECT_ACCESS_ROLES)
         binding_identities.append(
             _principal_identity(binding["principal_kind"], binding["principal_value"])
         )

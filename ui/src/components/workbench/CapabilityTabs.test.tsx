@@ -37,7 +37,11 @@ describe('CapabilityTabs', () => {
       ...localOwner,
       remote: true,
       instanceRole: 'editor',
-      capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_manage_instance: false },
+      capabilities: {
+        ...OWNER_INSTANCE_CAPABILITIES,
+        can_manage_instance: false,
+        can_manage_access_members: false,
+      },
     };
     const markup = renderWith(remoteOwner);
     expect(markup).toContain('workbench.modules.agents.title');

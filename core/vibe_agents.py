@@ -307,7 +307,20 @@ def _require_agent_create_access(user_context: Any) -> None:
 
 
 def _require_agent_onboarding_access(user_context: Any):
-    """Require owner-equivalent access for Organization Agent publication."""
+    """Require Instance Owner identity for Organization Agent onboarding.
+
+    Onboarding is a one-way bulk migration over *every* Agent row in the
+    instance, not a per-resource action: the inventory discloses Agents the
+    caller cannot otherwise see, and the write claims every policy-less Agent --
+    built-ins and legacy/local rows nobody owns -- under the caller's private
+    ACL, which hides them from everyone else and can fence an existing default
+    route.
+
+    It is deliberately NOT gated on ``can_manage_access_members``: this is a
+    migration tool, not member management, so it does not belong to that
+    capability even though both happen to be Owner-only today. Owner identity is
+    the gate because the migration's blast radius is the whole instance.
+    """
 
     context = resolve_resource_access_context(user_context)
     if context.is_instance_owner:
@@ -516,15 +529,83 @@ def resolve_effective_default_agent(connection, *, enabled_only: bool = True) ->
     return VibeAgentStore._from_row(row) if row is not None else None
 
 
+# Default routing surfaces -- the instance-wide default Agent and a project's
+# default Agent -- are resolved on behalf of whoever starts an unpinned session,
+# never on behalf of whoever configured them. Validating the assignment against
+# the resource policy's *shape* was tried and abandoned: no predicate over
+# {public, scope, private, absent} is both sound and usable. `private` and
+# `scope` narrow the audience; `absent` is the normal shape on a personal
+# install, where no Agent carries an ACL row at all, so rejecting it refuses
+# every Agent on the primary local-first deployment; and `public` still admits
+# only active members of the policy's organization, while instance and project
+# access are also granted to email and email-domain principals.
+#
+# So a default is advisory, and the ACL is enforced where it is meaningful: at
+# use time, against the principal actually resolving it. A default that some
+# principal cannot use degrades for that principal instead of being refused for
+# everyone at assignment time.
+def resolve_usable_default_agent(
+    connection,
+    *,
+    context,
+    agent: VibeAgent | None,
+) -> VibeAgent | None:
+    """Degrade a resolved default to one this caller may actually use.
+
+    A default is configured by one principal and resolved by another, so the
+    configurer can perfectly well name an Agent some of the audience cannot use.
+    Refusing the assignment cannot fix that (see the note above), and refusing
+    the session is worse than it looks: for a project default it means nobody
+    except the configurer can start a normal session there.
+
+    So fall back instead. Prefer a builtin, then any other enabled Agent the
+    caller can use, so an unpinned session keeps working. Return ``None`` when
+    nothing is usable and let the caller raise the existing machine-readable
+    access error, which is the signal the UI uses to prompt for an explicit
+    choice.
+
+    This is the *unpinned* path only. An explicit Agent selection is a stated
+    intent, not an advisory hint, so ``ensure_agent_selection_access`` still
+    errors rather than silently substituting a different Agent.
+    """
+
+    from storage import resource_access_service
+
+    def _usable(candidate: VibeAgent | None) -> bool:
+        return candidate is not None and resource_access_service.can_use_resource(
+            context,
+            "agent",
+            candidate.id,
+            connection=connection,
+        )
+
+    if _usable(agent):
+        return agent
+
+    rows = (
+        connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name))
+        .mappings()
+        .all()
+    )
+    candidates = [VibeAgentStore._from_row(row) for row in rows]
+    # Builtins first: they are the shape every install has and the one a caller
+    # is most likely to be entitled to.
+    candidates.sort(key=lambda item: 0 if item.source == "builtin" else 1)
+    for candidate in candidates:
+        if agent is not None and candidate.id == agent.id:
+            continue
+        if _usable(candidate):
+            return candidate
+    return None
+
+
 def ensure_default_agent_access(
     connection,
     *,
     user_context: Any = None,
     missing_is_error: bool = False,
 ) -> VibeAgent | None:
-    """Resolve and authorize the effective default Agent for a remote caller."""
-
-    from storage import resource_access_service
+    """Resolve the effective default Agent for a caller, degrading if needed."""
 
     context = resolve_resource_access_context(user_context)
     agent = resolve_effective_default_agent(connection)
@@ -532,14 +613,10 @@ def ensure_default_agent_access(
         if missing_is_error:
             raise LookupError("Default Agent not found")
         return None
-    if not resource_access_service.can_use_resource(
-        context,
-        "agent",
-        agent.id,
-        connection=connection,
-    ):
+    usable = resolve_usable_default_agent(connection, context=context, agent=agent)
+    if usable is None:
         raise VibeAgentAccessError("Agent access is not permitted.")
-    return agent
+    return usable
 
 
 def ensure_session_agent_access(
@@ -920,7 +997,11 @@ class VibeAgentStore:
         try:
             with self.engine.begin() as conn:
                 conn.execute(agents.insert().values(**self._values(agent)))
-                if source != "builtin" and context.is_active_organization_member and context.subject:
+                # Register a private ACL for any creating subject, including a
+                # Personal/email member. Organization *use* still follows the
+                # stored policy; omitting the row hid the Agent from its creator
+                # because missing-policy fails closed for non-owners.
+                if source != "builtin" and context.subject:
                     resource_access_service.ensure_resource_policy(
                         conn,
                         resource_kind="agent",
@@ -1665,6 +1746,9 @@ class VibeAgentStore:
         user_context: Any = None,
     ) -> None:
         normalized = normalize_agent_name(name)
+        context = resolve_resource_access_context(user_context)
+        if not context.can_manage_access_members:
+            raise VibeAgentAccessError("Agent access is not permitted.")
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
@@ -1687,6 +1771,9 @@ class VibeAgentStore:
                     agent_name=agent.name,
                     reason="disabled",
                 )
+            # No audience validation here: the default is advisory and the ACL
+            # is enforced per-principal at use time. The Owner-only gate on this
+            # setter is what bounds who may point instance-wide routing.
             self._write_default_agent_name(conn, agent.name, now=now)
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:

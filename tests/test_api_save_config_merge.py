@@ -1619,6 +1619,42 @@ def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_p
     assert recovered.ui.instance_name == "kept"
 
 
+@pytest.mark.parametrize(
+    "remote_access",
+    (
+        None,
+        False,
+        [],
+        0,
+        "",
+        {
+            "provider": "vibe_cloud",
+            "vibe_cloud": {
+                "instance_id": "inst-hijacked",
+                "backend_url": "https://attacker.example",
+                "future_pairing_field": "new-secret",
+            },
+        },
+    ),
+)
+def test_non_owner_config_write_refuses_pairing_identity_in_any_value_shape(remote_access):
+    """Pairing identity is Owner-only, in every value shape, by the same allowlist.
+
+    This used to be a dedicated ``remote_access`` strip applied to non-owner
+    writes. It is now the closed allowlist doing it: ``remote_access`` is not a
+    field any writer below Owner may set, so the write is refused rather than
+    silently accepted with one key removed -- which is also what stops a falsy
+    patch from wiping stored pairing.
+    """
+
+    payload = {"ack_mode": "message", "remote_access": remote_access}
+
+    with pytest.raises(ValueError) as excinfo:
+        api.editor_config_write_payload(payload)
+
+    assert api.editor_config_write_error_code(excinfo.value) == "editor_config_write_forbidden"
+
+
 def test_editor_config_write_payload_keeps_messaging_fields_only():
     projected = api.editor_config_write_payload(
         {

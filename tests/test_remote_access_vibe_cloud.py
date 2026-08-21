@@ -272,9 +272,13 @@ def test_session_claims_reject_missing_or_unknown_instance_role() -> None:
         remote_access.session_claims_from_oidc(config, base_claims)
     with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_instance_role"):
         remote_access.session_claims_from_oidc(config, {**base_claims, "vibe_instance_role": "admin"})
+    claims = remote_access.session_claims_from_oidc(
+        config, {**base_claims, "vibe_instance_role": "member"}
+    )
+    assert claims["vibe_instance_role"] == "member"
 
 
-@pytest.mark.parametrize("instance_role", ["editor", "owner"])
+@pytest.mark.parametrize("instance_role", ["editor", "member", "owner"])
 def test_session_claims_reject_elevated_show_page_email_roles(instance_role: str) -> None:
     config = _config()
 

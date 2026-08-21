@@ -1,3 +1,5 @@
+export type InstanceRole = 'owner' | 'member' | 'editor' | 'viewer';
+
 export type InstanceCapabilities = {
   is_instance_owner: boolean;
   can_read_instance: boolean;
@@ -5,6 +7,7 @@ export type InstanceCapabilities = {
   can_manage_projects: boolean;
   can_manage_agents: boolean;
   can_manage_instance: boolean;
+  can_manage_access_members: boolean;
   can_use_agents: boolean;
   can_use_skills: boolean;
   can_use_vault_secrets: boolean;
@@ -40,7 +43,7 @@ export type SessionInfo =
       email: string;
       sub?: string;
       instance_kind: InstanceKind | null;
-      instance_role: 'owner' | 'editor' | 'viewer';
+      instance_role: InstanceRole;
       capabilities: InstanceCapabilities;
       authorization_state: 'current';
     };
@@ -52,6 +55,7 @@ export const DENIED_INSTANCE_CAPABILITIES: InstanceCapabilities = {
   can_manage_projects: false,
   can_manage_agents: false,
   can_manage_instance: false,
+  can_manage_access_members: false,
   can_use_agents: false,
   can_use_skills: false,
   can_use_vault_secrets: false,
@@ -121,6 +125,7 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     : OWNER_INSTANCE_CAPABILITIES;
   const instanceRole =
     value.instance_role === 'owner' ||
+    value.instance_role === 'member' ||
     value.instance_role === 'editor' ||
     value.instance_role === 'viewer'
       ? value.instance_role

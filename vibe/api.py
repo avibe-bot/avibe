@@ -1391,6 +1391,18 @@ def _remote_access_pairing_projection(payload: dict) -> dict:
     return {"vibe_cloud": {"paired": paired}}
 
 
+# ``strip_pairing_identity_from_config_write`` used to sit here: a non-owner
+# config write had ``remote_access`` removed and everything else was persisted.
+# It is gone rather than kept beside the allowlist, because a subtractive filter
+# and a closed allowlist cannot both be the non-owner write schema — the
+# subtractive one is only ever as complete as the last section somebody
+# remembered, and that is precisely how credential-bearing sections stayed
+# writable for a member. ``editor_config_write_payload`` is now the single
+# schema for every writer below Owner, and pairing identity is covered by it the
+# same way every other Owner-only section is: ``remote_access`` is not on the
+# allowlist, so the write is refused.
+
+
 def _audio_asr_preference_projection(payload: dict) -> dict:
     audio_asr = payload.get("audio_asr")
     if not isinstance(audio_asr, dict):

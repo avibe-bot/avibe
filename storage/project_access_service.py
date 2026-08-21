@@ -25,7 +25,7 @@ PROJECT_ACCESS_MODES = frozenset({"inherit", "restricted"})
 PROJECT_ACCESS_ROLES = frozenset({"editor", "viewer"})
 PROJECT_PRINCIPAL_KINDS = frozenset({"email", "email_domain", "organization_group"})
 MAX_CONTROL_PLANE_REVISION = (1 << 53) - 1
-_ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+_ROLE_RANK = {"viewer": 1, "editor": 2, "member": 3, "owner": 4}
 _EMAIL_RE = re.compile(
     r"^[a-z0-9._%+-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
     r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$"

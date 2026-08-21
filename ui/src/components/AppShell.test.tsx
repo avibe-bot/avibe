@@ -44,6 +44,7 @@ const instanceAuth = vi.hoisted(() => ({
   instanceKind: null as 'personal' | 'organization' | null,
   capabilities: {
     can_manage_instance: true,
+    can_manage_access_members: true,
     can_chat: true,
     can_use_agents: true,
     can_use_skills: true,

@@ -4736,6 +4736,7 @@
     },
     "roles": {
       "owner": "Owner",
+      "member": "Instance Member",
       "editor": "Editor",
       "viewer": "Viewer"
     },
