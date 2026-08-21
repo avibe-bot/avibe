@@ -29,28 +29,6 @@
       "heading": "你无权访问此页面",
       "message": "请联系页面所有者，将你的邮箱加入允许访问名单。",
       "back": "返回首页"
-    },
-    "runtimeRecovery": {
-      "title": "Show Runtime 暂时不可用",
-      "loading": "正在加载 Show Page",
-      "eyebrow": "Show Page",
-      "heading": "Show Runtime 暂时不可用",
-      "downloadMessage": "Avibe 无法下载运行此 Show Page 所需的文件。",
-      "offlineMessage": "Avibe 当前处于离线模式，且没有可用的已验证 Show Runtime 归档。",
-      "nodeMessage": "Node.js 未安装，或当前版本不受支持。",
-      "platformMessage": "当前 Show Runtime 版本不支持此平台。",
-      "verificationMessage": "Show Runtime 文件未通过完整性校验。",
-      "configurationMessage": "当前配置的 Show Runtime 来源不可用。",
-      "installMessage": "Avibe 无法安装 Show Runtime。",
-      "startMessage": "Show Runtime 已安装，但无法启动。",
-      "unavailableMessage": "Avibe 无法启动用于渲染此 Show Page 的服务。",
-      "repairHeading": "修复 Show Runtime",
-      "repairMessage": "请在终端运行以下命令：",
-      "statusHeading": "恢复状态",
-      "retrying": "此页面会自动检查，并在 Runtime 就绪后恢复。",
-      "reasonLabel": "原因",
-      "sessionLabel": "会话",
-      "retryNow": "立即重试"
     }
   },
   "harness": {
@@ -923,6 +901,11 @@
     }
   },
   "runtime": {
+    "prepare": {
+      "prepared": "Show Runtime 已准备完成。",
+      "skipped": "Show Runtime 准备已跳过：{reason}",
+      "failed": "Show Runtime 准备失败：{reason}"
+    },
     "clean": {
       "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
       "wouldRemoveItems": "\u5c06\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
@@ -944,10 +927,7 @@
       "archiveCacheClean": "Show Runtime \u5f52\u6863\u7f13\u5b58\u6ca1\u6709\u53ef\u56de\u6536\u5f52\u6863",
       "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
       "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
-      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002",
-      "repairHealthy": "Show Runtime 可以正常启动，无需修复。",
-      "repairStarted": "已重新安装并成功启动清单选定的 Show Runtime。",
-      "repairStartFailed": "Show Runtime 已重新安装，但仍无法启动：{reason}"
+      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002"
     }
   }
 }

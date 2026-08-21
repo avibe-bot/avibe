@@ -7,6 +7,7 @@ class ShowRuntimeFailureClass(str, Enum):
     TRANSIENT = "transient"
     PERMANENT = "permanent"
     CONFIGURED = "configured"
+    CHECKSUM = "checksum"
 
 
 _TRANSIENT_FAILURES = frozenset(
@@ -20,7 +21,9 @@ _TRANSIENT_FAILURES = frozenset(
 
 
 def classify_show_runtime_failure(reason: str | None) -> ShowRuntimeFailureClass:
-    """Classify install failures for retry and recovery behavior."""
+    """Classify an install outcome without deciding its retry policy."""
+    if reason == "runtime_archive_checksum_mismatch":
+        return ShowRuntimeFailureClass.CHECKSUM
     if reason and reason.endswith("_unavailable_offline"):
         return ShowRuntimeFailureClass.CONFIGURED
     if reason in _TRANSIENT_FAILURES:

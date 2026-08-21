@@ -12866,8 +12866,8 @@ def _show_page_file_not_found_response():
     return response
 
 
-def _show_page_runtime_unavailable_response(reason: str):
-    return jsonify({"error": "show_runtime_unavailable", "reason": reason}), 503
+def _show_page_runtime_unavailable_response():
+    return jsonify({"error": "show_runtime_unavailable"}), 503
 
 
 def _is_show_api_asset(asset_path: str) -> bool:
@@ -13046,40 +13046,10 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, confine_to
     return any(part.startswith(".") for part in workspace_relative.parts)
 
 
-def _show_page_runtime_failure_reason(exc: Exception) -> str:
-    reason = getattr(exc, "reason", None)
-    if isinstance(reason, str) and reason.startswith("runtime_"):
-        return reason
-    return "runtime_proxy_failed"
-
-
-def _log_show_runtime_unavailable(reason: str, *, public: bool, fallback: bool) -> None:
-    if fallback:
-        target = "fallback public Show Page response" if public else "fallback Show Page response"
-    else:
-        target = "static public Show Page" if public else "static Show Page"
-    message = f"Show runtime unavailable (%s); serving {target}"
-    if request.headers.get("X-Avibe-Show-Recovery-Poll") == "1":
-        logger.debug(message, reason)
-        return
-    logger.warning(message, reason, exc_info=True)
-
-
-def _show_page_recovery_response(session_id: str, *, reason: str):
+def _show_page_recovery_response(session_id: str):
     from core.show_pages import show_page_runtime_recovery_html
 
-    response = Response(
-        show_page_runtime_recovery_html(
-            session_id,
-            reason=reason,
-            language=_request_ui_language(),
-        ),
-        status=200,
-        mimetype="text/html; charset=utf-8",
-    )
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["X-Avibe-Show-Recovery"] = "1"
-    return response
+    return Response(show_page_runtime_recovery_html(session_id), status=200, mimetype="text/html; charset=utf-8")
 
 
 def _show_page_file_response(root: Path, asset_path: str):
@@ -13110,8 +13080,6 @@ def _show_page_runtime_failure_response(
     session_id: str,
     asset_path: str,
     starlette_request: FastAPIRequest,
-    *,
-    reason: str,
 ):
     if not _is_show_page_spa_route_request(asset_path, starlette_request):
         return None
@@ -13119,7 +13087,7 @@ def _show_page_runtime_failure_response(
         static_response = _show_page_file_response(page_dir, asset_path)
         if static_response.status_code != 404:
             return static_response
-    return _show_page_recovery_response(session_id, reason=reason)
+    return _show_page_recovery_response(session_id)
 
 
 def _show_session_event_error_response(exc: Exception):
@@ -14129,8 +14097,8 @@ async def show_runtime_vendor_asset(vendor_path: str):
             headers=forwarded_headers,
             body=None,
         )
-    except Exception as exc:
-        return _show_page_runtime_unavailable_response(_show_page_runtime_failure_reason(exc))
+    except Exception:
+        return _show_page_runtime_unavailable_response()
     response_headers = {
         key: value
         for key, value in proxied.headers.items()
@@ -14929,18 +14897,19 @@ async def serve_private_show_page(session_id, asset_path):
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=can_annotate,
                 )
-            except Exception as exc:
-                reason = _show_page_runtime_failure_reason(exc)
+            except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response(reason)
+                    return _show_page_runtime_unavailable_response()
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
                     asset_path,
                     request._request,
-                    reason=reason,
                 )
-                _log_show_runtime_unavailable(reason, public=False, fallback=response is not None)
+                if response is not None:
+                    logger.debug("Show runtime unavailable; serving fallback Show Page response", exc_info=True)
+                else:
+                    logger.debug("Show runtime unavailable; serving static Show Page", exc_info=True)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if request.method in {"GET", "HEAD"}:
@@ -15429,18 +15398,19 @@ async def serve_public_show_page(share_id, asset_path):
                     show_config_session_id=share_id,
                     include_annotation_bootstrap=not limited_guest,
                 )
-            except Exception as exc:
-                reason = _show_page_runtime_failure_reason(exc)
+            except Exception:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response(reason)
+                    return _show_page_runtime_unavailable_response()
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
                     asset_path,
                     request._request,
-                    reason=reason,
                 )
-                _log_show_runtime_unavailable(reason, public=True, fallback=response is not None)
+                if response is not None:
+                    logger.debug("Show runtime unavailable; serving fallback public Show Page response", exc_info=True)
+                else:
+                    logger.debug("Show runtime unavailable; serving static public Show Page", exc_info=True)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if limited_guest:
@@ -15603,7 +15573,9 @@ async def _reconcile_startup_dependencies_task() -> None:
 
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)
         show_runtime = result.get("show_runtime") if isinstance(result.get("show_runtime"), dict) else {}
-        if show_runtime.get("prewarm_allowed") is True:
+        policy = show_runtime.get("policy") if isinstance(show_runtime.get("policy"), dict) else {}
+        install = show_runtime.get("install") if isinstance(show_runtime.get("install"), dict) else {}
+        if policy.get("state") == "allowed" and install.get("state") == "installed":
             from core.show_runtime import (
                 ShowRuntimeContext,
                 prewarm_show_page_session,

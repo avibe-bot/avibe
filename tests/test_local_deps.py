@@ -1289,7 +1289,7 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     assert by["node"]["installed"] is False and by["node"]["status"] == "missing"
 
 
-def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(monkeypatch):
+def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
     askill_calls = []
     avault_calls = []
 
@@ -1309,21 +1309,20 @@ def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(mon
 
     class _Mgr:
         def __init__(self):
-            self.auto_install = True
             self.prepared = []
 
-        def status(self):
+        def prepare(self, *, force=False, automatic=False):
+            self.prepared.append((force, automatic))
             return {
-                "installed": False,
-                "manifest": {"runtime_version": "1.4.0"},
-                "node_available": True,
-                "node_supported": True,
-                "node_version": "22.12.0",
+                "policy": {"state": "allowed", "reason": None},
+                "install": {"state": "installed", "reason": None},
+                "runtime": {"state": "unchecked", "reason": None},
+                "status": {
+                    "node_available": True,
+                    "node_supported": True,
+                    "node_version": "22.12.0",
+                },
             }
-
-        def prepare(self, *, force=False):
-            self.prepared.append(force)
-            return {"ok": True, "reason": None, "prewarm_allowed": True}
 
     manager = _Mgr()
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
@@ -1333,123 +1332,52 @@ def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(mon
     assert out["ok"] is True
     assert askill_calls == [False]
     assert avault_calls == [False]
-    assert manager.prepared == [False]
+    assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"
-    assert out["show_runtime"] == {
-        "ok": True,
-        "status": "ready",
-        "reason": None,
-        "prewarm_allowed": True,
-    }
+    assert out["show_runtime"]["ok"] is True
+    assert out["show_runtime"]["status"] == "pending_prewarm"
+    assert out["show_runtime"]["policy"]["state"] == "allowed"
+    assert out["show_runtime"]["install"]["state"] == "installed"
+    assert out["show_runtime"]["runtime"]["state"] == "unchecked"
 
 
-@pytest.mark.parametrize(
-    ("auto_install", "reason"),
-    [
-        (True, "VIBE_INSTALL_SKIP_SHOW_RUNTIME"),
-        (False, "VIBE_SHOW_RUNTIME_AUTO_INSTALL"),
-    ],
-)
-def test_reconcile_startup_dependencies_preserves_manager_install_opt_out_result(
-    monkeypatch,
-    auto_install,
-    reason,
-):
+def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+
     import core.show_runtime as srt_mod
 
     class _Mgr:
         def __init__(self):
-            self.auto_install = auto_install
             self.prepared = []
 
-        def status(self):
+        def prepare(self, *, force=False, automatic=False):
+            self.prepared.append((force, automatic))
             return {
-                "installed": False,
-                "node_available": True,
-                "node_supported": True,
-                "node_version": "22.12.0",
+                "policy": {"state": "allowed", "reason": None},
+                "install": {"state": "failed", "reason": "runtime_node_missing"},
+                "runtime": {"state": "unchecked", "reason": None},
+                "reason": "runtime_node_missing",
+                "status": {
+                    "node_available": False,
+                    "node_supported": None,
+                    "node_version": None,
+                },
             }
-
-        def prepare(self, *, force=False):
-            self.prepared.append(force)
-            return {"ok": True, "reason": reason, "prewarm_allowed": False}
 
     manager = _Mgr()
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
 
     out = api.reconcile_startup_dependencies()
 
-    assert out["ok"] is True
-    assert manager.prepared == [False]
-    assert out["show_runtime"] == {
-        "ok": True,
-        "status": "skipped",
-        "reason": reason,
-        "prewarm_allowed": False,
-    }
-
-
-def test_reconcile_startup_dependencies_reports_runtime_prepare_failure(monkeypatch):
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
-
-    import core.show_runtime as srt_mod
-
-    class _Mgr:
-        def status(self):
-            return {
-                "installed": False,
-                "node_available": True,
-                "node_supported": True,
-                "node_version": "22.12.0",
-            }
-
-        def prepare(self, *, force=False):
-            return {
-                "ok": False,
-                "reason": "runtime_archive_download_failed",
-                "prewarm_allowed": False,
-            }
-
-    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-
-    out = api.reconcile_startup_dependencies()
-
     assert out["ok"] is False
-    assert out["show_runtime"] == {
-        "ok": False,
-        "status": "failed",
-        "reason": "runtime_archive_download_failed",
-        "prewarm_allowed": False,
-    }
-
-
-def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(monkeypatch):
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
-
-    import core.show_runtime as srt_mod
-
-    class _Mgr:
-        def status(self):
-            return {"installed": False, "node_available": False, "node_version": None}
-
-        def prepare(self, *, force=False):
-            raise AssertionError("runtime must not prepare without Node")
-
-    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-
-    out = api.reconcile_startup_dependencies()
-
-    assert out["ok"] is False
+    assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "missing"
-    assert out["show_runtime"] == {
-        "ok": False,
-        "status": "skipped",
+    assert out["show_runtime"]["ok"] is False
+    assert out["show_runtime"]["status"] == "failed"
+    assert out["show_runtime"]["install"] == {
+        "state": "failed",
         "reason": "runtime_node_missing",
-        "prewarm_allowed": False,
     }
 
 
@@ -1522,6 +1450,11 @@ def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):
     manager.prepare.return_value = {
         "ok": False,
         "reason": "runtime_archive_download_failed",
+        "install": {
+            "state": "failed",
+            "reason": "runtime_archive_download_failed",
+            "failure_class": "transient",
+        },
         "status": {
             "download_error": {
                 "kind": "timeout",

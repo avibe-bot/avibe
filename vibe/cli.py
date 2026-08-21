@@ -12114,38 +12114,8 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
     manager = ShowRuntimeManager()
     before = manager.status()
-
-    def verify_startability(command_value: Any) -> tuple[Any | None, str | None]:
-        command = command_value if isinstance(command_value, list) else []
-        if not command:
-            return None, "runtime_command_missing"
-        with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
-            verification_root = Path(verification_root_value)
-            verifier = ShowRuntimeManager(
-                command=shlex.join(str(part) for part in command),
-                workspace_root=verification_root / "show",
-                runtime_dir=verification_root / "runtime",
-                auto_install=False,
-            )
-            try:
-                return asyncio.run(verifier.ensure()), None
-            except Exception as exc:  # noqa: BLE001
-                return None, str(exc)
-            finally:
-                verifier.stop()
-
-    language = _configured_cli_language()
     if before.get("installed"):
-        started, _start_error = verify_startability(before.get("command"))
-        if started is not None and started.available:
-            return _doctor_repair_result(
-                target,
-                "skipped",
-                i18n_t("runtime.doctor.repairHealthy", language),
-                provider=before.get("provider"),
-                platform=before.get("platform"),
-                install_dir=before.get("install_dir"),
-            )
+        return _doctor_repair_result(target, "skipped", "Show Runtime is already ready.")
 
     archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
     archive_url = str(archive.get("url") or "")
@@ -12162,29 +12132,16 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             archive_url=archive_url,
         )
 
-    result = manager.prepare(force=True)
+    result = manager.prepare(force=False)
     status = result.get("status") if isinstance(result.get("status"), dict) else {}
     if result.get("ok"):
-        started, start_error = verify_startability(result.get("command"))
-        if started is not None and started.available:
-            return _doctor_repair_result(
-                target,
-                "repaired",
-                i18n_t("runtime.doctor.repairStarted", language),
-                provider=result.get("provider"),
-                platform=result.get("platform"),
-                install_dir=status.get("install_dir"),
-            )
-        reason = (started.reason if started is not None else None) or "runtime_start_failed"
         return _doctor_repair_result(
             target,
-            "failed",
-            i18n_t("runtime.doctor.repairStartFailed", language, reason=reason),
+            "repaired",
+            "Prepared the manifest-selected Show Runtime.",
             provider=result.get("provider"),
             platform=result.get("platform"),
             install_dir=status.get("install_dir"),
-            reason=reason,
-            start_error=start_error,
         )
 
     reason = str(result.get("reason") or "runtime_prepare_failed")
@@ -14191,17 +14148,36 @@ def cmd_runtime(args) -> int:
         payload["avault"] = avault
         payload["tmux"] = tmux
         payload["git"] = git
+        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        runtime_prepared = install.get("state") == "installed"
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
-            if payload.get("ok"):
-                print("Show Runtime ready.")
+            language = _configured_cli_language()
+            if runtime_prepared:
+                print(i18n_t("runtime.prepare.prepared", language))
                 status = payload.get("status") or {}
                 if status.get("install_dir"):
                     print(f"Install dir: {status['install_dir']}")
+            elif policy.get("state") == "skipped":
+                print(
+                    i18n_t(
+                        "runtime.prepare.skipped",
+                        language,
+                        reason=policy.get("reason") or "unknown",
+                    ),
+                    file=sys.stderr,
+                )
             else:
-                reason = payload.get("reason") or "unknown"
-                print(f"Show Runtime prepare failed: {reason}", file=sys.stderr)
+                print(
+                    i18n_t(
+                        "runtime.prepare.failed",
+                        language,
+                        reason=install.get("reason") or "unknown",
+                    ),
+                    file=sys.stderr,
+                )
             if askill.get("skipped"):
                 print(f"askill: skipped ({askill.get('reason') or 'skipped'}).")
             elif askill.get("ok"):
@@ -14229,7 +14205,7 @@ def cmd_runtime(args) -> int:
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
                     file=sys.stderr,
                 )
-        strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
+        strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
         dry_run = bool(getattr(args, "dry_run", False))

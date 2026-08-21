@@ -29,28 +29,6 @@
       "heading": "You do not have access to this page",
       "message": "Please contact the page owner to be added to the allowed list.",
       "back": "Back to home"
-    },
-    "runtimeRecovery": {
-      "title": "Show Runtime unavailable",
-      "loading": "Loading Show Page",
-      "eyebrow": "Show Page",
-      "heading": "The Show Runtime is unavailable",
-      "downloadMessage": "Avibe could not download the files needed to run this Show Page.",
-      "offlineMessage": "Avibe is in offline mode and no verified Show Runtime archive is available.",
-      "nodeMessage": "The installed Node.js runtime is missing or is not supported.",
-      "platformMessage": "This platform is not supported by the current Show Runtime release.",
-      "verificationMessage": "The Show Runtime files did not pass integrity verification.",
-      "configurationMessage": "The configured Show Runtime source cannot be used.",
-      "installMessage": "Avibe could not install the Show Runtime.",
-      "startMessage": "The Show Runtime is installed but could not start.",
-      "unavailableMessage": "Avibe could not start the service that renders this Show Page.",
-      "repairHeading": "Repair the Show Runtime",
-      "repairMessage": "Run this command in a terminal:",
-      "statusHeading": "Recovery status",
-      "retrying": "This page checks automatically and will recover when the runtime is ready.",
-      "reasonLabel": "Reason",
-      "sessionLabel": "Session",
-      "retryNow": "Retry now"
     }
   },
   "harness": {
@@ -923,6 +901,11 @@
     }
   },
   "runtime": {
+    "prepare": {
+      "prepared": "Show Runtime prepared.",
+      "skipped": "Show Runtime preparation skipped: {reason}",
+      "failed": "Show Runtime preparation failed: {reason}"
+    },
     "clean": {
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
       "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
@@ -944,10 +927,7 @@
       "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives",
       "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
-      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed.",
-      "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
-      "repairStarted": "Reinstalled and started the manifest-selected Show Runtime.",
-      "repairStartFailed": "Show Runtime was reinstalled but could not start: {reason}"
+      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed."
     }
   }
 }

@@ -8420,18 +8420,25 @@ def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
 def _prepare_show_runtime_job() -> dict:
     try:
         from core.show_runtime import get_show_runtime_manager
+        from vibe.i18n import t as i18n_t
 
         payload = get_show_runtime_manager().prepare(force=True)
-        ok = bool(payload.get("ok"))
+        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
+        ok = install.get("state") == "installed"
+        reason = install.get("reason") or payload.get("reason")
         result = {
             "ok": ok,
-            "message": "Show Runtime ready." if ok else (payload.get("reason") or "Show Runtime prepare failed"),
+            "message": (
+                i18n_t("runtime.prepare.prepared")
+                if ok
+                else i18n_t("runtime.prepare.failed", reason=reason or "unknown")
+            ),
             "output": None,
         }
         if not ok:
             status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
             download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
-            result["reason"] = payload.get("reason")
+            result["reason"] = reason
             result["download_error"] = download_error
             if download_error:
                 result["message"] = dependency_error_message(download_error, label="Show Runtime download")
@@ -8600,7 +8607,8 @@ def reconcile_startup_dependencies() -> dict:
             from core.show_runtime import get_show_runtime_manager
 
             manager = get_show_runtime_manager()
-            status = manager.status()
+            prepared = manager.prepare(force=False, automatic=True)
+            status = prepared.get("status") if isinstance(prepared.get("status"), dict) else {}
             node_available = bool(status.get("node_available"))
             node_supported = status.get("node_supported") is not False
             node_ok = node_available and node_supported
@@ -8613,31 +8621,21 @@ def reconcile_startup_dependencies() -> dict:
                 "version": status.get("node_version"),
             }
 
-            if node_ok:
-                prepared = manager.prepare(force=False)
-                runtime_ok = bool(prepared.get("ok"))
-                prewarm_allowed = prepared.get("prewarm_allowed") is True
-                result["show_runtime"] = {
-                    "ok": runtime_ok,
-                    "status": "ready" if prewarm_allowed else ("skipped" if runtime_ok else "failed"),
-                    "reason": None if prewarm_allowed else prepared.get("reason") or "runtime_install_failed",
-                    "prewarm_allowed": prewarm_allowed,
-                }
-            else:
-                result["show_runtime"] = {
-                    "ok": False,
-                    "status": "skipped",
-                    "reason": "runtime_node_unsupported" if node_available else "runtime_node_missing",
-                    "prewarm_allowed": False,
-                }
+            policy = prepared.get("policy") if isinstance(prepared.get("policy"), dict) else {}
+            install = prepared.get("install") if isinstance(prepared.get("install"), dict) else {}
+            policy_state = policy.get("state")
+            install_state = install.get("state")
+            dependency_ok = install_state == "installed" or policy_state == "skipped"
+            prepared["ok"] = dependency_ok
+            prepared["status"] = (
+                "pending_prewarm"
+                if policy_state == "allowed" and install_state == "installed"
+                else ("skipped" if policy_state == "skipped" else "failed")
+            )
+            result["show_runtime"] = prepared
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to prepare Show Runtime: %s", exc, exc_info=True)
-            result["show_runtime"] = {
-                "ok": False,
-                "status": "failed",
-                "reason": str(exc),
-                "prewarm_allowed": False,
-            }
+            result["show_runtime"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
         if os.environ.get("VIBE_UI_ENABLE_TERMINAL", "").strip().lower() in {"0", "false", "no", "off"}:
             # Terminal explicitly disabled — don't download the optional tmux runtime.
