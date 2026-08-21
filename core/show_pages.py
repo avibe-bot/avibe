@@ -2466,17 +2466,24 @@ def show_page_runtime_recovery_html(
       </section>
     </main>
     <script>
+      let retryDelayMs = 3000;
       const checkRuntime = async () => {{
+        await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
         try {{
           const response = await fetch(window.location.href, {{
             cache: "no-store",
             credentials: "same-origin",
             headers: {{ "X-Avibe-Show-Recovery-Poll": "1" }},
           }});
-          if (!response.headers.get("X-Avibe-Show-Recovery")) window.location.reload();
+          if (!response.headers.get("X-Avibe-Show-Recovery")) {{
+            window.location.reload();
+            return;
+          }}
         }} catch (_error) {{}}
+        retryDelayMs = Math.min(30000, retryDelayMs * 2);
+        void checkRuntime();
       }};
-      window.setInterval(checkRuntime, 3000);
+      void checkRuntime();
     </script>
   </body>
 </html>

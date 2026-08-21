@@ -8613,7 +8613,21 @@ def reconcile_startup_dependencies() -> dict:
                 "version": status.get("node_version"),
             }
 
-            if node_ok:
+            skip_show_runtime_prepare = should_skip_show_runtime_prepare()
+            show_runtime_auto_install = bool(getattr(manager, "auto_install", True))
+            if node_ok and (skip_show_runtime_prepare or not show_runtime_auto_install):
+                runtime_installed = bool(status.get("installed"))
+                skip_reason = (
+                    "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
+                    if skip_show_runtime_prepare
+                    else "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
+                )
+                result["show_runtime"] = {
+                    "ok": True,
+                    "status": "ready" if runtime_installed else "skipped",
+                    "reason": None if runtime_installed else skip_reason,
+                }
+            elif node_ok:
                 prepared = manager.prepare(force=False)
                 runtime_ok = bool(prepared.get("ok"))
                 result["show_runtime"] = {

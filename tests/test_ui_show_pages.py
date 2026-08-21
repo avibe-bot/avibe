@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import socket
 import ssl
@@ -2904,9 +2905,36 @@ def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeyp
     assert b"vibe doctor repair show-runtime" in response.content
     assert b"runtime_archive_download_failed" in response.content
     assert b"X-Avibe-Show-Recovery-Poll" in response.content
+    assert b"window.setInterval" not in response.content
+    assert b"window.setTimeout" in response.content
+    assert b"Math.min(30000, retryDelayMs * 2)" in response.content
     assert b"src/App.tsx" not in response.content
     assert b'src="./src/main.tsx"' not in response.content
     assert "Show runtime unavailable (runtime_archive_download_failed)" in caplog.text
+
+
+def test_show_recovery_poll_logs_at_debug_without_traceback(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    set_show_runtime_manager_for_tests(
+        _FakeShowRuntimeManager(fail=True, failure_reason="runtime_archive_download_failed")
+    )
+    try:
+        with caplog.at_level(logging.DEBUG, logger="vibe.ui_server"):
+            response = app.test_client().get(
+                "/show/ses123/",
+                base_url="http://127.0.0.1:5123",
+                headers={"X-Avibe-Show-Recovery-Poll": "1"},
+            )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    records = [record for record in caplog.records if "Show runtime unavailable" in record.message]
+    assert response.status_code == 200
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert records[0].exc_info is None
 
 
 def test_show_request_recovers_after_transient_install_backoff(monkeypatch, tmp_path):
@@ -6269,6 +6297,72 @@ def test_show_runtime_manager_offline_failure_neither_retries_nor_latches(monkey
     assert attempts == ["attempt", "attempt"]
     assert manager._install_retry_attempt == 0
     assert manager._install_retry_deadline == 0.0
+
+
+def test_show_runtime_prepare_caches_remote_manifest_command(monkeypatch, tmp_path):
+    calls = []
+    command = [str(tmp_path / "runtime-cli")]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="manifest",
+        manifest_url="https://example.invalid/show-runtime-manifest.json",
+    )
+
+    def install():
+        calls.append("install")
+        return command
+
+    monkeypatch.setattr(manager, "_install_managed_runtime", install)
+    monkeypatch.setattr(manager, "status", lambda: {})
+
+    prepared = manager.prepare()
+    resolved = asyncio.run(manager._resolve_managed_command())
+
+    assert prepared["command"] == command
+    assert resolved == command
+    assert calls == ["install"]
+
+
+def test_show_runtime_manager_backs_off_failed_starts(monkeypatch, tmp_path):
+    clock = [100.0]
+    starts = []
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+
+    def fake_stop():
+        manager._process = None
+        manager._base_url = None
+
+    def fake_popen(command, **kwargs):
+        starts.append(command)
+        return SimpleNamespace()
+
+    async def missing_startup_url():
+        return None
+
+    monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(manager, "_read_startup_url", missing_startup_url)
+    monkeypatch.setattr(manager, "stop", fake_stop)
+
+    first = asyncio.run(manager.ensure())
+    clock[0] = 104.9
+    backed_off = asyncio.run(manager.ensure())
+    clock[0] = 105.0
+    retried = asyncio.run(manager.ensure())
+
+    assert first.reason == "runtime_start_failed"
+    assert backed_off.reason == "runtime_start_failed"
+    assert retried.reason == "runtime_start_failed"
+    assert len(starts) == 2
+    assert manager._start_retry_attempt == 2
+    assert manager._start_retry_deadline == 115.0
 
 
 def test_show_runtime_manager_passes_runtime_options(monkeypatch, tmp_path):

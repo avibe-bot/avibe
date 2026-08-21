@@ -13053,6 +13053,18 @@ def _show_page_runtime_failure_reason(exc: Exception) -> str:
     return "runtime_proxy_failed"
 
 
+def _log_show_runtime_unavailable(reason: str, *, public: bool, fallback: bool) -> None:
+    if fallback:
+        target = "fallback public Show Page response" if public else "fallback Show Page response"
+    else:
+        target = "static public Show Page" if public else "static Show Page"
+    message = f"Show runtime unavailable (%s); serving {target}"
+    if request.headers.get("X-Avibe-Show-Recovery-Poll") == "1":
+        logger.debug(message, reason)
+        return
+    logger.warning(message, reason, exc_info=True)
+
+
 def _show_page_recovery_response(session_id: str, *, reason: str):
     from core.show_pages import show_page_runtime_recovery_html
 
@@ -14928,18 +14940,7 @@ async def serve_private_show_page(session_id, asset_path):
                     request._request,
                     reason=reason,
                 )
-                if response is not None:
-                    logger.warning(
-                        "Show runtime unavailable (%s); serving fallback Show Page response",
-                        reason,
-                        exc_info=True,
-                    )
-                else:
-                    logger.warning(
-                        "Show runtime unavailable (%s); serving static Show Page",
-                        reason,
-                        exc_info=True,
-                    )
+                _log_show_runtime_unavailable(reason, public=False, fallback=response is not None)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if request.method in {"GET", "HEAD"}:
@@ -15439,18 +15440,7 @@ async def serve_public_show_page(share_id, asset_path):
                     request._request,
                     reason=reason,
                 )
-                if response is not None:
-                    logger.warning(
-                        "Show runtime unavailable (%s); serving fallback public Show Page response",
-                        reason,
-                        exc_info=True,
-                    )
-                else:
-                    logger.warning(
-                        "Show runtime unavailable (%s); serving static public Show Page",
-                        reason,
-                        exc_info=True,
-                    )
+                _log_show_runtime_unavailable(reason, public=True, fallback=response is not None)
         if response is None:
             response = _show_page_file_response(page_dir, asset_path)
         if limited_guest:

@@ -248,6 +248,8 @@ class ShowRuntimeManager:
         self.cache_root = self.runtime_dir / "vite-cache"
         self._install_retry_deadline = 0.0
         self._install_retry_attempt = 0
+        self._start_retry_deadline = 0.0
+        self._start_retry_attempt = 0
         self._install_reason: str | None = None
         self._download_error: dict[str, Any] | None = None
         self._managed_command: list[str] | None = None
@@ -276,6 +278,8 @@ class ShowRuntimeManager:
         async with self._lock:
             if self._base_url and await self._healthy(self._base_url):
                 return ShowRuntimeResult(True, self._base_url)
+            if time.monotonic() < self._start_retry_deadline:
+                return ShowRuntimeResult(False, reason="runtime_start_failed")
             self.stop()
             command = _resolve_command(self.command) if self._command_explicit else None
             if not command:
@@ -316,7 +320,10 @@ class ShowRuntimeManager:
             base_url = await self._read_startup_url()
             if not base_url:
                 self.stop()
+                self._record_runtime_start_failure()
                 return ShowRuntimeResult(False, reason="runtime_start_failed")
+            self._start_retry_deadline = 0.0
+            self._start_retry_attempt = 0
             self._base_url = base_url
             return ShowRuntimeResult(True, base_url)
 
@@ -596,6 +603,8 @@ class ShowRuntimeManager:
             self._install_reason = "runtime_command_missing"
             return None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
+            if self._managed_command and not self.force_install:
+                return self._managed_command
             install_due = self._managed_install_due()
             command = (
                 None
@@ -676,6 +685,12 @@ class ShowRuntimeManager:
             return
         self._install_retry_deadline = time.monotonic() + _show_runtime_install_retry_delay(
             self._install_retry_attempt
+        )
+
+    def _record_runtime_start_failure(self) -> None:
+        self._start_retry_attempt += 1
+        self._start_retry_deadline = time.monotonic() + _show_runtime_install_retry_delay(
+            self._start_retry_attempt
         )
 
     def _install_managed_runtime(self) -> list[str] | None:
@@ -1657,6 +1672,8 @@ class ShowRuntimeManager:
             else:
                 command = self._install_managed_runtime()
                 self._record_managed_install_outcome(command)
+            if command:
+                self._managed_command = command
             return {
                 "ok": command is not None,
                 "provider": self.runtime_source,

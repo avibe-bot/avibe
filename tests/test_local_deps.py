@@ -1309,6 +1309,7 @@ def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(mon
 
     class _Mgr:
         def __init__(self):
+            self.auto_install = True
             self.prepared = []
 
         def status(self):
@@ -1335,6 +1336,48 @@ def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(mon
     assert manager.prepared == [False]
     assert out["node"]["status"] == "ready"
     assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
+
+
+@pytest.mark.parametrize(
+    ("skip_prepare", "auto_install", "reason"),
+    [
+        (True, True, "VIBE_INSTALL_SKIP_SHOW_RUNTIME"),
+        (False, False, "VIBE_SHOW_RUNTIME_AUTO_INSTALL"),
+    ],
+)
+def test_reconcile_startup_dependencies_honors_show_runtime_install_opt_outs(
+    monkeypatch,
+    skip_prepare,
+    auto_install,
+    reason,
+):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "should_skip_show_runtime_prepare", lambda: skip_prepare)
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def __init__(self):
+            self.auto_install = auto_install
+
+        def status(self):
+            return {
+                "installed": False,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False):
+            raise AssertionError("runtime preparation must honor the configured opt-out")
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["ok"] is True
+    assert out["show_runtime"] == {"ok": True, "status": "skipped", "reason": reason}
 
 
 def test_reconcile_startup_dependencies_reports_runtime_prepare_failure(monkeypatch):
