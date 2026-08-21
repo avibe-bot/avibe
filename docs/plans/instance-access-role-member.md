@@ -226,3 +226,44 @@ The remote-Owner task/watch write fallback can still admit a missing legacy name
 ### Current-master default semantics
 
 The original follow-up brief referenced the pre-PR-#1606 audience-wide assignment predicate. PR #1606 had already replaced that model on `master`: an instance default is advisory, and ACL enforcement occurs per principal when the default is resolved. This alignment deliberately preserves #1606. A member may assign a private or scope-policy Agent as the default; a principal who cannot use it degrades to another usable Agent without changing the configured default or widening the target ACL.
+
+## Addendum: Agents page load 403s (2026-08-21, post-#1621)
+
+### Divergence found
+
+After #1621 aligned the Agent ACL layer, a remote member opening `/agents` still
+got two `instance_access_forbidden` toasts. Mutation worked; the *page load*
+fired two Owner-only GETs. Both are capability/HTTP mismatches, not ACL gaps:
+
+1. `AgentsPage.refreshOnboarding` was gated on `can_manage_agents`. #1621 made
+   that bit true for `member`, so the page began requesting
+   `GET /api/agent-onboarding` — a route deliberately kept Owner-only because
+   bulk onboarding is a one-way instance-wide migration. The handler's `catch`
+   swallowed the throw, but `ApiContext.handleApiError` had already toasted.
+2. The Agents detail panel auto-selects the default Agent on first load and
+   loads that backend's model catalog: `GET /api/claude/models`,
+   `GET /api/codex/models`, or `GET /api/backend/opencode/providers`. None was
+   named by any policy table, so all three fell to the Owner default-deny.
+
+### Decisions
+
+1. Onboarding UI keys off `is_instance_owner`, not `can_manage_agents`. The
+   route stays Owner (addendum above, `_require_agent_onboarding_access`); the
+   UI now matches it, so the banner simply never loads for a member and cannot
+   403. The member keeps New Agent, Import, Global prompts, edit, and default —
+   all already member-tier.
+2. The three read-only model catalogs are editor-tier, added to
+   `_EDITOR_HTTP_RULES` as exact GET rules. Editor rather than member because
+   Chat's `AgentRoutePicker` shares the same loader and is an editor surface;
+   member inherits editor by rank. Deliberately **not** an `/api/backend`
+   namespace: the rest of that namespace is credential and host work —
+   `*/auth*`, custom-provider writes, CLI install, runtime restart — and keeps
+   Owner by the unknown-route default.
+
+### Rule this leaves behind
+
+A capability bit is the UI's permission to *render* a surface; the HTTP policy
+is what may be *called*. When a rank gains a capability, every request the
+surface issues on load has to be re-checked against the policy tables, including
+the shared read-only lookups a page pulls in indirectly. A UI gate that is
+merely close to the route's tier produces a toast on every page load.

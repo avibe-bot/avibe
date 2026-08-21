@@ -523,6 +523,15 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/agents/[^/]+$"),
         ("GET", r"^/api/agents-graph$"),
         ("GET", r"^/api/agent-backends$"),
+        # Read-only model catalogs for the three backends. Chat's route picker is
+        # an editor surface and the Agents detail panel is a member one, so the
+        # catalog they share is editor-tier and member inherits it. Listed one
+        # route at a time rather than as a `/api/backend` namespace: the rest of
+        # that namespace is credential and host work -- `*/auth*`, custom-provider
+        # writes, CLI install, runtime restart -- and stays Owner by default.
+        ("GET", r"^/api/claude/models$"),
+        ("GET", r"^/api/codex/models$"),
+        ("GET", r"^/api/backend/opencode/providers$"),
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
         # Files favorites live under /api/browse, not /api/files. Admit only this

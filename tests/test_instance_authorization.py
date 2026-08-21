@@ -308,6 +308,11 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         # The Web UI's ShowPageShareControl reads the page it can mutate;
         # editors must keep GET access (regression: PR #1606 round 1).
         ("GET", "/api/show-pages/session-1"),
+        # Read-only model catalogs behind Chat's route picker and the Agents
+        # detail panel. Editor-tier because the picker is an editor surface.
+        ("GET", "/api/claude/models"),
+        ("GET", "/api/codex/models"),
+        ("GET", "/api/backend/opencode/providers"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path
@@ -358,7 +363,17 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/control"),
         ("POST", "/api/upgrade"),
         ("POST", "/api/logs"),
+        # Classifying the read-only catalogs above does not widen /api/backend:
+        # credential, custom-provider, install, and runtime routes keep Owner by
+        # the unknown-route default.
         ("POST", "/api/backend/codex/auth"),
+        ("POST", "/api/backend/claude/auth"),
+        ("POST", "/api/backend/opencode/auth"),
+        ("DELETE", "/api/backend/opencode/auth/anthropic"),
+        ("POST", "/api/backend/opencode/providers"),
+        ("POST", "/api/backend/opencode/future-mutation"),
+        ("POST", "/api/claude/models/refresh"),
+        ("POST", "/api/codex/future-mutation"),
         # Access administration and bearer credentials.
         ("PUT", "/api/permissions/authorized-users"),
         ("GET", "/api/users/bind-codes"),
@@ -443,6 +458,53 @@ def test_member_reachable_routes_are_bounded_by_declaration() -> None:
         synthetic = http_authorization_policy(method, "/api/route-added-after-the-member-rank")
         assert synthetic is not None
         assert synthetic.minimum_role == "owner", method
+
+
+def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page() -> None:
+    """The GETs one Agents-page load issues must be admitted by the ranks it renders for.
+
+    A remote member landing on ``/agents`` got two ``instance_access_forbidden``
+    toasts after the Agent ACL fix: the page's own reads were reachable, but the
+    onboarding inventory was requested off ``can_manage_agents`` (a member bit)
+    while the route is deliberately Owner, and the backend model catalogs the
+    detail panel loads were classified by nobody and so fell to the Owner
+    default. The property is stated over the ranks rather than over a list of
+    fixed cases: whoever can reach the surface can complete its load. Chat's
+    route picker shares the catalog loader and is an editor surface, so editor is
+    the floor for those three; the rest of the page is member management.
+    """
+
+    page_load_reads = (
+        ("GET", "/api/agents"),
+        ("GET", "/api/agents/demo"),
+        ("GET", "/api/running-agents"),
+        ("GET", "/api/models/agents"),
+    )
+    catalog_reads = (
+        ("GET", "/api/claude/models"),
+        ("GET", "/api/codex/models"),
+        ("GET", "/api/backend/opencode/providers"),
+    )
+
+    for role in ("editor", "member", "owner"):
+        context = _context(role, remote=True)
+        for method, path in catalog_reads:
+            minimum_role = http_authorization_policy(method, path).minimum_role
+            assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
+
+    for role in ("member", "owner"):
+        context = _context(role, remote=True)
+        for method, path in (*page_load_reads, *catalog_reads):
+            minimum_role = http_authorization_policy(method, path).minimum_role
+            assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
+
+    # The counterpart the UI must therefore stop requesting: bulk onboarding is a
+    # one-way instance-wide migration and stays Owner, so a member page load that
+    # still calls it is a UI defect, not a policy gap.
+    for method in ("GET", "POST"):
+        minimum_role = http_authorization_policy(method, "/api/agent-onboarding").minimum_role
+        assert minimum_role == "owner"
+        assert not _context("member", remote=True).has_role(minimum_role)
 
 
 def test_workbench_events_follow_role_boundaries() -> None:
