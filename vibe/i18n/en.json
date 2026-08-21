@@ -944,7 +944,10 @@
       "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives",
       "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
-      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed."
+      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed.",
+      "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
+      "repairStarted": "Reinstalled and started the manifest-selected Show Runtime.",
+      "repairStartFailed": "Show Runtime was reinstalled but could not start: {reason}"
     }
   }
 }

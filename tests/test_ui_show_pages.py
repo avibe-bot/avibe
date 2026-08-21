@@ -2951,7 +2951,7 @@ def test_show_request_recovers_after_transient_install_backoff(monkeypatch, tmp_
         runtime_source="npm",
     )
 
-    def install():
+    def install(**_kwargs):
         attempts.append(clock[0])
         if len(attempts) == 1:
             manager._install_reason = "runtime_archive_download_failed"
@@ -2966,7 +2966,7 @@ def test_show_request_recovers_after_transient_install_backoff(monkeypatch, tmp_
 
     monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
-    monkeypatch.setattr(manager, "_install_managed_runtime", install)
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
     monkeypatch.setattr(manager, "request", request_runtime)
     set_show_runtime_manager_for_tests(manager)
     try:
@@ -6192,7 +6192,7 @@ def test_show_runtime_manager_retries_transient_install_after_deadline(monkeypat
         runtime_source="npm",
     )
 
-    def install():
+    def install(**_kwargs):
         attempts.append(clock[0])
         if len(attempts) == 1:
             manager._install_reason = "runtime_archive_download_failed"
@@ -6201,7 +6201,7 @@ def test_show_runtime_manager_retries_transient_install_after_deadline(monkeypat
 
     monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
-    monkeypatch.setattr(manager, "_install_managed_runtime", install)
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
 
     assert asyncio.run(manager._resolve_managed_command()) is None
     assert attempts == [100.0]
@@ -6228,7 +6228,7 @@ def test_show_runtime_prepare_seeds_request_retry_backoff(monkeypatch, tmp_path)
         runtime_source="npm",
     )
 
-    def install():
+    def install(**_kwargs):
         attempts.append(clock[0])
         if len(attempts) == 1:
             manager._install_reason = "runtime_install_failed"
@@ -6237,7 +6237,7 @@ def test_show_runtime_prepare_seeds_request_retry_backoff(monkeypatch, tmp_path)
 
     monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("core.show_runtime.random.random", lambda: 1.0)
-    monkeypatch.setattr(manager, "_install_managed_runtime", install)
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
 
     prepared = manager.prepare()
     assert prepared["ok"] is False
@@ -6261,13 +6261,13 @@ def test_show_runtime_manager_latches_permanent_install_failure(monkeypatch, tmp
         runtime_source="npm",
     )
 
-    def install():
+    def install(**_kwargs):
         attempts.append(clock[0])
         manager._install_reason = "runtime_archive_checksum_mismatch"
         return None
 
     monkeypatch.setattr("core.show_runtime.time.monotonic", lambda: clock[0])
-    monkeypatch.setattr(manager, "_install_managed_runtime", install)
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
 
     assert asyncio.run(manager._resolve_managed_command()) is None
     clock[0] = 100_000.0
@@ -6285,12 +6285,12 @@ def test_show_runtime_manager_offline_failure_neither_retries_nor_latches(monkey
         offline=True,
     )
 
-    def install():
+    def install(**_kwargs):
         attempts.append("attempt")
         manager._install_reason = "runtime_archive_unavailable_offline"
         return None
 
-    monkeypatch.setattr(manager, "_install_managed_runtime", install)
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
 
     assert asyncio.run(manager._resolve_managed_command()) is None
     assert asyncio.run(manager._resolve_managed_command()) is None
@@ -6309,12 +6309,12 @@ def test_show_runtime_prepare_caches_remote_manifest_command(monkeypatch, tmp_pa
         manifest_url="https://example.invalid/show-runtime-manifest.json",
     )
 
-    def install():
+    def install(**_kwargs):
         calls.append("install")
         return command
 
-    monkeypatch.setattr(manager, "_install_managed_runtime", install)
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     prepared = manager.prepare()
     resolved = asyncio.run(manager._resolve_managed_command())
@@ -6322,6 +6322,112 @@ def test_show_runtime_prepare_caches_remote_manifest_command(monkeypatch, tmp_pa
     assert prepared["command"] == command
     assert resolved == command
     assert calls == ["install"]
+
+
+@pytest.mark.parametrize(
+    ("env_name", "auto_install", "expected_reason"),
+    [
+        ("VIBE_INSTALL_SKIP_SHOW_RUNTIME", True, "VIBE_INSTALL_SKIP_SHOW_RUNTIME"),
+        (None, False, "VIBE_SHOW_RUNTIME_AUTO_INSTALL"),
+    ],
+)
+def test_show_runtime_admission_owns_install_opt_outs(
+    monkeypatch,
+    tmp_path,
+    env_name,
+    auto_install,
+    expected_reason,
+):
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", raising=False)
+    if env_name:
+        monkeypatch.setenv(env_name, "1")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+        auto_install=auto_install,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_install_managed_runtime_locked",
+        lambda **_kwargs: pytest.fail("configured opt-out must stop admission before provider dispatch"),
+    )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
+
+    prepared = manager.prepare(force=False)
+
+    assert prepared["ok"] is True
+    assert prepared["command"] is None
+    assert prepared["reason"] == expected_reason
+    assert prepared["prewarm_allowed"] is False
+
+
+def test_show_runtime_prepare_passes_force_and_offline_without_mutating_manager(monkeypatch, tmp_path):
+    calls = []
+    command = [str(tmp_path / "runtime-cli")]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+        auto_install=False,
+        offline=False,
+        force_install=False,
+    )
+
+    def install(*, force, offline):
+        calls.append((force, offline))
+        return command
+
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
+
+    prepared = manager.prepare(force=True, offline=True)
+
+    assert prepared["command"] == command
+    assert prepared["prewarm_allowed"] is True
+    assert calls == [(True, True)]
+    assert manager.force_install is False
+    assert manager.offline is False
+
+
+def test_show_runtime_admission_serializes_prepare_and_request(monkeypatch, tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    attempts = []
+    command = [str(tmp_path / "runtime-cli")]
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+
+    def install(**_kwargs):
+        attempts.append("install")
+        started.set()
+        assert release.wait(timeout=5)
+        return command
+
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", install)
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
+    prepared = []
+    prepare_thread = threading.Thread(target=lambda: prepared.append(manager.prepare(force=False)))
+    prepare_thread.start()
+    assert started.wait(timeout=5)
+
+    async def resolve_while_prepare_runs():
+        resolving = asyncio.create_task(manager._resolve_managed_command())
+        await asyncio.sleep(0.05)
+        assert attempts == ["install"]
+        release.set()
+        return await resolving
+
+    resolved = asyncio.run(resolve_while_prepare_runs())
+    prepare_thread.join(timeout=5)
+
+    assert not prepare_thread.is_alive()
+    assert prepared[0]["command"] == command
+    assert resolved == command
+    assert attempts == ["install"]
 
 
 def test_show_runtime_manager_backs_off_failed_starts(monkeypatch, tmp_path):
@@ -6556,7 +6662,7 @@ def test_show_runtime_manager_installs_from_prebuilt_archive(monkeypatch, tmp_pa
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
-    assert manager._install_managed_runtime() == [
+    assert manager._install_managed_runtime_locked(force=False, offline=False) == [
         "/bin/node",
         str(tmp_path / "runtime" / "prebuilt" / "current" / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"),
     ]
@@ -6588,7 +6694,7 @@ def test_show_runtime_manager_installs_prebuilt_archive_with_internal_symlinks(m
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
-    command = manager._install_managed_runtime()
+    command = manager._install_managed_runtime_locked(force=False, offline=False)
 
     assert command == [
         "/bin/node",
@@ -6641,7 +6747,7 @@ def test_show_runtime_manager_reuses_installed_prebuilt_runtime_without_archive(
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
-    assert manager._install_managed_runtime() == ["/bin/node", str(cli_path)]
+    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
 
 
@@ -7075,7 +7181,7 @@ def test_show_runtime_adoption_selects_install_directory_deterministically(monke
         lambda _manifest, _archive, install_dir: selected.append(install_dir),
     )
 
-    command = manager._install_manifest_runtime_locked()
+    command = manager._install_manifest_runtime_locked(force=False, offline=False)
 
     assert command == installed["command"]
     assert selected == [expected]
@@ -7098,7 +7204,7 @@ def test_show_runtime_adoption_serves_verified_command_when_directory_lookup_fai
     monkeypatch.setattr(manager, "_manifest_install_dirs_for_command", lambda _command: set())
 
     with caplog.at_level("WARNING"):
-        command = manager._install_manifest_runtime_locked()
+        command = manager._install_manifest_runtime_locked(force=False, offline=False)
 
     assert command == installed["command"]
     assert manager._install_reason is None
@@ -7160,8 +7266,12 @@ def test_show_runtime_prepare_prunes_old_packaged_installs_and_keeps_rollback(mo
         runtime_dir=runtime_dir,
         runtime_source="manifest-cache",
     )
-    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(
+        manager,
+        "_install_manifest_runtime_locked",
+        lambda **_kwargs: ["/bin/node", str(current_cli)],
+    )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     result = manager.prepare()
 
@@ -7201,8 +7311,12 @@ def test_show_runtime_prepare_preserves_nested_retained_rollback(monkeypatch, tm
         runtime_dir=runtime_dir,
         runtime_source="manifest-cache",
     )
-    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(
+        manager,
+        "_install_manifest_runtime_locked",
+        lambda **_kwargs: ["/bin/node", str(current_cli)],
+    )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     result = manager.prepare()
 
@@ -7238,8 +7352,12 @@ def test_show_runtime_prepare_prunes_siblings_under_current_legacy_parent(monkey
         runtime_dir=runtime_dir,
         runtime_source="manifest-cache",
     )
-    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(
+        manager,
+        "_install_manifest_runtime_locked",
+        lambda **_kwargs: ["/bin/node", str(current_cli)],
+    )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     result = manager.prepare()
 
@@ -7270,8 +7388,12 @@ def test_show_runtime_prepare_preserves_descendants_of_current_legacy_parent(mon
         runtime_dir=runtime_dir,
         runtime_source="manifest-cache",
     )
-    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(parent_cli)])
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(
+        manager,
+        "_install_manifest_runtime_locked",
+        lambda **_kwargs: ["/bin/node", str(parent_cli)],
+    )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     result = manager.prepare()
 
@@ -7308,8 +7430,12 @@ def test_show_runtime_prepare_preserves_custom_child_under_stale_packaged_parent
         runtime_dir=runtime_dir,
         runtime_source="manifest-cache",
     )
-    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: ["/bin/node", str(current_cli)])
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(
+        manager,
+        "_install_manifest_runtime_locked",
+        lambda **_kwargs: ["/bin/node", str(current_cli)],
+    )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     result = manager.prepare()
 
@@ -7358,8 +7484,8 @@ def test_show_runtime_failed_prepare_does_not_clean_managed_installs(monkeypatch
         runtime_dir=runtime_dir,
         runtime_source="manifest-cache",
     )
-    monkeypatch.setattr(manager, "_install_manifest_runtime", lambda: None)
-    monkeypatch.setattr(manager, "status", lambda: {})
+    monkeypatch.setattr(manager, "_install_manifest_runtime_locked", lambda **_kwargs: None)
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
     result = manager.prepare()
 
@@ -7538,24 +7664,24 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
         runtime_dir=tmp_path / "runtime",
     )
 
-    def fake_install():
+    def fake_install(**_kwargs):
         bin_path = manager._managed_bin_path()
         bin_path.parent.mkdir(parents=True)
         bin_path.write_text("#!/bin/sh\n", encoding="utf-8")
         bin_path.chmod(0o755)
         return [str(bin_path)]
 
-    monkeypatch.setattr(manager, "_install_managed_runtime", fake_install)
+    monkeypatch.setattr(manager, "_install_managed_runtime_locked", fake_install)
     calls = []
 
-    async def fake_to_thread(func):
+    async def fake_to_thread(func, **kwargs):
         calls.append(func)
-        return func()
+        return func(**kwargs)
 
     monkeypatch.setattr("core.show_runtime.asyncio.to_thread", fake_to_thread)
 
     assert asyncio.run(manager._resolve_managed_command()) == [str(manager._managed_bin_path())]
-    assert calls == [fake_install]
+    assert [call.__name__ for call in calls] == ["_attempt_managed_install"]
 
 
 def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
@@ -7619,7 +7745,10 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
 
     monkeypatch.setattr(manager, "_run_install_command", fake_run)
 
-    assert manager._install_managed_runtime() == ["/bin/node", str(source_dir / "packages" / "runtime" / "dist" / "cli.js")]
+    assert manager._install_managed_runtime_locked(force=False, offline=False) == [
+        "/bin/node",
+        str(source_dir / "packages" / "runtime" / "dist" / "cli.js"),
+    ]
     assert commands == [
         (
             [
@@ -7666,7 +7795,7 @@ def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(
 
     monkeypatch.setattr(manager, "_run_install_command", fake_run)
 
-    assert manager._install_managed_runtime() == ["/bin/node", str(cli_path)]
+    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
     assert commands == [
         (
@@ -7696,7 +7825,7 @@ def test_show_runtime_manager_reuses_installed_github_runtime_without_git(monkey
         lambda command: ["/bin/node"] if command == "node" else None,
     )
 
-    assert manager._install_managed_runtime() == ["/bin/node", str(cli_path)]
+    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
 
 
@@ -7747,7 +7876,7 @@ def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):
     called = []
     monkeypatch.setattr(manager, "_install_npm_runtime", lambda: called.append("npm") or ["/tmp/avibe-show-runtime"])
 
-    assert manager._install_managed_runtime() == ["/tmp/avibe-show-runtime"]
+    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/tmp/avibe-show-runtime"]
     assert called == ["npm"]
 
 
@@ -7779,7 +7908,11 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
 
     def fake_reconcile():
         called["reconcile"] += 1
-        return {"ok": True, "show_runtime": {"ok": True}, "askill": {"ok": True}}
+        return {
+            "ok": True,
+            "show_runtime": {"ok": True, "prewarm_allowed": True},
+            "askill": {"ok": True},
+        }
 
     async def fake_runtime_prewarm():
         called["runtime"] += 1
@@ -7814,6 +7947,29 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
             ("ses_public", ShowRuntimeContext.SHARED),
         ],
     }
+
+
+def test_startup_dependency_reconcile_does_not_prewarm_skipped_runtime(monkeypatch):
+    from vibe.ui_server import _reconcile_startup_dependencies_task
+
+    monkeypatch.setattr(
+        "vibe.api.reconcile_startup_dependencies",
+        lambda: {
+            "ok": True,
+            "show_runtime": {
+                "ok": True,
+                "status": "skipped",
+                "reason": "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
+                "prewarm_allowed": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "core.show_runtime.prewarm_show_runtime",
+        lambda: pytest.fail("skipped runtime must not be prewarmed"),
+    )
+
+    asyncio.run(_reconcile_startup_dependencies_task())
 
 
 def test_show_runtime_proxy_logs_entry_timing(monkeypatch, tmp_path, caplog):

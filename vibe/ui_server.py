@@ -15603,7 +15603,7 @@ async def _reconcile_startup_dependencies_task() -> None:
 
         result = await asyncio.to_thread(api.reconcile_startup_dependencies)
         show_runtime = result.get("show_runtime") if isinstance(result.get("show_runtime"), dict) else {}
-        if show_runtime.get("ok"):
+        if show_runtime.get("prewarm_allowed") is True:
             from core.show_runtime import (
                 ShowRuntimeContext,
                 prewarm_show_page_session,

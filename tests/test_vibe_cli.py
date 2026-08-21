@@ -2213,7 +2213,7 @@ def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
             },
         },
     )
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
 
     result = cli._repair_show_runtime()
 
@@ -2224,6 +2224,22 @@ def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
 
 
 def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
+    prepared = []
+    stopped = []
+
+    async def ensure():
+        return SimpleNamespace(available=True, reason=None)
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": True,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "command": [str(tmp_path / "runtime-cli")],
+            "status": {"install_dir": str(tmp_path / "runtime")},
+        }
+
     manager = SimpleNamespace(
         status=lambda: {
             "provider": "manifest-cache",
@@ -2231,19 +2247,87 @@ def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
             "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
             "installed": False,
         },
-        prepare=lambda force=False: {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "status": {"install_dir": str(tmp_path / "runtime")},
-        },
+        prepare=prepare,
+        ensure=ensure,
+        stop=lambda: stopped.append(True),
     )
-    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
 
     result = cli._repair_show_runtime()
 
     assert result["status"] == "repaired"
     assert result["install_dir"] == str(tmp_path / "runtime")
+    assert prepared == [True]
+    assert stopped == [True]
+
+
+def test_repair_show_runtime_reports_installed_runtime_that_still_cannot_start(monkeypatch, tmp_path):
+    prepared = []
+    stopped = []
+
+    async def ensure():
+        return SimpleNamespace(available=False, reason="runtime_start_failed")
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": True,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "command": [str(tmp_path / "runtime-cli")],
+            "status": {"install_dir": str(tmp_path / "runtime")},
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
+            "installed": True,
+            "command": [str(tmp_path / "runtime-cli")],
+        },
+        prepare=prepare,
+        ensure=ensure,
+        stop=lambda: stopped.append(True),
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_start_failed"
+    assert "could not start" in result["message"]
+    assert prepared == [True]
+    assert stopped == [True, True]
+
+
+def test_repair_show_runtime_does_not_reinstall_startable_runtime(monkeypatch, tmp_path):
+    stopped = []
+
+    async def ensure():
+        return SimpleNamespace(available=True, reason=None)
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "install_dir": str(tmp_path / "runtime"),
+            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
+            "installed": True,
+            "command": [str(tmp_path / "runtime-cli")],
+        },
+        prepare=lambda force=False: pytest.fail("startable runtime must not be reinstalled"),
+        ensure=ensure,
+        stop=lambda: stopped.append(True),
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "skipped"
+    assert "no repair is needed" in result["message"]
+    assert result["install_dir"] == str(tmp_path / "runtime")
+    assert stopped == [True]
 
 
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):

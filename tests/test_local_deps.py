@@ -1323,7 +1323,7 @@ def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(mon
 
         def prepare(self, *, force=False):
             self.prepared.append(force)
-            return {"ok": True, "reason": None}
+            return {"ok": True, "reason": None, "prewarm_allowed": True}
 
     manager = _Mgr()
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
@@ -1335,31 +1335,34 @@ def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(mon
     assert avault_calls == [False]
     assert manager.prepared == [False]
     assert out["node"]["status"] == "ready"
-    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
+    assert out["show_runtime"] == {
+        "ok": True,
+        "status": "ready",
+        "reason": None,
+        "prewarm_allowed": True,
+    }
 
 
 @pytest.mark.parametrize(
-    ("skip_prepare", "auto_install", "reason"),
+    ("auto_install", "reason"),
     [
-        (True, True, "VIBE_INSTALL_SKIP_SHOW_RUNTIME"),
-        (False, False, "VIBE_SHOW_RUNTIME_AUTO_INSTALL"),
+        (True, "VIBE_INSTALL_SKIP_SHOW_RUNTIME"),
+        (False, "VIBE_SHOW_RUNTIME_AUTO_INSTALL"),
     ],
 )
-def test_reconcile_startup_dependencies_honors_show_runtime_install_opt_outs(
+def test_reconcile_startup_dependencies_preserves_manager_install_opt_out_result(
     monkeypatch,
-    skip_prepare,
     auto_install,
     reason,
 ):
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(api, "should_skip_show_runtime_prepare", lambda: skip_prepare)
-
     import core.show_runtime as srt_mod
 
     class _Mgr:
         def __init__(self):
             self.auto_install = auto_install
+            self.prepared = []
 
         def status(self):
             return {
@@ -1370,14 +1373,22 @@ def test_reconcile_startup_dependencies_honors_show_runtime_install_opt_outs(
             }
 
         def prepare(self, *, force=False):
-            raise AssertionError("runtime preparation must honor the configured opt-out")
+            self.prepared.append(force)
+            return {"ok": True, "reason": reason, "prewarm_allowed": False}
 
-    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    manager = _Mgr()
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
 
     out = api.reconcile_startup_dependencies()
 
     assert out["ok"] is True
-    assert out["show_runtime"] == {"ok": True, "status": "skipped", "reason": reason}
+    assert manager.prepared == [False]
+    assert out["show_runtime"] == {
+        "ok": True,
+        "status": "skipped",
+        "reason": reason,
+        "prewarm_allowed": False,
+    }
 
 
 def test_reconcile_startup_dependencies_reports_runtime_prepare_failure(monkeypatch):
@@ -1396,7 +1407,11 @@ def test_reconcile_startup_dependencies_reports_runtime_prepare_failure(monkeypa
             }
 
         def prepare(self, *, force=False):
-            return {"ok": False, "reason": "runtime_archive_download_failed"}
+            return {
+                "ok": False,
+                "reason": "runtime_archive_download_failed",
+                "prewarm_allowed": False,
+            }
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
 
@@ -1407,6 +1422,7 @@ def test_reconcile_startup_dependencies_reports_runtime_prepare_failure(monkeypa
         "ok": False,
         "status": "failed",
         "reason": "runtime_archive_download_failed",
+        "prewarm_allowed": False,
     }
 
 
@@ -1429,7 +1445,12 @@ def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(mo
 
     assert out["ok"] is False
     assert out["node"]["status"] == "missing"
-    assert out["show_runtime"] == {"ok": False, "status": "skipped", "reason": "runtime_node_missing"}
+    assert out["show_runtime"] == {
+        "ok": False,
+        "status": "skipped",
+        "reason": "runtime_node_missing",
+        "prewarm_allowed": False,
+    }
 
 
 def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):

@@ -8613,37 +8613,31 @@ def reconcile_startup_dependencies() -> dict:
                 "version": status.get("node_version"),
             }
 
-            skip_show_runtime_prepare = should_skip_show_runtime_prepare()
-            show_runtime_auto_install = bool(getattr(manager, "auto_install", True))
-            if node_ok and (skip_show_runtime_prepare or not show_runtime_auto_install):
-                runtime_installed = bool(status.get("installed"))
-                skip_reason = (
-                    "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
-                    if skip_show_runtime_prepare
-                    else "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
-                )
-                result["show_runtime"] = {
-                    "ok": True,
-                    "status": "ready" if runtime_installed else "skipped",
-                    "reason": None if runtime_installed else skip_reason,
-                }
-            elif node_ok:
+            if node_ok:
                 prepared = manager.prepare(force=False)
                 runtime_ok = bool(prepared.get("ok"))
+                prewarm_allowed = prepared.get("prewarm_allowed") is True
                 result["show_runtime"] = {
                     "ok": runtime_ok,
-                    "status": "ready" if runtime_ok else "failed",
-                    "reason": None if runtime_ok else prepared.get("reason") or "runtime_install_failed",
+                    "status": "ready" if prewarm_allowed else ("skipped" if runtime_ok else "failed"),
+                    "reason": None if prewarm_allowed else prepared.get("reason") or "runtime_install_failed",
+                    "prewarm_allowed": prewarm_allowed,
                 }
             else:
                 result["show_runtime"] = {
                     "ok": False,
                     "status": "skipped",
                     "reason": "runtime_node_unsupported" if node_available else "runtime_node_missing",
+                    "prewarm_allowed": False,
                 }
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to prepare Show Runtime: %s", exc, exc_info=True)
-            result["show_runtime"] = {"ok": False, "status": "failed", "reason": str(exc)}
+            result["show_runtime"] = {
+                "ok": False,
+                "status": "failed",
+                "reason": str(exc),
+                "prewarm_allowed": False,
+            }
 
         if os.environ.get("VIBE_UI_ENABLE_TERMINAL", "").strip().lower() in {"0", "false", "no", "off"}:
             # Terminal explicitly disabled — don't download the optional tmux runtime.
