@@ -796,7 +796,7 @@ export type ApiContextType = {
   onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
   getVibeAgent: (
     name: string,
-    params?: { cache?: boolean; expectedCodes?: readonly string[] },
+    params?: { cache?: boolean; handleError?: boolean; expectedCodes?: readonly string[] },
   ) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -4124,8 +4124,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getVibeAgent: (name, params) => {
       const path = `/api/agents/${encodeURIComponent(name)}`;
       return params?.cache === false
-        ? getJson(path, { expectedCodes: params.expectedCodes })
-        : getCachedJson(path, 5_000);
+        ? getJson(path, { handleError: params.handleError, expectedCodes: params.expectedCodes })
+        : getCachedJson(path, 5_000, { handleError: params?.handleError });
     },
     createVibeAgent: (payload) => postJson('/api/agents', payload),
     updateVibeAgent: async (name, payload) => {

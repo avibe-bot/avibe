@@ -89,9 +89,44 @@ type SelectedMutationBatch = {
   pending: number;
   drainGeneration: number;
   draining: boolean;
-  intentGeneration: number;
+  errorGeneration: number;
   failures: unknown[];
 };
+
+type SelectedCoordinator = {
+  desiredName: string | null;
+  intentGeneration: number;
+  readGenerations: Map<string, number>;
+  accepted: VibeAgentFull | null;
+  acceptedGeneration: number;
+  nextBatchId: number;
+  mutations: Map<string, SelectedMutationBatch>;
+};
+
+const createSelectedCoordinator = (): SelectedCoordinator => ({
+  desiredName: null,
+  intentGeneration: 0,
+  readGenerations: new Map(),
+  accepted: null,
+  acceptedGeneration: 0,
+  nextBatchId: 0,
+  mutations: new Map(),
+});
+
+const advanceSelectedRead = (coordinator: SelectedCoordinator, identity: string): number => {
+  const next = (coordinator.readGenerations.get(identity) ?? 0) + 1;
+  coordinator.readGenerations.set(identity, next);
+  return next;
+};
+
+const selectedReadIsCurrent = (
+  coordinator: SelectedCoordinator,
+  identity: string,
+  generation: number,
+): boolean => coordinator.readGenerations.get(identity) === generation;
+
+type ResourceErrorOwner = 'definitions' | 'selection' | 'mutation';
+type ResourceErrors = Record<ResourceErrorOwner, string | null>;
 
 // A tiny per-resource epoch owner. Every asynchronous read captures a token;
 // any committed mutation or identity change advances the epoch and makes older
@@ -115,6 +150,8 @@ const errorCodeOf = (error: unknown): string | null => {
 
 export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
+  const tRef = useRef(t);
+  tRef.current = t;
   const api = useApi();
   const { showToast } = useToast();
   const {
@@ -148,7 +185,16 @@ export const AgentsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [showGlobalPrompts, setShowGlobalPrompts] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [resourceErrors, setResourceErrors] = useState<ResourceErrors>({
+    definitions: null,
+    selection: null,
+    mutation: null,
+  });
+  const resourceErrorGenerationRef = useRef<Record<ResourceErrorOwner, number>>({
+    definitions: 0,
+    selection: 0,
+    mutation: 0,
+  });
   const [search, setSearch] = useState('');
   const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
   const [importing, setImporting] = useState<Backend | null>(null);
@@ -157,13 +203,7 @@ export const AgentsPage: React.FC = () => {
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
   const definitionsVersionRef = useRef(createAgentRequestVersion());
   const onboardingVersionRef = useRef(createAgentRequestVersion());
-  const selectedRef = useRef<VibeAgentFull | null>(null);
-  const selectedIntentRef = useRef({ generation: 0, desiredName: null as string | null });
-  const selectedAcceptedGenerationRef = useRef(0);
-  const selectedPassiveReadRef = useRef(0);
-  const selectedMutationBatchesRef = useRef(new Map<string, SelectedMutationBatch>());
-  const selectedMutationBatchIdRef = useRef(0);
-  const onboardingMutationRef = useRef(0);
+  const selectedCoordinatorRef = useRef(createSelectedCoordinator());
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -176,8 +216,27 @@ export const AgentsPage: React.FC = () => {
   // a member's page load into an owner-only GET and surfaced the 403 as a toast.
   const canOnboardAgents = capabilities.is_instance_owner;
 
+  const beginResourceError = useCallback((owner: ResourceErrorOwner) => {
+    const generation = resourceErrorGenerationRef.current[owner] + 1;
+    resourceErrorGenerationRef.current[owner] = generation;
+    setResourceErrors((current) => (current[owner] === null ? current : { ...current, [owner]: null }));
+    return generation;
+  }, []);
+
+  const setResourceError = useCallback((owner: ResourceErrorOwner, message: string, generation?: number) => {
+    if (generation !== undefined && resourceErrorGenerationRef.current[owner] !== generation) return;
+    setResourceErrors((current) => ({ ...current, [owner]: message }));
+  }, []);
+
+  const clearResourceError = useCallback((owner: ResourceErrorOwner, generation?: number) => {
+    if (generation !== undefined && resourceErrorGenerationRef.current[owner] !== generation) return;
+    resourceErrorGenerationRef.current[owner] += 1;
+    setResourceErrors((current) => (current[owner] === null ? current : { ...current, [owner]: null }));
+  }, []);
+
+  const error = resourceErrors.mutation ?? resourceErrors.selection ?? resourceErrors.definitions;
+
   const publishOnboarding = useCallback((result: VibeAgentOnboardingResult | null) => {
-    onboardingVersionRef.current.invalidate();
     setOnboardingInventory(result?.available ? result : null);
   }, []);
 
@@ -196,17 +255,32 @@ export const AgentsPage: React.FC = () => {
   }, [api, canOnboardAgents, publishOnboarding]);
 
   const commitSelected = useCallback((agent: VibeAgentFull | null) => {
-    selectedAcceptedGenerationRef.current += 1;
-    selectedPassiveReadRef.current += 1;
-    selectedRef.current = agent;
+    const coordinator = selectedCoordinatorRef.current;
+    const previousIdentity = coordinator.accepted?.name;
+    if (previousIdentity) advanceSelectedRead(coordinator, previousIdentity);
+    if (agent?.name) advanceSelectedRead(coordinator, agent.name);
+    coordinator.acceptedGeneration += 1;
+    coordinator.accepted = agent;
     setSelected(agent);
   }, []);
 
   const beginSelectedIntent = useCallback((identity: string | null) => {
-    const generation = ++selectedIntentRef.current.generation;
-    selectedIntentRef.current.desiredName = identity;
-    selectedPassiveReadRef.current += 1;
-    return { generation, identity };
+    const coordinator = selectedCoordinatorRef.current;
+    if (coordinator.desiredName && coordinator.desiredName !== identity) {
+      advanceSelectedRead(coordinator, coordinator.desiredName);
+    }
+    if (identity) advanceSelectedRead(coordinator, identity);
+    coordinator.intentGeneration += 1;
+    coordinator.desiredName = identity;
+    return { intentGeneration: coordinator.intentGeneration, identity };
+  }, []);
+
+  const rollbackSelectedIntent = useCallback(() => {
+    const coordinator = selectedCoordinatorRef.current;
+    if (coordinator.desiredName) advanceSelectedRead(coordinator, coordinator.desiredName);
+    coordinator.intentGeneration += 1;
+    coordinator.desiredName = coordinator.accepted?.name ?? null;
+    if (coordinator.desiredName) advanceSelectedRead(coordinator, coordinator.desiredName);
   }, []);
 
 
@@ -217,7 +291,7 @@ export const AgentsPage: React.FC = () => {
     const token = definitionsVersionRef.current.begin();
     const request = (async () => {
       setLoading(true);
-      setError(null);
+      clearResourceError('definitions');
       try {
         const result = await api.listVibeAgents({
           includeDisabled: true,
@@ -229,54 +303,121 @@ export const AgentsPage: React.FC = () => {
         if (!definitionsVersionRef.current.isCurrent(token)) return;
         setAgents(result.agents);
         setDefaultName(result.default_agent_name);
-        // Keep the currently-selected agent present after edits / refreshes.
-        const currentSelected = selectedRef.current;
-        if (currentSelected) {
-          const fresh = result.agents.find((a) => a.name === currentSelected.name);
-          if (
-            !fresh &&
-            selectedIntentRef.current.desiredName === currentSelected.name &&
-            !selectedMutationBatchesRef.current.has(currentSelected.name)
-          ) {
+        // Reconcile identity outcomes from the same authoritative list snapshot.
+        // A missing desired identity invalidates only that pending intent; a
+        // missing accepted identity clears the rendered snapshot without
+        // cancelling a different desired selection that is still loading.
+        const coordinator = selectedCoordinatorRef.current;
+        const acceptedIdentity = coordinator.accepted?.name ?? null;
+        const desiredIdentity = coordinator.desiredName;
+        const acceptedMissing = acceptedIdentity
+          ? !result.agents.some((agent) => agent.name === acceptedIdentity)
+          : false;
+        const desiredMissing = desiredIdentity
+          ? !result.agents.some((agent) => agent.name === desiredIdentity)
+          : false;
+
+        if (desiredIdentity && desiredMissing && !coordinator.mutations.has(desiredIdentity)) {
+          advanceSelectedRead(coordinator, desiredIdentity);
+          coordinator.intentGeneration += 1;
+          clearResourceError('selection');
+          if (desiredIdentity === acceptedIdentity) {
+            coordinator.desiredName = null;
             commitSelected(null);
+          } else if (acceptedIdentity && !acceptedMissing) {
+            coordinator.desiredName = acceptedIdentity;
+          } else {
+            coordinator.desiredName = null;
+            if (acceptedIdentity) commitSelected(null);
           }
+        } else if (acceptedMissing && acceptedIdentity && !coordinator.mutations.has(acceptedIdentity)) {
+          commitSelected(null);
         }
       } catch (err) {
-        if (definitionsVersionRef.current.isCurrent(token)) setError(errorMessage(err) ?? String(err));
+        if (definitionsVersionRef.current.isCurrent(token)) {
+          setResourceError('definitions', errorMessage(err) ?? String(err));
+        }
       } finally {
         if (definitionsVersionRef.current.isCurrent(token)) setLoading(false);
       }
     })();
     return request;
-  }, [api, commitSelected]);
+  }, [api, clearResourceError, commitSelected, setResourceError]);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
+  const launchSelectedRead = useCallback(
+    async (options: {
+      identity: string;
+      readGeneration: number;
+      intentGeneration?: number;
+      expectedCodes?: readonly string[];
+    }): Promise<'published' | 'failed' | 'stale'> => {
+      const coordinator = selectedCoordinatorRef.current;
+      const isCurrent = () =>
+        selectedReadIsCurrent(coordinator, options.identity, options.readGeneration) &&
+        coordinator.desiredName === options.identity &&
+        (options.intentGeneration === undefined || coordinator.intentGeneration === options.intentGeneration);
+      try {
+        const params = options.expectedCodes ? { cache: false, expectedCodes: options.expectedCodes } : { cache: false };
+        const result = await api.getVibeAgent(options.identity, params);
+        if (!isCurrent()) return 'stale';
+        if (result.ok && result.agent?.name === options.identity) {
+          clearResourceError('selection');
+          commitSelected(result.agent);
+          return 'published';
+        }
+        rollbackSelectedIntent();
+        setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
+        return 'failed';
+      } catch (err) {
+        if (!isCurrent()) return 'stale';
+        if (options.expectedCodes && SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
+          const acceptedIdentity = coordinator.accepted?.name ?? null;
+          advanceSelectedRead(coordinator, options.identity);
+          coordinator.desiredName = acceptedIdentity;
+          coordinator.intentGeneration += 1;
+          clearResourceError('selection');
+          if (acceptedIdentity === options.identity) commitSelected(null);
+          return 'failed';
+        }
+        rollbackSelectedIntent();
+        setResourceError('selection', errorMessage(err) || tRef.current('errorBoundary.title'));
+        return 'failed';
+      }
+    },
+    [api, clearResourceError, commitSelected, rollbackSelectedIntent, setResourceError],
+  );
+
   const beginSelectedMutation = useCallback((identity: string) => {
-    let batch = selectedMutationBatchesRef.current.get(identity);
+    const coordinator = selectedCoordinatorRef.current;
+    let batch = coordinator.mutations.get(identity);
     if (!batch) {
       batch = {
-        id: ++selectedMutationBatchIdRef.current,
+        id: ++coordinator.nextBatchId,
         identity,
         pending: 0,
         drainGeneration: 0,
         draining: false,
-        intentGeneration: selectedIntentRef.current.generation,
+        errorGeneration: 0,
         failures: [],
       };
-      selectedMutationBatchesRef.current.set(identity, batch);
+      coordinator.mutations.set(identity, batch);
     }
+    const errorGeneration = beginResourceError('mutation');
+    batch.errorGeneration = errorGeneration;
     batch.pending += 1;
     batch.drainGeneration += 1;
     batch.draining = false;
-    selectedPassiveReadRef.current += 1;
-    return { id: batch.id, identity };
-  }, []);
+    advanceSelectedRead(coordinator, identity);
+    return { id: batch.id, identity, errorGeneration };
+  }, [beginResourceError]);
 
   const settleSelectedMutation = useCallback(
     (operation: { id: number; identity: string }, failure?: unknown) => {
-      const batch = selectedMutationBatchesRef.current.get(operation.identity);
+      const coordinator = selectedCoordinatorRef.current;
+      const batch = coordinator.mutations.get(operation.identity);
       if (!batch || batch.id !== operation.id) return;
       if (failure) batch.failures.push(failure);
       batch.pending = Math.max(0, batch.pending - 1);
@@ -284,24 +425,21 @@ export const AgentsPage: React.FC = () => {
 
       batch.draining = true;
       const drainGeneration = ++batch.drainGeneration;
-      const intentGeneration = batch.intentGeneration;
-      const acceptedGeneration = selectedAcceptedGenerationRef.current;
-      const passiveRead = ++selectedPassiveReadRef.current;
       const identity = operation.identity;
+      const intentGeneration = coordinator.intentGeneration;
+      const readGeneration = advanceSelectedRead(coordinator, identity);
+      const shouldDrain = coordinator.desiredName === identity;
 
       void (async () => {
-        let result: Awaited<ReturnType<typeof api.getVibeAgent>> | null = null;
-        let readError: unknown = null;
-        try {
-          result = await api.getVibeAgent(identity, {
-            cache: false,
+        if (shouldDrain) {
+          await launchSelectedRead({
+            identity,
+            readGeneration,
+            intentGeneration,
             expectedCodes: SELECTED_DISAPPEARANCE_CODES,
           });
-        } catch (err) {
-          readError = err;
         }
-
-        const currentBatch = selectedMutationBatchesRef.current.get(identity);
+        const currentBatch = coordinator.mutations.get(identity);
         if (
           !currentBatch ||
           currentBatch.id !== operation.id ||
@@ -310,83 +448,30 @@ export const AgentsPage: React.FC = () => {
         ) {
           return;
         }
-
-        const canPublish =
-          selectedIntentRef.current.generation === intentGeneration &&
-          selectedIntentRef.current.desiredName === identity &&
-          selectedRef.current?.name === identity &&
-          selectedAcceptedGenerationRef.current === acceptedGeneration &&
-          selectedPassiveReadRef.current === passiveRead;
-        const failures = currentBatch.failures;
-
-        if (canPublish && result?.ok) commitSelected(result.agent);
-        if (canPublish && readError) {
-          if (SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(readError) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-            commitSelected(null);
-          }
+        if (currentBatch.failures.length > 0) {
+          setResourceError(
+            'mutation',
+            errorMessage(currentBatch.failures[0]) || t('errorBoundary.title'),
+            currentBatch.errorGeneration,
+          );
         }
-        // The settled mutation batch owns the Definitions refresh even when the
-        // user has already selected another Agent; the full-detail publication
-        // remains conditional on the selected intent above.
         void refreshRef.current();
-        if (canPublish && readError && !SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(readError) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-          setError(errorMessage(readError) ?? String(readError));
-        }
-        if (canPublish && failures.length > 0) {
-          setError(errorMessage(failures[0]) ?? String(failures[0]));
-        }
-        if (selectedMutationBatchesRef.current.get(identity) === currentBatch) {
-          selectedMutationBatchesRef.current.delete(identity);
-        }
+        coordinator.mutations.delete(identity);
       })();
     },
-    [api, commitSelected],
+    [launchSelectedRead, setResourceError, t],
   );
 
-  const refreshSelected = useCallback(async () => {
-    const current = selectedRef.current;
-    if (!current) return;
-    const batch = selectedMutationBatchesRef.current.get(current.name);
+  const reconcileSelected = useCallback(async () => {
+    const coordinator = selectedCoordinatorRef.current;
+    const identity = coordinator.desiredName;
+    if (!identity) return;
+    const batch = coordinator.mutations.get(identity);
     if (batch) return;
-    const intentGeneration = selectedIntentRef.current.generation;
-    const desiredIdentity = selectedIntentRef.current.desiredName;
-    const acceptedGeneration = selectedAcceptedGenerationRef.current;
-    const passiveRead = ++selectedPassiveReadRef.current;
-    const identity = current.name;
-    try {
-      const result = await api.getVibeAgent(identity, {
-        cache: false,
-        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
-      });
-      if (
-        result.ok &&
-        selectedPassiveReadRef.current === passiveRead &&
-        selectedAcceptedGenerationRef.current === acceptedGeneration &&
-        selectedIntentRef.current.generation === intentGeneration &&
-        selectedIntentRef.current.desiredName === desiredIdentity &&
-        desiredIdentity === identity &&
-        selectedRef.current?.name === identity &&
-        !selectedMutationBatchesRef.current.has(identity)
-      ) {
-        commitSelected(result.agent);
-      }
-    } catch (err) {
-      if (
-        selectedPassiveReadRef.current !== passiveRead ||
-        selectedAcceptedGenerationRef.current !== acceptedGeneration ||
-        selectedIntentRef.current.generation !== intentGeneration ||
-        selectedIntentRef.current.desiredName !== desiredIdentity ||
-        desiredIdentity !== identity ||
-        selectedRef.current?.name !== identity ||
-        selectedMutationBatchesRef.current.has(identity)
-      ) return;
-      if (SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-        commitSelected(null);
-        return;
-      }
-      setError(errorMessage(err) ?? String(err));
-    }
-  }, [api, commitSelected]);
+    const intentGeneration = coordinator.intentGeneration;
+    const readGeneration = advanceSelectedRead(coordinator, identity);
+    await launchSelectedRead({ identity, readGeneration, intentGeneration, expectedCodes: SELECTED_DISAPPEARANCE_CODES });
+  }, [launchSelectedRead]);
 
   useEffect(() => {
     refresh();
@@ -452,7 +537,7 @@ export const AgentsPage: React.FC = () => {
       // `onConnected`, and refetching from both would pay twice for one gap.
       onConnected: () => {
         void refreshRef.current();
-        void refreshSelected();
+        void reconcileSelected();
         void refreshOnboarding();
         void fetchRunningActiveCount();
       },
@@ -464,10 +549,10 @@ export const AgentsPage: React.FC = () => {
       onSessionStatus: () => fetchRunningActiveCount(),
       onAuthorizationChanged: () => {
         void refreshRef.current();
-        void refreshSelected();
+        void reconcileSelected();
       },
     });
-  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, refreshOnboarding, refreshSelected]);
+  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, refreshOnboarding, reconcileSelected]);
 
   useEffect(() => {
     if (!capabilities.can_use_agents) return;
@@ -518,29 +603,17 @@ export const AgentsPage: React.FC = () => {
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
-      const { generation, identity } = beginSelectedIntent(name);
-      try {
-        const result = await api.getVibeAgent(name, { cache: false });
-        if (
-          result.ok &&
-          selectedIntentRef.current.generation === generation &&
-          selectedIntentRef.current.desiredName === identity
-        ) {
-          commitSelected(result.agent);
-          // Enter the mobile drill-down only once the detail has actually loaded —
-          // never optimistically, or a failed fetch hides the list with no panel.
-          if (openDetail) setDetailOpen(true);
-        }
-      } catch (err) {
-        if (
-          selectedIntentRef.current.generation === generation &&
-          selectedIntentRef.current.desiredName === identity
-        ) {
-          setError(errorMessage(err) ?? String(err));
-        }
-      }
+      const coordinator = selectedCoordinatorRef.current;
+      const { intentGeneration: generation } = beginSelectedIntent(name);
+      const identity = name;
+      clearResourceError('selection');
+      const readGeneration = advanceSelectedRead(coordinator, identity);
+      const outcome = await launchSelectedRead({ identity, readGeneration, intentGeneration: generation });
+      // Enter the mobile drill-down only once the detail has actually loaded —
+      // never optimistically, or a failed fetch hides the list with no panel.
+      if (outcome === 'published' && openDetail) setDetailOpen(true);
     },
-    [api, beginSelectedIntent, commitSelected],
+    [beginSelectedIntent, clearResourceError, launchSelectedRead],
   );
 
   // Apply text search + backend filter; backend grouping is a layout
@@ -610,18 +683,23 @@ export const AgentsPage: React.FC = () => {
     const confirmed = window.confirm(t('agents.deleteConfirm', { name: selected.name }));
     if (!confirmed) return;
     const name = selected.name;
-    beginSelectedIntent(null);
+    const coordinator = selectedCoordinatorRef.current;
+    const errorGeneration = beginResourceError('mutation');
+    if (coordinator.desiredName === name) advanceSelectedRead(coordinator, name);
     try {
       const result = await api.removeVibeAgent(name);
       if (result.ok) {
-        commitSelected(null);
+        if (coordinator.desiredName === name && coordinator.accepted?.name === name) {
+          beginSelectedIntent(null);
+          commitSelected(null);
+        }
         refresh();
         void refreshOnboarding();
-      } else if (result.message) {
-        setError(result.message);
+      } else {
+        setResourceError('mutation', errorMessage(result) || t('errorBoundary.title'), errorGeneration);
       }
     } catch (err) {
-      setError(errorMessage(err) ?? String(err));
+      setResourceError('mutation', errorMessage(err) || t('errorBoundary.title'), errorGeneration);
     }
   };
 
@@ -660,11 +738,9 @@ export const AgentsPage: React.FC = () => {
   const onOnboardAgents = async () => {
     if (onboardingSubmitting) return;
     setOnboardingSubmitting(true);
-    const mutationId = ++onboardingMutationRef.current;
-    onboardingVersionRef.current.begin();
+    onboardingVersionRef.current.invalidate();
     try {
       const result = await api.onboardVibeAgents();
-      if (mutationId === onboardingMutationRef.current) publishOnboarding(result);
       showToast(
         result.sync?.ok === false
           ? t('agents.onboarding.savedPending')
@@ -674,6 +750,7 @@ export const AgentsPage: React.FC = () => {
     } catch (err) {
       showToast(t('agents.onboarding.failed', { error: errorMessage(err) ?? String(err) }), 'error');
     } finally {
+      void refreshOnboarding();
       setOnboardingSubmitting(false);
     }
   };
@@ -1179,6 +1256,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt ?? '');
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editorSeedRevision, setEditorSeedRevision] = useState(0);
+  const editorDraftRef = useRef(agent.system_prompt ?? '');
+  const editorDirtyRef = useRef(false);
   const [modelCatalogs, setModelCatalogs] = useState<
     Record<
       string,
@@ -1221,6 +1301,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       setSystemPrompt(next.systemPrompt);
       setSystemPromptOpen(false);
       setEditorOpen(false);
+      editorDraftRef.current = next.systemPrompt;
+      editorDirtyRef.current = false;
+      setEditorSeedRevision((revision) => revision + 1);
     } else {
       // Same-identity reconciliation updates clean inline fields while leaving
       // dirty work and the modal's private draft untouched.
@@ -1228,10 +1311,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       if (description === previous.description) setDescription(next.description);
       if (model === previous.model) setModel(next.model);
       if (effort === previous.effort) setEffort(next.effort);
-      if (systemPrompt === previous.systemPrompt) setSystemPrompt(next.systemPrompt);
+      if (systemPrompt === previous.systemPrompt || systemPrompt === next.systemPrompt) setSystemPrompt(next.systemPrompt);
+      if (editorDraftRef.current === previous.systemPrompt || editorDraftRef.current === next.systemPrompt) {
+        editorDraftRef.current = next.systemPrompt;
+        editorDirtyRef.current = false;
+        if (editorOpen) setEditorSeedRevision((revision) => revision + 1);
+      }
     }
     serverSnapshotRef.current = next;
-  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, description, effort, model, name, systemPrompt]);
+  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, description, effort, model, name, systemPrompt, editorOpen]);
 
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the
@@ -1412,7 +1500,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           onChange={(e) => setDescription(e.target.value)}
           onBlur={() => {
             if (!locked && description !== (agent.description ?? '')) {
-              onChange({ description: description.trim() || null });
+              const canonical = description.trim();
+              setDescription(canonical);
+              onChange({ description: canonical || null });
             }
           }}
           disabled={locked}
@@ -1556,7 +1646,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
             onChange={(e) => setSystemPrompt(e.target.value)}
             onBlur={() => {
               if (canEdit && systemPrompt !== (agent.system_prompt ?? '')) {
-                onChange({ system_prompt: systemPrompt.trim() || null });
+                const canonical = systemPrompt.trim();
+                setSystemPrompt(canonical);
+                onChange({ system_prompt: canonical || null });
               }
             }}
             readOnly={!canEdit}
@@ -1609,17 +1701,25 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       {/* Full-screen system-prompt editor — large input + Markdown preview.
           Opening from collapsed or expanded both jump straight here. */}
       <EditorDialog
+        key={`${agent.id}:${editorSeedRevision}`}
         open={canEdit && editorOpen}
         onClose={() => setEditorOpen(false)}
         title={t('agents.detail.systemPrompt')}
         description={t('agents.detail.systemPromptEditorHint')}
         value={systemPrompt}
         placeholder={t('agents.create.systemPromptPlaceholder')}
-        footerHint={(draft) => t('agents.detail.systemPromptCount', { count: estimateTokens(draft) })}
+        footerHint={(draft) => {
+          editorDraftRef.current = draft;
+          editorDirtyRef.current = draft !== systemPrompt;
+          return t('agents.detail.systemPromptCount', { count: estimateTokens(draft) });
+        }}
         onSave={(next) => {
-          setSystemPrompt(next);
-          if (next !== (agent.system_prompt ?? '')) {
-            onChange({ system_prompt: next.trim() || null });
+          const canonical = next.trim();
+          setSystemPrompt(canonical);
+          editorDraftRef.current = canonical;
+          editorDirtyRef.current = false;
+          if (canonical !== (agent.system_prompt ?? '')) {
+            onChange({ system_prompt: canonical || null });
           }
         }}
       />

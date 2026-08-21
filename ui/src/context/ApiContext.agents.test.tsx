@@ -115,4 +115,16 @@ describe('ApiProvider agent detail transport', () => {
     })).rejects.toMatchObject({ code: 'agent_access_forbidden' });
     expect(showToast).toHaveBeenCalledTimes(1);
   });
+
+  it('passes handleError through the real uncached request path', async () => {
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+
+    apiFetch.mockResolvedValueOnce(response({ ok: false, code: 'agent_backend_unavailable', message: 'offline' }, 503));
+    await expect(capturedApi!.getVibeAgent('agent-a', { cache: false, handleError: false })).resolves.toMatchObject({
+      ok: false,
+      code: 'agent_backend_unavailable',
+    });
+    expect(showToast).not.toHaveBeenCalled();
+  });
 });
