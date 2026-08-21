@@ -468,12 +468,12 @@ _REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
 #     ``require_bind``.
 #   * bulk Agent onboarding, a one-way instance-wide migration whose GET
 #     discloses every Agent row and whose POST claims every policy-less one under
-#     the caller's private ACL, and instance-wide default routing.
+#     the caller's private ACL.
 _MEMBER_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        # can_manage_agents: Agent CRUD. /api/agents/default and
-        # /api/agent-onboarding are instance-wide and stay Owner by default.
+        # can_manage_agents: Agent CRUD and instance-wide default selection.
+        # /api/agent-onboarding is a bulk migration and stays Owner by default.
         #
         # ``/api/agent/<name>/install`` is absent on purpose, and so is its job
         # status sibling: the handler runs a package manager, a self-update, or a
@@ -488,6 +488,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("PATCH", r"^/api/agents/[^/]+$"),
         ("DELETE", r"^/api/agents/[^/]+$"),
         ("POST", r"^/api/agents/import$"),
+        ("POST", r"^/api/agents/default$"),
         # can_manage_agents: selecting among already-authenticated model sources.
         # Adding or re-authenticating a source is credential work and stays Owner.
         ("GET", r"^/api/models/agents$"),
@@ -617,8 +618,8 @@ def required_instance_role(method: str, path: str) -> str | None:
     is never reachable by a role that predates it. The member rank widens only
     the routes listed in ``_MEMBER_HTTP_RULES`` plus the read/ops quartet under
     ``/api/remote-access``; access administration, credential and lifecycle
-    routes, ACL writes, bulk Agent migration, and instance-wide default-agent
-    routing are Owner by that default rather than by per-route exception.
+    routes, ACL writes, and bulk Agent migration are Owner by that default
+    rather than by per-route exception.
     """
 
     return http_authorization_policy(method, path).minimum_role

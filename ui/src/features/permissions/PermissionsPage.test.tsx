@@ -281,7 +281,7 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
   });
 
-  it('shows an Instance Member both access tabs read-only', async () => {
+  it('shows a Member both access tabs read-only', async () => {
     const withMember = response();
     withMember.projection.access.entries = [{
       kind: 'email',
@@ -308,7 +308,7 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: 'permissions.actions.manage' })).toBeNull();
   });
 
-  it('offers Instance Member in the access role picker for owners', async () => {
+  it('offers Member in the access role picker for owners', async () => {
     const user = userEvent.setup();
     renderPage();
 

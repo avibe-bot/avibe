@@ -257,7 +257,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     route must inherit the same Instance role as the rest of that capability.
     The member surface is the opposite shape: an explicit allow-list, so an
     unknown API fails closed to Owner along with allowlist mutation,
-    pairing-identity writes, and instance-wide default-agent routing.
+    pairing-identity writes, and bulk Agent onboarding.
     """
 
     assert _EDITOR_HTTP_NAMESPACES == (
@@ -333,6 +333,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     member_examples = (
         ("POST", "/api/agents"),
         ("POST", "/api/agents/import"),
+        ("POST", "/api/agents/default"),
         ("PATCH", "/api/agents/demo"),
         ("DELETE", "/api/agents/demo"),
         ("PUT", "/api/models/agents/codex/chain"),
@@ -370,8 +371,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         # Host reach.
         ("POST", "/api/browse"),
         ("POST", "/api/browse/mkdir"),
-        # Instance-wide Agent routing and bulk migration.
-        ("POST", "/api/agents/default"),
+        # Bulk migration.
         ("GET", "/api/agent-onboarding"),
         ("POST", "/api/agent-onboarding"),
     )
@@ -1114,15 +1114,13 @@ def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_pa
     assert paired == [("key", "https://avibe.bot", "avibe")]
 
 
-def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None:
-    """Instance-wide default routing is Owner-only, and that is the whole gate.
+def test_member_can_set_instance_default_agent(monkeypatch, tmp_path) -> None:
+    """Default selection follows Agent management at service and HTTP layers.
 
-    A member is refused twice over -- by the store's own permission check and by
-    the route policy -- and the Owner may then point routing at any Agent,
-    including one narrower than the instance audience. Nothing about the target's
-    policy shape is validated here: a default is advisory and the ACL is enforced
-    per-principal at use time (``core.vibe_agents.resolve_usable_default_agent``),
-    which is covered in ``tests/test_resource_acl_agents.py``.
+    Member may point routing at any Agent it can manage, including one narrower
+    than the instance audience. Editor and Viewer stay denied. The default stays
+    advisory: per-principal degradation remains covered in
+    ``tests/test_resource_acl_agents.py``.
     """
 
     from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
@@ -1149,9 +1147,15 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
             backend="codex",
             user_context=member,
         )
-        with pytest.raises(VibeAgentAccessError):
-            store.set_default_agent_name(private_agent.name, user_context=member)
+        for role in ("viewer", "editor"):
+            with pytest.raises(VibeAgentAccessError):
+                store.set_default_agent_name(
+                    private_agent.name,
+                    user_context=_context(role, remote=True),
+                )
         assert store.get_default_agent_name() == before
+        store.set_default_agent_name(private_agent.name, user_context=member)
+        assert store.get_default_agent_name() == private_agent.name
     finally:
         store.close()
 
@@ -1175,11 +1179,11 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
     )
-    assert member_response.status_code == 403
-    assert member_response.get_json()["error"] == "instance_access_forbidden"
+    assert member_response.status_code == 200
+    assert member_response.get_json()["default_agent_name"] == "member-private"
     store = VibeAgentStore()
     try:
-        assert store.get_default_agent_name() == before
+        assert store.get_default_agent_name() == "member-private"
     finally:
         store.close()
 
