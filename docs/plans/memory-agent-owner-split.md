@@ -304,10 +304,13 @@ impossible. The design is therefore **at most one agentic leg per recall**:
 the user-owner leg runs the caller's agentic policy with the caller's
 budgets, and the assistant-owner leg always runs `hybrid` (no agentic LLM
 loop, rerank off per the current port defaults). Both legs share one
-wall-clock deadline. This makes the budget enforceable by construction — the
-caller's model-call and token budgets fund exactly one agentic run, exactly
-as today — at the cost of slightly weaker retrieval on the assistant leg,
-which is acceptable for short factual records.
+wall-clock deadline. This keeps budget semantics exactly as today: the
+wall-clock deadline is the Avibe-enforced bound, while `max_model_calls` /
+`cost_budget_tokens` remain declared policy that does not cross the provider
+boundary — a pre-existing limitation of single-owner agentic recall that the
+fan-out neither fixes nor worsens, because it still issues at most one
+agentic provider run. The assistant leg's slightly weaker retrieval is
+acceptable for short factual records.
 
 ### 6a. Diagnostics (Settings Memory log)
 
@@ -377,8 +380,9 @@ changes recall output, since its CLI examples are live contract surface.
    partial warning; profiles render as two labeled blocks and never
    interleave.
 5. **Budget closure.** A recall executes at most one agentic provider run
-   regardless of fan-out; the fan-out's total wall-clock, model-call, and
-   token cost stays within the caller's single `RecallPolicy`.
+   regardless of fan-out, under one shared Avibe-enforced wall-clock
+   deadline; declared model-call/token budgets keep their current
+   single-search semantics (the fan-out adds no second agentic spender).
 6. **Terminal flush closure.** A session reaching a terminal boundary
    final-flushes every owner session that holds capture state for it; an
    agent capture immediately before session end is distilled and searchable
