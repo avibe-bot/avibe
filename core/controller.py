@@ -487,7 +487,7 @@ class Controller:
 
         self.memory_runtime = create_memory_runtime(
             getattr(self.config, "memory", None) or MemoryConfig(),
-            processing_event=self._send_memory_processing_event,
+            processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
         )
         self.memory_module = self.memory_runtime.module
@@ -864,7 +864,7 @@ class Controller:
                             artifact_manager=getattr(runtime, "artifact_manager", None),
                             process_factory=getattr(runtime, "process_factory", None),
                             effective_home=runtime.effective_home,
-                            processing_event=self._send_memory_processing_event,
+                            processing_event=self._log_memory_processing_event,
                             on_config_settled=self._adopt_settled_memory_config,
                         )
                         if not await self._retain_failed_factory_reset_runtime(
@@ -900,7 +900,7 @@ class Controller:
                         artifact_manager=runtime.artifact_manager,
                         process_factory=runtime.process_factory,
                         effective_home=runtime.effective_home,
-                        processing_event=self._send_memory_processing_event,
+                        processing_event=self._log_memory_processing_event,
                         on_config_settled=self._adopt_settled_memory_config,
                     )
                     activation = await fresh.activate_fresh(settled)
@@ -2782,31 +2782,26 @@ class Controller:
                 int((time.monotonic() - started_at) * 1000),
             )
 
-    async def _send_memory_processing_event(
+    async def _log_memory_processing_event(
         self,
         event: str,
         kind: str | None,
         occurred_at: str,
         queued: int,
     ) -> bool:
-        from core.handlers.admin_notifications import send_admin_text
+        """Record one durable Memory health event without notifying IM users."""
 
-        store = self.settings_manager.get_store()
-        admin_ids = list(store.get_admins().keys()) if store else []
-        if not admin_ids:
-            return True
-        if event == "recovered":
-            key = "memory.alert.recovered"
-        else:
-            key = "memory.alert.credential" if kind == "credential" else "memory.alert.engine"
-        text = self._t(key, occurred_at=occurred_at, queued=queued)
-        delivered = await send_admin_text(
-            self,
-            admin_ids,
-            text,
-            log_label="Memory processing notification",
+        logger.log(
+            logging.INFO if event == "recovered" else logging.WARNING,
+            "Memory processing event=%s kind=%s occurred_at=%s queued=%d",
+            event,
+            kind or "none",
+            occurred_at,
+            queued,
         )
-        return bool(delivered)
+        # Logging is the terminal sink for this durable event. Acknowledge it so
+        # the coordinator does not replay the same record on every drain tick.
+        return True
 
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""
