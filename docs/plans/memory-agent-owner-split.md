@@ -163,9 +163,20 @@ get quarantined on recovery:
 - `_legacy_provider_ref` (v0 migration re-derivation — v0 rows are all
   user-owned by definition; derive with owner = principal).
 
-Flush scheduling needs no changes: `SessionFlushCoordinator` keys everything
-by the serialized `ProviderSessionRef`, so the assistant session gets its own
-add/flush lifecycle for free.
+Queue-driven flush *scheduling* needs no changes: `SessionFlushCoordinator`
+keys everything by the serialized `ProviderSessionRef`, so the assistant
+session gets its own retry/flush lifecycle once its rows exist.
+
+**Terminal flush is not free and is in scope.** The session-end path
+(`MemoryModule._final_flush_under_admission`) mints exactly one session ref
+from the caller principal today. It must fan out: on a terminal boundary,
+resolve both owner-scoped refs for the raw session and final-flush each one
+that has capture state, so an agent capture followed immediately by session
+end is distilled rather than left in the assistant session's buffer.
+Lifecycle validation on these paths switches from `is_principal_id` to the
+owner-aware predicate wherever an owner (not a caller) flows; scope
+resolution (`resolve_current_session_scopes`) returns owner-qualified scopes
+so recovery and terminal flush can address both sessions.
 
 ### 4. `ProviderSessionRef` compatibility (Blocker 3)
 
@@ -187,10 +198,17 @@ Consequences:
 - old rows load in new code unchanged (they are all user-owned, and owner ==
   principal for those);
 - new *user* rows are byte-identical to old ones — rollback-safe;
-- new *assistant* rows under rollback deliver to the user owner (the old
-  code re-derives the session from the principal) — this matches the accepted
-  "legacy agent memories live in the user owner" degradation and loses no
-  data.
+- new *assistant* rows under rollback keep addressing the assistant owner:
+  the old delivery path deserializes the persisted ref and sends
+  `session_ref.principal_id` as `sender_id` unchanged (`_queue_from_row` →
+  coordinator → `EverOSPort.add`), so in-flight agent rows still write to
+  `u-…-agent` on EverOS. The old read path does not query that owner, so
+  those memories are invisible until re-upgrade — preserved, not lost, and
+  nothing crashes. Old-code recovery revalidation that re-derives digests
+  from the caller principal will not match an assistant ref and may park such
+  rows as untrusted rather than deliver them; re-upgrade restores both
+  delivery and visibility. This bounded invisible-until-upgrade window is the
+  accepted rollback degradation;
 - Load fixtures: keep a fixture of the released four-field shape plus a
   pre-owner-split queue row and assert both load and deliver (persisted-shape
   rule).
@@ -219,15 +237,24 @@ Result for an agent `remember` of "用户准备在 23 号做发布":
   `user_id=<assistant owner>` concurrently (same method, project, bounded
   `top_k` each);
 - tag every result with its owner kind; `MemoryItem` gains an optional
-  `origin: Literal["user", "agent"]` field, serialized only when present so
-  legacy payload shapes stay stable (same pattern as `project`);
+  `origin: Literal["user", "agent", "both"]` field, serialized only when
+  present so legacy payload shapes stay stable (same pattern as `project`);
+- ranking metadata crosses the port boundary: today `_map_search_items`
+  discards provider scores and episode IDs, and `MemoryItem` cannot carry
+  them, so the promised merge cannot be built on `MemoryItem` alone. The port
+  returns an internal scored result type (provider score, stable episode ID,
+  timestamp, owner) to the module; the module merges on that type and only
+  then projects to `MemoryItem`. The public payload shape is unchanged;
 - merge: keep EverOS scores (both legs are the same method over
   LR-calibrated episode scores), tie-break by timestamp then stable ID, trim
   to the caller's limit after merging;
-- dedupe: normalized exact-match only. Paraphrase duplicates ("我 23 号准备做
-  发布" vs "用户准备在 23 号做发布") are *not* merged; they coexist and are
-  distinguished by the origin label. Deterministic near-duplicate detection
-  over paraphrases is explicitly out of scope;
+- dedupe: normalized exact-match only. When both owners hold the same
+  normalized text, the merged item keeps the higher-scored hit and carries
+  `origin="both"` — collapsing must never erase one side's provenance.
+  Paraphrase duplicates ("我 23 号准备做发布" vs "用户准备在 23 号做发布") are
+  *not* merged; they coexist and are distinguished by origin labels.
+  Deterministic near-duplicate detection over paraphrases is explicitly out
+  of scope;
 - partial failure: one failed leg degrades to the other leg's results plus the
   existing `memory_search_partial` warning;
 - `include_current_session` overlays: each leg carries its **own** derived
@@ -243,8 +270,27 @@ never merge into one ranked list. `list_episodes` stays user-owner-only in
 this plan (documented limitation; fan-out is a follow-up).
 
 Cost: recall goes from one provider search to two concurrent ones with
-bounded per-leg `top_k`; agentic budget ceilings are unchanged and cover the
-whole fan-out.
+bounded per-leg `top_k`. For `mode="agentic"` the budgets do **not** cover
+the fan-out for free: the provider request carries only a wall-clock timeout,
+so two independent agentic legs would double model calls and token cost.
+The fan-out therefore partitions the caller's `RecallPolicy` budgets — the
+wall-clock timeout is shared across the concurrent pair (one deadline, not
+two), and `max_model_calls` / `cost_budget_tokens` are split between the legs
+(floor at the provider minimum) so the fan-out's total stays within what the
+caller granted. The invariant is total-cost-bounded-by-policy, not
+per-leg-bounded-by-policy.
+
+### 6a. Diagnostics (Settings Memory log)
+
+`core/memory/everos_insight/reader.py` recognizes only the 34-character
+principal shape (`_PRINCIPAL_RE` / `_PRINCIPAL_GLOB`) and scopes MemCells by
+exact caller principal, so assistant-owned processing would silently vanish
+from scoped and admin diagnostics. The insight reader gains the same trusted
+caller→owner expansion as the read path: a caller's scoped view covers its
+principal owner and its derived assistant owner, with owner-shape matching
+widened accordingly and insight tests covering assistant-owned entries. This
+ships in the same PR as the write-path switch — the processing log must never
+have a window where accepted captures are invisible to diagnostics.
 
 ### 7. Injection and surfaces
 
@@ -290,13 +336,24 @@ changes recall output, since its CLI examples are live contract surface.
    through the owner-aware re-derivation, and delivers — seeded as one row per
    shape, asserted unchanged after recovery, not enumerated as skip-lists.
 4. **Search fan-out.** One Avibe search returns both owners' hits, each
-   tagged with its origin; a single-leg provider failure yields the other
-   leg's results plus a partial warning; profiles render as two labeled
-   blocks and never interleave.
-5. **Cross-user isolation.** Distinct principals derive distinct assistant
+   tagged with its origin; an exact-duplicate collapse carries both origins;
+   a single-leg provider failure yields the other leg's results plus a
+   partial warning; profiles render as two labeled blocks and never
+   interleave.
+5. **Budget closure.** For agentic recall, the fan-out's total wall-clock,
+   model-call, and token cost stays within the caller's single
+   `RecallPolicy`; no leg can spend the whole budget twice.
+6. **Terminal flush closure.** A session reaching a terminal boundary
+   final-flushes every owner session that holds capture state for it; an
+   agent capture immediately before session end is distilled and searchable
+   afterwards.
+7. **Diagnostics closure.** Every accepted capture remains visible in the
+   Settings Memory processing log under its trusted caller's scoped view,
+   regardless of owner.
+8. **Cross-user isolation.** Distinct principals derive distinct assistant
    owners; no search, profile, or clear path accepts a caller-supplied owner
    ID.
-6. **End-to-end (scenario).** An agent `remember` of a user fact yields, in
+9. **End-to-end (scenario).** An agent `remember` of a user fact yields, in
    the assistant owner only: an Episode, at least the possibility of Facts and
    a Profile update; no AgentCase; the user owner's profile unchanged; and a
    subsequent search on the fact's keyword recalls it with the agent-origin
@@ -318,19 +375,29 @@ changes recall output, since its CLI examples are live contract surface.
 
 ## Delivery plan
 
-Three PRs, in dependency order:
+Three PRs, in dependency order. **Reads land before writes**: shipping the
+writer first would make every `remember` between the two PRs invisible to
+recall, search, and profile; shipping the reader first is a safe no-op (the
+assistant owner is empty until the writer lands, and the empty leg returns
+nothing).
 
-1. **PR A — owner model + write path.** Owner kinds/IDs, owner-aware
-   `_provider_session_ref` and all re-derivation sites, `ProviderSessionRef`
-   semantics per §4, `EverOSPort.add` sender change, fixtures and unit +
-   contract tests. Smallest reviewable core; ships dark (nothing reads the
-   assistant owner yet).
-2. **PR B — read fan-out.** Dual-owner recall/search/profile in
-   `MemoryModule`, origin tags, merge/dedupe/partial semantics, per-leg
-   session filters, queried-owner response validation, i18n labels,
-   system-prompt guidance update, scenario catalog entries.
-3. **PR C — surface polish.** Web UI labeled rendering, docs, and the
-   regression checklist for the Incus pass.
+1. **PR A — read fan-out + labeled surfaces.** Dual-owner
+   recall/search/profile in `MemoryModule`, the internal scored result type
+   at the port boundary, origin tags (including `both`), merge/dedupe/partial
+   semantics, agentic budget partitioning, per-leg session filters,
+   queried-owner response validation, backend i18n labels, Web UI labeled
+   rendering (`MemorySearchPanel` / `MemoryProfilePanel`), frontend i18n,
+   system-prompt guidance update, scenario catalog entries. Deploys dark by
+   data (assistant owner empty) but complete by capability — no intermediate
+   surface where dual-owner data renders unlabeled.
+2. **PR B — owner model + write path.** Owner kinds/IDs, owner-aware
+   `_provider_session_ref` and all re-derivation sites, terminal-flush
+   fan-out (§3), `ProviderSessionRef` semantics per §4, `EverOSPort.add`
+   sender change, everos_insight owner expansion (§6a), fixtures and unit +
+   contract + scenario tests. The moment this lands, new agent captures are
+   immediately searchable and labeled through PR A's reader.
+3. **PR C — docs + regression close-out.** User documentation, the Incus
+   regression checklist, and any residual scenario catalog updates.
 
 This document is the plan of record; material scope changes update it in the
 same PR that implements them.
