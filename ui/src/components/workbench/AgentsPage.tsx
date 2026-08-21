@@ -83,6 +83,16 @@ type AgentRequestVersion = {
   isCurrent: (token: AgentRequestToken) => boolean;
 };
 
+type SelectedMutationBatch = {
+  id: number;
+  identity: string;
+  pending: number;
+  drainGeneration: number;
+  draining: boolean;
+  intentGeneration: number;
+  failures: unknown[];
+};
+
 // A tiny per-resource epoch owner. Every asynchronous read captures a token;
 // any committed mutation or identity change advances the epoch and makes older
 // responses inert without relying on timing or a name comparison alone.
@@ -148,9 +158,11 @@ export const AgentsPage: React.FC = () => {
   const definitionsVersionRef = useRef(createAgentRequestVersion());
   const onboardingVersionRef = useRef(createAgentRequestVersion());
   const selectedRef = useRef<VibeAgentFull | null>(null);
-  const selectedVersionRef = useRef(createAgentRequestVersion());
-  const selectedIntentRef = useRef(0);
-  const selectedMutationVersionRef = useRef(0);
+  const selectedIntentRef = useRef({ generation: 0, desiredName: null as string | null });
+  const selectedAcceptedGenerationRef = useRef(0);
+  const selectedPassiveReadRef = useRef(0);
+  const selectedMutationBatchesRef = useRef(new Map<string, SelectedMutationBatch>());
+  const selectedMutationBatchIdRef = useRef(0);
   const onboardingMutationRef = useRef(0);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
@@ -184,14 +196,17 @@ export const AgentsPage: React.FC = () => {
   }, [api, canOnboardAgents, publishOnboarding]);
 
   const commitSelected = useCallback((agent: VibeAgentFull | null) => {
-    selectedVersionRef.current.invalidate();
+    selectedAcceptedGenerationRef.current += 1;
+    selectedPassiveReadRef.current += 1;
     selectedRef.current = agent;
     setSelected(agent);
   }, []);
 
   const beginSelectedIntent = useCallback((identity: string | null) => {
-    const intent = ++selectedIntentRef.current;
-    return { intent, token: selectedVersionRef.current.begin(identity) };
+    const generation = ++selectedIntentRef.current.generation;
+    selectedIntentRef.current.desiredName = identity;
+    selectedPassiveReadRef.current += 1;
+    return { generation, identity };
   }, []);
 
 
@@ -218,8 +233,11 @@ export const AgentsPage: React.FC = () => {
         const currentSelected = selectedRef.current;
         if (currentSelected) {
           const fresh = result.agents.find((a) => a.name === currentSelected.name);
-          if (!fresh) {
-            beginSelectedIntent(null);
+          if (
+            !fresh &&
+            selectedIntentRef.current.desiredName === currentSelected.name &&
+            !selectedMutationBatchesRef.current.has(currentSelected.name)
+          ) {
             commitSelected(null);
           }
         }
@@ -230,39 +248,145 @@ export const AgentsPage: React.FC = () => {
       }
     })();
     return request;
-  }, [api, beginSelectedIntent, commitSelected]);
+  }, [api, commitSelected]);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
+  const beginSelectedMutation = useCallback((identity: string) => {
+    let batch = selectedMutationBatchesRef.current.get(identity);
+    if (!batch) {
+      batch = {
+        id: ++selectedMutationBatchIdRef.current,
+        identity,
+        pending: 0,
+        drainGeneration: 0,
+        draining: false,
+        intentGeneration: selectedIntentRef.current.generation,
+        failures: [],
+      };
+      selectedMutationBatchesRef.current.set(identity, batch);
+    }
+    batch.pending += 1;
+    batch.drainGeneration += 1;
+    batch.draining = false;
+    selectedPassiveReadRef.current += 1;
+    return { id: batch.id, identity };
+  }, []);
+
+  const settleSelectedMutation = useCallback(
+    (operation: { id: number; identity: string }, failure?: unknown) => {
+      const batch = selectedMutationBatchesRef.current.get(operation.identity);
+      if (!batch || batch.id !== operation.id) return;
+      if (failure) batch.failures.push(failure);
+      batch.pending = Math.max(0, batch.pending - 1);
+      if (batch.pending !== 0 || batch.draining) return;
+
+      batch.draining = true;
+      const drainGeneration = ++batch.drainGeneration;
+      const intentGeneration = batch.intentGeneration;
+      const acceptedGeneration = selectedAcceptedGenerationRef.current;
+      const passiveRead = ++selectedPassiveReadRef.current;
+      const identity = operation.identity;
+
+      void (async () => {
+        let result: Awaited<ReturnType<typeof api.getVibeAgent>> | null = null;
+        let readError: unknown = null;
+        try {
+          result = await api.getVibeAgent(identity, {
+            cache: false,
+            expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+          });
+        } catch (err) {
+          readError = err;
+        }
+
+        const currentBatch = selectedMutationBatchesRef.current.get(identity);
+        if (
+          !currentBatch ||
+          currentBatch.id !== operation.id ||
+          currentBatch.drainGeneration !== drainGeneration ||
+          currentBatch.pending !== 0
+        ) {
+          return;
+        }
+
+        const canPublish =
+          selectedIntentRef.current.generation === intentGeneration &&
+          selectedIntentRef.current.desiredName === identity &&
+          selectedRef.current?.name === identity &&
+          selectedAcceptedGenerationRef.current === acceptedGeneration &&
+          selectedPassiveReadRef.current === passiveRead;
+        const failures = currentBatch.failures;
+
+        if (canPublish && result?.ok) commitSelected(result.agent);
+        if (canPublish && readError) {
+          if (SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(readError) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
+            commitSelected(null);
+          }
+        }
+        // The settled mutation batch owns the Definitions refresh even when the
+        // user has already selected another Agent; the full-detail publication
+        // remains conditional on the selected intent above.
+        void refreshRef.current();
+        if (canPublish && readError && !SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(readError) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
+          setError(errorMessage(readError) ?? String(readError));
+        }
+        if (canPublish && failures.length > 0) {
+          setError(errorMessage(failures[0]) ?? String(failures[0]));
+        }
+        if (selectedMutationBatchesRef.current.get(identity) === currentBatch) {
+          selectedMutationBatchesRef.current.delete(identity);
+        }
+      })();
+    },
+    [api, commitSelected],
+  );
+
   const refreshSelected = useCallback(async () => {
     const current = selectedRef.current;
     if (!current) return;
-    const intent = selectedIntentRef.current;
-    const token = selectedVersionRef.current.begin(current.name);
+    const batch = selectedMutationBatchesRef.current.get(current.name);
+    if (batch) return;
+    const intentGeneration = selectedIntentRef.current.generation;
+    const desiredIdentity = selectedIntentRef.current.desiredName;
+    const acceptedGeneration = selectedAcceptedGenerationRef.current;
+    const passiveRead = ++selectedPassiveReadRef.current;
+    const identity = current.name;
     try {
-      const result = await api.getVibeAgent(current.name, {
+      const result = await api.getVibeAgent(identity, {
         cache: false,
         expectedCodes: SELECTED_DISAPPEARANCE_CODES,
       });
       if (
         result.ok &&
-        selectedVersionRef.current.isCurrent(token) &&
-        selectedIntentRef.current === intent &&
-        selectedRef.current?.name === token.identity
+        selectedPassiveReadRef.current === passiveRead &&
+        selectedAcceptedGenerationRef.current === acceptedGeneration &&
+        selectedIntentRef.current.generation === intentGeneration &&
+        selectedIntentRef.current.desiredName === desiredIdentity &&
+        desiredIdentity === identity &&
+        selectedRef.current?.name === identity &&
+        !selectedMutationBatchesRef.current.has(identity)
       ) {
         commitSelected(result.agent);
       }
     } catch (err) {
-      if (!selectedVersionRef.current.isCurrent(token) || selectedIntentRef.current !== intent) return;
+      if (
+        selectedPassiveReadRef.current !== passiveRead ||
+        selectedAcceptedGenerationRef.current !== acceptedGeneration ||
+        selectedIntentRef.current.generation !== intentGeneration ||
+        selectedIntentRef.current.desiredName !== desiredIdentity ||
+        desiredIdentity !== identity ||
+        selectedRef.current?.name !== identity ||
+        selectedMutationBatchesRef.current.has(identity)
+      ) return;
       if (SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-        beginSelectedIntent(null);
         commitSelected(null);
         return;
       }
       setError(errorMessage(err) ?? String(err));
     }
-  }, [api, beginSelectedIntent, commitSelected]);
+  }, [api, commitSelected]);
 
   useEffect(() => {
     refresh();
@@ -394,17 +518,24 @@ export const AgentsPage: React.FC = () => {
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
-      const { intent, token } = beginSelectedIntent(name);
+      const { generation, identity } = beginSelectedIntent(name);
       try {
-        const result = await api.getVibeAgent(name);
-        if (result.ok && selectedIntentRef.current === intent && selectedVersionRef.current.isCurrent(token)) {
+        const result = await api.getVibeAgent(name, { cache: false });
+        if (
+          result.ok &&
+          selectedIntentRef.current.generation === generation &&
+          selectedIntentRef.current.desiredName === identity
+        ) {
           commitSelected(result.agent);
           // Enter the mobile drill-down only once the detail has actually loaded —
           // never optimistically, or a failed fetch hides the list with no panel.
           if (openDetail) setDetailOpen(true);
         }
       } catch (err) {
-        if (selectedIntentRef.current === intent && selectedVersionRef.current.isCurrent(token)) {
+        if (
+          selectedIntentRef.current.generation === generation &&
+          selectedIntentRef.current.desiredName === identity
+        ) {
           setError(errorMessage(err) ?? String(err));
         }
       }
@@ -447,26 +578,12 @@ export const AgentsPage: React.FC = () => {
   const updateField = async (patch: VibeAgentUpdatePayload) => {
     if (!selected) return;
     const name = selected.name;
-    const intent = selectedIntentRef.current;
-    const mutationToken = selectedVersionRef.current.begin(name);
-    selectedMutationVersionRef.current = mutationToken.version;
+    const operation = beginSelectedMutation(name);
     try {
       const result = await api.updateVibeAgent(name, patch);
-      if (
-        result.ok &&
-        selectedIntentRef.current === intent &&
-        selectedRef.current?.name === name &&
-        selectedMutationVersionRef.current === mutationToken.version
-      ) {
-        // Publishing the mutation result advances the same epoch, invalidating
-        // any read that started while the PATCH was in flight.
-        commitSelected(result.agent);
-        refresh();
-      }
+      settleSelectedMutation(operation, result.ok ? undefined : result);
     } catch (err) {
-      if (selectedIntentRef.current === intent && selectedRef.current?.name === name) {
-        setError(errorMessage(err) ?? String(err));
-      }
+      settleSelectedMutation(operation, err);
     }
   };
 
