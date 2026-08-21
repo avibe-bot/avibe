@@ -90,8 +90,10 @@ type SelectedMutationBatch = {
   version: number;
   errorGeneration: number;
   failures: unknown[];
-  waiters: Array<() => void>;
+  waiters: Array<(result: SelectedMutationResult) => void>;
 };
+
+type SelectedMutationResult = { ok: true } | { ok: false; error: unknown };
 
 type SelectedReconciliationDebt = {
   version: number;
@@ -99,6 +101,21 @@ type SelectedReconciliationDebt = {
 };
 
 type AutoSelectReason = 'initial' | 'replacement';
+
+type SelectedRetirement = {
+  retired: boolean;
+  resumedIdentity: string | null;
+  intentGeneration: number;
+};
+
+type SelectedReadOutcome =
+  | { kind: 'published' }
+  | { kind: 'failed' }
+  | { kind: 'stale' }
+  | { kind: 'expected-retired'; resumedIdentity: string; intentGeneration: number };
+
+const canonicalFieldValue = (field: 'name' | 'description' | 'model' | 'effort' | 'systemPrompt', value: string) =>
+  field === 'name' || field === 'description' || field === 'systemPrompt' ? value.trim() : value;
 
 type SelectedCoordinator = {
   desiredName: string | null;
@@ -218,6 +235,7 @@ export const AgentsPage: React.FC = () => {
   const [onboardingInventory, setOnboardingInventory] = useState<VibeAgentOnboardingResult | null>(null);
   const [onboardingExpanded, setOnboardingExpanded] = useState(false);
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
+  const onboardingSettlementRef = useRef<Promise<boolean> | null>(null);
   const definitionsVersionRef = useRef(createAgentRequestVersion());
   const onboardingVersionRef = useRef(createAgentRequestVersion());
   const selectedCoordinatorRef = useRef(createSelectedCoordinator());
@@ -258,19 +276,30 @@ export const AgentsPage: React.FC = () => {
     setOnboardingInventory(result?.available ? result : null);
   }, []);
 
-  const refreshOnboarding = useCallback(async () => {
-    if (!selectedMountedRef.current) return;
-    if (!canOnboardAgents) {
-      setOnboardingInventory(null);
-      return;
-    }
-    const token = onboardingVersionRef.current.begin();
-    try {
-      const result = await api.getVibeAgentOnboarding();
-      if (selectedMountedRef.current && onboardingVersionRef.current.isCurrent(token)) publishOnboarding(result);
-    } catch {
-      if (selectedMountedRef.current && onboardingVersionRef.current.isCurrent(token)) publishOnboarding(null);
-    }
+  const refreshOnboarding = useCallback(() => {
+    const request = (async () => {
+      if (!selectedMountedRef.current) return false;
+      if (!canOnboardAgents) {
+        setOnboardingInventory(null);
+        return true;
+      }
+      const token = onboardingVersionRef.current.begin();
+      try {
+        const result = await api.getVibeAgentOnboarding();
+        if (selectedMountedRef.current && onboardingVersionRef.current.isCurrent(token)) {
+          publishOnboarding(result);
+          return true;
+        }
+      } catch {
+        if (selectedMountedRef.current && onboardingVersionRef.current.isCurrent(token)) {
+          publishOnboarding(null);
+          return true;
+        }
+      }
+      return false;
+    })();
+    onboardingSettlementRef.current = request;
+    return request;
   }, [api, canOnboardAgents, publishOnboarding]);
 
   useEffect(() => {
@@ -281,16 +310,18 @@ export const AgentsPage: React.FC = () => {
       const coordinator = selectedCoordinatorRef.current;
       for (const identity of coordinator.readGenerations.keys()) advanceSelectedRead(coordinator, identity);
       for (const batch of coordinator.mutations.values()) {
-        for (const resolve of batch.waiters.splice(0)) resolve();
+        for (const resolve of batch.waiters.splice(0)) resolve({ ok: false, error: new Error('Agent page unmounted') });
       }
       coordinator.mutations.clear();
     };
   }, []);
 
   const scheduleSelectedReadRef = useRef<
-    ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean }) => Promise<'published' | 'failed' | 'stale'> | null)
+    ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean }) => Promise<SelectedReadOutcome> | null)
   >(null);
-  const retireSelectedIdentityRef = useRef<((identity: string, options?: { refreshDefinitions?: boolean }) => boolean) | null>(null);
+  const retireSelectedIdentityRef = useRef<
+    ((identity: string, options?: { refreshDefinitions?: boolean }) => SelectedRetirement) | null
+  >(null);
 
   const commitSelected = useCallback((agent: VibeAgentFull | null) => {
     const coordinator = selectedCoordinatorRef.current;
@@ -383,7 +414,9 @@ export const AgentsPage: React.FC = () => {
   const retireSelectedIdentity = useCallback(
     (identity: string, options: { refreshDefinitions?: boolean } = {}) => {
       const coordinator = selectedCoordinatorRef.current;
-      if (coordinator.retired.has(identity)) return false;
+      if (coordinator.retired.has(identity)) {
+        return { retired: false, resumedIdentity: null, intentGeneration: coordinator.intentGeneration };
+      }
       const acceptedIdentity = coordinator.accepted?.name ?? null;
       const pendingIdentity = coordinator.desiredName === identity;
       const acceptedCanResume = Boolean(
@@ -411,7 +444,11 @@ export const AgentsPage: React.FC = () => {
         definitionsVersionRef.current.invalidate();
         void refreshRef.current();
       }
-      return true;
+      return {
+        retired: true,
+        resumedIdentity: pendingIdentity && acceptedCanResume ? acceptedIdentity : null,
+        intentGeneration: coordinator.intentGeneration,
+      };
     },
     [clearResourceError, commitSelected],
   );
@@ -462,7 +499,7 @@ export const AgentsPage: React.FC = () => {
       intentGeneration?: number;
       expectedCodes?: readonly string[];
       debtVersion?: number;
-    }): Promise<'published' | 'failed' | 'stale'> => {
+    }): Promise<SelectedReadOutcome> => {
       const coordinator = selectedCoordinatorRef.current;
       const isCurrent = () =>
         selectedMountedRef.current &&
@@ -480,48 +517,50 @@ export const AgentsPage: React.FC = () => {
       try {
         const params = options.expectedCodes ? { cache: false, expectedCodes: options.expectedCodes } : { cache: false };
         const result = await api.getVibeAgent(options.identity, params);
-        if (!isCurrent()) return 'stale';
+        if (!isCurrent()) return { kind: 'stale' };
         if (result.ok && result.agent?.name === options.identity) {
           clearResourceError('selection');
           commitSelected(result.agent);
           finishDebt(true);
-          return 'published';
+          return { kind: 'published' };
         }
         if (
           options.expectedCodes &&
           SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(result) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])
         ) {
-          retireSelectedIdentityRef.current?.(options.identity);
+          const retirement = retireSelectedIdentityRef.current?.(options.identity);
           finishDebt(false);
-          return 'failed';
+          if (retirement?.resumedIdentity) {
+            return {
+              kind: 'expected-retired',
+              resumedIdentity: retirement.resumedIdentity,
+              intentGeneration: retirement.intentGeneration,
+            };
+          }
+          return { kind: 'failed' };
         }
-        const rollback = rollbackSelectedIntent();
+        rollbackSelectedIntent();
         setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
         finishDebt(false);
-        if (rollback.identity && rollback.identity !== options.identity) {
-          void scheduleSelectedReadRef.current?.(rollback.identity, {
-            debtOnly: true,
-            expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
-          });
-        }
-        return 'failed';
+        return { kind: 'failed' };
       } catch (err) {
-        if (!isCurrent()) return 'stale';
+        if (!isCurrent()) return { kind: 'stale' };
         if (options.expectedCodes && SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-          retireSelectedIdentityRef.current?.(options.identity);
+          const retirement = retireSelectedIdentityRef.current?.(options.identity);
           finishDebt(false);
-          return 'failed';
+          if (retirement?.resumedIdentity) {
+            return {
+              kind: 'expected-retired',
+              resumedIdentity: retirement.resumedIdentity,
+              intentGeneration: retirement.intentGeneration,
+            };
+          }
+          return { kind: 'failed' };
         }
-        const rollback = rollbackSelectedIntent();
+        rollbackSelectedIntent();
         setResourceError('selection', errorMessage(err) || tRef.current('errorBoundary.title'));
         finishDebt(false);
-        if (rollback.identity && rollback.identity !== options.identity) {
-          void scheduleSelectedReadRef.current?.(rollback.identity, {
-            debtOnly: true,
-            expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
-          });
-        }
-        return 'failed';
+        return { kind: 'failed' };
       }
     },
     [api, clearResourceError, commitSelected, rollbackSelectedIntent, setResourceError],
@@ -531,7 +570,7 @@ export const AgentsPage: React.FC = () => {
     (
       identity: string,
       options: { expectedCodes?: readonly string[]; debtOnly?: boolean } = {},
-    ): Promise<'published' | 'failed' | 'stale'> | null => {
+    ): Promise<SelectedReadOutcome> | null => {
       if (!selectedMountedRef.current || !identity) return null;
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.retired.has(identity) || coordinator.desiredName !== identity) return null;
@@ -555,7 +594,7 @@ export const AgentsPage: React.FC = () => {
       }).then((outcome) => {
         if (debtVersion !== undefined) {
           const currentDebt = coordinator.reconciliationDebt.get(identity);
-          if (currentDebt?.version === debtVersion && outcome !== 'published') currentDebt.scheduled = false;
+          if (currentDebt?.version === debtVersion && outcome.kind !== 'published') currentDebt.scheduled = false;
         }
         return outcome;
       });
@@ -590,15 +629,15 @@ export const AgentsPage: React.FC = () => {
   }, [beginResourceError]);
 
   const settleSelectedMutation = useCallback(
-    (operation: { id: number; identity: string }, failure?: unknown): Promise<void> => {
-      if (!selectedMountedRef.current) return Promise.resolve();
+    (operation: { id: number; identity: string }, failure?: unknown): Promise<SelectedMutationResult> => {
+      if (!selectedMountedRef.current) return Promise.resolve({ ok: false, error: new Error('Agent page unmounted') });
       const coordinator = selectedCoordinatorRef.current;
       const batch = [...coordinator.mutations.values()].find((candidate) => candidate.id === operation.id);
-      if (!batch) return Promise.resolve();
+      if (!batch) return Promise.resolve({ ok: false, error: new Error('Agent mutation is no longer current') });
       if (failure) batch.failures.push(failure);
       batch.pending = Math.max(0, batch.pending - 1);
       if (batch.pending !== 0) {
-        return new Promise<void>((resolve) => batch.waiters.push(resolve));
+        return new Promise<SelectedMutationResult>((resolve) => batch.waiters.push(resolve));
       }
 
       const identity = batch.identity;
@@ -617,20 +656,42 @@ export const AgentsPage: React.FC = () => {
         debtOnly: true,
         expectedCodes: SELECTED_DISAPPEARANCE_CODES,
       });
-      const completion = drain?.then(() => undefined) ?? Promise.resolve();
+      const completion = drain?.then((outcome) => outcome.kind === 'published'
+        ? ({ ok: true } as const)
+        : ({ ok: false, error: new Error('Agent reconciliation failed') } as const))
+        ?? Promise.resolve({ ok: failures.length === 0 } as SelectedMutationResult);
+      const resultPromise = completion.then((result) => {
+        if (failures.length > 0) return { ok: false, error: failures[0] } as const;
+        return result;
+      });
       const waiters = batch.waiters.splice(0);
-      for (const resolve of waiters) void completion.then(resolve);
-      return completion;
+      for (const resolve of waiters) void resultPromise.then(resolve);
+      return resultPromise;
     },
     [setResourceError, t],
   );
 
   const reconcileSelected = useCallback(async () => {
     const coordinator = selectedCoordinatorRef.current;
-    const identity = coordinator.desiredName;
-    if (!identity) return;
-    if (coordinator.mutations.has(identity)) return;
-    await scheduleSelectedReadRef.current?.(identity, { expectedCodes: SELECTED_DISAPPEARANCE_CODES });
+    let transactionIntentGeneration = coordinator.intentGeneration;
+    let identity = coordinator.desiredName;
+    const attempted = new Set<string>();
+    while (selectedMountedRef.current && identity && !attempted.has(identity)) {
+      if (coordinator.intentGeneration !== transactionIntentGeneration) return;
+      attempted.add(identity);
+      if (coordinator.mutations.has(identity)) return;
+      const outcome = await scheduleSelectedReadRef.current?.(identity, {
+        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+      });
+      if (!outcome || outcome.kind !== 'expected-retired') return;
+      if (
+        outcome.intentGeneration !== coordinator.intentGeneration ||
+        coordinator.desiredName !== outcome.resumedIdentity ||
+        attempted.has(outcome.resumedIdentity)
+      ) return;
+      transactionIntentGeneration = outcome.intentGeneration;
+      identity = outcome.resumedIdentity;
+    }
   }, []);
 
   useEffect(() => {
@@ -777,9 +838,18 @@ export const AgentsPage: React.FC = () => {
       beginSelectedIntent(name, { auto });
       clearResourceError('selection');
       const outcome = await scheduleSelectedReadRef.current?.(name);
+      if (outcome?.kind === 'failed') {
+        const rollbackIdentity = selectedCoordinatorRef.current.desiredName;
+        if (rollbackIdentity && rollbackIdentity !== name) {
+          void scheduleSelectedReadRef.current?.(rollbackIdentity, {
+            debtOnly: true,
+            expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+          });
+        }
+      }
       // Enter the mobile drill-down only once the detail has actually loaded —
       // never optimistically, or a failed fetch hides the list with no panel.
-      if (outcome === 'published' && openDetail) setDetailOpen(true);
+      if (outcome?.kind === 'published' && openDetail) setDetailOpen(true);
     },
     [beginSelectedIntent, clearResourceError],
   );
@@ -829,11 +899,19 @@ export const AgentsPage: React.FC = () => {
     if (!selected) return;
     const name = selected.name;
     const operation = beginSelectedMutation(name);
+    let mutationSettled = false;
     try {
       const result = await api.updateVibeAgent(name, patch);
-      await settleSelectedMutation(operation, result.ok ? undefined : result);
+      const settled = await settleSelectedMutation(operation, result.ok ? undefined : result);
+      mutationSettled = true;
+      if (!settled.ok) throw settled.error;
     } catch (err) {
-      await settleSelectedMutation(operation, err);
+      if (!mutationSettled) {
+        const settled = await settleSelectedMutation(operation, err);
+        mutationSettled = true;
+        if (!settled.ok) throw settled.error;
+      }
+      throw err;
     }
   };
 
@@ -862,8 +940,9 @@ export const AgentsPage: React.FC = () => {
         throw result;
       }
       migrateSelectedIdentity(oldName, newName, selected.id);
-      await settleSelectedMutation(operation);
+      const mutationResult = await settleSelectedMutation(operation);
       settled = true;
+      if (!mutationResult.ok) throw mutationResult.error;
       void refreshOnboarding();
     } catch (err) {
       if (!settled) await settleSelectedMutation(operation, err);
@@ -937,7 +1016,14 @@ export const AgentsPage: React.FC = () => {
     } catch (err) {
       showToast(t('agents.onboarding.failed', { error: errorMessage(err) ?? String(err) }), 'error');
     } finally {
-      void refreshOnboarding();
+      let settlement = refreshOnboarding();
+      await settlement;
+      while (selectedMountedRef.current) {
+        const latest = onboardingSettlementRef.current;
+        if (!latest || latest === settlement) break;
+        settlement = latest;
+        await settlement;
+      }
       setOnboardingSubmitting(false);
     }
   };
@@ -1500,6 +1586,14 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       effort: agent.reasoning_effort ?? 'medium',
       systemPrompt: agent.system_prompt ?? '',
     };
+    const snapshotChanged =
+      previous.id !== next.id ||
+      previous.name !== next.name ||
+      previous.description !== next.description ||
+      previous.model !== next.model ||
+      previous.effort !== next.effort ||
+      previous.systemPrompt !== next.systemPrompt;
+    if (!snapshotChanged) return;
     if (previous.id !== next.id) {
       fieldRevisionRef.current = { name: 0, description: 0, model: 0, effort: 0, systemPrompt: 0 };
       submittedRevisionRef.current = { name: 0, description: 0, model: 0, effort: 0, systemPrompt: 0 };
@@ -1517,19 +1611,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       editorDirtyRef.current = false;
       setEditorSeedRevision((revision) => revision + 1);
     } else {
-      // Same-identity reconciliation follows explicit local/submitted
-      // revisions. A field with an in-flight mutation remains local until its
-      // mutation batch's authoritative drain completes; an older drain cannot
-      // overwrite a newer edit. Once no submission is pending, clean fields
-      // follow the accepted server snapshot.
-      const revisions = fieldRevisionRef.current;
-      const submitted = submittedRevisionRef.current;
+      // Same-identity reconciliation compares the current canonical value to
+      // the accepted baseline. A field that returned to that baseline is clean
+      // even if it has an older edit revision; a field with an active submission
+      // remains local until its authoritative drain settles.
       const pending = pendingRevisionRef.current;
-      if (pending.name === null && revisions.name <= submitted.name) setName(next.name);
-      if (pending.description === null && revisions.description <= submitted.description) setDescription(next.description);
-      if (pending.model === null && revisions.model <= submitted.model) setModel(next.model);
-      if (pending.effort === null && revisions.effort <= submitted.effort) setEffort(next.effort);
-      if (pending.systemPrompt === null && revisions.systemPrompt <= submitted.systemPrompt) setSystemPrompt(next.systemPrompt);
+      if (pending.name === null && canonicalFieldValue('name', name) === canonicalFieldValue('name', previous.name)) setName(next.name);
+      if (pending.description === null && canonicalFieldValue('description', description) === canonicalFieldValue('description', previous.description)) setDescription(next.description);
+      if (pending.model === null && canonicalFieldValue('model', model) === canonicalFieldValue('model', previous.model)) setModel(next.model);
+      if (pending.effort === null && canonicalFieldValue('effort', effort) === canonicalFieldValue('effort', previous.effort)) setEffort(next.effort);
+      if (pending.systemPrompt === null && canonicalFieldValue('systemPrompt', systemPrompt) === canonicalFieldValue('systemPrompt', previous.systemPrompt)) setSystemPrompt(next.systemPrompt);
       if (!editorDirtyRef.current && editorOpen) {
         editorDraftRef.current = next.systemPrompt;
         editorBaselineRef.current = next.systemPrompt;
@@ -1538,7 +1629,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       }
     }
     serverSnapshotRef.current = next;
-  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, editorOpen]);
+  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, editorOpen, name, description, model, effort, systemPrompt]);
 
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the
@@ -1605,6 +1696,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         submittedRevisionRef.current[field] = revision;
         if (fieldRevisionRef.current[field] !== revision) continue;
         const snapshot = serverSnapshotRef.current;
+        if (field === 'name') setName(snapshot.name);
         if (field === 'description') setDescription(snapshot.description ?? '');
         if (field === 'model') setModel(snapshot.model ?? '');
         if (field === 'effort') setEffort(snapshot.effort ?? 'medium');
@@ -1618,6 +1710,23 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           }
         }
       }
+    }).catch((err) => {
+      // A PATCH or its authoritative drain failed. The caller must see the
+      // rejection, while the latest server snapshot owns any field without a
+      // newer local edit. Keep an open modal's private draft untouched.
+      for (const { field, revision } of revisions) {
+        if (pendingRevisionRef.current[field] !== revision) continue;
+        pendingRevisionRef.current[field] = null;
+        submittedRevisionRef.current[field] = revision;
+        if (fieldRevisionRef.current[field] !== revision) continue;
+        const snapshot = serverSnapshotRef.current;
+        if (field === 'name') setName(snapshot.name);
+        if (field === 'description') setDescription(snapshot.description ?? '');
+        if (field === 'model') setModel(snapshot.model ?? '');
+        if (field === 'effort') setEffort(snapshot.effort ?? 'medium');
+        if (field === 'systemPrompt') setSystemPrompt(snapshot.systemPrompt ?? '');
+      }
+      throw err;
     });
   };
 
@@ -1754,7 +1863,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
             onBlur={commitRename}
             onKeyDown={(e) => {
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-              if (e.key === 'Escape') setName(agent.name);
+              if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
             }}
             disabled={locked || renaming}
             title={lockHint}
@@ -1775,12 +1884,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
             setDescription(e.target.value);
           }}
           onBlur={() => {
-            if (!locked && (description !== (agent.description ?? '') || pendingRevisionRef.current.description !== null)) {
-              const canonical = description.trim();
-              setDescription(canonical);
-              markFieldSubmitted('description');
-              submitFields({ description: canonical || null }, ['description']);
+            if (locked) return;
+            const canonical = description.trim();
+            setDescription(canonical);
+            if (canonical === serverSnapshotRef.current.description && pendingRevisionRef.current.description === null) {
+              cancelFieldEdit('description', canonical);
+              return;
             }
+            markFieldSubmitted('description');
+            void submitFields({ description: canonical || null }, ['description']).catch(() => undefined);
           }}
           disabled={locked}
           title={lockHint}
@@ -1840,7 +1952,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                   patch.reasoning_effort = fallback;
                 }
               }
-              submitFields(patch, patch.reasoning_effort ? ['model', 'effort'] : ['model']);
+              void submitFields(patch, patch.reasoning_effort ? ['model', 'effort'] : ['model']).catch(() => undefined);
             }}
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
@@ -1867,7 +1979,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                   markFieldEdit('effort');
                   markFieldSubmitted('effort');
                   setEffort(opt);
-                  submitFields({ reasoning_effort: opt }, ['effort']);
+                  void submitFields({ reasoning_effort: opt }, ['effort']).catch(() => undefined);
                 }}
                 className={clsx(
                   'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',
@@ -1937,12 +2049,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               setSystemPrompt(e.target.value);
             }}
             onBlur={() => {
-              if (canEdit && systemPrompt !== (agent.system_prompt ?? '')) {
-                const canonical = systemPrompt.trim();
-                setSystemPrompt(canonical);
-                markFieldSubmitted('systemPrompt');
-                void submitFields({ system_prompt: canonical || null }, ['systemPrompt']);
+              if (!canEdit) return;
+              const canonical = systemPrompt.trim();
+              setSystemPrompt(canonical);
+              if (canonical === serverSnapshotRef.current.systemPrompt && pendingRevisionRef.current.systemPrompt === null) {
+                cancelFieldEdit('systemPrompt', canonical);
+                return;
               }
+              markFieldSubmitted('systemPrompt');
+              void submitFields({ system_prompt: canonical || null }, ['systemPrompt']).catch(() => undefined);
             }}
             readOnly={!canEdit}
             title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
@@ -2017,10 +2132,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
           markFieldEdit('systemPrompt');
           markFieldSubmitted('systemPrompt');
           setSystemPrompt(canonical);
-          editorDraftRef.current = canonical;
-          editorBaselineRef.current = canonical;
-          editorDirtyRef.current = false;
-          if (canonical !== (agent.system_prompt ?? '') || pendingRevisionRef.current.systemPrompt !== null) {
+          if (canonical !== serverSnapshotRef.current.systemPrompt || pendingRevisionRef.current.systemPrompt !== null) {
             return submitFields({ system_prompt: canonical || null }, ['systemPrompt']);
           }
           return;
