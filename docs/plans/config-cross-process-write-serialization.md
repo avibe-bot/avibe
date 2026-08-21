@@ -53,9 +53,34 @@ read-merge-write cycle); a snapshot overwrite silently reverts them.
   default_provider, rotate_session_secret; real two-process lock-contract
   test).
 
-## Remaining — stage ③ (the close-out)
+## PR #1513 implementation update (2026-08-22)
 
-Migrate every remaining direct writer to `update_config_fields`:
+The remaining UI writers are now expressed through one client-side mutation
+protocol. `ApiContext.mutateConfig()` accepts explicit leaf assignments and
+the whitelisted `platforms.enabled` add/remove operation; it is the only UI
+owner that serializes those mutations to the existing `/api/config` merge-patch
+HTTP body. Wizard steps derive mutations from the fields they own, so a later
+step cannot replay mount-time `agents`, platform sections, or runtime paths.
+
+On the server, `config_file_lock` is the single cross-process lock owner. The
+generic `save_config` read/merge/validate/write cycle, `config_write_transaction`,
+first-run creators, ordinary `V2Config.save`, Memory updates, and the WeChat QR
+writer all use that lock (nested acquisition is re-entrant). The lock prevents
+overlapping read-modify-write cycles; it does not make an explicitly submitted
+stale snapshot safe, which is why the UI mutation boundary remains required.
+
+The branch adds lock-boundary tests that prove both the transaction's load and
+mutator wait behind the migration lock, plus focused UI tests for field ownership
+and Wizard step isolation. This is the intended close-out shape for stage ③;
+the remaining work is remote review/CI verification on the rebased branch.
+
+## Remaining — stage ③ (the close-out checklist)
+
+The original checklist below names the writer surfaces that needed ownership
+and transaction coverage. A surface may use `save_config` with an explicit
+patch (when it must retain API validation/runtime reconciliation) or
+`update_config_fields` (for a typed in-memory mutator); the contract is the
+same: the decision and write must observe one lock-fresh snapshot.
 
 1. `vibe/api.py` `save_config` — serialize the WHOLE read-merge-write
    cycle (base load currently happens outside the file lock, so a
@@ -94,4 +119,6 @@ Non-goals: no schema change, no file split, no new IPC, no guards.
 
 Stage ③ merged → every cross-process `config.json` writer is
 patch-shaped under the transaction → issue closed with a pointer to the
-parked single-writer option.
+parked single-writer option. A green local run is not sufficient: close only
+after the PR head has a clean merge state, zero unresolved review findings,
+and passing CI on the final pushed commit.
