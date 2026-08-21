@@ -76,7 +76,7 @@
       "@typescript-eslint/no-explicit-any": 4
     },
     "src/components/steps/Summary.tsx": {
-      "@typescript-eslint/no-explicit-any": 8
+      "@typescript-eslint/no-explicit-any": 5
     },
     "src/components/steps/TelegramConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4

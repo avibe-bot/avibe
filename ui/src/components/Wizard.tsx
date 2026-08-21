@@ -17,14 +17,22 @@ import {
   getEnabledPlatforms,
   platformSupportsChannels,
 } from '../lib/platforms';
-import { buildWizardStepMutations } from '../lib/wizardConfigMutations';
+import {
+  buildWizardStepMutations,
+  collectWizardEnabledPlatformDelta,
+  type WizardEnabledPlatformDelta,
+} from '../lib/wizardConfigMutations';
 import { WizardChrome } from './visual';
 
 export const Wizard: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const [currentStep, setCurrentStep] = useState(0);
-  const [data, setData] = useState<any>({ show_duration: false });
+  const [data, setData] = useState<any>({
+    show_duration: false,
+    __wizardEnabledAdds: [],
+    __wizardEnabledRemoves: [],
+  });
   const [loaded, setLoaded] = useState(false);
 
   const steps = React.useMemo(() => {
@@ -102,6 +110,10 @@ export const Wizard: React.FC = () => {
             // messages. Concurrent additions by other processes are NOT
             // in this baseline and are preserved.
             __wizardEnabledBaseline: enabledPlatforms,
+            // Finish may reassert only list operations that this wizard has
+            // actually submitted. These are intent records, not config fields.
+            __wizardEnabledAdds: [],
+            __wizardEnabledRemoves: [],
             agents: {
               opencode: config.agents?.opencode,
               claude: config.agents?.claude,
@@ -132,15 +144,29 @@ export const Wizard: React.FC = () => {
       ...(nextPlatforms.includes('wechat') ? { show_duration: false } : {}),
       ...stepData,
     };
-    const submittedAdds = await persistStep(steps[currentStep].id, stepData, data, nextData);
-    if (submittedAdds.length > 0) {
-      const currentBaseline: string[] = Array.isArray(nextData.__wizardEnabledBaseline)
-        ? nextData.__wizardEnabledBaseline
-        : [];
-      nextData.__wizardEnabledBaseline = Array.from(
-        new Set([...currentBaseline, ...submittedAdds]),
-      );
+    const submittedDelta = await persistStep(steps[currentStep].id, stepData, data, nextData);
+    const previousAdds = Array.isArray(data.__wizardEnabledAdds)
+      ? data.__wizardEnabledAdds.filter(
+          (platform: unknown): platform is string => typeof platform === 'string',
+        )
+      : [];
+    const previousRemoves = Array.isArray(data.__wizardEnabledRemoves)
+      ? data.__wizardEnabledRemoves.filter(
+          (platform: unknown): platform is string => typeof platform === 'string',
+        )
+      : [];
+    const wizardAdds = new Set(previousAdds);
+    const wizardRemoves = new Set(previousRemoves);
+    for (const platform of submittedDelta.remove) {
+      wizardAdds.delete(platform);
+      wizardRemoves.add(platform);
     }
+    for (const platform of submittedDelta.add) {
+      wizardRemoves.delete(platform);
+      wizardAdds.add(platform);
+    }
+    nextData.__wizardEnabledAdds = [...wizardAdds];
+    nextData.__wizardEnabledRemoves = [...wizardRemoves];
     setData(nextData);
     if (currentStep < steps.length - 1) {
       setCurrentStep(currentStep + 1);
@@ -158,7 +184,7 @@ export const Wizard: React.FC = () => {
     stepData: any,
     before: any,
     mergedData: any,
-  ): Promise<string[]> => {
+  ): Promise<WizardEnabledPlatformDelta> => {
     const mutations = buildWizardStepMutations({ stepId, before, stepData, after: mergedData });
     if (mutations.length > 0) await api.mutateConfig(mutations);
 
@@ -182,9 +208,7 @@ export const Wizard: React.FC = () => {
         }
       }
     }
-    return mutations.flatMap((mutation) =>
-      mutation.kind === 'enabled-platforms' ? [...mutation.add] : [],
-    );
+    return collectWizardEnabledPlatformDelta(mutations);
   };
 
   const CurrentComponent = steps[currentStep].component;

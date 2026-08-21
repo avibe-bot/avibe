@@ -20,6 +20,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const recordOrEmpty = (value: unknown): Record<string, unknown> =>
   isRecord(value) ? value : {};
 
+const stringList = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+
 const normalizePlatformSection = (platform: string, section: unknown) => {
   if (!isRecord(section)) return section;
 
@@ -122,9 +127,19 @@ export const buildWizardStepMutations = ({
   const selectedBefore = getEnabledPlatforms(previous);
   const selectedAfter = getEnabledPlatforms(next);
   const newlySelected = selectedAfter.filter((platform) => !selectedBefore.includes(platform));
+  // A platform that was already enabled and runnable when the wizard loaded is
+  // not owned by a later credential edit. Only newly selected platforms, or a
+  // selected platform whose credentials were not runnable before this step,
+  // may acquire a wizard-owned add operation. This keeps a stale credential
+  // snapshot from turning Finish into an implicit re-enable.
+  const needsWizardEnablement = (platform: string) =>
+    !selectedBefore.includes(platform) || !platformHasRunnableConfig(previous, platform);
   const addCandidates = stepId === 'platform'
-    ? [...new Set([...newlySelected, ...editedPlatforms])]
-    : editedPlatforms;
+    ? [...new Set([
+        ...newlySelected,
+        ...editedPlatforms.filter(needsWizardEnablement),
+      ])]
+    : editedPlatforms.filter(needsWizardEnablement);
   const add = addCandidates.filter(
     (platform) =>
       selectedAfter.includes(platform) && platformHasRunnableConfig(next, platform),
@@ -142,6 +157,37 @@ export const buildWizardStepMutations = ({
   return mutations;
 };
 
+export type WizardEnabledPlatformDelta = {
+  add: string[];
+  remove: string[];
+};
+
+/**
+ * Collect the list intent from mutations that were actually submitted by a
+ * wizard step. The ordering mirrors configMutationsToPayload: a later add or
+ * remove wins for the same platform.
+ */
+export const collectWizardEnabledPlatformDelta = (
+  mutations: readonly ConfigMutation[],
+): WizardEnabledPlatformDelta => {
+  const add = new Set<string>();
+  const remove = new Set<string>();
+  for (const mutation of mutations) {
+    if (mutation.kind !== 'enabled-platforms') continue;
+    for (const platform of mutation.remove) {
+      if (!platform) continue;
+      add.delete(platform);
+      remove.add(platform);
+    }
+    for (const platform of mutation.add) {
+      if (!platform) continue;
+      remove.delete(platform);
+      add.add(platform);
+    }
+  }
+  return { add: [...add], remove: [...remove] };
+};
+
 export const buildWizardFinishMutations = (
   data: unknown,
   autoUpdate: boolean,
@@ -154,8 +200,19 @@ export const buildWizardFinishMutations = (
         (platform): platform is string => typeof platform === 'string',
       )
     : [];
-  const add = selected.filter((platform) => platformHasRunnableConfig(config, platform));
-  const remove = baseline.filter((platform) => !selected.includes(platform));
+  // The loaded enabled list is an observation, not ownership. Finish may
+  // reassert only list changes that this wizard actually submitted.
+  const wizardAdds = stringList(config.__wizardEnabledAdds);
+  const wizardRemoves = stringList(config.__wizardEnabledRemoves);
+  const add = wizardAdds.filter(
+    (platform) => selected.includes(platform) && platformHasRunnableConfig(config, platform),
+  );
+  const remove = [
+    ...new Set([
+      ...baseline.filter((platform) => !selected.includes(platform)),
+      ...wizardRemoves.filter((platform) => !selected.includes(platform)),
+    ]),
+  ];
   const mutations: ConfigMutation[] = [];
 
   if (add.length > 0 || remove.length > 0) {

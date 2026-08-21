@@ -4,9 +4,17 @@ import { configMutationsToPayload } from './configMutations';
 import {
   buildWizardFinishMutations,
   buildWizardStepMutations,
+  collectWizardEnabledPlatformDelta,
 } from './wizardConfigMutations';
 
 describe('wizard config mutations', () => {
+  it('tracks only the final intent for each wizard platform operation', () => {
+    expect(collectWizardEnabledPlatformDelta([
+      { kind: 'enabled-platforms', add: ['slack'], remove: ['discord'] },
+      { kind: 'enabled-platforms', add: ['discord'], remove: ['slack'] },
+    ])).toEqual({ add: ['discord'], remove: ['slack'] });
+  });
+
   it('persists only fields owned by the Agents step', () => {
     const before = {
       agents: {
@@ -79,6 +87,23 @@ describe('wizard config mutations', () => {
       stepId: 'platform-slack', before, stepData, after,
     }))).toEqual({
       slack: { require_mention: true },
+    });
+  });
+
+  it('adds a platform when its credentials become runnable during the wizard', () => {
+    const before = {
+      platforms: { enabled: ['slack'] },
+      slack: {},
+    };
+    const stepData = {
+      slack: { bot_token: 'xoxb-token', app_token: 'xapp-token' },
+    };
+    const after = { ...before, ...stepData };
+
+    expect(configMutationsToPayload(buildWizardStepMutations({
+      stepId: 'platform-slack', before, stepData, after,
+    }))).toEqual({
+      slack: { bot_token: 'xoxb-token', app_token: 'xapp-token' },
       __avibe_list_ops: { 'platforms.enabled': { add: ['slack'] } },
     });
   });
@@ -114,7 +139,40 @@ describe('wizard config mutations', () => {
       update: { auto_update: false },
       setup_completed: true,
       __avibe_list_ops: {
-        'platforms.enabled': { add: ['slack'], remove: ['discord'] },
+        'platforms.enabled': { remove: ['discord'] },
+      },
+    });
+  });
+
+  it('does not re-enable a baseline platform changed by another browser', () => {
+    const data = {
+      platforms: { enabled: ['slack'] },
+      __wizardEnabledBaseline: ['slack'],
+      __wizardEnabledAdds: [],
+      __wizardEnabledRemoves: [],
+      slack: { has_bot_token: true, has_app_token: true },
+      update: { auto_update: true },
+    };
+
+    expect(configMutationsToPayload(buildWizardFinishMutations(data, true))).toEqual({
+      setup_completed: true,
+    });
+  });
+
+  it('reasserts a platform that this wizard explicitly added', () => {
+    const data = {
+      platforms: { enabled: ['slack'] },
+      __wizardEnabledBaseline: [],
+      __wizardEnabledAdds: ['slack'],
+      __wizardEnabledRemoves: [],
+      slack: { has_bot_token: true, has_app_token: true },
+      update: { auto_update: true },
+    };
+
+    expect(configMutationsToPayload(buildWizardFinishMutations(data, true))).toEqual({
+      setup_completed: true,
+      __avibe_list_ops: {
+        'platforms.enabled': { add: ['slack'] },
       },
     });
   });

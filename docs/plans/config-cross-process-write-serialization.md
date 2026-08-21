@@ -60,7 +60,11 @@ protocol. `ApiContext.mutateConfig()` accepts explicit leaf assignments and
 the whitelisted `platforms.enabled` add/remove operation; it is the only UI
 owner that serializes those mutations to the existing `/api/config` merge-patch
 HTTP body. Wizard steps derive mutations from the fields they own, so a later
-step cannot replay mount-time `agents`, platform sections, or runtime paths.
+step cannot replay mount-time `agents`, platform sections, or runtime paths. The wizard also
+records only list operations it actually submitted; the load-time enabled list is an observation,
+not permission to re-enable a platform at Finish. Channel and guild settings are committed by
+the Channels/credential steps, while Summary owns completion flags and final wizard list intent
+only, so it does not replay the accumulated channel snapshot.
 
 On the server, `config_file_lock` is the single cross-process lock owner. The
 generic `save_config` read/merge/validate/write cycle, `config_write_transaction`,

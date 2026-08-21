@@ -67,11 +67,11 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     setSaving(true);
     setError(null);
     try {
+      // Platform credentials and channel/guild settings are persisted by their
+      // own wizard steps. Finish owns only completion and final list intent;
+      // replaying the accumulated settings snapshot here would overwrite
+      // changes made by another browser after those steps completed.
       await api.mutateConfig(buildWizardFinishMutations(data, autoUpdate));
-      const settingsByPlatform = buildSettingsPayload(data);
-      await Promise.all(
-        Object.entries(settingsByPlatform).map(([platform, payload]) => api.saveSettings(payload, platform))
-      );
 
       await control('start');
 
@@ -330,54 +330,3 @@ const countConfiguredChannels = (channelConfigsByPlatform: Record<string, Record
     (count, channels) => count + Object.values(channels || {}).filter((config: any) => config?.enabled).length,
     0
   );
-
-const buildSettingsPayload = (data: any) => {
-  const channelConfigsByPlatform = data.channelConfigsByPlatform || {};
-  const discordGuildAllowlist = Array.isArray(data.discordGuildAllowlist)
-    ? data.discordGuildAllowlist
-    : Array.isArray(data.discord?.guild_allowlist)
-      ? data.discord.guild_allowlist
-      : [];
-  const shouldPersistDiscordGuilds =
-    discordGuildAllowlist.length > 0 || data.discordGuildAllowlistTouched === true;
-  return Object.fromEntries(
-    Object.entries(channelConfigsByPlatform).map(([platform, channels]: any) => [
-      platform,
-      {
-        channels: Object.fromEntries(
-          Object.entries(channels || {}).map(([id, cfg]: any) => [
-            id,
-            {
-              enabled: cfg.enabled,
-              show_message_types: cfg.show_message_types || [],
-              custom_cwd: cfg.custom_cwd || null,
-              require_mention: cfg.require_mention ?? null,
-              require_bind: cfg.require_bind ?? null,
-              routing: {
-                agent_name: cfg.routing?.agent_name || null,
-                model: cfg.routing?.model || null,
-                reasoning_effort: cfg.routing?.reasoning_effort || null,
-                opencode_agent: cfg.routing?.opencode_agent || null,
-                opencode_model: cfg.routing?.opencode_model || null,
-                opencode_reasoning_effort: cfg.routing?.opencode_reasoning_effort || null,
-                claude_agent: cfg.routing?.claude_agent || null,
-                claude_model: cfg.routing?.claude_model || null,
-                claude_reasoning_effort: cfg.routing?.claude_reasoning_effort || null,
-                codex_agent: cfg.routing?.codex_agent || null,
-                codex_model: cfg.routing?.codex_model || null,
-                codex_reasoning_effort: cfg.routing?.codex_reasoning_effort || null,
-              },
-            },
-          ])
-        ),
-        ...(platform === 'discord' && shouldPersistDiscordGuilds
-          ? {
-              guilds: Object.fromEntries(
-                discordGuildAllowlist.map((guildId: string) => [guildId, { enabled: true }])
-              ),
-            }
-          : {}),
-      },
-    ])
-  );
-};
