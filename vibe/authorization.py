@@ -438,13 +438,46 @@ _REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
     )
 )
 
+# Contract amendment (issue #1596): the member set an Instance Owner controls is
+# *cloud allowlist entries AND multi-platform IM bound users*, not the allowlist
+# alone. A principal reaches this instance just as directly by being a bound IM
+# user on any supported platform, an IM admin additionally unlocks protected
+# setup, routing, and update actions, and a bind code is a bearer credential that
+# mints exactly that access. So every route that mints, revokes, or promotes
+# either kind of membership is Owner-only, whichever namespace it lives in.
+#
+# Read-only listing of the member set itself stays at member, matching the cloud
+# allowlist whose GET is member and whose PUT is Owner. Listing bind codes does
+# not: that response carries the codes, so reading it is equivalent to minting.
+_ACCESS_ADMINISTRATION_HTTP_RULES = (
+    ("PUT", r"^/api/permissions/authorized-users$"),
+    ("POST", r"^/api/users$"),
+    ("POST", r"^/api/users/[^/]+/admin$"),
+    ("DELETE", r"^/api/users/[^/]+$"),
+    ("GET", r"^/api/bind-codes$"),
+    ("POST", r"^/api/bind-codes$"),
+    ("DELETE", r"^/api/bind-codes/[^/]+$"),
+    ("GET", r"^/api/setup/first-bind-code$"),
+)
+
+# Bulk Agent onboarding is an instance-wide one-way migration, not member
+# management: the GET discloses every Agent row and the POST claims every
+# policy-less one under the caller's private ACL. Owner-only for blast radius,
+# which is why ``core.vibe_agents._require_agent_onboarding_access`` checks Owner
+# identity rather than ``can_manage_access_members``.
+_AGENT_MIGRATION_HTTP_RULES = (
+    ("GET", r"^/api/agent-onboarding$"),
+    ("POST", r"^/api/agent-onboarding$"),
+)
+
 # Member-management and instance-wide default routing stay Owner-only even
 # though instance management is now rank-member. Unknown APIs inherit member;
 # list Owner exceptions here.
 _OWNER_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        ("PUT", r"^/api/permissions/authorized-users$"),
+        *_ACCESS_ADMINISTRATION_HTTP_RULES,
+        *_AGENT_MIGRATION_HTTP_RULES,
         ("POST", r"^/api/agents/default$"),
     )
 )
@@ -548,10 +581,11 @@ def required_instance_role(method: str, path: str) -> str | None:
     API routes deliberately default to member so a newly added management
     route cannot accidentally become available to editors or viewers, while
     member inherits today's instance-management surface. Pairing identity,
-    member-set mutation, ownership, and instance-wide default-agent routing
-    stay Owner-only: writes under ``/api/remote-access`` default to owner,
-    and allowlist mutation plus ``POST /api/agents/default`` stay Owner-only
-    via ``_OWNER_HTTP_RULES``.
+    member-set mutation, ownership, bulk Agent migration, and instance-wide
+    default-agent routing stay Owner-only: writes under ``/api/remote-access``
+    default to owner, and ``_OWNER_HTTP_RULES`` covers access administration
+    (cloud allowlist mutation plus the IM bound-user and bind-code routes),
+    ``/api/agent-onboarding``, and ``POST /api/agents/default``.
     """
 
     return http_authorization_policy(method, path).minimum_role

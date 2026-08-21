@@ -1,8 +1,12 @@
+import re
+
 import pytest
 
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
+    _ACCESS_ADMINISTRATION_HTTP_RULES,
+    _AGENT_MIGRATION_HTTP_RULES,
     _EDITOR_HTTP_NAMESPACES,
     _REMOTE_ACCESS_HTTP_NAMESPACE,
     _REMOTE_ACCESS_MEMBER_HTTP_RULES,
@@ -350,6 +354,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         == "owner"
     )
     assert http_authorization_policy("POST", "/api/agents/default").minimum_role == "owner"
+    assert http_authorization_policy("GET", "/api/agent-onboarding").minimum_role == "owner"
+    assert http_authorization_policy("POST", "/api/agent-onboarding").minimum_role == "owner"
     assert _REMOTE_ACCESS_HTTP_NAMESPACE == "/api/remote-access"
     assert {(method, pattern.pattern) for method, pattern in _REMOTE_ACCESS_MEMBER_HTTP_RULES} == {
         ("GET", r"^/api/remote-access/status$"),
@@ -398,14 +404,14 @@ def test_session_service_mutations_recheck_instance_role() -> None:
 
 
 def test_advertised_manage_capabilities_are_honored_by_service_guards() -> None:
-    """Project CRUD and Agent onboarding follow can_manage_*, not owner identity.
+    """Project CRUD follows can_manage_projects, not owner identity.
 
     Seed every existing instance role so a leftover require_instance_role(...,
     "owner") or is_instance_owner check cannot silently deny member while the
-    capability projection still advertises the surface.
+    capability projection still advertises the surface. Bulk Agent onboarding is
+    asserted separately below: it is an instance-wide migration rather than an
+    advertised management surface, so it stays on Owner identity.
     """
-
-    from core.vibe_agents import VibeAgentAccessError, _require_agent_onboarding_access
 
     for role in ("viewer", "editor", "member", "owner"):
         context = _context(role, remote=True)
@@ -414,7 +420,23 @@ def test_advertised_manage_capabilities_are_honored_by_service_guards() -> None:
         else:
             with pytest.raises(InstanceAuthorizationError):
                 require_instance_role(context, "member")
-        if context.can_manage_agents:
+
+
+def test_bulk_agent_onboarding_follows_owner_identity() -> None:
+    """Onboarding is a migration tool, so only the Instance Owner may run it.
+
+    Seed every existing instance role rather than naming the rejected ones, so a
+    role added later is covered here without editing this test: the property is
+    that exactly the Owner passes. Deliberately not gated on
+    ``can_manage_access_members`` -- claiming every policy-less Agent is not
+    member management, it is an instance-wide one-way migration.
+    """
+
+    from core.vibe_agents import VibeAgentAccessError, _require_agent_onboarding_access
+
+    for role in ("viewer", "editor", "member", "owner"):
+        context = _context(role, remote=True)
+        if context.is_instance_owner:
             assert _require_agent_onboarding_access(context) is context
         else:
             with pytest.raises(VibeAgentAccessError):
@@ -581,6 +603,205 @@ def test_registered_remote_access_writes_default_to_owner(monkeypatch, tmp_path)
             else:
                 assert response.status_code == 403, f"{role} {method} {path}"
                 assert response.get_json()["error"] == "instance_access_forbidden"
+
+
+# Namespaces whose routes decide who reaches this instance at all. Contract
+# amendment (issue #1596): the member set an Owner controls is cloud allowlist
+# entries AND multi-platform IM bound users, so the IM bound-user and bind-code
+# routes are member management. ``/api/agent-onboarding`` is in the sweep for a
+# different reason -- it is an instance-wide one-way Agent migration -- but the
+# assertion is the same: Owner-only.
+_ACCESS_ADMINISTRATION_NAMESPACES = (
+    "/api/users",
+    "/api/bind-codes",
+    "/api/setup/first-bind-code",
+    "/api/agent-onboarding",
+)
+
+# The only route in those namespaces allowed below Owner: it discloses the member
+# set without disclosing or minting a credential, matching the cloud allowlist
+# whose GET is member and whose PUT is Owner. Everything else registered in the
+# namespaces now or later must be Owner, which is what the sweep asserts.
+_ACCESS_ADMINISTRATION_MEMBER_READS = frozenset({("GET", "/api/users")})
+
+
+def _registered_access_administration_routes():
+    from vibe.ui_server import app
+
+    routes = []
+    for route in app.routes:
+        path = getattr(route, "path", None) or ""
+        if not path.startswith(_ACCESS_ADMINISTRATION_NAMESPACES):
+            continue
+        for method in getattr(route, "methods", None) or ():
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            routes.append((method.upper(), path))
+    return tuple(sorted(set(routes)))
+
+
+def _sample_path(path: str) -> str:
+    """Fill router path parameters so the route can actually be requested."""
+
+    return re.sub(r"\{[^}]+\}", "sample-1", path)
+
+
+def _install_access_administration_stubs(monkeypatch) -> None:
+    """Stub the handlers so only the authorization outcome is under test."""
+
+    from vibe import api
+
+    ok = {"ok": True}
+    for name in (
+        "get_users",
+        "save_users",
+        "toggle_admin",
+        "remove_user",
+        "get_bind_codes",
+        "create_bind_code",
+        "delete_bind_code",
+        "get_first_bind_code",
+        "get_vibe_agent_onboarding",
+        "onboard_vibe_agents",
+    ):
+        monkeypatch.setattr(api, name, lambda *args, **kwargs: dict(ok))
+
+
+def test_registered_access_administration_routes_are_owner_only(monkeypatch, tmp_path) -> None:
+    """Minting or mutating instance access is Owner-only, at policy and handler.
+
+    Enumerated from the live router rather than from a list of known routes, so a
+    bind-code, bound-user, or onboarding sibling added later fails this test until
+    it is classified. Editor and viewer stay 403 across the whole set, matching
+    master, where every one of these routes was already above their rank.
+    """
+
+    from tests.ui_server_test_helpers import (
+        csrf_headers,
+        remote_peer,
+        remote_session_cookie,
+        save_config,
+    )
+    from vibe import remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    _install_access_administration_stubs(monkeypatch)
+
+    routes = _registered_access_administration_routes()
+    assert routes, "router must expose the access-administration namespaces"
+
+    declared = {
+        (method, pattern)
+        for method, pattern in (*_ACCESS_ADMINISTRATION_HTTP_RULES, *_AGENT_MIGRATION_HTTP_RULES)
+        # The cloud allowlist route lives outside these namespaces; it is
+        # asserted with the other Owner rules above.
+        if not pattern.startswith(r"^/api/permissions/")
+    }
+    matched = {
+        (method, pattern)
+        for method, pattern in declared
+        for route_method, route_path in routes
+        if route_method == method and re.fullmatch(pattern, _sample_path(route_path))
+    }
+    assert matched == declared, "every declared Owner rule must match a live route"
+
+    for method, path in routes:
+        policy = http_authorization_policy(method, _sample_path(path))
+        if (method, path) in _ACCESS_ADMINISTRATION_MEMBER_READS:
+            assert policy.minimum_role == "member", f"{method} {path}"
+        else:
+            assert policy.minimum_role == "owner", f"{method} {path} must be Owner-only"
+
+    for role in ("viewer", "editor", "member", "owner"):
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(
+                config,
+                f"{role}@example.com",
+                f"{role}-1",
+                role=role,
+                access_source="email" if role != "owner" else "owner",
+            ),
+            domain="alex.avibe.bot",
+        )
+        headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+        for method, path in routes:
+            request_path = _sample_path(path)
+            kwargs = {
+                "headers": headers,
+                "base_url": "https://alex.avibe.bot",
+                "environ_base": remote_peer(),
+            }
+            if method not in {"GET", "HEAD", "OPTIONS"}:
+                kwargs["json"] = {}
+            response = client.request(method, request_path, **kwargs)
+            policy_role = http_authorization_policy(method, request_path).minimum_role
+            admitted = _context(role, remote=True).has_role(policy_role or "owner")
+            if admitted:
+                assert response.status_code != 403, f"{role} {method} {request_path}"
+            else:
+                assert response.status_code == 403, f"{role} {method} {request_path}"
+                assert response.get_json()["error"] == "instance_access_forbidden"
+
+
+def test_access_administration_handlers_gate_without_the_route_policy(monkeypatch, tmp_path) -> None:
+    """The handler gate stands on its own, not only the route policy table.
+
+    Two layers answer one question, so this drives the handlers with the policy
+    table neutralised: a route re-registered under a path the table does not
+    recognise must still refuse a member.
+    """
+
+    from tests.ui_server_test_helpers import (
+        csrf_headers,
+        remote_peer,
+        remote_session_cookie,
+        save_config,
+    )
+    from vibe import authorization, remote_access
+    from vibe.authorization import HttpAuthorizationPolicy
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+    _install_access_administration_stubs(monkeypatch)
+    # The request hook imports this by name at call time, so replacing the
+    # module attribute really does disarm the policy layer for this test.
+    monkeypatch.setattr(
+        authorization,
+        "http_authorization_policy",
+        lambda *args, **kwargs: HttpAuthorizationPolicy("member"),
+    )
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "member@example.com",
+            "member-1",
+            role="member",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+    for method, path in _registered_access_administration_routes():
+        if (method, path) in _ACCESS_ADMINISTRATION_MEMBER_READS:
+            continue
+        request_path = _sample_path(path)
+        kwargs = {
+            "headers": headers,
+            "base_url": "https://alex.avibe.bot",
+            "environ_base": remote_peer(),
+        }
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            kwargs["json"] = {}
+        response = client.request(method, request_path, **kwargs)
+        assert response.status_code == 403, f"member {method} {request_path}"
 
 
 @pytest.mark.parametrize(

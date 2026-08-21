@@ -332,10 +332,23 @@ def _require_agent_create_access(user_context: Any) -> None:
 
 
 def _require_agent_onboarding_access(user_context: Any):
-    """Require instance-management access for Organization Agent publication."""
+    """Require Instance Owner identity for Organization Agent onboarding.
+
+    Onboarding is a one-way bulk migration over *every* Agent row in the
+    instance, not a per-resource action: the inventory discloses Agents the
+    caller cannot otherwise see, and the write claims every policy-less Agent --
+    built-ins and legacy/local rows nobody owns -- under the caller's private
+    ACL, which hides them from everyone else and can fence an existing default
+    route.
+
+    It is deliberately NOT gated on ``can_manage_access_members``: this is a
+    migration tool, not member management, so it does not belong to that
+    capability even though both happen to be Owner-only today. Owner identity is
+    the gate because the migration's blast radius is the whole instance.
+    """
 
     context = resolve_resource_access_context(user_context)
-    if context.can_manage_agents:
+    if context.is_instance_owner:
         return context
     raise VibeAgentAccessError("Agent access is not permitted.")
 

@@ -2498,6 +2498,23 @@ def _has_runtime_owner_access(context: Any) -> bool:
     return bool(context is not None and context.is_instance_owner)
 
 
+def _access_administration_forbidden(context: Any = None):
+    """Return a 403 response unless the caller may administer instance access.
+
+    The route policy table (``authorization._ACCESS_ADMINISTRATION_HTTP_RULES``)
+    is one layer; this is the one that travels with the handler, so a route
+    re-registered under a different path keeps the gate. Both answer the same
+    question: may this caller change who reaches the instance? The member set is
+    cloud allowlist entries *and* multi-platform IM bound users, so IM bind codes
+    and bound-user mutation are member management.
+    """
+
+    resolved = _request_authorization_context(context)
+    if resolved is not None and resolved.can_manage_access_members:
+        return None
+    return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+
+
 def _runtime_record_session_id(record: Any) -> str | None:
     if not isinstance(record, Mapping):
         return None
@@ -4990,6 +5007,12 @@ def vibe_agent_onboarding():
 
     try:
         user_context = getattr(g, "authorization_context", None)
+        # Owner identity rather than can_manage_access_members: this is an
+        # instance-wide one-way Agent migration, not member management. The store
+        # repeats the check in ``_require_agent_onboarding_access`` so non-HTTP
+        # callers are gated too; both layers ask the same question.
+        if not _has_runtime_owner_access(user_context):
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         if request.method == "POST":
             return jsonify(api.onboard_vibe_agents(user_context=user_context))
         return jsonify(api.get_vibe_agent_onboarding(user_context=user_context))
@@ -12380,6 +12403,9 @@ def users_post():
     from vibe import api
     from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     try:
         return jsonify(api.save_users(payload))
@@ -12393,6 +12419,9 @@ def users_post():
 def users_toggle_admin(user_id):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     return jsonify(api.toggle_admin(user_id, payload.get("is_admin", False), payload.get("platform") or None))
 
@@ -12401,6 +12430,9 @@ def users_toggle_admin(user_id):
 def users_delete(user_id):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     result = api.remove_user(user_id, request.args.get("platform") or None)
     if not result.get("ok"):
         return jsonify(result), 400
@@ -12411,6 +12443,10 @@ def users_delete(user_id):
 def bind_codes_get():
     from vibe import api
 
+    # The listing carries the codes themselves, so reading it mints access.
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     return jsonify(api.get_bind_codes())
 
 
@@ -12418,6 +12454,9 @@ def bind_codes_get():
 def bind_codes_post():
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     result = api.create_bind_code(
         code_type=payload.get("type", "one_time"),
@@ -12432,6 +12471,9 @@ def bind_codes_post():
 def bind_codes_delete(code):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     result = api.delete_bind_code(code)
     if not result.get("ok"):
         return jsonify(result), 404
@@ -12442,6 +12484,10 @@ def bind_codes_delete(code):
 def setup_first_bind_code():
     from vibe import api
 
+    # Named "setup", but it mints a live bind code rather than reporting state.
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     return jsonify(api.get_first_bind_code())
 
 
