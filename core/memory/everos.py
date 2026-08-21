@@ -1448,12 +1448,6 @@ def _repair_stale_profile_summary(
                 return info.description
         return summary
 
-    if not explicit_info and len(implicit_traits) > 1 and summary == implicit_traits[0].description:
-        for trait in reversed(implicit_traits[1:]):
-            candidate = trait.description or trait.trait
-            if candidate and candidate != summary:
-                return candidate
-
     return summary
 
 
