@@ -176,4 +176,19 @@ describe('wizard config mutations', () => {
       },
     });
   });
+
+  it('does not re-enable a selected platform skipped before persistence', () => {
+    const data = {
+      platforms: { enabled: ['slack'] },
+      __wizardEnabledBaseline: [],
+      __wizardEnabledAdds: [],
+      __wizardEnabledRemoves: [],
+      slack: {},
+      update: { auto_update: true },
+    };
+
+    expect(configMutationsToPayload(buildWizardFinishMutations(data, true))).toEqual({
+      setup_completed: true,
+    });
+  });
 });

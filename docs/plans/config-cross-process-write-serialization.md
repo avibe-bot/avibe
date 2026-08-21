@@ -64,7 +64,11 @@ step cannot replay mount-time `agents`, platform sections, or runtime paths. The
 records only list operations it actually submitted; the load-time enabled list is an observation,
 not permission to re-enable a platform at Finish. Channel and guild settings are committed by
 the Channels/credential steps, while Summary owns completion flags and final wizard list intent
-only, so it does not replay the accumulated channel snapshot.
+only, so it does not replay the accumulated channel snapshot. After Finish,
+Summary routes startup and bind-code handling from the lock-fresh config
+response, not the wizard's local platform selection; a skipped or otherwise
+unpersisted selection therefore resolves to the platforms actually enabled by
+the transaction (including a valid Workbench-only setup).
 
 On the server, `config_file_lock` is the single cross-process lock owner. The
 generic `save_config` read/merge/validate/write cycle, `config_write_transaction`,

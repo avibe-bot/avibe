@@ -71,14 +71,25 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
       // own wizard steps. Finish owns only completion and final list intent;
       // replaying the accumulated settings snapshot here would overwrite
       // changes made by another browser after those steps completed.
-      await api.mutateConfig(buildWizardFinishMutations(data, autoUpdate));
+      const savedConfig = await api.mutateConfig(buildWizardFinishMutations(data, autoUpdate));
+
+      // The wizard can contain a selected platform that was never persisted
+      // (for example, the user selected it and then used the global Skip
+      // action before entering credentials). The config response is the
+      // lock-fresh result after Finish, so use it for all post-save runtime
+      // decisions instead of routing from that stale local selection.
+      const committedData =
+        savedConfig && typeof savedConfig === 'object' && !Array.isArray(savedConfig)
+          ? { ...data, ...savedConfig }
+          : data;
+      const committedEnabledPlatforms = getEnabledPlatforms(committedData);
 
       await control('start');
 
       // ``enabledPlatforms`` only ever lists real IM platforms — the always-on
       // workbench is stripped by PlatformsConfig.validate() before any config
       // reaches the UI. An empty list is therefore a workbench-only setup.
-      if (enabledPlatforms.length === 0) {
+      if (committedEnabledPlatforms.length === 0) {
         // Workbench-only setup — there is no external bot to bind, so finish
         // instead of falling through to a bogus bind-code flow.
         setSaving(false);
@@ -87,7 +98,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         }, 1000);
         return;
       }
-      if (enabledPlatforms.every((platform) => platform === 'wechat')) {
+      if (committedEnabledPlatforms.every((platform) => platform === 'wechat')) {
         setSaving(false);
         showToast(t('wechat.setupComplete'));
         setTimeout(() => {
