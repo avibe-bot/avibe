@@ -87,10 +87,14 @@ type SelectedMutationBatch = {
   id: number;
   identity: string;
   pending: number;
-  drainGeneration: number;
-  draining: boolean;
+  version: number;
   errorGeneration: number;
   failures: unknown[];
+};
+
+type SelectedReconciliationDebt = {
+  version: number;
+  scheduled: boolean;
 };
 
 type SelectedCoordinator = {
@@ -100,7 +104,10 @@ type SelectedCoordinator = {
   accepted: VibeAgentFull | null;
   acceptedGeneration: number;
   nextBatchId: number;
+  nextMutationVersion: number;
   mutations: Map<string, SelectedMutationBatch>;
+  reconciliationDebt: Map<string, SelectedReconciliationDebt>;
+  retired: Set<string>;
 };
 
 const createSelectedCoordinator = (): SelectedCoordinator => ({
@@ -110,7 +117,10 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
   accepted: null,
   acceptedGeneration: 0,
   nextBatchId: 0,
+  nextMutationVersion: 0,
   mutations: new Map(),
+  reconciliationDebt: new Map(),
+  retired: new Set(),
 });
 
 const advanceSelectedRead = (coordinator: SelectedCoordinator, identity: string): number => {
@@ -254,6 +264,11 @@ export const AgentsPage: React.FC = () => {
     }
   }, [api, canOnboardAgents, publishOnboarding]);
 
+  const scheduleSelectedReadRef = useRef<
+    ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean }) => Promise<'published' | 'failed' | 'stale'> | null)
+  >(null);
+  const retireSelectedIdentityRef = useRef<((identity: string, options?: { refreshDefinitions?: boolean }) => boolean) | null>(null);
+
   const commitSelected = useCallback((agent: VibeAgentFull | null) => {
     const coordinator = selectedCoordinatorRef.current;
     const previousIdentity = coordinator.accepted?.name;
@@ -261,15 +276,19 @@ export const AgentsPage: React.FC = () => {
     if (agent?.name) advanceSelectedRead(coordinator, agent.name);
     coordinator.acceptedGeneration += 1;
     coordinator.accepted = agent;
+    if (agent?.name) coordinator.retired.delete(agent.name);
     setSelected(agent);
   }, []);
 
-  const beginSelectedIntent = useCallback((identity: string | null) => {
+  const beginSelectedIntent = useCallback((identity: string | null, options: { auto?: boolean } = {}) => {
     const coordinator = selectedCoordinatorRef.current;
     if (coordinator.desiredName && coordinator.desiredName !== identity) {
       advanceSelectedRead(coordinator, coordinator.desiredName);
     }
     if (identity) advanceSelectedRead(coordinator, identity);
+    if (identity && !options.auto) coordinator.retired.delete(identity);
+    const debt = identity ? coordinator.reconciliationDebt.get(identity) : null;
+    if (debt) debt.scheduled = false;
     coordinator.intentGeneration += 1;
     coordinator.desiredName = identity;
     return { intentGeneration: coordinator.intentGeneration, identity };
@@ -278,10 +297,9 @@ export const AgentsPage: React.FC = () => {
   const rollbackSelectedIntent = useCallback(() => {
     const coordinator = selectedCoordinatorRef.current;
     if (coordinator.desiredName) advanceSelectedRead(coordinator, coordinator.desiredName);
-    coordinator.intentGeneration += 1;
-    coordinator.desiredName = coordinator.accepted?.name ?? null;
-    if (coordinator.desiredName) advanceSelectedRead(coordinator, coordinator.desiredName);
-  }, []);
+    const acceptedIdentity = coordinator.accepted?.name ?? null;
+    return beginSelectedIntent(acceptedIdentity && !coordinator.retired.has(acceptedIdentity) ? acceptedIdentity : null);
+  }, [beginSelectedIntent]);
 
 
   // Definitions refreshes are explicit reconciliation reads. They must always
@@ -303,35 +321,23 @@ export const AgentsPage: React.FC = () => {
         if (!definitionsVersionRef.current.isCurrent(token)) return;
         setAgents(result.agents);
         setDefaultName(result.default_agent_name);
-        // Reconcile identity outcomes from the same authoritative list snapshot.
-        // A missing desired identity invalidates only that pending intent; a
-        // missing accepted identity clears the rendered snapshot without
-        // cancelling a different desired selection that is still loading.
+        // List omission is authoritative retirement evidence. The coordinator
+        // owns all desired/accepted transitions; stale list responses cannot
+        // re-select an identity after retirement because the retired set is
+        // updated before the next render.
         const coordinator = selectedCoordinatorRef.current;
-        const acceptedIdentity = coordinator.accepted?.name ?? null;
-        const desiredIdentity = coordinator.desiredName;
-        const acceptedMissing = acceptedIdentity
-          ? !result.agents.some((agent) => agent.name === acceptedIdentity)
-          : false;
-        const desiredMissing = desiredIdentity
-          ? !result.agents.some((agent) => agent.name === desiredIdentity)
-          : false;
-
-        if (desiredIdentity && desiredMissing && !coordinator.mutations.has(desiredIdentity)) {
-          advanceSelectedRead(coordinator, desiredIdentity);
-          coordinator.intentGeneration += 1;
-          clearResourceError('selection');
-          if (desiredIdentity === acceptedIdentity) {
-            coordinator.desiredName = null;
-            commitSelected(null);
-          } else if (acceptedIdentity && !acceptedMissing) {
-            coordinator.desiredName = acceptedIdentity;
-          } else {
-            coordinator.desiredName = null;
-            if (acceptedIdentity) commitSelected(null);
+        const currentIdentities = [coordinator.accepted?.name, coordinator.desiredName].filter(
+          (identity): identity is string => Boolean(identity),
+        );
+        const retired = currentIdentities.filter(
+          (identity) => !result.agents.some((agent) => agent.name === identity) && !coordinator.mutations.has(identity),
+        );
+        if (retired.length > 0) {
+          for (const identity of retired) {
+            retireSelectedIdentityRef.current?.(identity, { refreshDefinitions: false });
           }
-        } else if (acceptedMissing && acceptedIdentity && !coordinator.mutations.has(acceptedIdentity)) {
-          commitSelected(null);
+          definitionsVersionRef.current.invalidate();
+          void refreshRef.current();
         }
       } catch (err) {
         if (definitionsVersionRef.current.isCurrent(token)) {
@@ -342,10 +348,33 @@ export const AgentsPage: React.FC = () => {
       }
     })();
     return request;
-  }, [api, clearResourceError, commitSelected, setResourceError]);
+  }, [api, clearResourceError, setResourceError]);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+
+  const retireSelectedIdentity = useCallback(
+    (identity: string, options: { refreshDefinitions?: boolean } = {}) => {
+      const coordinator = selectedCoordinatorRef.current;
+      if (coordinator.retired.has(identity)) return false;
+      coordinator.retired.add(identity);
+      advanceSelectedRead(coordinator, identity);
+      coordinator.reconciliationDebt.delete(identity);
+      if (coordinator.desiredName === identity) {
+        coordinator.intentGeneration += 1;
+        coordinator.desiredName = null;
+      }
+      if (coordinator.accepted?.name === identity) commitSelected(null);
+      clearResourceError('selection');
+      if (options.refreshDefinitions !== false) {
+        definitionsVersionRef.current.invalidate();
+        void refreshRef.current();
+      }
+      return true;
+    },
+    [clearResourceError, commitSelected],
+  );
+  retireSelectedIdentityRef.current = retireSelectedIdentity;
 
   const launchSelectedRead = useCallback(
     async (options: {
@@ -353,12 +382,21 @@ export const AgentsPage: React.FC = () => {
       readGeneration: number;
       intentGeneration?: number;
       expectedCodes?: readonly string[];
+      debtVersion?: number;
     }): Promise<'published' | 'failed' | 'stale'> => {
       const coordinator = selectedCoordinatorRef.current;
       const isCurrent = () =>
         selectedReadIsCurrent(coordinator, options.identity, options.readGeneration) &&
         coordinator.desiredName === options.identity &&
+        !coordinator.retired.has(options.identity) &&
         (options.intentGeneration === undefined || coordinator.intentGeneration === options.intentGeneration);
+      const finishDebt = (published: boolean) => {
+        if (options.debtVersion === undefined) return;
+        const debt = coordinator.reconciliationDebt.get(options.identity);
+        if (!debt || debt.version !== options.debtVersion) return;
+        if (published) coordinator.reconciliationDebt.delete(options.identity);
+        else debt.scheduled = false;
+      };
       try {
         const params = options.expectedCodes ? { cache: false, expectedCodes: options.expectedCodes } : { cache: false };
         const result = await api.getVibeAgent(options.identity, params);
@@ -366,29 +404,73 @@ export const AgentsPage: React.FC = () => {
         if (result.ok && result.agent?.name === options.identity) {
           clearResourceError('selection');
           commitSelected(result.agent);
+          finishDebt(true);
           return 'published';
         }
         rollbackSelectedIntent();
         setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
+        finishDebt(false);
+        void scheduleSelectedReadRef.current?.(coordinator.desiredName ?? '', {
+          debtOnly: true,
+          expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
+        });
         return 'failed';
       } catch (err) {
         if (!isCurrent()) return 'stale';
         if (options.expectedCodes && SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
-          const acceptedIdentity = coordinator.accepted?.name ?? null;
-          advanceSelectedRead(coordinator, options.identity);
-          coordinator.desiredName = acceptedIdentity;
-          coordinator.intentGeneration += 1;
-          clearResourceError('selection');
-          if (acceptedIdentity === options.identity) commitSelected(null);
+          retireSelectedIdentityRef.current?.(options.identity);
+          finishDebt(false);
           return 'failed';
         }
         rollbackSelectedIntent();
         setResourceError('selection', errorMessage(err) || tRef.current('errorBoundary.title'));
+        finishDebt(false);
+        void scheduleSelectedReadRef.current?.(coordinator.desiredName ?? '', {
+          debtOnly: true,
+          expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
+        });
         return 'failed';
       }
     },
     [api, clearResourceError, commitSelected, rollbackSelectedIntent, setResourceError],
   );
+
+  const scheduleSelectedRead = useCallback(
+    (
+      identity: string,
+      options: { expectedCodes?: readonly string[]; debtOnly?: boolean } = {},
+    ): Promise<'published' | 'failed' | 'stale'> | null => {
+      if (!identity) return null;
+      const coordinator = selectedCoordinatorRef.current;
+      if (coordinator.retired.has(identity) || coordinator.desiredName !== identity) return null;
+      // User selection is an explicit intent and may read immediately even
+      // while that identity has a pending mutation. Passive/debt drains wait
+      // for acknowledgements so they cannot publish an intermediate snapshot.
+      if (coordinator.mutations.has(identity) && options.debtOnly) return null;
+      const debt = coordinator.reconciliationDebt.get(identity);
+      if (options.debtOnly && !debt) return null;
+      if (debt && options.debtOnly && debt.scheduled) return null;
+      const debtVersion = debt?.version;
+      if (debt) debt.scheduled = true;
+      const readGeneration = advanceSelectedRead(coordinator, identity);
+      const intentGeneration = coordinator.intentGeneration;
+      return launchSelectedRead({
+        identity,
+        readGeneration,
+        intentGeneration,
+        expectedCodes: options.expectedCodes,
+        debtVersion,
+      }).then((outcome) => {
+        if (debtVersion !== undefined) {
+          const currentDebt = coordinator.reconciliationDebt.get(identity);
+          if (currentDebt?.version === debtVersion && outcome !== 'published') currentDebt.scheduled = false;
+        }
+        return outcome;
+      });
+    },
+    [launchSelectedRead],
+  );
+  scheduleSelectedReadRef.current = scheduleSelectedRead;
 
   const beginSelectedMutation = useCallback((identity: string) => {
     const coordinator = selectedCoordinatorRef.current;
@@ -398,8 +480,7 @@ export const AgentsPage: React.FC = () => {
         id: ++coordinator.nextBatchId,
         identity,
         pending: 0,
-        drainGeneration: 0,
-        draining: false,
+        version: ++coordinator.nextMutationVersion,
         errorGeneration: 0,
         failures: [],
       };
@@ -408,8 +489,9 @@ export const AgentsPage: React.FC = () => {
     const errorGeneration = beginResourceError('mutation');
     batch.errorGeneration = errorGeneration;
     batch.pending += 1;
-    batch.drainGeneration += 1;
-    batch.draining = false;
+    batch.version = ++coordinator.nextMutationVersion;
+    const debt = coordinator.reconciliationDebt.get(identity);
+    if (debt) debt.scheduled = false;
     advanceSelectedRead(coordinator, identity);
     return { id: batch.id, identity, errorGeneration };
   }, [beginResourceError]);
@@ -421,57 +503,31 @@ export const AgentsPage: React.FC = () => {
       if (!batch || batch.id !== operation.id) return;
       if (failure) batch.failures.push(failure);
       batch.pending = Math.max(0, batch.pending - 1);
-      if (batch.pending !== 0 || batch.draining) return;
+      if (batch.pending !== 0) return;
 
-      batch.draining = true;
-      const drainGeneration = ++batch.drainGeneration;
       const identity = operation.identity;
-      const intentGeneration = coordinator.intentGeneration;
-      const readGeneration = advanceSelectedRead(coordinator, identity);
-      const shouldDrain = coordinator.desiredName === identity;
-
-      void (async () => {
-        if (shouldDrain) {
-          await launchSelectedRead({
-            identity,
-            readGeneration,
-            intentGeneration,
-            expectedCodes: SELECTED_DISAPPEARANCE_CODES,
-          });
-        }
-        const currentBatch = coordinator.mutations.get(identity);
-        if (
-          !currentBatch ||
-          currentBatch.id !== operation.id ||
-          currentBatch.drainGeneration !== drainGeneration ||
-          currentBatch.pending !== 0
-        ) {
-          return;
-        }
-        if (currentBatch.failures.length > 0) {
-          setResourceError(
-            'mutation',
-            errorMessage(currentBatch.failures[0]) || t('errorBoundary.title'),
-            currentBatch.errorGeneration,
-          );
-        }
-        void refreshRef.current();
-        coordinator.mutations.delete(identity);
-      })();
+      const version = batch.version;
+      const failures = [...batch.failures];
+      const errorGeneration = batch.errorGeneration;
+      coordinator.mutations.delete(identity);
+      if (failures.length > 0) {
+        setResourceError('mutation', errorMessage(failures[0]) || t('errorBoundary.title'), errorGeneration);
+      }
+      if (!coordinator.retired.has(identity)) {
+        coordinator.reconciliationDebt.set(identity, { version, scheduled: false });
+      }
+      void refreshRef.current();
+      void scheduleSelectedReadRef.current?.(identity, { debtOnly: true, expectedCodes: SELECTED_DISAPPEARANCE_CODES });
     },
-    [launchSelectedRead, setResourceError, t],
+    [setResourceError, t],
   );
 
   const reconcileSelected = useCallback(async () => {
     const coordinator = selectedCoordinatorRef.current;
     const identity = coordinator.desiredName;
     if (!identity) return;
-    const batch = coordinator.mutations.get(identity);
-    if (batch) return;
-    const intentGeneration = coordinator.intentGeneration;
-    const readGeneration = advanceSelectedRead(coordinator, identity);
-    await launchSelectedRead({ identity, readGeneration, intentGeneration, expectedCodes: SELECTED_DISAPPEARANCE_CODES });
-  }, [launchSelectedRead]);
+    await scheduleSelectedReadRef.current?.(identity, { expectedCodes: SELECTED_DISAPPEARANCE_CODES });
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -486,9 +542,11 @@ export const AgentsPage: React.FC = () => {
   // something to show — eliminates the empty "select an agent" state
   // that confused users on first visit.
   useEffect(() => {
-    if (selected || agents.length === 0) return;
-    const target = (defaultName && agents.find((a) => a.name === defaultName)) || agents[0];
-    if (target) selectAgent(target.name);
+    const coordinator = selectedCoordinatorRef.current;
+    if (selected || coordinator.accepted || coordinator.desiredName || agents.length === 0) return;
+    const available = agents.filter((agent) => !coordinator.retired.has(agent.name));
+    const target = (defaultName && available.find((a) => a.name === defaultName)) || available[0];
+    if (target) void selectAgent(target.name, false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultName, agents]);
 
@@ -602,18 +660,15 @@ export const AgentsPage: React.FC = () => {
   }, [capabilities.can_use_agents, eventBridgeConnected, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
-    async (name: string, openDetail = false) => {
-      const coordinator = selectedCoordinatorRef.current;
-      const { intentGeneration: generation } = beginSelectedIntent(name);
-      const identity = name;
+    async (name: string, openDetail = false, auto = false) => {
+      beginSelectedIntent(name, { auto });
       clearResourceError('selection');
-      const readGeneration = advanceSelectedRead(coordinator, identity);
-      const outcome = await launchSelectedRead({ identity, readGeneration, intentGeneration: generation });
+      const outcome = await scheduleSelectedReadRef.current?.(name);
       // Enter the mobile drill-down only once the detail has actually loaded —
       // never optimistically, or a failed fetch hides the list with no panel.
       if (outcome === 'published' && openDetail) setDetailOpen(true);
     },
-    [beginSelectedIntent, clearResourceError, launchSelectedRead],
+    [beginSelectedIntent, clearResourceError],
   );
 
   // Apply text search + backend filter; backend grouping is a layout
@@ -683,17 +738,11 @@ export const AgentsPage: React.FC = () => {
     const confirmed = window.confirm(t('agents.deleteConfirm', { name: selected.name }));
     if (!confirmed) return;
     const name = selected.name;
-    const coordinator = selectedCoordinatorRef.current;
     const errorGeneration = beginResourceError('mutation');
-    if (coordinator.desiredName === name) advanceSelectedRead(coordinator, name);
     try {
       const result = await api.removeVibeAgent(name);
       if (result.ok) {
-        if (coordinator.desiredName === name && coordinator.accepted?.name === name) {
-          beginSelectedIntent(null);
-          commitSelected(null);
-        }
-        refresh();
+        retireSelectedIdentityRef.current?.(name);
         void refreshOnboarding();
       } else {
         setResourceError('mutation', errorMessage(result) || t('errorBoundary.title'), errorGeneration);
