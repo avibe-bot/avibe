@@ -128,11 +128,27 @@ def test_force_install_rebuilds_even_when_the_commit_matches(tmp_path: Path) -> 
     harness = Harness(tmp_path, upstream)
     assert harness.manager._install_github_runtime()
     harness.npm_commands.clear()
-    harness.manager.force_install = True
 
-    assert harness.manager._install_github_runtime()
+    assert harness.manager._install_github_runtime(force=True)
 
     assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
+
+
+def test_force_install_fails_before_build_when_old_output_remains(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upstream = make_upstream(tmp_path)
+    harness = Harness(tmp_path, upstream)
+    assert harness.manager._install_github_runtime()
+    harness.npm_commands.clear()
+    monkeypatch.setattr(show_runtime.shutil, "rmtree", lambda _path: None)
+
+    command = harness.manager._install_github_runtime(force=True)
+
+    assert command is None
+    assert harness.manager._install_reason == "runtime_install_failed"
+    assert harness.npm_commands == []
 
 
 def test_forced_update_failure_reports_failed_operation_and_installed_state(tmp_path: Path) -> None:

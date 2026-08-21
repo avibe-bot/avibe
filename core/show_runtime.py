@@ -967,7 +967,7 @@ class ShowRuntimeManager:
         command: list[str] | None,
         *,
         replacement_required: bool,
-        replacement_completed: bool,
+        replacement_completed: bool = False,
     ) -> list[str] | None:
         """Return a command only when it satisfies the requested operation.
 
@@ -2286,7 +2286,6 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 command,
                 replacement_required=False,
-                replacement_completed=False,
             )
         except Exception:
             return None
@@ -2322,14 +2321,12 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 verified_existing_command,
                 replacement_required=False,
-                replacement_completed=False,
             )
         archive_path = self._resolve_manifest_archive(archive, offline=offline)
         if not archive_path:
             return self._managed_install_operation_command(
                 verified_existing_command,
                 replacement_required=force,
-                replacement_completed=False,
             )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(prefix="manifest-", dir=self.runtime_dir))
@@ -2342,7 +2339,6 @@ class ShowRuntimeManager:
                 return self._managed_install_operation_command(
                     verified_existing_command,
                     replacement_required=force,
-                    replacement_completed=False,
                 )
             if install_dir.exists():
                 shutil.rmtree(install_dir)
@@ -2353,10 +2349,11 @@ class ShowRuntimeManager:
             installed_command = self._manifest_runtime_command(install_dir, node)
             if not installed_command:
                 self._install_reason = "runtime_install_missing_bin"
+            # The staged tree was moved onto the managed identity before this command resolved.
             return self._managed_install_operation_command(
                 installed_command,
                 replacement_required=force,
-                replacement_completed=installed_command is not None,
+                replacement_completed=force and installed_command is not None,
             )
         except Exception:
             logger.exception("Failed to install manifest Show Runtime")
@@ -2364,7 +2361,6 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 verified_existing_command,
                 replacement_required=force,
-                replacement_completed=False,
             )
         finally:
             if tmp_dir.exists():
@@ -2642,14 +2638,12 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=force,
-                replacement_completed=False,
             )
         archive_digest = _file_sha256(archive)
         if not force and existing_command and self._archive_manifest_matches(archive_digest):
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=False,
-                replacement_completed=False,
             )
         tmp_dir = Path(tempfile.mkdtemp(prefix="prebuilt-", dir=self.runtime_dir))
         try:
@@ -2661,7 +2655,6 @@ class ShowRuntimeManager:
                 return self._managed_install_operation_command(
                     existing_command,
                     replacement_required=force,
-                    replacement_completed=False,
                 )
             if install_dir.exists():
                 shutil.rmtree(install_dir)
@@ -2671,10 +2664,11 @@ class ShowRuntimeManager:
             installed_command = self._archive_runtime_command(install_dir, node)
             if not installed_command:
                 self._install_reason = "runtime_install_missing_bin"
+            # The staged tree was moved onto the managed identity before this command resolved.
             return self._managed_install_operation_command(
                 installed_command,
                 replacement_required=force,
-                replacement_completed=installed_command is not None,
+                replacement_completed=force and installed_command is not None,
             )
         except Exception:
             logger.exception("Failed to install prebuilt Show Runtime")
@@ -2682,7 +2676,6 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=force,
-                replacement_completed=False,
             )
         finally:
             if tmp_dir.exists():
@@ -2790,14 +2783,12 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         if not npm:
             self._install_reason = "runtime_npm_missing"
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         if not source_dir.exists():
             source_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -2805,14 +2796,12 @@ class ShowRuntimeManager:
                 return self._managed_install_operation_command(
                     None,
                     replacement_required=replacement_required,
-                    replacement_completed=False,
                 )
         else:
             if not self._run_install_command([*git, "-C", str(source_dir), "fetch", "--depth", "1", "origin", self.github_ref]):
                 return self._managed_install_operation_command(
                     existing_command,
                     replacement_required=replacement_required,
-                    replacement_completed=False,
                 )
             fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
             if (
@@ -2827,30 +2816,45 @@ class ShowRuntimeManager:
                 return self._managed_install_operation_command(
                     existing_command,
                     replacement_required=False,
-                    replacement_completed=False,
                 )
             if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
                 return self._managed_install_operation_command(
                     existing_command,
                     replacement_required=replacement_required,
-                    replacement_completed=False,
                 )
         # From here on the artifact the marker describes is being replaced:
         # ``npm ci`` empties node_modules and the build writes into dist. Drop
         # the marker first so a failure anywhere below leaves "unknown" rather
         # than a commit that no longer describes what is on disk.
         self._write_github_build_marker(source_dir, None)
+        if replacement_required:
+            build_output = source_dir / "packages" / "runtime" / "dist"
+            try:
+                if os.path.lexists(build_output):
+                    shutil.rmtree(build_output)
+            except OSError:
+                logger.warning("Failed to remove the GitHub Show Runtime build before replacement", exc_info=True)
+                self._install_reason = "runtime_install_failed"
+                return self._managed_install_operation_command(
+                    None,
+                    replacement_required=True,
+                )
+            if os.path.lexists(build_output):
+                self._install_reason = "runtime_install_failed"
+                return self._managed_install_operation_command(
+                    None,
+                    replacement_required=True,
+                )
+            existing_command = None
         if not self._run_install_command([*npm, "ci"], cwd=source_dir):
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         if not self._run_install_command([*npm, "run", "build"], cwd=source_dir):
             return self._managed_install_operation_command(
                 existing_command,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         command = self._github_runtime_command(source_dir, node)
         if not command:
@@ -2858,13 +2862,13 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 None,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
+        # A forced build starts with no dist tree, so resolving this command proves replacement.
         return self._managed_install_operation_command(
             command,
             replacement_required=replacement_required,
-            replacement_completed=True,
+            replacement_completed=replacement_required,
         )
 
     def _github_build_marker_path(self, source_dir: Path) -> Path:
@@ -2926,7 +2930,6 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 None,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         install_root = self.runtime_dir / "package"
@@ -2934,6 +2937,24 @@ class ShowRuntimeManager:
         package_json = install_root / "package.json"
         if not package_json.exists():
             package_json.write_text('{"private":true,"type":"module"}\n', encoding="utf-8")
+        if replacement_required:
+            managed_tree = install_root / "node_modules"
+            try:
+                if os.path.lexists(managed_tree):
+                    shutil.rmtree(managed_tree)
+            except OSError:
+                logger.warning("Failed to remove the npm Show Runtime tree before replacement", exc_info=True)
+                self._install_reason = "runtime_install_failed"
+                return self._managed_install_operation_command(
+                    None,
+                    replacement_required=True,
+                )
+            if os.path.lexists(managed_tree):
+                self._install_reason = "runtime_install_failed"
+                return self._managed_install_operation_command(
+                    None,
+                    replacement_required=True,
+                )
         with self.install_log_path.open("w", encoding="utf-8") as log:
             result = subprocess.run(
                 [
@@ -2957,7 +2978,6 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 None,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
         resolved = _resolve_executable_path(self._managed_bin_path())
         if not resolved:
@@ -2965,12 +2985,12 @@ class ShowRuntimeManager:
             return self._managed_install_operation_command(
                 None,
                 replacement_required=replacement_required,
-                replacement_completed=False,
             )
+        # A forced install starts with no node_modules tree, so this command proves replacement.
         return self._managed_install_operation_command(
             [resolved],
             replacement_required=replacement_required,
-            replacement_completed=True,
+            replacement_completed=replacement_required,
         )
 
     def _managed_bin_path(self) -> Path:

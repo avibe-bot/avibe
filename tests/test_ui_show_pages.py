@@ -6892,6 +6892,28 @@ def test_show_runtime_manager_forced_manifest_fallback_reports_failed_operation_
     assert result["status"]["command"] == installed["command"]
 
 
+def test_show_runtime_manager_force_refreshes_matching_manifest_install(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path, text="healthy runtime\n")
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = manager.prepare()
+    installed_cli = Path(installed["command"][1])
+    installed_cli.write_text("corrupt runtime\n", encoding="utf-8")
+
+    replaced = manager.prepare(force=True)
+
+    assert replaced["ok"] is True
+    assert installed_cli.read_text(encoding="utf-8") == "healthy runtime\n"
+
+
 def test_show_runtime_manager_preserves_structured_http_download_error(monkeypatch, tmp_path):
     archive_path = _write_runtime_archive(tmp_path)
     archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz?token=secret"
@@ -8243,6 +8265,68 @@ def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):
 
     assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/tmp/avibe-show-runtime"]
     assert called == [False]
+
+
+def test_show_runtime_manager_forced_npm_replacement_fails_when_old_tree_remains(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    managed_bin.chmod(0o755)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    install_calls = []
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/npm"] if command == "npm" else None,
+    )
+    monkeypatch.setattr("core.show_runtime.shutil.rmtree", lambda _path: None)
+    monkeypatch.setattr(
+        "core.show_runtime.subprocess.run",
+        lambda *_args, **_kwargs: install_calls.append(True) or SimpleNamespace(returncode=0),
+    )
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_install_failed"
+    assert result["status"]["installed"] is True
+    assert managed_bin.read_text(encoding="utf-8") == "old runtime\n"
+    assert install_calls == []
+
+
+def test_show_runtime_manager_forced_npm_replacement_removes_old_tree_before_install(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    managed_bin.chmod(0o755)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/npm"] if command == "npm" else None,
+    )
+
+    def install_after_removal(*_args, **_kwargs):
+        assert not managed_bin.parent.parent.exists()
+        managed_bin.parent.mkdir(parents=True)
+        managed_bin.write_text("new runtime\n", encoding="utf-8")
+        managed_bin.chmod(0o755)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("core.show_runtime.subprocess.run", install_after_removal)
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is True
+    assert managed_bin.read_text(encoding="utf-8") == "new runtime\n"
 
 
 def test_show_runtime_shutdown_stops_manager():

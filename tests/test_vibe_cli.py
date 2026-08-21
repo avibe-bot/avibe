@@ -2285,6 +2285,7 @@ def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
 
     assert result["status"] == "repaired"
     assert result["install_dir"] == str(tmp_path / "runtime")
+    assert result["message"] == "Installed and started Show Runtime."
     assert prepared == [False]
     assert stopped == [True]
 
@@ -2373,6 +2374,7 @@ def test_repair_show_runtime_reinstalls_unstartable_runtime_and_verifies_recover
     result = cli._repair_show_runtime()
 
     assert result["status"] == "repaired"
+    assert result["message"] == "Reinstalled and started Show Runtime."
     assert prepared == [True]
 
 
@@ -2419,9 +2421,116 @@ def test_repair_show_runtime_reports_runtime_that_still_cannot_start(monkeypatch
 
     assert result["status"] == "failed"
     assert result["reason"] == "runtime_start_health_timeout"
-    assert "could not start" in result["message"]
+    assert result["message"] == "Show Runtime was reinstalled but could not start: runtime_start_health_timeout"
     assert prepared == [True]
     assert verifier_stops == [True, True]
+
+
+def test_repair_show_runtime_reports_first_install_that_cannot_start(monkeypatch, tmp_path):
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "archive": {"url": str(tmp_path / "runtime.tgz")},
+            "installed": False,
+        },
+        prepare=lambda force=False: {
+            "ok": True,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+            "status": {"install_dir": str(tmp_path / "installed")},
+        },
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_start_health_timeout"
+    assert result["message"] == "Show Runtime was installed but could not start: runtime_start_health_timeout"
+
+
+def test_repair_show_runtime_preserves_undetermined_post_repair_verification(monkeypatch, tmp_path):
+    prepared = []
+    verification_index = 0
+    verifier_results = iter(
+        [
+            SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            SimpleNamespace(available=True, reason=None),
+        ]
+    )
+
+    class VerificationDirectory:
+        def __init__(self, *args, **kwargs):
+            nonlocal verification_index
+            del args, kwargs
+            verification_index += 1
+            self.index = verification_index
+
+        def __enter__(self):
+            root = tmp_path / f"verification-{self.index}"
+            root.mkdir()
+            return str(root)
+
+        def __exit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+            if self.index == 2:
+                raise OSError("post-repair verification cleanup failed")
+            return False
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": True,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+            "status": {"install_dir": str(tmp_path / "installed")},
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "install_dir": str(tmp_path / "installed"),
+            "archive": {"url": str(tmp_path / "runtime.tgz")},
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(0, result=next(verifier_results)),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr(cli.tempfile, "TemporaryDirectory", VerificationDirectory)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_start_verification_failed"
+    assert result["start_error"] == "post-repair verification cleanup failed"
+    assert "preparation completed" in result["message"]
+    assert prepared == [True]
 
 
 def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remains_installed(
