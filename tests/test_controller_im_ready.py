@@ -36,6 +36,11 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
     controller.cleanup_task = None
     controller._delivery_recovery_complete = asyncio.Event()
+    # This is the only test here that gets past the readiness boundary inside
+    # `_on_runtime_ready()`, and the announcement asks the IM runtime whether it
+    # died first. Publishing itself is a no-op in a process that does not hold
+    # the service lock, which no test process does.
+    controller._im_run_exception = None
 
     asyncio.run(controller._on_runtime_ready())
 

@@ -402,15 +402,15 @@ export const SettingsMessagingPage: React.FC = () => {
               control={
                 <CompactField
                   type="number"
-                  min={1}
+                  min={0}
                   max={1440}
                   value={Math.round(
-                    (config.agents?.opencode?.active_turn_timeout_seconds ?? 5400) / 60
+                    (config.agents?.opencode?.active_turn_timeout_seconds ?? 0) / 60
                   )}
                   onChange={(event) => {
                     const minutes = Math.max(
-                      1,
-                      Math.min(1440, Number(event.target.value) || 1)
+                      0,
+                      Math.min(1440, Number(event.target.value) || 0)
                     );
                     void persist(
                       {

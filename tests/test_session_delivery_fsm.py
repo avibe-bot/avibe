@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -34,7 +35,6 @@ from core.runtime_activation import (
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
-    TURN_LIFECYCLE_ADMISSION_KEY,
     DeliveryRequest,
     DeliveryResult,
     SessionTurnManager,
@@ -105,13 +105,26 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
     )
 
 
-def _complete_capture_admission(context: MessageContext) -> None:
-    admission = (context.platform_specific or {}).pop(
-        TURN_LIFECYCLE_ADMISSION_KEY,
-        None,
+def _memory_facts_controller():
+    from core.controller import Controller
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller.memory_runtime = SimpleNamespace(
+        principal_for_user_key=lambda user_key: f"principal:{user_key}",
     )
-    if admission is not None:
-        admission.release()
+    controller.platform_settings_managers = {}
+    controller.get_cwd = lambda _context: None
+    return controller
+
+
+def _complete_capture_admission(context: MessageContext) -> None:
+    """Guard that durable dispatch carries no lifecycle state in its JSON bag."""
+
+    payload = context.platform_specific or {}
+    assert "_turn_lifecycle_admission" not in payload
+    assert "_turn_lifecycle_snapshot" not in payload
+    json.dumps(payload)
 
 
 def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
@@ -191,28 +204,70 @@ def managers(tmp_path: Path):
     engine_b.dispose()
 
 
+def _capture_handler(manager: SessionTurnManager) -> MessageHandler:
+    handler = MessageHandler.__new__(MessageHandler)
+    handler.controller = manager.controller
+    handler._memory_capture_tasks = set()
+    handler._memory_capture_tasks_by_session = {}
+    handler._memory_capture_registration_open = True
+    manager.controller.session_turns = manager
+    manager.controller.message_handler = handler
+    return handler
+
+
+@pytest.mark.anyio
+async def test_completed_memory_lifecycle_state_does_not_accumulate(managers) -> None:
+    """Scenario: MEMORY-INDEP-005.
+
+    Settled optional Memory fences must not retain every historical session.
+    """
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    for index in range(256):
+        session_id = f"settled-memory-session-{index}"
+        snapshot = manager.snapshot_session_lifecycle(session_id)
+        admission = await manager.acquire_lifecycle_admission(session_id)
+        admission.release()
+
+        async def reset_session() -> str:
+            return "reset"
+
+        assert await manager.run_session_lifecycle(
+            session_id,
+            reset_session,
+        ) == "reset"
+        assert not manager.session_lifecycle_snapshot_matches(
+            session_id,
+            snapshot,
+        )
+
+    del admission, snapshot
+    gc.collect()
+    assert len(manager._session_lifecycle_states) == 0
+
+
 @pytest.mark.anyio
 async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> None:
+    """Scenario: MEMORY-INDEP-010."""
+
     manager, _other, _engine, _engine_b, _starts = managers
-    handler = MessageHandler.__new__(MessageHandler)
-    handler._memory_capture_tasks = set()
+    handler = _capture_handler(manager)
     capture_entered = asyncio.Event()
     release_capture = asyncio.Event()
     lifecycle_entered = asyncio.Event()
 
-    async def run_turn(_session_id, context, _text, **_kwargs):
-        admission = context.platform_specific.pop(
-            TURN_LIFECYCLE_ADMISSION_KEY
-        )
+    async def run_turn(_session_id, context, _text, **kwargs):
+        _complete_capture_admission(context)
+        expected_snapshot = kwargs["lifecycle_snapshot"]
 
         async def capture() -> None:
             capture_entered.set()
             await release_capture.wait()
 
-        capture_task = asyncio.create_task(capture())
-        handler._track_memory_capture_task(
-            capture_task,
-            lifecycle_admission=admission,
+        handler._schedule_memory_capture_task(
+            session_id="ses_fsm",
+            expected_snapshot=expected_snapshot,
+            capture=capture(),
         )
 
     async def lifecycle_operation() -> str:
@@ -248,19 +303,19 @@ async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> No
 
 
 @pytest.mark.anyio
-async def test_session_lifecycle_advances_local_epoch_after_operation(managers) -> None:
+async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
-    pre_epoch = manager.session_lifecycle_epoch("ses_fsm")
+    snapshot = manager.snapshot_session_lifecycle("ses_fsm")
 
     async def lifecycle_operation() -> str:
-        assert manager.session_lifecycle_epoch("ses_fsm") == pre_epoch
+        assert manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
         return "reset"
 
     assert await manager.run_session_lifecycle(
         "ses_fsm",
         lifecycle_operation,
     ) == "reset"
-    assert manager.session_lifecycle_epoch_matches("ses_fsm", pre_epoch + 1)
+    assert not manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
 
 
 @pytest.mark.anyio
@@ -268,7 +323,7 @@ async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> Non
     """MEMORY-IM-ATTACH-001: failed reset preserves an in-flight turn epoch."""
 
     manager, _other, _engine, _engine_b, _starts = managers
-    sampled_epoch = manager.session_lifecycle_epoch("ses_fsm")
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
 
     async def lifecycle_operation() -> str:
         raise RuntimeError("reset failed")
@@ -278,9 +333,241 @@ async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> Non
 
     admission = await manager.acquire_lifecycle_admission("ses_fsm")
     try:
-        assert manager.session_lifecycle_epoch_matches("ses_fsm", sampled_epoch)
+        assert manager.session_lifecycle_snapshot_matches(
+            "ses_fsm",
+            sampled_snapshot,
+        )
     finally:
         admission.release()
+
+
+@pytest.mark.anyio
+async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-001."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    capture_holding = asyncio.Event()
+    never_resolves = asyncio.Event()
+    lifecycle_busy = False
+    dispatched: list[str] = []
+
+    async def hung_capture() -> None:
+        capture_holding.set()
+        await never_resolves.wait()
+
+    handler._schedule_memory_capture_task(
+        session_id="ses_fsm",
+        expected_snapshot=manager.snapshot_session_lifecycle("ses_fsm"),
+        capture=hung_capture(),
+    )
+    await asyncio.wait_for(capture_holding.wait(), timeout=1.0)
+
+    async def run_turn(_session_id, _context, text, **_kwargs):
+        dispatched.append(text)
+
+    manager._run = run_turn
+    started = await asyncio.wait_for(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="next turn",
+            ),
+            context=_context(),
+        ),
+        timeout=1.0,
+    )
+    assert started.turn_id
+    assert dispatched == ["next turn"]
+
+    async def reset_session() -> str:
+        return "reset"
+
+    async def archive_session() -> str:
+        return "archived"
+
+    try:
+        assert await asyncio.wait_for(
+            manager.run_session_lifecycle(
+                "ses_fsm",
+                reset_session,
+                deadline_seconds=0.05,
+            ),
+            timeout=1.0,
+        ) == "reset"
+        assert await asyncio.wait_for(
+            manager.run_session_lifecycle(
+                "ses_fsm",
+                archive_session,
+                deadline_seconds=0.05,
+            ),
+            timeout=1.0,
+        ) == "archived"
+    except Exception as error:
+        lifecycle_busy = getattr(error, "code", None) == "memory_session_lifecycle_busy"
+        raise
+    assert lifecycle_busy is False
+    never_resolves.set()
+    await handler.drain_memory_capture_tasks()
+
+
+@pytest.mark.anyio
+async def test_capture_admitted_before_new_is_discarded_after_transition(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-002."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    attributed: list[str] = []
+    admitted = asyncio.Event()
+    finish_capture = asyncio.Event()
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
+
+    async def capture_write() -> None:
+        attributed.append("wrote")
+
+    async def delayed_capture() -> None:
+        admitted.set()
+        await finish_capture.wait()
+        await handler._run_memory_capture(
+            "ses_fsm",
+            sampled_snapshot,
+            capture_write(),
+        )
+
+    capture_task = asyncio.create_task(delayed_capture())
+    handler._track_memory_capture_task(capture_task, session_id="ses_fsm")
+    await asyncio.wait_for(admitted.wait(), timeout=1.0)
+
+    async def reset_session() -> str:
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        reset_session,
+        deadline_seconds=0.05,
+    ) == "reset"
+    assert not manager.session_lifecycle_snapshot_matches(
+        "ses_fsm",
+        sampled_snapshot,
+    )
+
+    finish_capture.set()
+    await handler.drain_memory_capture_tasks()
+    assert attributed == []
+
+
+@pytest.mark.anyio
+async def test_idle_session_capture_attributes_and_shutdown_drains(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-003."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    attributed: list[str] = []
+
+    async def capture_write() -> None:
+        attributed.append("wrote")
+
+    await handler._run_memory_capture(
+        "ses_fsm",
+        manager.snapshot_session_lifecycle("ses_fsm"),
+        capture_write(),
+    )
+    assert attributed == ["wrote"]
+
+    never_resolves = asyncio.Event()
+
+    async def accepted_capture() -> None:
+        await never_resolves.wait()
+
+    pending = asyncio.create_task(accepted_capture(), name="memory-capture")
+    handler._track_memory_capture_task(pending, session_id="ses_fsm")
+    drain = asyncio.create_task(handler.drain_memory_capture_tasks())
+    await asyncio.sleep(0)
+    assert not drain.done()
+    never_resolves.set()
+    await asyncio.wait_for(drain, timeout=1.0)
+    assert handler._memory_capture_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_successful_lifecycle_does_not_cancel_a_new_generation_capture(
+    managers,
+) -> None:
+    """A capture registered during reset must not be cancelled on the success bump."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    scheduled: list[asyncio.Task[object]] = []
+
+    async def reset_session() -> str:
+        task = handler._schedule_memory_capture_task(
+            session_id="ses_fsm",
+            expected_snapshot=manager.snapshot_session_lifecycle("ses_fsm"),
+            capture=asyncio.sleep(0),
+        )
+        assert task is not None
+        scheduled.append(task)
+        await asyncio.sleep(0)
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        reset_session,
+        deadline_seconds=1.0,
+    ) == "reset"
+    assert scheduled[0].cancelled() is False
+    await handler.drain_memory_capture_tasks()
+    assert scheduled[0].cancelled() is False
+
+
+@pytest.mark.anyio
+async def test_failed_timeout_lifecycle_preserves_in_flight_captures(
+    managers,
+) -> None:
+    """A failed /new after the 5s deadline must not cancel accepted captures."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = _capture_handler(manager)
+    never_resolves = asyncio.Event()
+    holding = asyncio.Event()
+
+    async def hung_capture() -> None:
+        holding.set()
+        await never_resolves.wait()
+
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
+    handler._schedule_memory_capture_task(
+        session_id="ses_fsm",
+        expected_snapshot=sampled_snapshot,
+        capture=hung_capture(),
+    )
+    await asyncio.wait_for(holding.wait(), timeout=1.0)
+
+    async def reset_session() -> str:
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.run_session_lifecycle(
+            "ses_fsm",
+            reset_session,
+            deadline_seconds=0.05,
+        )
+
+    assert manager.session_lifecycle_snapshot_matches(
+        "ses_fsm",
+        sampled_snapshot,
+    )
+    assert handler._memory_capture_tasks
+    assert all(not task.cancelled() for task in handler._memory_capture_tasks)
+    never_resolves.set()
+    await handler.drain_memory_capture_tasks()
 
 
 async def _activate(
@@ -1741,7 +2028,7 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     payload = manager._hydrate_delivery_context(context, delivery)
 
     assert payload["metadata"] == {"visible": "record metadata"}
-    assert context.user_id is None
+    assert context.user_id == "user"
     assert context.platform_specific["delivery_admission_context"] == {
         "message_handler_route": {
             "base_session_id": "slack_C1:reviewer",
@@ -1749,6 +2036,162 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
             "routing_subagent": True,
         }
     }
+
+
+def test_hydrate_delivery_context_preserves_im_author_as_routing_identity(
+    managers,
+) -> None:
+    """Hydrating an IM delivery keeps the outbound recipient on author_id.
+
+    This is the guardrail that would have caught avibe-bot/avibe#1584: Memory
+    identity must not replace MessageContext.user_id.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                author_name="Ada",
+                native_message_id="wc-msg-1",
+                metadata={"_memory_user_id": "local"},
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=author_id,
+        platform="wechat",
+    )
+
+    manager._hydrate_delivery_context(context, delivery)
+
+    assert context.user_id == author_id
+    assert context.platform_specific["message_metadata"]["_memory_user_id"] == "local"
+
+
+def test_wechat_outbound_send_uses_hydrated_author_id(managers) -> None:
+    """Scenario: MESSAGE-DELIVERY-316.
+
+    WeChat reply addresses the real platform user, never a Memory principal.
+    """
+
+    from modules.im.wechat import WeChatBot, WeChatConfig
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                native_message_id="wc-msg-2",
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id=None,
+        channel_id=author_id,
+        platform="wechat",
+        platform_specific={"context_token": "ctx-1"},
+    )
+    manager._hydrate_delivery_context(context, delivery)
+    bot = WeChatBot(
+        WeChatConfig(bot_token="token", base_url="https://ilinkai.weixin.qq.com")
+    )
+
+    with patch(
+        "modules.im.wechat.wechat_api.send_message",
+        new=AsyncMock(return_value={}),
+    ) as mock_send:
+        message_id = asyncio.run(bot.send_message(context, "reply"))
+
+    to_user_id = mock_send.await_args.args[2]
+    assert to_user_id == author_id
+    assert to_user_id
+    assert message_id
+
+
+def test_workbench_memory_principal_stays_in_turn_facts(managers) -> None:
+    """Workbench Memory identity is metadata-only; missing metadata skips capture."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    controller = _memory_facts_controller()
+    workbench = _context()
+    workbench.user_id = "workbench"
+    skipped = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="no memory identity",
+            ),
+            context=workbench,
+        )
+    )
+    skipped_delivery = _row(engine, str(skipped.delivery_id))
+    skipped_context = _context()
+    skipped_context.user_id = "workbench"
+    manager._hydrate_delivery_context(skipped_context, skipped_delivery)
+    skipped_facts = controller._memory_turn_facts(
+        skipped_context, include_workdir=False
+    )
+
+    assert skipped_context.user_id == "workbench"
+    assert skipped_facts.user_id == "workbench"
+    assert controller.memory_capture_admitted(skipped_context) is False
+    assert controller.memory_principal_for_context(skipped_context) is None
+    assert starts
+
+    remembered_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=remembered_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="remember this",
+                author_id="push-user",
+                metadata={
+                    "_memory_user_id": "local",
+                    "_memory_ordinary_text": True,
+                },
+            ),
+            dispatch_text="remember this",
+        )
+    context = _context()
+    context.user_id = "workbench"
+    manager._hydrate_delivery_context(context, _row(engine, remembered_id))
+    facts = controller._memory_turn_facts(context, include_workdir=False)
+
+    assert context.user_id == "push-user"
+    assert facts.user_id == "local"
+    assert controller.memory_principal_for_context(context) == "principal:avibe:local"
 
 
 @pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
@@ -1761,7 +2204,8 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
 
     manager, _other, engine, _engine_b, _starts = managers
     classifications: list[bool | None] = []
-    hydrated_users: list[str | None] = []
+    routing_users: list[str | None] = []
+    memory_users: list[str | None] = []
     memory_cli_observations: list[tuple[bool, bool, tuple[str, str] | None]] = []
     principal_id = "u-" + ("1" * 32)
     project_id = "p-" + ("2" * 32)
@@ -1770,6 +2214,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
         project_for=lambda _facts: project_id,
         admits=lambda _facts: True,
     )
+    facts_controller = _memory_facts_controller()
     prompt_controller = SimpleNamespace(
         config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
         _memory_scopes_by_session={},
@@ -1786,7 +2231,10 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
 
     async def capture_start(_session_id, context, _text, **_kwargs):
         classifications.append(context.is_ordinary_text)
-        hydrated_users.append(context.user_id)
+        routing_users.append(context.user_id)
+        memory_users.append(
+            facts_controller._memory_turn_facts(context, include_workdir=False).user_id
+        )
         prompt_admitted = memory_cli_prompt_admitted(prompt_controller, context)
         payload = context.platform_specific or {}
         memory_cli_observations.append(
@@ -1845,7 +2293,8 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
             asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
 
     assert classifications == [True]
-    assert hydrated_users == ["local"]
+    assert routing_users == ["user"]
+    assert memory_users == ["local"]
     assert memory_cli_observations == [
         (True, True, (principal_id, project_id)),
     ]
@@ -4663,49 +5112,35 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
 
 
-def test_persisted_start_revalidation_failure_releases_lifecycle_admission(
+def test_persisted_start_does_not_acquire_lifecycle_admission(
     managers,
     monkeypatch,
 ) -> None:
-    manager, _other, _engine, _engine_b, _starts = managers
-    original_begin = manager._sqlite_engine().begin
-    acquired = False
+    """Scenario: MEMORY-INDEP-001. Dispatch must not wait on Memory."""
 
+    manager, _other, _engine, _engine_b, _starts = managers
+    acquired = False
     original_acquire = manager.acquire_lifecycle_admission
 
     async def track_acquire(raw_session_id):
         nonlocal acquired
-        admission = await original_acquire(raw_session_id)
         acquired = True
-        return admission
+        return await original_acquire(raw_session_id)
 
     monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
-
-    def failing_begin():
-        if acquired:
-            raise OSError("temporary sqlite outage")
-        return original_begin()
-
-    engine = manager._sqlite_engine()
-    monkeypatch.setattr(
-        manager,
-        "_sqlite_engine",
-        lambda: SimpleNamespace(connect=engine.connect, begin=failing_begin),
-    )
-    with pytest.raises(OSError, match="temporary sqlite outage"):
-        asyncio.run(
-            manager.deliver(
-                DeliveryRequest(
-                    session_id="ses_fsm",
-                    priority="p3",
-                    content="release the lock",
-                ),
-                context=_context(),
-            )
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not fence dispatch",
+            ),
+            context=_context(),
         )
+    )
 
-    assert acquired
-    assert not manager._session_lifecycle_locks["ses_fsm"].locked()
+    assert acquired is False
+    assert "ses_fsm" not in manager._session_lifecycle_states
 
 
 @pytest.mark.parametrize(

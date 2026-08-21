@@ -203,6 +203,43 @@ def test_agent_output_provenance_is_hidden_metadata_and_deduplicated(isolated_st
     }
 
 
+def test_visible_replay_promotes_suppressed_nonterminal_output(isolated_state):
+    native_message_id = "agent-output:codex:run-1:primary"
+    suppressed = MessageContext(
+        user_id="U_alice",
+        channel_id="C_general",
+        platform="slack",
+        platform_specific={"suppress_delivery": True},
+    )
+    visible = MessageContext(
+        user_id="U_alice",
+        channel_id="C_general",
+        platform="slack",
+    )
+
+    local = persist_agent_message(
+        suppressed,
+        "output",
+        "local history",
+        metadata={"delivery_suppressed": True, "run_id": "run-1"},
+        native_message_id=native_message_id,
+    )
+    promoted = persist_agent_message(
+        visible,
+        "output",
+        "visible reply",
+        metadata={"run_id": "run-1"},
+        native_message_id=native_message_id,
+    )
+
+    assert local is not None
+    assert promoted is not None
+    assert promoted["id"] == local["id"]
+    assert promoted["type"] == "output"
+    assert promoted["text"] == "visible reply"
+    assert promoted["metadata"] == {"run_id": "run-1"}
+
+
 def test_persist_agent_reuses_cached_sqlite_engine(isolated_state, monkeypatch):
     import storage.db as sqlite_db
 

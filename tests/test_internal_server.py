@@ -37,7 +37,6 @@ from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
 from core.vibe_agents import VibeAgentStore
 from core.memory.maintenance import MemoryStoreUnavailableError
-from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -278,15 +277,16 @@ def _build_controller_double(handler=None):
     controller = MagicMock()
     controller.message_handler = MagicMock()
 
-    async def _handle_user_message(context, text):
+    async def _handle_user_message(
+        context,
+        text,
+        *,
+        lifecycle_snapshot=None,
+    ):
         payload = context.platform_specific or {}
-        lifecycle_admission = payload.pop(
-            session_turns.TURN_LIFECYCLE_ADMISSION_KEY,
-            None,
-        )
-        release = getattr(lifecycle_admission, "release", None)
-        if callable(release):
-            release()
+        assert "_turn_lifecycle_admission" not in payload
+        assert "_turn_lifecycle_snapshot" not in payload
+        del lifecycle_snapshot
         if handler is not None:
             return await handler(context, text)
         return None
@@ -356,23 +356,19 @@ def _build_controller_double(handler=None):
     return controller
 
 
-def test_controller_double_releases_turn_lifecycle_admission_before_handler() -> None:
+def test_controller_double_omits_retired_turn_lifecycle_admission() -> None:
     async def _exercise() -> None:
-        lock = asyncio.Lock()
-        await lock.acquire()
-        admission = session_turns.TurnLifecycleAdmission(lock)
         context = MessageContext(
             user_id="U",
             channel_id="C",
             platform="avibe",
-            platform_specific={
-                session_turns.TURN_LIFECYCLE_ADMISSION_KEY: admission,
-            },
+            platform_specific={},
         )
 
         async def handler(received_context, _text):
-            assert session_turns.TURN_LIFECYCLE_ADMISSION_KEY not in received_context.platform_specific
-            assert lock.locked() is False
+            assert "_turn_lifecycle_admission" not in (
+                received_context.platform_specific or {}
+            )
 
         controller = _build_controller_double(handler=handler)
         await controller.message_handler.handle_user_message(context, "hello")
@@ -479,8 +475,8 @@ def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() 
         "ok": True,
         "session": {"id": "ses-memory", "status": "archived"},
     }
-    # The UI transport waits without a reporting deadline, while the controller
-    # still bounds provider lifecycle work before its shielded archive commit.
+    # The UI transport waits without a reporting deadline so the controller can
+    # finish the terminal archive write. Memory flush is scheduled afterwards.
     controller.archive_memory_cli_session.assert_awaited_once_with(
         "ses-memory",
         deadline_seconds=5.0,
@@ -527,11 +523,6 @@ def test_memory_archive_session_rejects_widened_or_invalid_payloads(
     "error,status_code,error_code",
     [
         (LookupError("missing"), 404, "session_not_found"),
-        (
-            MemorySessionLifecycleBusyError("busy"),
-            503,
-            "memory_session_lifecycle_busy",
-        ),
         (RuntimeError("failed"), 503, "session_archive_unavailable"),
     ],
 )
@@ -1805,6 +1796,96 @@ def test_publish_event_endpoint_emits_allowlisted_bus_event():
     ]
 
 
+def test_internal_events_end_a_subscriber_whose_queue_overflowed(monkeypatch):
+    """The controller feed drops its reader rather than serving it a hole.
+
+    This is the first bounded queue on the controller → UI-server → browser
+    path, and a discard here is the most invisible of the three: the UI server's
+    broker never sees the event, so every id downstream stays contiguous and
+    every socket keeps heartbeating. Ending the stream is what turns the loss
+    into a signal -- the bridge reconnects, the reconnect flips
+    ``workbench.events.bridge.status``, and browsers reconcile once. Announcing
+    the hole down this same stream cannot work: the queue is still full, so the
+    next iteration finds another discard and announces again, starving the
+    payload frames the warning was about.
+    """
+
+    from core import inbox_events
+
+    subscriptions: list[tuple[int, asyncio.Queue]] = []
+    real_subscribe = inbox_events.bus.subscribe
+
+    def tracking_subscribe():
+        # The controller handshake carries no sub_id (the browser feed's does),
+        # so the test learns it the only other way available to a caller.
+        subscription = real_subscribe()
+        subscriptions.append(subscription)
+        return subscription
+
+    monkeypatch.setattr(inbox_events.bus, "subscribe", tracking_subscribe)
+    baseline_subscribers = inbox_events.bus.subscriber_count()
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_until_end() -> tuple[str, int, list[str], bool, int]:
+        app = internal_server.create_app(_build_controller_double())
+        route = next(
+            candidate
+            for candidate in app.routes
+            if getattr(candidate, "path", None) == "/internal/events"
+            and "GET" in (getattr(candidate, "methods", None) or set())
+        )
+        response = await route.endpoint()
+        iterator = response.body_iterator.__aiter__()
+        frames: list[str] = []
+        ended = False
+        try:
+            handshake = decode(await iterator.__anext__())
+            sub_id, queue = subscriptions[-1]
+            # Park the stream inside its read loop before overflowing the queue,
+            # so what this asserts is a discard the reader has to notice on a
+            # later iteration -- not one already covered by the handshake it
+            # just delivered.
+            pending = asyncio.create_task(iterator.__anext__())
+            await asyncio.sleep(0)
+
+            for index in range(queue.maxsize + 3):
+                inbox_events.bus.publish("runs.updated", {"run_id": f"run_{index}"})
+            # One yield runs the whole batch of ``call_soon_threadsafe``
+            # handoffs, so every discard has happened by the time the count is
+            # read.
+            await asyncio.sleep(0)
+            dropped = inbox_events.bus.dropped_count(sub_id)
+
+            # Bounded well below the ``maxsize`` frames still sitting in the
+            # queue: a stream that kept serving them would run out of the budget
+            # rather than end, which is the failure this asserts against.
+            for _ in range(5):
+                awaitable = pending if pending is not None else iterator.__anext__()
+                pending = None
+                try:
+                    frames.append(decode(await asyncio.wait_for(awaitable, timeout=2)))
+                except StopAsyncIteration:
+                    ended = True
+                    break
+        finally:
+            await iterator.aclose()
+        # Read after the generator has exited: its ``finally`` unsubscribes, and
+        # a subscription that no longer exists is owed nothing.
+        return handshake, dropped, frames, ended, inbox_events.bus.subscriber_count()
+
+    handshake, dropped, frames, ended, subscribers_after = asyncio.run(collect_until_end())
+
+    assert "event: connected" in handshake
+    assert dropped == 3
+    assert ended is True
+    # The queue still held ``maxsize`` events, so anything but a short tail here
+    # means the reader kept relaying frames across the gap.
+    assert len(frames) <= 1
+    assert subscribers_after == baseline_subscribers
+
+
 def test_reconcile_platforms_endpoint_calls_controller(monkeypatch):
     controller = _build_controller_double()
     calls = []
@@ -2240,7 +2321,9 @@ def test_dispatch_async_stop_receipt_waits_for_terminal_evidence(monkeypatch, tm
 
     started = asyncio.Event()
 
-    async def _never_settles(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _never_settles(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         # Model a long agent turn: the backend accepted the prompt but hasn't
         # produced its terminal result yet. dispatch_turn would normally hold on
         # ``await done.wait()`` with no timeout — emulate that by just sleeping so
@@ -4431,7 +4514,16 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     captured: dict = {}
     started = asyncio.Event()
 
-    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _fake_dispatch_turn(
+        ctrl,
+        ctx,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        on_chunk=None,
+        lifecycle_snapshot=None,
+    ):
+        captured["lifecycle_snapshot"] = lifecycle_snapshot
         captured["source"] = source
         captured["on_chunk"] = on_chunk
         captured["text"] = text
@@ -4477,6 +4569,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
 
     events = asyncio.run(_go())
     assert captured["source"] == SOURCE_SCHEDULED, "scheduled run dispatches on the scheduler path"
+    assert captured["lifecycle_snapshot"] is None
     # A scheduled run passes the no-op chunk SINK (callable, NOT None) so dispatch_turn
     # HOLDS the turn open to its terminal result — same as a Chat turn — instead of an
     # async backend returning at prompt-submit and freeing the slot (Codex P2). The sink
@@ -4518,7 +4611,9 @@ def test_hfr_482_create_per_run_delivery_adopts_reserved_session(monkeypatch, tm
 
     started = asyncio.Event()
 
-    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _fake_dispatch_turn(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         started.set()
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
@@ -4740,7 +4835,9 @@ def test_agent_run_send_now_steers_its_content_without_promoting_fifo(monkeypatc
     original_started = asyncio.Event()
     seen: list[tuple[str, str]] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append((text, source))
         if text == "original work":
             _bind_test_native_start(engine, ctx)
@@ -5231,7 +5328,9 @@ def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
     original_started = asyncio.Event()
     seen: list[str] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append(text)
         _bind_test_native_start(engine, ctx)
         if text == "original work":
@@ -5399,7 +5498,9 @@ def test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner
 
     seen: list[str] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append(text)
         return TurnDispatchOutcome(
             error=None,
@@ -5479,7 +5580,9 @@ def test_agent_run_send_now_on_an_idle_backlog_starts_its_own_content(monkeypatc
     assert request_store.claim(request.id) is not None
     seen: list[str] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append(text)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
@@ -5768,7 +5871,9 @@ def test_idle_send_now_releases_hold_and_starts_the_exact_head(
     app = internal_server.create_app(controller)
     controller.emit_agent_message = AsyncMock()
 
-    async def _dispatch(ctrl, context, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, context, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         assert text == "retry me later"
         _bind_test_native_start(engine, context)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -6039,7 +6144,16 @@ def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tm
     session_id = session["id"]
     dispatched: list[str] = []
 
-    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _accept_dispatch(
+        ctrl,
+        ctx,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        on_chunk=None,
+        lifecycle_snapshot=None,
+    ):
+        del lifecycle_snapshot
         dispatched.append(text)
         _bind_test_native_start(engine, ctx)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -6206,7 +6320,16 @@ def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_pa
     assert request_store.claim(run.id) is not None
     dispatched: list[str] = []
 
-    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _accept_dispatch(
+        ctrl,
+        ctx,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        on_chunk=None,
+        lifecycle_snapshot=None,
+    ):
+        del lifecycle_snapshot
         dispatched.append(text)
         _bind_test_native_start(engine, ctx)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -6299,7 +6422,9 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
 
     started = asyncio.Event()
 
-    async def _long_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _long_dispatch_turn(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         _bind_test_native_start(engine, ctx)
         started.set()
         await asyncio.sleep(5)  # held until the test cancels it
@@ -8534,6 +8659,18 @@ def test_show_access_settings_read_returns_controller_snapshot(monkeypatch):
             "share_id": "stable-link",
             "revision": 7,
             "normalized_emails": ["alice@example.com", "bob@example.com"],
+            "entries": [
+                {
+                    "kind": "email",
+                    "value": "alice@example.com",
+                    "organization_id": None,
+                },
+                {
+                    "kind": "email",
+                    "value": "bob@example.com",
+                    "organization_id": None,
+                },
+            ],
         }
     }
     assert captured == ["ses-show-access", "closed"]
@@ -8623,6 +8760,7 @@ def test_show_access_apply_preserves_atomic_result_status(monkeypatch, status):
             "share_id": "current-link",
             "revision": 9,
             "normalized_emails": [],
+            "entries": [],
         },
     }
     assert captured == {
@@ -8632,6 +8770,74 @@ def test_show_access_apply_preserves_atomic_result_status(monkeypatch, status):
         "target_share_id": "candidate-link",
         "target_emails": ["guest@example.com"],
     }
+
+
+def test_show_access_apply_writes_and_reads_group_and_organization_entries(monkeypatch):
+    from core import show_pages
+
+    captured: dict = {}
+
+    class _Store:
+        def apply_access(self, page_id, **kwargs):
+            captured.update(page_id=page_id, **kwargs)
+            return show_pages.ShowAccessApplyResult(
+                status="applied",
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="limited",
+                    share_id="stable-link",
+                    revision=2,
+                    entries=(
+                        show_pages.ShowAccessEntry("group", "group-7", "org-1"),
+                        show_pages.ShowAccessEntry("organization", "org-1", "org-1"),
+                    ),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "page_id": "ses-show-access",
+        "expected_revision": 1,
+        "target_access_mode": "limited",
+        "target_share_id": "stable-link",
+        "target_entries": [
+            {"kind": "group", "value": "group-7"},
+            {"kind": "organization", "value": "org-1"},
+        ],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/show-access/apply", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "applied",
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "limited",
+            "share_id": "stable-link",
+            "revision": 2,
+            "normalized_emails": [],
+            "entries": [
+                {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+                {
+                    "kind": "organization",
+                    "value": "org-1",
+                    "organization_id": "org-1",
+                },
+            ],
+        },
+    }
+    assert captured["target_entries"] == payload["target_entries"]
+    assert "target_emails" not in captured
 
 
 def test_show_access_internal_identity_mismatch_fails_closed(monkeypatch):

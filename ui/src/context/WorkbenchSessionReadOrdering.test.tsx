@@ -94,10 +94,51 @@ type FakeApi = {
 
 const apiRef = { current: null as FakeApi | null };
 
+type StreamConnectHandler = NonNullable<WorkbenchEventHandlers['onConnected']>;
+
+const streamConnectHandlers = new Set<StreamConnectHandler>();
+const wrappedApis = new WeakMap<FakeApi, FakeApi>();
+
+/**
+ * Supply the half of the resume edge the real ApiContext owns. Consumers no
+ * longer watch page activity themselves: ApiContext decides whether the shared
+ * event stream can vouch for the gap the page spent away, recycles the ones that
+ * cannot, and announces the replacement through `onConnected`. These fakes stand
+ * in for that context, so the signal has to come from here rather than from every
+ * fake in the file.
+ */
+function withStreamConnect(api: FakeApi | null): FakeApi | null {
+  if (!api) return null;
+  // Consumers key their subscription effect on the api object, so a fresh
+  // wrapper per render would resubscribe forever.
+  const cached = wrappedApis.get(api);
+  if (cached) return cached;
+  const wrapped: FakeApi = {
+    ...api,
+    connectWorkbenchEvents: (handlers) => {
+      const disconnect = api.connectWorkbenchEvents(handlers);
+      const onConnected = handlers.onConnected;
+      if (!onConnected) return disconnect;
+      streamConnectHandlers.add(onConnected);
+      return () => {
+        streamConnectHandlers.delete(onConnected);
+        disconnect();
+      };
+    },
+  };
+  wrappedApis.set(api, wrapped);
+  return wrapped;
+}
+
 vi.mock('./ApiContext', async () => {
   const actual = await vi.importActual<typeof import('./ApiContext')>('./ApiContext');
-  return { ...actual, useApi: () => apiRef.current };
+  return { ...actual, useApi: () => withStreamConnect(apiRef.current) };
 });
+
+// The provider reports its one never-sent refusal through the toast surface, which
+// this tree does not mount. Nothing here asserts that copy — a no-op keeps the
+// dependency from throwing.
+vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast: () => {} }) }));
 
 function settle() {
   return act(async () => {
@@ -106,14 +147,26 @@ function settle() {
   });
 }
 
+// The inbox reconciles when a stream starts reaching it. That covers coming back
+// to a page whose stream could not prove it stayed connected -- ApiContext
+// recycles it, and the replacement's handshake is the signal here. It is not the
+// raw visibility edge, which a page whose stream never dropped also sees.
+function simulatePageResume() {
+  for (const handler of [...streamConnectHandlers]) handler({ sub_id: 1, source: 'browser' });
+}
+
 describe('Workbench session read ownership', () => {
   beforeEach(() => {
     apiRef.current = null;
+    // jsdom never reports window focus, so no reading would ever count as "the
+    // page is presented" and nothing would ever be marked read.
+    document.hasFocus = () => true;
   });
 
   afterEach(() => {
     cleanup();
     apiRef.current = null;
+    Reflect.deleteProperty(document, 'hasFocus');
   });
 
   it('does not let a bootstrap issued before hide repopulate the projects tree', async () => {
@@ -145,7 +198,7 @@ describe('Workbench session read ownership', () => {
     await settle();
 
     act(() => {
-      handlers?.onConnected?.({ sub_id: 1, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -240,7 +293,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
@@ -273,6 +326,7 @@ describe('Workbench session read ownership', () => {
       getWorkbenchProjectsBootstrap,
       listSessions: vi.fn().mockResolvedValue({ sessions: [session], next_before_id: null }),
       connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      createProject: vi.fn().mockResolvedValue(project),
     };
     let tree: ReturnType<typeof useWorkbenchProjectsTree> | null = null;
     const Probe = () => {
@@ -289,8 +343,8 @@ describe('Workbench session read ownership', () => {
       </WorkbenchProjectsProvider>,
     );
     await settle();
-    act(() => {
-      tree?.upsertProjectToTop(project);
+    await act(async () => {
+      await tree?.createProject({ folder_path: '/tmp/a' });
     });
     await settle();
     await act(async () => {
@@ -326,6 +380,7 @@ describe('Workbench session read ownership', () => {
     let handlers: WorkbenchEventHandlers | null = null;
     apiRef.current = {
       getWorkbenchProjectsBootstrap,
+      createProject: vi.fn().mockResolvedValue(localProject),
       connectWorkbenchEvents: vi.fn((next) => {
         handlers = next;
         return vi.fn();
@@ -347,12 +402,12 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 3, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
-    act(() => {
-      tree?.upsertProjectToTop(localProject);
+    await act(async () => {
+      await tree?.createProject({ folder_path: '/tmp/local' });
     });
     await act(async () => {
       staleReconnect.resolve({
@@ -502,7 +557,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -711,7 +766,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      handlers?.onConnected?.({ sub_id: 3, source: 'browser' });
+      handlers?.onConnected?.();
     });
     await settle();
     act(() => {
@@ -1253,7 +1308,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     act(() => {
@@ -1319,7 +1374,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     act(() => {
@@ -1409,7 +1464,7 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     act(() => {
@@ -1505,7 +1560,7 @@ describe('Workbench session read ownership', () => {
     await settle();
     act(() => {
       void inbox?.loadMore();
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
     });
     await settle();
     expect(listInbox).toHaveBeenCalledTimes(2);
@@ -1573,8 +1628,8 @@ describe('Workbench session read ownership', () => {
     );
     await settle();
     act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-      window.dispatchEvent(new Event('focus'));
+      simulatePageResume();
+      simulatePageResume();
     });
     await settle();
     expect(listInbox).toHaveBeenCalledTimes(2);

@@ -29,12 +29,13 @@ from config.v2_config import TelegramConfig
 
 @pytest.fixture(autouse=True)
 def _reset_chat_discovery_cache():
-    """chat_discovery keeps process-global debounce/migration caches keyed on
+    """chat_discovery keeps a process-global debounce cache keyed on
     (platform, chat_id) — not on the DB path — so a chat remembered by one test
     short-circuits remember_chat in a later test that points get_vibe_remote_dir at
-    a fresh tmp dir. Clear them between tests for isolation."""
+    a fresh tmp dir. Clear it between tests for isolation. The migrated-target memo
+    it used to keep alongside is now `ensure_sqlite_state`'s, which conftest's
+    `_reset_cached_sqlite_engines` already resets for every test."""
     chat_discovery._debounce_cache.clear()
-    chat_discovery._migrated_db_paths.clear()
     yield
 
 

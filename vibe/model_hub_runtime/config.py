@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
 
+from config.atomic_io import write_atomic
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
 
@@ -110,17 +109,8 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
 
 
 def _secure_write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    # The file is 0600 by ``write_atomic``; the directory is this function's own
+    # concern, because the config it holds names an upstream API key.
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(payload, handle, sort_keys=False, default_flow_style=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        temporary.replace(path)
-        path.chmod(0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_atomic(path, yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))

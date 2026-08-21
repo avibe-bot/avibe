@@ -8,9 +8,18 @@ from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.show_pages import (
     SHOW_ACCESS_EMAIL_MAX_COUNT,
+    SHOW_ACCESS_ENTRY_MAX_COUNTS,
+    ShowAccess,
+    ShowAccessEntry,
+    ShowAccessVisitor,
     ShowPage,
     ShowPageError,
     ShowPageStore,
+    limited_show_access_admits,
+    limited_show_access_grant,
+    limited_show_access_grant_is_current,
+    parse_show_access_apply_request,
+    show_access_payload,
     _default_index_html,
     _extract_icon_path,
     ensure_show_page_dir,
@@ -20,7 +29,7 @@ from core.show_pages import (
     show_public_event_write_token,
 )
 from storage.pagination import PageRequest
-from vibe import cli
+from vibe import api, cli
 
 
 @dataclass(frozen=True)
@@ -39,12 +48,12 @@ def _stub_runtime_prepare_dependencies(
 ):
     calls = {"askill": [], "avault": [], "tmux": [], "git": []}
 
-    def fake_askill(offline=False):
-        calls["askill"].append({"offline": offline})
+    def fake_askill(offline=False, force=False):
+        calls["askill"].append({"offline": offline, "force": force})
         return askill_result or {"ok": True, "installed": True}
 
-    def fake_avault(offline=False):
-        calls["avault"].append({"offline": offline})
+    def fake_avault(offline=False, force=False):
+        calls["avault"].append({"offline": offline, "force": force})
         return avault_result or {"ok": True, "installed": True}
 
     def fake_tmux(offline=False, force=False):
@@ -193,15 +202,16 @@ def test_runtime_clean_cleans_git_runtime(monkeypatch, capsys):
     args = parser.parse_args(["runtime", "clean", "--json", "--keep-previous", "2"])
 
     class FakeRuntimeManager:
-        def clean(self, *, keep_previous=1):
+        def clean(self, *, keep_previous=1, dry_run=False):
             assert keep_previous == 2
-            return {"ok": True, "removed": ["show-old"]}
+            assert dry_run is False
+            return {"ok": True, "removed": ["show-old"], "archives": {"removed_count": 0}}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     monkeypatch.setattr(
         cli,
         "_clean_git_runtime",
-        lambda *, keep_previous: {"ok": True, "removed": [f"git-old-{keep_previous}"]},
+        lambda *, keep_previous, dry_run=False: {"ok": True, "removed": [f"git-old-{keep_previous}"], "dry_run": dry_run},
     )
 
     assert cli.cmd_runtime(args) == 0
@@ -282,45 +292,29 @@ def test_runtime_prepare_cli_strict_allows_unsupported_git_platform(monkeypatch,
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])
-    seen = {"askill": None, "avault": None, "tmux": None, "git": None}
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
             assert offline is True
             return {"ok": True}
 
-    def fake_askill(offline=False):
-        seen["askill"] = offline
-        return {"ok": True, "skipped": True, "reason": "offline"}
-
-    def fake_avault(offline=False):
-        seen["avault"] = offline
-        return {"ok": True, "skipped": True, "reason": "offline"}
-
-    def fake_tmux(offline=False, force=False):
-        seen["tmux"] = {"offline": offline, "force": force}
-        return {"ok": True, "skipped": True, "reason": "offline"}
-
-    def fake_git(offline=None, force=False):
-        seen["git"] = {"offline": offline, "force": force}
-        return {"ok": True, "installed": True}
-
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
-    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
-    monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
+    offline_result = {"ok": True, "skipped": True, "reason": "offline"}
+    calls = _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        askill_result=offline_result,
+        avault_result=offline_result,
+        tmux_result=offline_result,
+    )
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert seen == {
-        "askill": True,
-        "avault": True,
-        "tmux": {"offline": True, "force": False},
-        "git": {"offline": True, "force": False},
-    }
-    assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
-    assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
+    for phase, recorded in calls.items():
+        assert recorded, f"{phase} phase did not run"
+        assert all(call["offline"] for call in recorded), phase
+        assert all(call["force"] is False for call in recorded), phase
+    assert payload["avault"] == offline_result
+    assert payload["tmux"] == offline_result
     assert payload["git"] == {"ok": True, "installed": True}
 
 
@@ -360,6 +354,115 @@ def test_runtime_prepare_tmux_runs_when_terminal_enabled(monkeypatch):
 
     assert cli._ensure_tmux_during_prepare(force=True) == {"ok": True}
     assert calls == [True]
+
+
+def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeypatch):
+    # Prepare is the chokepoint that keeps managed local deps current, which is
+    # not the same as reinstalling them: every install here is a network download
+    # (askill ~30s, avault ~20s), so a prepare with nothing to change must reach
+    # none of them. Stubbing the installers rather than the decision keeps this
+    # honest whichever way the wrappers ask the question.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_AVAULT", raising=False)
+    monkeypatch.setattr(api, "install_askill", lambda: pytest.fail("askill must not reinstall when current"))
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("avault must not reinstall when current"))
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+
+    askill = cli._ensure_askill_during_prepare()
+    avault = cli._ensure_avault_during_prepare()
+
+    assert askill == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/x/askill",
+        "version": "0.1.14",
+    }
+    assert avault["ok"] is True
+    assert avault["changed"] is False
+    assert avault["version"] == api.AVAULT_VERSION
+
+
+@pytest.mark.parametrize("reason", ["latest_unavailable", "a_reason_invented_after_this_test"])
+def test_runtime_prepare_installs_when_currency_was_not_established(monkeypatch, reason):
+    # "I did not install" and "it is current" are different facts, and prepare
+    # may only report ready for the second. `up_to_date` is the one verdict that
+    # states it; every other non-install verdict — the upstream probe failing
+    # today, whatever is added later — means unknown, so prepare installs rather
+    # than printing `askill ready.` off a check that never happened. Keyed on the
+    # verdict rather than on a list of reasons, so a reason added later inherits
+    # the safe branch instead of a false pass.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.setattr(
+        api,
+        "refresh_askill_if_stale",
+        lambda: {"ok": True, "skipped": True, "reason": reason, "status": {"path": "/x/askill", "version": "0.1.14"}},
+    )
+    forced = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: forced.append(force) or {"ok": True, "installed": True, "changed": True},
+    )
+
+    out = cli._ensure_askill_during_prepare()
+
+    assert forced == [True], "an unestablished currency must reach the installer"
+    assert out["changed"] is True
+    assert out["action"] == "refresh_currency_unknown"
+
+
+def test_runtime_prepare_force_still_reinstalls_current_managed_deps(monkeypatch):
+    # The mirror of the test above, and the boundary of the change: making the
+    # ordinary prepare cheap must not take the repair away. A corrupted binary
+    # can still report the current version, so `--force` has to reach the
+    # installer for exactly the states the currency check skips.
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_AVAULT", raising=False)
+    installed = []
+    monkeypatch.setattr(api, "refresh_askill_if_stale", lambda: pytest.fail("--force must not settle for a currency check"))
+    monkeypatch.setattr(api, "refresh_avault_if_stale", lambda: pytest.fail("--force must not settle for a currency check"))
+    monkeypatch.setattr(api, "install_askill", lambda: installed.append("askill") or {"ok": True})
+    monkeypatch.setattr(api, "install_avault", lambda force=False: installed.append("avault") or {"ok": True, "changed": True})
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/askill")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+
+    assert cli._ensure_askill_during_prepare(force=True)["ok"] is True
+    assert cli._ensure_avault_during_prepare(force=True)["ok"] is True
+    assert installed == ["askill", "avault"]
+
+
+def test_runtime_prepare_force_reaches_every_managed_dependency(monkeypatch):
+    # `--force` is advertised by the parser as "reinstall even when the cached
+    # runtime matches", so it belongs to every dependency phase, not to the ones
+    # that happen to accept it. Asserted over whatever phases ran rather than a
+    # list of names, so a phase added later fails here instead of silently
+    # ignoring the flag.
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare", "--force"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            assert force is True
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
+
+    assert cli.cmd_runtime(args) == 0
+    assert calls, "prepare recorded no dependency phases"
+    for phase, recorded in calls.items():
+        assert recorded, f"{phase} phase did not run"
+        assert all(call["force"] is True for call in recorded), phase
 
 
 def _save_config() -> V2Config:
@@ -792,6 +895,518 @@ def test_show_access_and_availability_are_independent(monkeypatch, tmp_path) -> 
         assert store.get("ses-offline-access").offline is True
     finally:
         store.close()
+
+
+def _instance_ownership(monkeypatch, organization_id: str | None) -> None:
+    """Pin the store's own answer to "which organization owns this instance".
+
+    Group and organization access entries are stored against that answer and
+    never against a caller-supplied one, so pinning it here is what makes an
+    organization-scoped audience reachable (or, with ``None``, Personal).
+    """
+
+    ownership = (
+        {"mode": "personal"}
+        if organization_id is None
+        else {"mode": "organization", "organization_id": organization_id}
+    )
+    monkeypatch.setattr(
+        ShowPageStore,
+        "_resolve_instance_ownership",
+        staticmethod(lambda: dict(ownership)),
+    )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ShowAccessEntry(kind="group", value="group-7", organization_id="org-1"),
+        ShowAccessEntry(kind="group", value="group-7"),
+        ShowAccessEntry(kind="organization", value="org-1", organization_id="org-1"),
+        {"kind": "organization"},
+    ],
+)
+def test_show_access_personal_instance_grants_emails_only(monkeypatch, tmp_path, entry) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-personal-entries")
+        _instance_ownership(monkeypatch, None)
+        result = store.apply_access(
+            "ses-personal-entries",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[{"kind": "email", "value": "guest@example.com"}, entry],
+        )
+
+        assert result.status == "invalid"
+        assert result.show_access.revision == 0
+        assert result.show_access.access_mode == "private"
+        # A rejected audience is rejected whole: the email alongside it is not
+        # written either.
+        assert result.show_access.entries == ()
+        assert store.get_access("ses-personal-entries").entries == ()
+    finally:
+        store.close()
+
+
+def test_show_access_entries_are_scoped_to_the_instance_organization(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-org-entries")
+        _instance_ownership(monkeypatch, "org-1")
+        applied = store.apply_access(
+            "ses-org-entries",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": " Guest@Example.COM "},
+                {"kind": "group", "value": " group-7 "},
+                {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+                # "This organization may read" is one switch, not a list: every
+                # organization entry names the instance's organization by
+                # construction, so two of them collapse into one.
+                {"kind": "organization"},
+                {"kind": "organization", "value": "org-1", "organization_id": "org-1"},
+            ],
+        )
+
+        assert applied.status == "applied"
+        assert applied.show_access.revision == 1
+        assert applied.show_access.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+            ShowAccessEntry("group", "group-7", "org-1"),
+            ShowAccessEntry("organization", "org-1", "org-1"),
+        )
+        assert applied.show_access.normalized_emails == ("guest@example.com",)
+        assert store.get_access("ses-org-entries") == applied.show_access
+
+        cross_organization = store.apply_access(
+            "ses-org-entries",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[{"kind": "group", "value": "group-9", "organization_id": "org-2"}],
+        )
+        assert cross_organization.status == "invalid"
+        assert store.get_access("ses-org-entries") == applied.show_access
+
+        # The audience is a complete set, not a delta.
+        replaced = store.apply_access(
+            "ses-org-entries",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[{"kind": "group", "value": "group-8"}],
+        )
+        assert replaced.status == "applied"
+        assert replaced.show_access.entries == (ShowAccessEntry("group", "group-8", "org-1"),)
+        assert replaced.show_access.normalized_emails == ()
+
+        # ``target_emails`` is the email-only shorthand for that same
+        # replacement, so it revokes the group entry with it.
+        shorthand = store.apply_access(
+            "ses-org-entries",
+            expected_revision=2,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_emails=["guest@example.com"],
+        )
+        assert shorthand.status == "applied"
+        assert shorthand.show_access.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+        )
+    finally:
+        store.close()
+
+
+def test_show_access_group_audience_over_limit_has_no_write(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-group-limit")
+        _instance_ownership(monkeypatch, "org-1")
+        limit = SHOW_ACCESS_ENTRY_MAX_COUNTS["group"]
+        allowed_groups = [{"kind": "group", "value": f"group-{index}"} for index in range(limit)]
+        allowed = store.apply_access(
+            "ses-group-limit",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=allowed_groups,
+        )
+        result = store.apply_access(
+            "ses-group-limit",
+            expected_revision=allowed.show_access.revision,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[*allowed_groups, {"kind": "group", "value": "one-too-many"}],
+        )
+
+        assert allowed.status == "applied"
+        assert len(allowed.show_access.entries) == limit
+        assert result.status == "invalid"
+        assert result.show_access == allowed.show_access
+    finally:
+        store.close()
+
+
+def test_show_access_never_partially_replaces_the_entry_set(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        first = store.ensure("ses-entries-first")
+        second = store.ensure("ses-entries-second")
+        _instance_ownership(monkeypatch, "org-1")
+        taken = store.apply_access(
+            "ses-entries-first",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id="taken-link",
+            target_entries=[{"kind": "email", "value": "first@example.com"}],
+        )
+        heterogeneous = store.apply_access(
+            "ses-entries-second",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=second.share_id,
+            target_entries=[
+                {"kind": "email", "value": "second@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        assert taken.status == heterogeneous.status == "applied"
+
+        conflict = store.apply_access(
+            "ses-entries-second",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=second.share_id,
+            target_entries=[{"kind": "email", "value": "replacement@example.com"}],
+        )
+        collision = store.apply_access(
+            "ses-entries-second",
+            expected_revision=1,
+            target_access_mode="limited",
+            target_share_id="taken-link",
+            target_entries=[{"kind": "email", "value": "replacement@example.com"}],
+        )
+
+        assert conflict.status == "conflict"
+        assert collision.status == "share_id_taken"
+        assert conflict.show_access == heterogeneous.show_access
+        assert collision.show_access == heterogeneous.show_access
+        assert store.get_access("ses-entries-second") == heterogeneous.show_access
+        assert store.get_by_share_id("taken-link").session_id == first.session_id
+    finally:
+        store.close()
+
+
+def test_share_link_edits_carry_the_whole_entry_set(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-entries-rotate")
+        _instance_ownership(monkeypatch, "org-1")
+        limited = store.apply_access(
+            "ses-entries-rotate",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": "guest@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        rotated, previous = store.rotate_share("ses-entries-rotate")
+        after_rotate = store.get_access("ses-entries-rotate")
+        renamed, _ = store.set_share_id("ses-entries-rotate", "renamed-link")
+        after_rename = store.get_access("ses-entries-rotate")
+
+        assert previous == page.share_id
+        assert rotated.share_id not in {None, page.share_id}
+        assert renamed.share_id == "renamed-link"
+        assert after_rotate.entries == limited.show_access.entries
+        assert after_rename.entries == limited.show_access.entries
+
+        # Known-by-design: the entry set is re-validated against the instance's
+        # CURRENT organization, so an instance that has left it can no longer
+        # rotate the link — the audience fails closed instead of being silently
+        # re-scoped. Owner/organization transfer is out of scope for this lane.
+        _instance_ownership(monkeypatch, None)
+        _expect_show_page_error(lambda: store.rotate_share("ses-entries-rotate"), "invalid")
+        assert store.get_access("ses-entries-rotate").entries == limited.show_access.entries
+    finally:
+        store.close()
+
+
+def test_show_access_stamps_organization_entries_from_the_pairing_held_at_persist(
+    monkeypatch, tmp_path
+) -> None:
+    """Organization-scoped entries are stamped with the pairing live at persist.
+
+    Resolving ownership before the pairing lock used to let a re-pair land
+    between that read and the write, so the former organization's ID could be
+    stored after the new pairing was already active. Resolution and persist now
+    share one lock hold: an unlocked snapshot is never the one written.
+    """
+
+    from contextlib import contextmanager
+
+    import core.show_pages as show_pages_mod
+    from config.v2_config import config_file_lock as real_config_file_lock
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = ShowPageStore()
+    try:
+        page = store.ensure("ses-pairing-lock")
+        held = {"depth": 0}
+        resolved_under_lock: list[bool] = []
+
+        @contextmanager
+        def tracking_lock(*args, **kwargs):
+            held["depth"] += 1
+            try:
+                with real_config_file_lock(*args, **kwargs):
+                    yield
+            finally:
+                held["depth"] -= 1
+
+        def resolve_ownership():
+            under_lock = held["depth"] > 0
+            resolved_under_lock.append(under_lock)
+            organization_id = "org-live" if under_lock else "org-stale"
+            return {"mode": "organization", "organization_id": organization_id}
+
+        monkeypatch.setattr(show_pages_mod, "config_file_lock", tracking_lock)
+        monkeypatch.setattr(
+            ShowPageStore,
+            "_resolve_instance_ownership",
+            staticmethod(resolve_ownership),
+        )
+        applied = store.apply_access(
+            "ses-pairing-lock",
+            expected_revision=0,
+            target_access_mode="limited",
+            target_share_id=page.share_id,
+            target_entries=[
+                {"kind": "email", "value": "guest@example.com"},
+                {"kind": "group", "value": "group-7"},
+                {"kind": "organization"},
+            ],
+        )
+        persisted = store.get_access("ses-pairing-lock")
+
+        assert applied.status == "applied"
+        assert persisted.entries == (
+            ShowAccessEntry("email", "guest@example.com", None),
+            ShowAccessEntry("group", "group-7", "org-live"),
+            ShowAccessEntry("organization", "org-live", "org-live"),
+        )
+        assert resolved_under_lock
+        assert all(resolved_under_lock)
+        assert "org-stale" not in {
+            entry.organization_id for entry in persisted.entries
+        }
+    finally:
+        store.close()
+
+
+def _limited_access(*entries: ShowAccessEntry) -> ShowAccess:
+    return ShowAccess(
+        page_id="ses-admit",
+        access_mode="limited",
+        share_id="share-admit",
+        revision=1,
+        entries=entries,
+    )
+
+
+def _visitor(
+    *,
+    email: str = "guest@example.com",
+    organization_id: str | None = None,
+    organization_member_id: str | None = None,
+    organization_role: str | None = None,
+    group_ids: frozenset[str] = frozenset(),
+) -> ShowAccessVisitor:
+    return ShowAccessVisitor(
+        normalized_email=email,
+        organization_id=organization_id,
+        organization_member_id=organization_member_id,
+        organization_role=organization_role,
+        group_ids=group_ids,
+    )
+
+
+def test_limited_show_access_admits_any_matching_entry() -> None:
+    access = _limited_access(
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    member = dict(
+        organization_id="org-1",
+        organization_member_id="mem-1",
+        organization_role="member",
+    )
+
+    assert limited_show_access_admits(access, _visitor(email="guest@example.com"))
+    assert limited_show_access_admits(
+        access,
+        _visitor(email="other@example.com", group_ids=frozenset({"group-7"}), **member),
+    )
+    assert limited_show_access_admits(
+        access,
+        _visitor(email="other@example.com", **member),
+    )
+    assert not limited_show_access_admits(
+        access,
+        _visitor(email="other@example.com"),
+    )
+    assert not limited_show_access_admits(
+        _limited_access(),
+        _visitor(email="guest@example.com", **member),
+    )
+    private = ShowAccess(
+        page_id="ses-admit",
+        access_mode="private",
+        share_id="share-admit",
+        revision=1,
+        entries=access.entries,
+    )
+    assert not limited_show_access_admits(private, _visitor(email="guest@example.com"))
+
+
+def test_limited_show_access_grant_names_the_matched_entry_and_is_rechecked() -> None:
+    """A grant is a whole audience entry, and it lasts exactly as long as it does.
+
+    Persisting the matched entry is what keeps a resumed visitor's proof
+    bounded: whatever the identity provider claims, what outlives the match is
+    one entry the audience's own write caps already bound.
+    """
+
+    entries = (
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    access = _limited_access(*entries)
+    member = dict(
+        organization_id="org-1",
+        organization_member_id="mem-1",
+        organization_role="member",
+    )
+    visitors = (
+        _visitor(email="guest@example.com"),
+        _visitor(email="other@example.com", group_ids=frozenset({"group-7"}), **member),
+        _visitor(email="other@example.com", **member),
+    )
+
+    for entry, visitor in zip(entries, visitors, strict=True):
+        grant = limited_show_access_grant(access, visitor)
+        assert grant == entry
+        # The grant holds while its entry is in the audience...
+        assert limited_show_access_grant_is_current(access, grant)
+        # ...and ends the moment that entry is withdrawn, even when the rest of
+        # the audience is untouched.
+        remaining = _limited_access(*(other for other in entries if other != entry))
+        assert not limited_show_access_grant_is_current(remaining, grant)
+
+    assert limited_show_access_grant(access, _visitor(email="other@example.com")) is None
+    assert not limited_show_access_grant_is_current(access, None)
+    private = ShowAccess(
+        page_id="ses-admit",
+        access_mode="private",
+        share_id="share-admit",
+        revision=1,
+        entries=entries,
+    )
+    assert not limited_show_access_grant_is_current(private, entries[0])
+
+
+def test_limited_show_access_organization_block_is_fail_closed() -> None:
+    access = _limited_access(
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+    email_only = _visitor(email="guest@example.com")
+    other_org = _visitor(
+        email="other@example.com",
+        organization_id="org-2",
+        organization_member_id="mem-2",
+        organization_role="member",
+        group_ids=frozenset({"group-7"}),
+    )
+    incomplete = _visitor(
+        email="other@example.com",
+        organization_id="org-1",
+        organization_role="member",
+        group_ids=frozenset({"group-7"}),
+    )
+
+    assert limited_show_access_admits(access, email_only)
+    assert not limited_show_access_admits(
+        _limited_access(
+            ShowAccessEntry("group", "group-7", "org-1"),
+            ShowAccessEntry("organization", "org-1", "org-1"),
+        ),
+        email_only,
+    )
+    assert not limited_show_access_admits(access, other_org)
+    assert not limited_show_access_admits(access, incomplete)
+    assert not limited_show_access_admits(
+        _limited_access(ShowAccessEntry("group", "group-7", "org-1")),
+        _visitor(
+            email="other@example.com",
+            organization_id="org-1",
+            organization_member_id="mem-1",
+            organization_role="member",
+            group_ids=frozenset({"group-8"}),
+        ),
+    )
+
+
+def test_show_access_payload_includes_the_entry_set() -> None:
+    access = _limited_access(
+        ShowAccessEntry("email", "guest@example.com"),
+        ShowAccessEntry("group", "group-7", "org-1"),
+        ShowAccessEntry("organization", "org-1", "org-1"),
+    )
+
+    assert show_access_payload(access)["entries"] == [
+        {"kind": "email", "value": "guest@example.com", "organization_id": None},
+        {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+        {"kind": "organization", "value": "org-1", "organization_id": "org-1"},
+    ]
+    assert parse_show_access_apply_request(
+        {
+            "page_id": "ses-admit",
+            "expected_revision": 1,
+            "target_access_mode": "limited",
+            "target_share_id": "share-admit",
+            "target_emails": ["guest@example.com"],
+            "target_entries": [{"kind": "group", "value": "group-7"}],
+        }
+    ) is None
+    parsed_entries = parse_show_access_apply_request(
+        {
+            "page_id": "ses-admit",
+            "expected_revision": 1,
+            "target_access_mode": "limited",
+            "target_share_id": "share-admit",
+            "target_entries": [{"kind": "group", "value": "group-7"}],
+        }
+    )
+    assert parsed_entries is not None
+    assert "target_emails" not in parsed_entries
+    assert parsed_entries["target_entries"] == [{"kind": "group", "value": "group-7"}]
 
 
 def test_set_share_id_rejects_archived_session(monkeypatch, tmp_path):
@@ -2392,10 +3007,9 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert public_payload["active_url"] == public_payload["public_url"]
     assert public_payload["public_url"].startswith("https://alex.avibe.bot/p/")
     assert public_payload["previous_private_url"] == "https://alex.avibe.bot/show/ses123/"
-    share_path = "/" + public_payload["public_url"].split("https://alex.avibe.bot/", 1)[1]
     assert prewarmed[-1] == (
         "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm",
-        {"context": "shared", "base_path": share_path},
+        {"context": "shared"},
     )
 
     args = parser.parse_args(["show", "update", "--session-id", "ses123", "--visibility", "private", "--json"])

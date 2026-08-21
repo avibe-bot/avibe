@@ -92,12 +92,12 @@ def load_config(
             raise FileNotFoundError(f"V2 config not found at {target}")
         return V2Config.load(target)
 
-    from config.v2_config import config_lock_transaction
+    from config.v2_config import config_file_lock
 
     # Create-if-absent under the cross-process file lock (#1458 stage
     # ③): the existence check and the seeding save are one atomic step
     # (see the matching note in vibe.runtime.ensure_config).
-    with config_lock_transaction(target):
+    with config_file_lock(target):
         if not target.exists():
             default = default_factory()
             default.save(target)

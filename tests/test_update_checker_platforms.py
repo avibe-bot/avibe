@@ -932,6 +932,35 @@ def test_post_update_notification_skips_success_when_running_version_mismatches(
     assert not marker.exists()
 
 
+def test_a_version_that_did_not_take_effect_is_blocked_even_with_no_one_to_tell(monkeypatch, tmp_path):
+    """Blocking is decided by the version, not by whether anyone can be told.
+
+    An instance whose upgrade failed and was rolled back is running the old
+    version again, which is precisely the mismatch this check reads -- and it is
+    also, by construction, an instance nobody is watching. If the block were a
+    step on the notification path, the machine with no reachable admin would
+    retry the release that just took it down, roll back, and retry, while the one
+    with a Slack channel is protected. So the record is written from the version
+    fact alone, before any question of delivery, and the marker being discarded
+    here for want of a target must not take the block with it.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    controller.im_clients = {}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker("3.0.11", platform="telegram")
+    monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
+
+    asyncio.run(checker.check_and_send_post_update_notification())
+
+    assert checker.state.blocked_auto_update_version == "3.0.11"
+    assert checker.state.blocked_auto_update_reason == "post_update_version_mismatch"
+    assert checker.state.blocked_auto_update_current_version == "3.0.10"
+    assert not (tmp_path / "state" / "pending_update_notification.json").exists()
+
+
 def test_stop_returns_cancellable_task(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()

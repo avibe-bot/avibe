@@ -1,0 +1,942 @@
+"""Cover the migration release guard's detection and the properties it asserts.
+
+Two layers. The synthetic tests pin the detection itself, so the guard cannot decay into
+something that passes because it stopped looking. The repository tests are the guard
+running for real: three of them state the invariant the working tree must hold, and one
+runs the guard against the release that preceded the v3.0.11 splice, which is the known
+positive that keeps the other three honest.
+
+Anything reading release history needs tags, which a shallow CI checkout does not have.
+Those tests skip there and the ``migration-release-guard`` workflow runs the same
+properties through the CLI with the full history fetched.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+from alembic.script.revision import Revision
+
+from scripts import migration_release_guard as guard
+from scripts.release_package_version import package_version_from_release_tag
+from storage.migrations import background_tables_ready
+
+pytestmark = pytest.mark.no_sqlite_template
+
+
+def _release_history() -> list[str]:
+    try:
+        return guard.released_tags()
+    except guard.MigrationGuardError:
+        return []
+
+
+RELEASE_HISTORY = _release_history()
+
+# The last release before the splice shipped. Comparing today's graph against it must
+# still surface the rechain, which is what proves the guard detects the real defect and
+# not merely a synthetic one.
+SPLICED_BASELINE = "v3.0.10"
+SPLICED_REVISION = "20260806_0047"
+
+requires_release_history = pytest.mark.skipif(
+    not RELEASE_HISTORY,
+    reason=(
+        "this checkout has no release tags carrying migrations; the migration-release-guard "
+        "workflow runs these properties with fetch-depth: 0"
+    ),
+)
+requires_spliced_baseline = pytest.mark.skipif(
+    SPLICED_BASELINE not in RELEASE_HISTORY,
+    reason=f"{SPLICED_BASELINE} is not present in this checkout",
+)
+
+
+def _graphs(monkeypatch, shipped: dict[str, str], current: dict[str, str]) -> None:
+    monkeypatch.setattr(guard, "released_sources", lambda tag: shipped)
+    monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
+
+
+def _revision_file(revision: str, down_revision: str, *, annotated: bool = False, **edges: str) -> str:
+    """A migration module declaring exactly the graph fields it is given."""
+    revision_type, parent_type = (": str", ": str | None") if annotated else ("", "")
+    lines = [f'revision{revision_type} = "{revision}"', f"down_revision{parent_type} = {down_revision}"]
+    lines += [f"{field} = {value}" for field, value in edges.items()]
+    return '"""a migration"""\n\n' + "\n".join(lines) + "\n"
+
+
+# One revision of every shape the real graph contains: a root with no parent, an ordinary
+# linear child declared in the annotated form, a sibling branch carrying a branch label,
+# and a merge with a tuple parent and a dependency edge. Seeding every shape rather than
+# listing the ones that must not regress means a shape introduced later is covered the
+# moment it joins this table, without editing a single test.
+SHIPPED_REVISIONS = (
+    ("20260101_0001", "root", "None", {}),
+    ("20260102_0002", "linear", '"20260101_0001"', {"annotated": True}),
+    ("20260103_0003", "branch", '"20260101_0001"', {"branch_labels": '("side",)'}),
+    ("20260104_0004", "merge", '("20260102_0002", "20260103_0003")', {"depends_on": '"20260103_0003"'}),
+)
+
+SHIPPED_GRAPH = {
+    f"{revision}_{slug}.py": _revision_file(revision, down_revision, **edges)
+    for revision, slug, down_revision, edges in SHIPPED_REVISIONS
+}
+
+
+def test_an_unchanged_graph_reports_nothing(monkeypatch):
+    _graphs(monkeypatch, SHIPPED_GRAPH, dict(SHIPPED_GRAPH))
+
+    assert guard.rechained_revisions("v0.0.0") == []
+    assert guard.new_slot_collisions("v0.0.0") == {}
+
+
+@pytest.mark.parametrize(
+    ("revision", "slug", "edges"),
+    [(revision, slug, edges) for revision, slug, _, edges in SHIPPED_REVISIONS],
+)
+def test_repointing_any_released_revision_is_reported(monkeypatch, revision, slug, edges):
+    current = dict(SHIPPED_GRAPH)
+    current[f"{revision}_{slug}.py"] = _revision_file(revision, '"20269999_9999"', **edges)
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+    assert len(problems) == 1
+    assert revision in problems[0]
+
+
+@pytest.mark.parametrize("field", guard.GRAPH_EDGES)
+def test_changing_any_edge_alembic_orders_by_is_reported(monkeypatch, field):
+    """Every field Alembic builds its graph from, not just the parent pointer.
+
+    ``depends_on`` and ``branch_labels`` reorder a graph as surely as ``down_revision``
+    does, and a dependency added behind a revision users are already stamped at is the
+    outage's exact shape: fresh databases traverse it, existing ones record it as
+    satisfied. Parametrizing off ``GRAPH_EDGES`` means a field added to the guard is
+    covered here without editing this test.
+    """
+    declarations = {"down_revision": '"20260101_0001"'} | {field: '"20260103_0003"'}
+    current = dict(SHIPPED_GRAPH)
+    current["20260102_0002_linear.py"] = _revision_file("20260102_0002", annotated=True, **declarations)
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert len(problems) == 1
+    assert field in problems[0]
+
+
+def test_the_compared_fields_are_what_alembic_builds_its_graph_from():
+    """The field list is measured against Alembic, never maintained by hand here.
+
+    A field Alembic orders revisions by and this guard does not read is a hole of exactly
+    the outage's shape -- the graph changes and every comparison still matches. Anchoring
+    to the constructor means a field added upstream fails this test rather than going
+    unwatched for however long it takes someone to notice.
+    """
+    parameters = set(inspect.signature(Revision.__init__).parameters) - {"self"}
+
+    assert set(guard.GRAPH_FIELDS.values()) == parameters
+
+
+@pytest.mark.parametrize(
+    ("shipped", "respelled"),
+    [('"20260101_0001"', '("20260101_0001",)'), ('("20260101_0001",)', '"20260101_0001"')],
+    ids=["scalar-to-tuple", "tuple-to-scalar"],
+)
+def test_a_spelling_alembic_reads_identically_is_not_drift(monkeypatch, shipped, respelled):
+    """Normalization is Alembic's, so the guard agrees with it about what changed.
+
+    A guard that reported a re-spelling would be red for an edit that changes nothing,
+    and a guard people expect to be wrong is one they stop reading.
+    """
+    _graphs(
+        monkeypatch,
+        dict(SHIPPED_GRAPH) | {"20260102_0002_linear.py": _revision_file("20260102_0002", shipped)},
+        dict(SHIPPED_GRAPH) | {"20260102_0002_linear.py": _revision_file("20260102_0002", respelled)},
+    )
+
+    assert guard.rechained_revisions("v0.0.0") == []
+
+
+def test_deleting_a_released_revision_is_reported(monkeypatch):
+    current = {name: source for name, source in SHIPPED_GRAPH.items() if "linear" not in name}
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+    assert len(problems) == 1
+    assert "20260102_0002" in problems[0]
+
+
+def test_a_slot_taken_twice_since_the_baseline_is_reported(monkeypatch):
+    current = dict(SHIPPED_GRAPH)
+    current["20260105_0004_second_claim.py"] = _revision_file("20260105_0004", '"20260104_0004"')
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    assert guard.new_slot_collisions("v0.0.0") == {
+        "0004": {"20260104_0004_merge.py", "20260105_0004_second_claim.py"}
+    }
+
+
+def test_a_slot_the_baseline_already_shared_is_not_reported(monkeypatch):
+    """Collisions history already carries stay out of the report, without an allowlist.
+
+    The graph really does contain them. Reporting them would leave the guard permanently
+    red -- and a permanently red guard is one people learn to ignore.
+    """
+    shipped = dict(SHIPPED_GRAPH)
+    shipped["20260105_0004_second_claim.py"] = _revision_file("20260105_0004", '"20260104_0004"')
+    _graphs(monkeypatch, shipped, dict(shipped))
+
+    assert guard.new_slot_collisions("v0.0.0") == {}
+
+
+def test_a_further_claimant_to_an_already_shared_slot_is_reported(monkeypatch):
+    """What history excuses is the filenames it shipped, not the slot number forever.
+
+    Excusing the number would make an already-duplicated slot a permanent blind spot --
+    the one place a third branch could fork the graph without the guard saying anything.
+    """
+    shipped = dict(SHIPPED_GRAPH)
+    shipped["20260105_0004_second_claim.py"] = _revision_file("20260105_0004", '"20260104_0004"')
+    current = dict(shipped)
+    current["20260106_0004_third_claim.py"] = _revision_file("20260106_0004", '"20260105_0004"')
+    _graphs(monkeypatch, shipped, current)
+
+    assert guard.new_slot_collisions("v0.0.0") == {
+        "0004": {
+            "20260104_0004_merge.py",
+            "20260105_0004_second_claim.py",
+            "20260106_0004_third_claim.py",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "shipped_parent",
+    ['"20260101_0001"', "ROOT"],
+    ids=["shipped-a-literal", "shipped-a-computed-expression"],
+)
+def test_computed_revision_metadata_is_reported_rather_than_compared(monkeypatch, shipped_parent):
+    """Metadata the guard cannot read is the absence of evidence, never evidence of equality.
+
+    The second case is the one a normalized ``"<computed>"`` string got wrong: two
+    different computed expressions rendered identically and so compared equal, which read
+    as an unchanged graph precisely where nothing could be verified at all.
+    """
+    shipped = dict(SHIPPED_GRAPH)
+    shipped["20260102_0002_linear.py"] = _revision_file("20260102_0002", shipped_parent)
+    current = dict(shipped)
+    current["20260102_0002_linear.py"] = _revision_file("20260102_0002", "SOME_OTHER_CONSTANT")
+    _graphs(monkeypatch, shipped, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert len(problems) == 1
+    assert "20260102_0002_linear.py" in problems[0]
+    assert "computes its migration metadata" in problems[0]
+
+
+def test_two_files_claiming_one_revision_are_reported_rather_than_compared(monkeypatch):
+    """Alembic identifies a migration by its revision string, and so must the guard.
+
+    Two files declaring one identifier are indistinguishable to both: a database stamped
+    with it has applied whichever one ran, and Alembic will never run the other's body.
+    The dangerous outcome is not the collision but the silent survivor -- one claimant
+    answering the comparison for a migration whose tables no database has.
+    """
+    current = dict(SHIPPED_GRAPH)
+    current["20260105_0005_impostor.py"] = _revision_file("20260102_0002", '"20260101_0001"')
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert len(problems) == 2
+    assert {"20260102_0002_linear.py", "20260105_0005_impostor.py"} == {problem.split()[0] for problem in problems}
+    assert all("also declares" in problem for problem in problems)
+
+
+# Every way a migration file's declared metadata can be malformed, alongside the well-formed
+# shapes. Seeding the malformed ones rather than listing which failures must be caught is
+# what makes the partition below complete: a new way to be unreadable joins this table and
+# is covered without editing an assertion.
+UNREADABLE_GRAPH = dict(SHIPPED_GRAPH) | {
+    "20260105_0005_computed_revision.py": _revision_file("X", "None").replace('"X"', "SOME_CONSTANT"),
+    "20260106_0006_computed_parent.py": _revision_file("20260106_0006", "SOME_CONSTANT"),
+    "20260107_0007_computed_dependency.py": _revision_file(
+        "20260107_0007", '"20260101_0001"', depends_on="SOME_CONSTANT"
+    ),
+    "20260108_0008_duplicate.py": _revision_file("20260102_0002", '"20260101_0001"'),
+    "20260109_0009_no_metadata.py": '"""not a migration at all"""\n',
+    "__init__.py": "",
+}
+
+
+@pytest.mark.parametrize("sources", [SHIPPED_GRAPH, UNREADABLE_GRAPH], ids=["well-formed", "malformed"])
+def test_every_migration_is_compared_or_reported(sources):
+    """The invariant behind every key this guard invents, stated once.
+
+    A key names exactly one migration or it names none. Whatever a file declares, it is
+    either a node the comparison reaches or a reason the comparison refuses to run --
+    never neither, because a file that is neither has been dropped silently and the
+    comparison then passes over a graph missing it.
+
+    Coverage is the property; disjointness is not. Demanding the two halves never overlap
+    is what made ``revision_graph`` drop what it could not read, which is right for the
+    working tree -- the file is reported instead -- and silently wrong for a baseline,
+    where dropping a node discards the only surviving record of what that release
+    declared. An unreadable node stays in the graph carrying values that compare unequal
+    to everything, so it is reached *and* reported.
+
+    The denominator is the point. Every earlier version of this assertion counted the
+    files the guard's own parser had managed to read, which cannot fail: a file it does
+    not see is missing from both the numerator and the denominator at once. Counting the
+    files Alembic will load is a measurement the parser cannot influence, so a migration
+    that becomes invisible to it now fails here instead of passing quietly.
+    """
+    compared = {name for name, _ in guard.revision_graph(sources).values()}
+    reported = set(guard.ungraphable_sources(sources))
+
+    assert compared | reported == {name for name in sources if guard.is_migration_source(name)}
+
+
+# Every shape a *released* migration's metadata can take: the readable ones, plus an edge
+# no reader can resolve. A released revision the guard stops reading is not one it may
+# quietly skip -- it is one whose declared parent nothing records any more, which is
+# strictly worse than a parent that merely changed.
+RELEASED_SHAPES = SHIPPED_REVISIONS + (("20260105_0005", "computed", "SOME_CONSTANT", {}),)
+
+RELEASED_GRAPH = {
+    f"{revision}_{slug}.py": _revision_file(revision, down_revision, **edges)
+    for revision, slug, down_revision, edges in RELEASED_SHAPES
+}
+
+
+@pytest.mark.parametrize(("revision", "slug"), [(revision, slug) for revision, slug, _, _ in RELEASED_SHAPES])
+def test_no_released_revision_can_be_rewritten_without_a_report(monkeypatch, revision, slug):
+    """Whatever a release shipped, rewriting it in the working tree has to be visible.
+
+    Stated per released shape rather than per known bug: the hole this closes was a
+    released node with a computed edge, which the baseline graph dropped while the now
+    readable working-tree node produced no reason of its own, so the rewrite was compared
+    against nothing and reported by nobody. A shape whose baseline handling regresses
+    fails here whatever the mechanism, and a shape added to the table is covered without
+    editing an assertion.
+    """
+    name = f"{revision}_{slug}.py"
+    current = dict(RELEASED_GRAPH)
+    current[name] = _revision_file(revision, '"20269999_9999"')
+    _graphs(monkeypatch, RELEASED_GRAPH, current)
+
+    problems = guard.rechained_revisions("v0.0.0")
+
+    assert [problem for problem in problems if revision in problem or name in problem]
+
+
+@pytest.mark.parametrize("renamed", [False, True], ids=["in-place", "renamed"])
+@pytest.mark.parametrize(("revision", "slug"), [(revision, slug) for revision, slug, _, _ in SHIPPED_REVISIONS])
+def test_no_released_migration_body_can_change_without_a_report(monkeypatch, revision, slug, renamed):
+    """What a released migration *does* is as fixed as what it declares.
+
+    A database stamped at the revision never reruns the edited body and a fresh install
+    runs only the new one, so the two diverge permanently with nothing raised at either
+    moment. The edit here is a comment, which is the weakest case on purpose: an
+    exemption for edits that look harmless would put a human judgement back on the path
+    this guard exists to take it off.
+
+    Renaming is the same edit wearing a filename, and both axes are stated together
+    because they are one defect rather than a case and its afterthought. Alembic keys a
+    migration by ``revision`` and scans the directory to find it, so the renamed file runs
+    on every fresh install exactly as the original did -- while a check keyed by filename
+    sees the old name absent and compares nothing.
+    """
+    name = f"{revision}_{slug}.py"
+    current = dict(SHIPPED_GRAPH)
+    edited = current.pop(name) + "\n# a later edit\n"
+    current[f"{revision}_renamed.py" if renamed else name] = edited
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    problems = guard.edited_released_bodies("v0.0.0")
+
+    assert len(problems) == 1
+    assert revision in problems[0]
+
+
+def test_renaming_a_released_migration_without_editing_it_is_not_a_change(monkeypatch):
+    """The boundary the property above draws, stated from the side it must not cross.
+
+    A database records the revision it reached and nothing else, and Alembic finds that
+    revision by scanning ``version_locations`` rather than by name. A rename leaving the
+    body alone is therefore invisible to every database in the field, and reporting it
+    would be the guard enforcing a filename convention of its own -- which is the slot
+    property's subject, not this one's.
+    """
+    revision, slug = SHIPPED_REVISIONS[0][0], SHIPPED_REVISIONS[0][1]
+    current = dict(SHIPPED_GRAPH)
+    current[f"{revision}_moved.py"] = current.pop(f"{revision}_{slug}.py")
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+
+    assert guard.edited_released_bodies("v0.0.0") == []
+    assert guard.rechained_revisions("v0.0.0") == []
+
+
+# Every way a released revision can stop running what the release ran, keyed by the shape
+# of the change rather than by which half of the pair happens to catch it.
+RELEASED_REVISION_MUTATIONS = {
+    "edited": lambda sources, name: dict(sources) | {name: sources[name] + "\n# a later edit\n"},
+    "renamed-and-edited": lambda sources, name: {key: value for key, value in sources.items() if key != name}
+    | {"20269999_9999_moved.py": sources[name] + "\n# a later edit\n"},
+    "deleted": lambda sources, name: {key: value for key, value in sources.items() if key != name},
+    "rechained": lambda sources, name: dict(sources) | {name: _revision_file("20260102_0002", '"20269999_9999"')},
+    "made-unreadable": lambda sources, name: dict(sources)
+    | {name: sources[name].replace('"20260102_0002"', "SOME_CONSTANT")},
+    "duplicated": lambda sources, name: dict(sources) | {"20260102_0002_copy.py": sources[name]},
+}
+
+
+@pytest.mark.parametrize(
+    "mutate", list(RELEASED_REVISION_MUTATIONS.values()), ids=list(RELEASED_REVISION_MUTATIONS)
+)
+def test_a_released_revision_is_always_accounted_for(monkeypatch, mutate):
+    """The pair is exhaustive even where neither half is, and that is the claim on record.
+
+    ``rechained_revisions`` watches what a revision declares and ``edited_released_bodies``
+    watches what it does, so each passes over what the other owns -- a revision that is
+    gone, contested, or unreadable has no body to compare, and a body edit under an
+    unchanged declaration produces no drift. Asserting on their union is what makes those
+    hand-offs safe: a case falling out of one half without landing in the other fails here
+    rather than becoming a silently unguarded shape.
+    """
+    _graphs(monkeypatch, SHIPPED_GRAPH, mutate(SHIPPED_GRAPH, "20260102_0002_linear.py"))
+
+    assert guard.rechained_revisions("v0.0.0") + guard.edited_released_bodies("v0.0.0")
+
+
+def test_support_files_are_not_held_to_the_release(monkeypatch):
+    """Alembic does not load ``__init__.py`` as a migration, so neither does the guard."""
+    shipped = dict(SHIPPED_GRAPH) | {"__init__.py": ""}
+    current = dict(shipped) | {"__init__.py": "# touched\n"}
+    _graphs(monkeypatch, shipped, current)
+
+    assert guard.edited_released_bodies("v0.0.0") == []
+    assert guard.rechained_revisions("v0.0.0") == []
+
+
+def _declare(monkeypatch, *entries: guard.DeclaredBodyEdit) -> None:
+    monkeypatch.setattr(guard, "DECLARED_BODY_EDITS", entries)
+
+
+DECLARED_EDIT = SHIPPED_GRAPH["20260102_0002_linear.py"] + "\n# a declared edit\n"
+
+
+@pytest.mark.parametrize(
+    ("pinned", "reported"),
+    [
+        (guard.body_fingerprint(DECLARED_EDIT), False),
+        (guard.body_fingerprint(DECLARED_EDIT + "# and one more\n"), True),
+    ],
+    ids=["pins-the-body-present", "pins-a-different-body"],
+)
+def test_a_declaration_accepts_exactly_the_body_it_pins(monkeypatch, pinned, reported):
+    """What separates a declaration from an exemption, stated from both sides.
+
+    An entry naming only the revision would hand that file a standing permission: the
+    edit it was written for and every later one look alike to a check that stops at the
+    name. Pinning the replacement means the second edit arrives as an undeclared edit
+    again, which is the whole difference between recording a decision and suspending the
+    property.
+    """
+    current = dict(SHIPPED_GRAPH) | {"20260102_0002_linear.py": DECLARED_EDIT}
+    _graphs(monkeypatch, SHIPPED_GRAPH, current)
+    _declare(monkeypatch, guard.DeclaredBodyEdit(revision="20260102_0002", body=pinned, reason="recorded"))
+
+    assert bool(guard.edited_released_bodies("v0.0.0")) is reported
+
+
+def test_a_declaration_that_describes_no_edit_is_reported_as_spent(monkeypatch):
+    """The property that keeps the list from becoming the allowlist this module refuses.
+
+    A declaration is spent the moment a release ships the body it pinned, and a spent one
+    is indistinguishable from a live one by inspection. Failing on it is what bounds the
+    list to edits made since the last release, and it also catches the entry written for
+    an edit that was reverted before shipping -- which would otherwise sit ready to
+    excuse an edit nobody reviewed.
+    """
+    _graphs(monkeypatch, SHIPPED_GRAPH, dict(SHIPPED_GRAPH))
+    _declare(monkeypatch, guard.DeclaredBodyEdit(revision="20260102_0002", body="0" * 64, reason="recorded"))
+
+    assert len(guard.spent_body_edit_declarations("v0.0.0")) == 1
+    assert guard.edited_released_bodies("v0.0.0") == []
+
+
+def test_every_declaration_pins_a_fingerprint_and_records_a_reason():
+    """A mistyped fingerprint would otherwise surface as an unexplained mismatch."""
+    for declared in guard.DECLARED_BODY_EDITS:
+        assert declared.revision.strip()
+        assert declared.reason.strip()
+        assert len(declared.body) == 64 and set(declared.body) <= set("0123456789abcdef")
+
+
+@requires_release_history
+def test_the_real_graph_has_no_undeclared_edit_and_no_spent_declaration():
+    """The pair measured against the graph that actually ships, not a synthetic one.
+
+    Both halves, because they fail in opposite directions: an undeclared edit is a
+    divergence nobody wrote down, and a spent declaration is a written permission that
+    outlived the edit it was written for.
+    """
+    assert guard.edited_released_bodies() == []
+    assert guard.spent_body_edit_declarations() == []
+
+
+def test_an_unreadable_graph_has_its_head_refused_rather_than_guessed():
+    """A head is one answer, and a partial graph corrupts it silently rather than loudly.
+
+    Dropping an unreadable node also drops the parent edge pointing past it, so its
+    ancestor is left looking like a head. The upgrade property asserts a released database
+    ends at a head, so an upgrade that stopped early at that ancestor would satisfy the
+    very assertion the property exists to make.
+    """
+    with pytest.raises(guard.MigrationGuardError):
+        guard.shipped_head_revisions(UNREADABLE_GRAPH)
+
+    assert guard.shipped_head_revisions(SHIPPED_GRAPH) == {"20260104_0004"}
+
+
+@requires_release_history
+def test_the_real_graph_is_wholly_comparable():
+    """The partition above, run against the graph that actually ships.
+
+    Holding only a synthetic tree to it would leave the possibility that every real
+    migration sits in the reported half, where nothing is ever compared.
+    """
+    assert guard.ungraphable_sources(guard.working_tree_sources()) == {}
+
+
+@pytest.mark.parametrize(("problems", "expected_exit"), [([], 0), (["a released revision was rechained"], 1)])
+def test_the_command_line_exit_code_follows_the_verdict(monkeypatch, capsys, problems, expected_exit):
+    """The CLI is how a developer runs this outside CI, so its wiring is part of the guard."""
+    monkeypatch.setattr(guard, "collect_problems", lambda baseline, **kwargs: ("v9.9.9", problems, {}))
+
+    assert guard.main([]) == expected_exit
+    for problem in problems:
+        assert problem in capsys.readouterr().err
+
+
+def test_the_command_line_refuses_rather_than_passing_without_history(monkeypatch, capsys):
+    def unreachable(*args, **kwargs):
+        raise guard.MigrationGuardError("no release tag carries the migrations directory")
+
+    monkeypatch.setattr(guard, "collect_problems", unreachable)
+
+    assert guard.main([]) == 2
+    assert "could not run" in capsys.readouterr().err
+
+
+def test_head_tables_is_what_a_fresh_install_has():
+    """The derivation source for the upgrade property must itself be measured, not maintained.
+
+    Every other check compares against ``HEAD_TABLES``. If a migration adds a table and
+    nobody adds it here, the upgrade property stops asking about it and goes on passing.
+    """
+    assert guard.fresh_install_tables() == guard.HEAD_TABLES
+
+
+def test_a_complete_set_of_tables_is_not_by_itself_a_complete_schema(tmp_path):
+    """Readiness has to mean what production means by it, columns included.
+
+    An upgrade that creates every table and omits a column leaves a database that starts
+    and then fails on the first query touching it -- indistinguishable from success to
+    anything comparing table names alone.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        for table in guard.HEAD_TABLES:
+            connection.execute(f'create table "{table}" (placeholder integer)')
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert not background_tables_ready(db_path)
+    gap = guard.describe_schema_gap(db_path)
+    assert "table(s) missing" not in gap
+    assert "column(s) missing" in gap
+
+
+def test_a_prerelease_sorts_between_the_releases_it_falls_between():
+    """Installable prereleases are releases here, ordered where they actually shipped.
+
+    ``gh-vX.Y.ZrcN`` builds carry a wheel and an sdist, so a database in the field can
+    have been built by one. Sorting them as releases is what makes the newest tag a
+    baseline rather than a guess.
+    """
+    assert (
+        guard.version_key("v3.0.8")
+        < guard.version_key("gh-v3.0.9rc2")
+        < guard.version_key("gh-v3.0.9rc10")
+        < guard.version_key("v3.0.9")
+    )
+    # The publisher writes the same version several ways and builds the same wheel from
+    # each, so the guard has to read them as the same release rather than as one release
+    # and some strings it does not recognise.
+    assert guard.release_version("gh-v3.0.9-rc2") == guard.release_version("gh-v3.0.9rc2")
+
+
+@requires_release_history
+def test_no_tag_the_publisher_can_build_falls_outside_the_guard():
+    """The release universe is the publish path's, because that is the one that decides.
+
+    A tag the guard does not recognise is absent from every property here, so a migration
+    first shipped in it can be rechained or edited afterwards with nothing to compare
+    against -- the guard would pass, quietly, over the release it was pointed at.
+
+    The denominator is the repository's own tags run through the publish path's parser,
+    not a list of the forms in use today. Every tag shipped so far happens to be plain
+    ``vX.Y.Z`` or ``gh-vX.Y.ZrcN``, so a filter narrowed back to those would satisfy any
+    test written from today's tags and drop the first release that used another form.
+    """
+    covered = set(guard.released_tags())
+    for tag in guard._git("tag", "-l", "v*", "-l", "gh-v*").split():
+        try:
+            package_version_from_release_tag(tag)
+        except ValueError:
+            continue
+        assert tag in covered or guard.versions_tree(tag) is None, tag
+
+
+@pytest.mark.parametrize(
+    ("gap", "short", "expected"),
+    [
+        (None, {}, []),
+        (None, {"messages": "0 of 2 rows; CHECK constraint failed: ck_messages_type"}, ["could not seed messages"]),
+        ("1 table(s) missing: scopes", {}, ["upgrade left the database not ready"]),
+    ],
+    ids=["reaches-head-over-rows", "a-table-it-could-not-seed", "a-schema-that-came-out-short"],
+)
+def test_a_release_the_property_could_not_cover_is_reported_as_a_failure(monkeypatch, gap, short, expected):
+    """Coverage the run did not reach is a violation, not a note printed beside them.
+
+    A note blocks nothing, so a guard that downgrades its own gaps into notes goes on
+    reporting success over the part of its subject it never touched. That is the same
+    failure as passing over a release that fell outside the window, and it is worse for
+    being visible: the run says both "passed" and "did not look", and only one is read.
+    """
+    monkeypatch.setattr(guard, "released_graphs", lambda: ["v9.9.9"])
+    monkeypatch.setattr(guard, "schema_gap_after_upgrade", lambda tag: (gap, short, {}))
+
+    reasons = guard.unrepairable_releases()[0].get("v9.9.9", [])
+
+    assert len(reasons) == len(expected)
+    assert all(fragment in reason for reason, fragment in zip(reasons, expected))
+
+
+@requires_release_history
+def test_every_release_that_wrote_a_database_is_inside_the_upgrade_window():
+    """The upgrade property's window is an equation about releases, so it is checked as one.
+
+    ``released_tags`` reads "shipped no versions directory" as "left no migrated database
+    in the field". That is true today because state and the graph arrived together --
+    everything before ``storage/`` persisted JSON, which is why ``storage/importer.py``
+    still carries an importer for it rather than a migration -- but it is an equation, and
+    a release breaking it would leave a database no property here builds while every
+    property here goes on passing. Falling out of a window is the failure with no symptom.
+
+    The second assertion is what keeps the first from being a tautology: the denominator is
+    every tag the publisher can build, which is strictly larger than the tags carrying a
+    graph. Read off the graph-carrying set instead, the property could never be violated
+    and the test would pass forever.
+    """
+    universe = guard.release_tag_names()
+    graphed = guard.released_tags()
+
+    assert guard.releases_with_state_but_no_graph() == []
+    assert set(graphed) < set(universe)
+
+
+def test_every_table_the_schema_accepts_rows_for_gets_them(tmp_path):
+    """An upgrade proved on an empty database is proved against the one case no user is in.
+
+    Empty is where adding a NOT NULL column, tightening a nullable one, and building a
+    unique index all succeed unconditionally, so it is the state under which a migration
+    that cannot survive real data still passes.
+
+    The claim is a pair, the way the released-revision checks are: a table either carries
+    its rows or is named in what the seeder returns, with the schema's own objection.
+    Asserting only that some tables were seeded would pass a seeder that gave up on the
+    awkward ones quietly, and quietly giving up on the awkward ones is the failure that
+    reads most like success.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("create table plain (id text primary key, name text not null)")
+        connection.execute(
+            "create table enumerated (id text primary key, state text not null "
+            "constraint ck_enumerated_state check (state in ('waiting', 'active')))"
+        )
+        connection.execute("create table defaulted (id integer primary key, note text default 'n')")
+        connection.execute(
+            "create table shaped (id text primary key, doc text not null "
+            "constraint ck_shaped_doc check (json_valid(doc) = 1 "
+            "and json_extract(doc, '$.version') = 1 "
+            "and json_type(doc, '$.events') = 'array'))"
+        )
+        connection.execute("create table constrained (id text primary key, slug text not null)")
+        connection.execute("create unique index ux_constrained_slug on constrained (slug)")
+        connection.execute(
+            "create table paired (platform text not null, native_id text not null, "
+            "label text not null, primary key (platform, native_id))"
+        )
+        connection.execute(
+            "create table pinned (id text primary key, kind text not null "
+            "constraint ck_pinned_kind check (kind in ('only')), ref text not null)"
+        )
+        connection.execute("create unique index ux_pinned_kind_ref on pinned (kind, ref)")
+        connection.execute(
+            "create table overlapping (a text not null, b text not null, c text not null, note text)"
+        )
+        connection.execute("create unique index ux_overlapping_ab on overlapping (a, b)")
+        connection.execute("create unique index ux_overlapping_bc on overlapping (b, c)")
+        connection.execute("create table nullable (id text primary key, tag text, note text)")
+        connection.execute(
+            "create table exclusive (id text primary key, kind text not null, left_ref text, right_ref text, "
+            "constraint ck_exclusive_shape check ("
+            "(kind = 'left' and left_ref is not null and right_ref is null) or "
+            "(kind = 'right' and right_ref is not null and left_ref is null) or "
+            "(kind = 'none' and left_ref is null and right_ref is null)))"
+        )
+        connection.execute(
+            "create table impossible (id text primary key, shape text not null "
+            "constraint ck_impossible_shape check (shape in ('a', 'b') and shape in ('c', 'd')))"
+        )
+        # A parent whose key a CHECK holds to one literal, so a child cannot guess the value it
+        # ends up with, and two children of it: one whose reference may repeat, and one whose
+        # reference is its own primary key and therefore may not.
+        connection.execute(
+            "create table parented (id text primary key "
+            "constraint ck_parented_id check (id in ('kept')), note text)"
+        )
+        connection.execute(
+            "create table sharing (id text primary key, parent_id text not null references parented (id), "
+            "note text)"
+        )
+        connection.execute(
+            "create table exclusively_owned (parent_id text primary key references parented (id), "
+            "note text)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    short, refused = guard.seed_representative_rows(db_path)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        counted = {
+            str(name): connection.execute(f'select count(*) from "{name}"').fetchone()[0]
+            for (name,) in connection.execute("select name from sqlite_master where type = 'table'")
+        }
+        state = connection.execute("select state from enumerated").fetchone()[0]
+        doc = connection.execute("select doc from shaped").fetchone()[0]
+        slugs = [row[0] for row in connection.execute("select slug from constrained")]
+        names = [row[0] for row in connection.execute("select name from plain")]
+        pairs = [tuple(row) for row in connection.execute("select platform, native_id from paired")]
+        pins = [tuple(row) for row in connection.execute("select kind, ref from pinned")]
+        overlaps = [tuple(row) for row in connection.execute("select a, b, c from overlapping")]
+        tags = [row[0] for row in connection.execute("select tag from nullable")]
+        kinds = [tuple(row) for row in connection.execute("select kind, left_ref, right_ref from exclusive")]
+        shared = [row[0] for row in connection.execute("select parent_id from sharing")]
+        owned = [row[0] for row in connection.execute("select parent_id from exclusively_owned")]
+        dangling = connection.execute("pragma foreign_key_check").fetchall()
+    finally:
+        connection.close()
+
+    assert set(short) == {"impossible", "parented", "exclusively_owned"}
+    assert "ck_impossible_shape" in short["impossible"]
+    assert all(count >= guard.SEED_ROWS for table, count in counted.items() if table not in short)
+    # Every repair came from the constraint that rejected the row before it, not from a guess.
+    assert state in {"waiting", "active"}
+    assert json.loads(doc) == {"version": 1, "events": []}
+    # A column repeats unless the schema refuses the row that repeats it, and which of the two
+    # it is stays the database's answer rather than this module's model of the schema. `slug`
+    # and `plain.id` are refused, so those tables fall back to rows differing everywhere;
+    # `plain.name` is free, and a migration adding `unique (name)` meets the duplicate.
+    assert len(set(slugs)) == len(slugs) == guard.SEED_ROWS
+    assert len(set(names)) == 1
+    # A composite group constrains the tuple, so each of its members still repeats -- which
+    # takes more rows than the group is wide.
+    assert len(set(pairs)) == len(pairs)
+    assert len({platform for platform, _ in pairs}) < len(pairs)
+    assert len({native_id for _, native_id in pairs}) < len(pairs)
+    # Overlapping groups share a member, and the shared one is what a per-group choice gets
+    # wrong: varying one member of each group leaves `b` distinct in every row, so a later
+    # `unique (b)` migration passes here and fails on a release free to repeat it.
+    assert len({(a, b) for a, b, _ in overlaps}) == len(overlaps)
+    assert len({(b, c) for _, b, c in overlaps}) == len(overlaps)
+    assert all(len({row[member] for row in overlaps}) < len(overlaps) for member in range(3))
+    # A CHECK pinning one member of a group to a single literal is the schema declining the
+    # other's repeat: every row that holds `ref` still carries `kind = 'only'` and collides.
+    assert len(set(pins)) == len(pins)
+    assert len({kind for kind, _ in pins}) == 1
+    # A nullable column carries both shapes a release holds. Only the non-NULL one is new: a
+    # migration tightening the column or reading its value is untested against NULLs alone,
+    # and one made non-NULL everywhere is untested against the NULLs it will actually meet.
+    assert None in tags
+    assert [tag for tag in tags if tag is not None]
+    # Some tables have no row with every column non-NULL, and no fixture can be asked for one:
+    # `ck_exclusive_shape` keys `left_ref` and `right_ref` off `kind`, so each state requires
+    # one of them NULL. The table still gets rows, in whichever state the repair reached, and
+    # the columns that leaves NULL are what `refused` exists to say out loud rather than to
+    # pass over. Reaching every state instead is constraint solving, which this is not.
+    assert "exclusive, every column at once" in refused
+    assert "ck_exclusive_shape" in refused["exclusive, every column at once"]
+    assert "exclusive" not in short
+    assert {(left, right) for _, left, right in kinds} == {(None, None)}
+    # Every reference resolves, which is not a nicety: `20260806_0047` rebuilds tables and then
+    # runs this same check, aborting the upgrade if anything dangles, so a fabricated reference
+    # turns a correct migration red. It cannot be resolved by guessing either -- `ck_parented_id`
+    # holds the parent's key to one literal, so only reading back what the parent ended up with
+    # gets it right.
+    assert dangling == []
+    assert set(shared) == {"kept"}
+    # Whether the children may share that parent is the database's answer: `sharing` keeps its
+    # reference in every row, while `exclusively_owned` has it as a primary key and so is bounded
+    # by the one parent row there is. Sharing regardless would collapse it to a single row, and
+    # one row is what this whole fixture exists to stop being.
+    assert owned == ["kept"]
+    assert f"of {guard.SEED_ROWS} rows" in short["exclusively_owned"]
+    # And the bound is reported at both ends rather than only where it bites. `parented` may hold
+    # one row because its key is held to one literal; `exclusively_owned` may hold one because
+    # each of its rows needs a parent of its own. Naming only the child would read as the child's
+    # problem, and naming neither is the shortfall-as-a-note this whole split exists to refuse.
+    assert f"of {guard.SEED_ROWS} rows" in short["parented"]
+
+
+def test_a_repeat_the_rows_do_not_carry_is_a_violation_however_it_got_there():
+    """The claim is read back out of the rows, never inferred from the code that wrote them.
+
+    ``insert_seed_row``'s repair rewrites values to satisfy whatever constraint a row tripped,
+    and it picks the column to rewrite out of that constraint's own text -- so it can pick the
+    one column the row existed to hold still. SQLite then accepts a row that proves nothing,
+    and an accepted insert looks exactly like a successful one until the column is read back.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("create table t (a text not null, b text not null)")
+        connection.executemany("insert into t (a, b) values (?, ?)", [("x", "x"), ("x-1", "x")])
+
+        assert guard.seeded_rows_prove_repetition(connection, "t", ["b"]) == ""
+        assert "a" in guard.seeded_rows_prove_repetition(connection, "t", ["a", "b"])
+    finally:
+        connection.close()
+
+
+@requires_release_history
+def test_the_upgrade_property_runs_over_a_database_that_carries_rows(monkeypatch):
+    """The seeding is only worth anything if the upgrade under test is the thing it precedes.
+
+    Read at the moment ``run_migrations`` is called, because that is the upgrade whose
+    behaviour the property is about; counting afterwards would also accept a seeder that
+    ran after it, or one whose rows the upgrade had already removed.
+    """
+    observed: dict[str, int] = {}
+    upgrade = guard.run_migrations
+
+    def counting(db_path):
+        connection = sqlite3.connect(db_path)
+        try:
+            observed.update(
+                (str(name), connection.execute(f'select count(*) from "{name}"').fetchone()[0])
+                for (name,) in connection.execute(
+                    "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+                )
+                if name != guard.ALEMBIC_BOOKKEEPING_TABLE
+            )
+        finally:
+            connection.close()
+        return upgrade(db_path)
+
+    monkeypatch.setattr(guard, "run_migrations", counting)
+    _, short, _ = guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
+
+    assert observed
+    assert all(count >= guard.SEED_ROWS for table, count in observed.items() if table not in short)
+
+
+@requires_release_history
+def test_every_installable_tag_is_covered_exactly_once():
+    """Coverage is per shipped graph: nothing skipped, nothing rebuilt.
+
+    The unit has to be the graph rather than the tag, because a graph is what put a
+    database in the field -- and because covering ~95 installable tags one database each
+    would cost minutes to prove what ~30 distinct directories already prove.
+    """
+    covered = guard.released_graphs()
+
+    assert {guard.versions_tree(tag) for tag in covered} == {guard.versions_tree(tag) for tag in guard.released_tags()}
+    assert len({guard.versions_tree(tag) for tag in covered}) == len(covered)
+
+
+@requires_release_history
+def test_no_slot_is_newly_taken_twice():
+    assert guard.new_slot_collisions() == {}
+
+
+@requires_release_history
+def test_no_released_revision_has_been_rechained():
+    assert guard.rechained_revisions() == []
+
+
+@requires_release_history
+def test_every_released_database_still_reaches_head():
+    """A database built by any released graph must reach the full schema under today's.
+
+    This is the property the v3.0.11 outage violated, and the one no other test in this
+    repository could see: every existing migration test builds its starting database by
+    replaying the current chain from empty, which produces the schema the current graph
+    intends rather than the schema a release actually left behind.
+    """
+    assert guard.unrepairable_releases()[0] == {}
+
+
+@requires_release_history
+@pytest.mark.parametrize("keep", [0, 1], ids=["applies-nothing", "applies-a-prefix"])
+def test_a_database_the_release_never_shipped_cannot_pass(monkeypatch, keep, tmp_path):
+    """The guard's own false negative, closed at the only revision that proves anything.
+
+    An extraction that resolves to no revisions -- or to some prefix of the release --
+    reports success and leaves a database that release never shipped, which then upgrades
+    to today's head with a complete schema: a pass proving the opposite of what it claims.
+    Every intermediate revision is a database today's graph can legitimately repair, so
+    only the released graph's own head is evidence it was applied in full.
+    """
+
+    extract = guard.extract_released_versions
+
+    def truncated(tag: str, destination: Path) -> Path:
+        versions = extract(tag, destination)
+        for path in sorted(versions.glob("*.py"))[keep:]:
+            path.unlink()
+        return versions
+
+    monkeypatch.setattr(guard, "extract_released_versions", truncated)
+
+    with pytest.raises(guard.MigrationGuardError):
+        guard.schema_gap_after_upgrade(RELEASE_HISTORY[-1])
+
+
+@requires_spliced_baseline
+def test_the_guard_still_detects_the_release_it_was_written_for():
+    """Run against the release before the splice, the guard must report it.
+
+    Without this, every assertion above could pass because the guard stopped detecting
+    anything, and nothing in the suite would notice.
+    """
+    problems = guard.rechained_revisions(SPLICED_BASELINE)
+
+    assert [problem for problem in problems if SPLICED_REVISION in problem]
+    assert guard.new_slot_collisions(SPLICED_BASELINE)

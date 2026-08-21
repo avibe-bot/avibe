@@ -27,10 +27,10 @@ redaction, and capture behavior.
   rejects the turn. If a selected attachment later fails descriptor/hash
   verification during durable pinning, the same capture is retried once as
   text-only; an attachment-only turn retains the closed pin failure.
-- The first release keeps the existing Avibe allowlist in
-  `core/memory/modality.py`: bitmap images, PDF, supported audio, direct text,
-  CSV, VTT, HTML, and EML. Office/iWork/ODF/RTF, SVG, and video remain excluded
-  even where EverOS can parse them.
+- The live allowlist in `core/memory/modality.py` follows the pinned EverOS
+  parser except for SVG and video. Office/iWork/ODF/RTF files are admitted only
+  when the host can resolve LibreOffice `soffice`; otherwise they are skipped
+  per file so a missing converter cannot abort the rest of the `/add` batch.
 - The Memory consumer alone applies the limit of 8 files, 25 MiB per file, and
   100 MiB per bundle. Ordinary Agent attachment behavior is unchanged.
 - Multimodal preflight sends a tiny generated image containing no user or

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Final, Literal, Mapping, Protocol, Sequence
 
+from .stream_wire import ProtocolSSEState, ProtocolUsageReport
+
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
 SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
 OBSERVATION_OUTCOMES = (
@@ -97,6 +99,11 @@ class RawCallOutcome:
     source_id: str
     error_type: str | None = None  # raw upstream error type, if present
     error_candidates: tuple[str, ...] = ()  # unsorted raw type/code candidates
+    # Tokens the upstream reported for this call, when the response carried a
+    # readable report. A call that settles before it can hand its body onward
+    # would otherwise take its token report with it, and a vendor that reported
+    # tokens billed for them whether or not the call ended well.
+    usage: ProtocolUsageReport | None = None
 
 
 class ObservationOutcome(str, Enum):
@@ -315,10 +322,23 @@ class InvokeHandle(Protocol):
     For streaming calls, ``stream_started`` becomes true only when the
     protocol taxonomy observes the first model output; transport metadata and
     error frames remain pre-output. ``close_stream()`` is idempotent.
+
+    ``observed`` carries what the adapter itself read of this body, and it is
+    the handle's only member that answers before the body is consumed. A
+    streaming adapter has already read the head of the stream to decide there
+    was one — Anthropic reports the input tokens it billed in that head — and it
+    keeps reading as the body is yielded, so its tracker is never behind a
+    consumer's. Without it the facts of a call would exist only in bytes the
+    consumer has already pulled, and everything that can end a turn before the
+    first pull would see a call that never happened. It is None only when the
+    adapter tokenized no stream for this call.
     """
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None: ...
+
+    @property
+    def observed(self) -> ProtocolSSEState | None: ...
 
     @property
     def outcome_available(self) -> bool: ...

@@ -4,13 +4,28 @@ from __future__ import annotations
 
 import json
 import secrets
-from typing import Any, Mapping
+import time
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Mapping
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 
 from storage.db import get_cached_sqlite_engine
-from storage.models import remote_access_authorizations
+from storage.models import remote_access_authorizations, state_meta
+
+INSTANCE_BINDING_STATE_META_KEY = "remote_access.instance_binding.v1"
+INSTANCE_BINDING_STATE_RECONCILING = "reconciling"
+INSTANCE_BINDING_STATE_READY = "ready"
+# A durable, USABLE legacy state: the pairing reconciled successfully but the
+# control plane never reported a recognized kind. No kind-specific bypass is
+# available, and a later authoritative backfill completes it via a normal
+# transition.
+INSTANCE_BINDING_STATE_PENDING_KIND = "pending_kind"
+INSTANCE_BINDING_STATE_INVALID = "invalid"
+INSTANCE_BINDING_GENERATION_KEY = "vibe_instance_binding_generation"
+INSTANCE_BINDING_LOCK_FILENAME = "remote-access-instance-binding.lock"
 
 
 def store(
@@ -133,6 +148,10 @@ def load_scoped(
     return _record_from_row(row) if row is not None else None
 
 
+class InstanceBindingChangedError(RuntimeError):
+    """A durable binding generation advanced while this authorization write was in flight."""
+
+
 def upsert_scoped(
     *,
     reference: str | None,
@@ -145,8 +164,14 @@ def upsert_scoped(
     claims: Mapping[str, Any],
     last_checked_at: int,
     updated_at: int,
+    expected_binding_generation: int | None = None,
 ) -> str:
-    """Store one current Instance or Show Page context without expiring it."""
+    """Store one current Instance or Show Page context without expiring it.
+
+    When ``expected_binding_generation`` is provided, the compare and the write
+    run atomically under the cross-process binding lock (C2): a generation
+    that advanced, or a binding still reconciling, refuses the write.
+    """
 
     from storage.importer import ensure_sqlite_state
 
@@ -167,7 +192,19 @@ def upsert_scoped(
         "updated_at": updated_at,
     }
     engine = get_cached_sqlite_engine()
+    # Compare and write share one SQLite writer transaction: that is the
+    # cross-process CAS for authorization rows (C2). Generation is monotonic
+    # so a peer completing a transition after we captured expected_generation
+    # is still refused here.
     with engine.begin() as conn:
+        if expected_binding_generation is not None:
+            live = _load_binding_state_from_connection(conn)
+            live_generation = int((live or {}).get("generation") or 0)
+            live_state = (live or {}).get("state")
+            if live_generation > int(expected_binding_generation) or (
+                live_state == INSTANCE_BINDING_STATE_RECONCILING
+            ):
+                raise InstanceBindingChangedError("instance_binding_changed")
         existing_scope_reference = conn.execute(
             select(remote_access_authorizations.c.id)
             .where(remote_access_authorizations.c.instance_id == instance_id)
@@ -292,3 +329,593 @@ def delete_for_instance(instance_id: str) -> int:
             )
         )
     return int(result.rowcount or 0)
+
+
+def _decode_binding_state(value: Any) -> dict[str, Any] | None:
+    """Decode one state row, rejecting malformed values instead of guessing."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            return None
+        state = payload.get("state")
+        if state not in {
+            INSTANCE_BINDING_STATE_RECONCILING,
+            INSTANCE_BINDING_STATE_READY,
+            INSTANCE_BINDING_STATE_PENDING_KIND,
+        }:
+            return None
+        instance_id = payload.get("instance_id")
+        if not isinstance(instance_id, str) or not instance_id.strip():
+            return None
+        instance_kind = payload.get("instance_kind")
+        if instance_kind not in {None, "personal", "organization"}:
+            return None
+        if state == INSTANCE_BINDING_STATE_READY and instance_kind is None:
+            return None
+        generation = int(payload.get("generation"))
+        raw_schema_version = payload.get("schema_version")
+        if raw_schema_version is None:
+            schema_version = 1
+        else:
+            schema_version = int(raw_schema_version)
+            if schema_version != 1:
+                return None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if generation <= 0:
+        return None
+    return {
+        "schema_version": schema_version,
+        "state": state,
+        "instance_id": instance_id.strip(),
+        "instance_kind": instance_kind,
+        "generation": generation,
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+def _load_binding_state_from_connection(conn) -> dict[str, Any] | None:
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == INSTANCE_BINDING_STATE_META_KEY
+        )
+    ).scalar_one_or_none()
+    if raw is None:
+        return None
+    decoded = _decode_binding_state(raw)
+    if decoded is not None:
+        return decoded
+    # Keep corruption distinguishable from a never-initialized install. Any
+    # caller that sees this value must fail closed until a transition repairs it.
+    return {
+        "schema_version": 0,
+        "state": INSTANCE_BINDING_STATE_INVALID,
+        "instance_id": None,
+        "instance_kind": None,
+        "generation": 0,
+        "updated_at": None,
+    }
+
+
+def _ensure_sqlite_state() -> None:
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+
+
+def _binding_file_lock():
+    from config import paths
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(paths.get_state_dir() / INSTANCE_BINDING_LOCK_FILENAME)
+
+
+@contextmanager
+def instance_binding_lock() -> Iterator[None]:
+    """Serialize binding transitions across controller and UI processes."""
+
+    _ensure_sqlite_state()
+    with _binding_file_lock():
+        yield
+
+
+def load_instance_binding_state(*, ensure: bool = True) -> dict[str, Any] | None:
+    """Read the durable binding epoch shared by UI and controller processes."""
+
+    if ensure:
+        _ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    try:
+        with engine.connect() as conn:
+            return _load_binding_state_from_connection(conn)
+    except OperationalError as exc:
+        # A pre-migration process may not have created state_meta yet. Treat
+        # that as a legacy no-row install; callers that need a durable write
+        # use the default ``ensure=True`` path and will still fail closed on a
+        # real storage error.
+        if not ensure and "no such table" in str(exc).lower():
+            return None
+        raise
+
+
+def _validate_transition_identity(
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+) -> tuple[str, str | None]:
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        raise ValueError("instance_id_required")
+    if instance_kind not in {None, "personal", "organization"}:
+        raise ValueError("instance_kind_required")
+    return instance_id.strip(), instance_kind
+
+
+def _binding_payload(
+    *,
+    state: str,
+    instance_id: str,
+    instance_kind: str | None,
+    generation: int,
+) -> tuple[dict[str, Any], str]:
+    now = str(int(time.time()))
+    payload = {
+        "schema_version": 1,
+        "state": state,
+        "instance_id": instance_id,
+        "instance_kind": instance_kind,
+        "generation": int(generation),
+        "updated_at": now,
+    }
+    return payload, now
+
+
+def _write_binding_state(conn, payload: Mapping[str, Any], updated_at: str) -> None:
+    encoded = json.dumps(dict(payload), separators=(",", ":"), sort_keys=True)
+    statement = sqlite_insert(state_meta).values(
+        key=INSTANCE_BINDING_STATE_META_KEY,
+        value_json=encoded,
+        updated_at=updated_at,
+    )
+    conn.execute(
+        statement.on_conflict_do_update(
+            index_elements=[state_meta.c.key],
+            set_={"value_json": encoded, "updated_at": updated_at},
+        )
+    )
+
+
+def _begin_instance_binding_transition_locked(
+    conn,
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+) -> dict[str, Any]:
+    instance_id, instance_kind = _validate_transition_identity(
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+    )
+    existing = _load_binding_state_from_connection(conn)
+    if (
+        existing is not None
+        and existing["state"] == INSTANCE_BINDING_STATE_READY
+        and existing["instance_id"] == instance_id
+        and existing["instance_kind"] == instance_kind
+    ):
+        return {
+            "generation": existing["generation"],
+            "changed": False,
+            "previous": existing,
+            "state": INSTANCE_BINDING_STATE_READY,
+        }
+    if (
+        existing is not None
+        and existing["state"]
+        in {INSTANCE_BINDING_STATE_RECONCILING, INSTANCE_BINDING_STATE_PENDING_KIND}
+        and existing["instance_id"] == instance_id
+        and existing["instance_kind"] == instance_kind
+    ):
+        return {
+            "generation": existing["generation"],
+            "changed": True,
+            "previous": existing,
+            "state": INSTANCE_BINDING_STATE_RECONCILING,
+        }
+    generation = (int(existing["generation"]) if existing is not None else 0) + 1
+    payload, now = _binding_payload(
+        state=INSTANCE_BINDING_STATE_RECONCILING,
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+        generation=generation,
+    )
+    _write_binding_state(conn, payload, now)
+    return {
+        "generation": generation,
+        "changed": True,
+        "previous": existing,
+        "state": INSTANCE_BINDING_STATE_RECONCILING,
+    }
+
+
+def begin_instance_binding_transition(
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+) -> dict[str, Any]:
+    """Commit a fail-closed ``reconciling`` epoch before derived work starts."""
+
+    _ensure_sqlite_state()
+    with _binding_file_lock():
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            return _begin_instance_binding_transition_locked(
+                conn,
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+            )
+
+
+def _invalidate_instance_binding_authorizations_locked(
+    conn,
+    *,
+    instance_id: str,
+    previous_instance_id: str | None = None,
+    preserve_show_page: bool = True,
+    keep_reference_for_revalidation: bool = True,
+) -> int:
+    ids = {
+        value.strip()
+        for value in (instance_id, previous_instance_id or "")
+        if isinstance(value, str) and value.strip()
+    }
+    if not ids:
+        return 0
+    predicate = remote_access_authorizations.c.instance_id.in_(ids)
+    if preserve_show_page:
+        predicate = and_(
+            predicate,
+            or_(
+                remote_access_authorizations.c.scope_kind.is_(None),
+                remote_access_authorizations.c.scope_kind != "show_page",
+            ),
+        )
+    if keep_reference_for_revalidation:
+        result = conn.execute(
+            update(remote_access_authorizations)
+            .where(predicate)
+            .values(authorization_state="stale", updated_at=int(time.time()))
+        )
+    else:
+        result = conn.execute(delete(remote_access_authorizations).where(predicate))
+    return int(result.rowcount or 0)
+
+
+def invalidate_instance_binding_authorizations(
+    *,
+    instance_id: str,
+    previous_instance_id: str | None = None,
+    preserve_show_page: bool = True,
+    keep_reference_for_revalidation: bool = True,
+) -> int:
+    """Invalidate derived instance claims without touching exact Show Page grants."""
+
+    _ensure_sqlite_state()
+    with _binding_file_lock():
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            return _invalidate_instance_binding_authorizations_locked(
+                conn,
+                instance_id=instance_id,
+                previous_instance_id=previous_instance_id,
+                preserve_show_page=preserve_show_page,
+                keep_reference_for_revalidation=keep_reference_for_revalidation,
+            )
+
+
+def _complete_instance_binding_transition_locked(
+    conn,
+    *,
+    instance_id: str,
+    instance_kind: str,
+    generation: int,
+) -> bool:
+    if instance_kind not in {"personal", "organization"}:
+        return False
+    existing = _load_binding_state_from_connection(conn)
+    if (
+        existing is None
+        or existing["state"] != INSTANCE_BINDING_STATE_RECONCILING
+        or existing["instance_id"] != instance_id
+        or existing["instance_kind"] not in {None, instance_kind}
+        or existing["generation"] != int(generation)
+    ):
+        return False
+    # Publishing ready is itself a binding event: bump generation so any
+    # in-flight authorization write that captured the reconciling generation
+    # CAS-fails instead of landing under the new ready binding.
+    payload, now = _binding_payload(
+        state=INSTANCE_BINDING_STATE_READY,
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+        generation=int(generation) + 1,
+    )
+    _write_binding_state(conn, payload, now)
+    return True
+
+
+def complete_instance_binding_transition(
+    *,
+    instance_id: str,
+    instance_kind: str,
+    generation: int,
+) -> bool:
+    """Publish a reconciled binding epoch after all derived work succeeds."""
+
+    _ensure_sqlite_state()
+    with _binding_file_lock():
+        engine = get_cached_sqlite_engine()
+        with engine.begin() as conn:
+            return _complete_instance_binding_transition_locked(
+                conn,
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+                generation=generation,
+            )
+
+
+def reconcile_instance_binding(
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+    reconcile: Callable[[], Any] | None = None,
+    previous_instance_id: str | None = None,
+    preserve_show_page: bool = True,
+    hold_config_lock: bool = True,
+) -> dict[str, Any]:
+    """Run one serialized identity transition and publish ``ready`` last.
+
+    A callback failure deliberately leaves the committed ``reconciling`` row
+    in place. Callers must treat the returned ``ok=False`` as fail-closed and
+    retry from the next heartbeat.
+    """
+
+    instance_id, instance_kind = _validate_transition_identity(
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+    )
+    # Canonical lock order (C2): SQLite initialization FIRST, then the
+    # cross-process config lock. Never acquire config_file_lock while
+    # ensure_sqlite_state / migration.lock may still be needed.
+    _ensure_sqlite_state()
+
+    def run() -> dict[str, Any]:
+        engine = get_cached_sqlite_engine()
+        with _binding_file_lock():
+            return _reconcile_instance_binding_locked(
+                engine,
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+                reconcile=reconcile,
+                previous_instance_id=previous_instance_id,
+                preserve_show_page=preserve_show_page,
+            )
+
+    if not hold_config_lock:
+        return run()
+    from config.v2_config import config_file_lock
+
+    with config_file_lock():
+        return run()
+
+
+def _reconcile_instance_binding_locked(
+    engine,
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+    reconcile: Callable[[], Any] | None,
+    previous_instance_id: str | None,
+    preserve_show_page: bool,
+) -> dict[str, Any]:
+    with engine.begin() as conn:
+        transition = _begin_instance_binding_transition_locked(
+            conn,
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+        )
+        previous = transition.get("previous")
+        previous_id = previous.get("instance_id") if isinstance(previous, Mapping) else None
+        if previous_instance_id and previous_instance_id != instance_id:
+            previous_id = previous_instance_id
+        preserve = preserve_show_page and previous_id in {None, instance_id}
+        invalidated = (
+            _invalidate_instance_binding_authorizations_locked(
+                conn,
+                instance_id=instance_id,
+                previous_instance_id=previous_id,
+                preserve_show_page=preserve,
+            )
+            if transition["changed"]
+            else 0
+        )
+
+        if not transition["changed"]:
+            return {
+                **transition,
+                "ok": True,
+                "ready": True,
+                "invalidated": 0,
+            }
+
+    try:
+        if reconcile is not None:
+            reconcile()
+    except Exception as exc:
+        return {
+            **transition,
+            "ok": False,
+            "ready": False,
+            "invalidated": invalidated,
+            "error": str(exc),
+        }
+
+    if instance_kind is None:
+        # A supported legacy no-kind pairing must stay USABLE: publish the
+        # durable pending_kind state instead of parking in fail-closed
+        # reconciling. A later authoritative backfill runs a new transition.
+        with engine.begin() as conn:
+            existing = _load_binding_state_from_connection(conn)
+            if (
+                existing is not None
+                and existing["state"] == INSTANCE_BINDING_STATE_RECONCILING
+                and existing["instance_id"] == instance_id
+                and existing["generation"] == int(transition["generation"])
+            ):
+                payload, now = _binding_payload(
+                    state=INSTANCE_BINDING_STATE_PENDING_KIND,
+                    instance_id=instance_id,
+                    instance_kind=None,
+                    generation=transition["generation"],
+                )
+                _write_binding_state(conn, payload, now)
+        return {
+            **transition,
+            "ok": True,
+            "ready": False,
+            "invalidated": invalidated,
+            "pending": True,
+        }
+
+    with engine.begin() as conn:
+        completed = _complete_instance_binding_transition_locked(
+            conn,
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+            generation=transition["generation"],
+        )
+    if not completed:
+        return {
+            **transition,
+            "ok": False,
+            "ready": False,
+            "invalidated": invalidated,
+            "error": "binding_generation_changed",
+        }
+    return {
+        **transition,
+        "generation": int(transition["generation"]) + 1,
+        "ok": True,
+        "ready": True,
+        "invalidated": invalidated,
+    }
+
+
+def instance_binding_generation(
+    *,
+    instance_id: str,
+    instance_kind: str,
+) -> int | None:
+    state = load_instance_binding_state()
+    if (
+        state is None
+        or state["state"] != INSTANCE_BINDING_STATE_READY
+        or state["instance_id"] != instance_id
+        or state["instance_kind"] != instance_kind
+    ):
+        return None
+    return int(state["generation"])
+
+
+def current_instance_binding_generation(*, ensure: bool = True) -> int:
+    """Return the durable generation any process can compare against.
+
+    Missing state is generation 0 (a never-initialized install). A corrupt
+    or reconciling row still exposes its generation so a stale writer can
+    refuse to reverse a newer transition.
+    """
+
+    state = load_instance_binding_state(ensure=ensure)
+    if state is None:
+        return 0
+    try:
+        return int(state.get("generation") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bootstrap_deferred_migration() -> None:
+    """Run the deferred-context migration for one bootstrap transition."""
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.resource_access_service import (
+        RESOURCE_BINDING_STATE_UNAVAILABLE,
+        RESOURCE_BINDING_STATUS_KEY,
+        migrate_legacy_deferred_resource_contexts,
+    )
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        result = migrate_legacy_deferred_resource_contexts(connection)
+    if result.get(RESOURCE_BINDING_STATUS_KEY) == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        raise RuntimeError("legacy_deferred_context_provenance_unavailable")
+
+
+def binding_is_ready_for_pairing(
+    *,
+    instance_id: str | None,
+    instance_kind: str | None,
+    ensure: bool = False,
+    bootstrap: bool = False,
+) -> bool:
+    """True only when the durable binding is ready for this pairing.
+
+    A missing row is compatible ONLY for a no-kind legacy pairing. A known
+    configured kind without a validated durable row is an upgrade artifact:
+    with ``bootstrap=True`` (authorization consumers) it earns a validated
+    row through one real transition; otherwise it fails closed.
+    ``pending_kind`` is the durable usable legacy state; once a row exists,
+    ``reconciling`` / ``invalid`` / mismatched identity means the kind is
+    unavailable to every consumer until reconciliation succeeds.
+    """
+
+    current_id = (instance_id or "").strip()
+    current_kind = instance_kind if instance_kind in {"personal", "organization"} else None
+    state = load_instance_binding_state(ensure=ensure)
+    if state is None:
+        # Stay compatible for the legacy no-kind pairing; a known kind with
+        # no validated binding row (the server may have reclassified while
+        # this install was offline) is bootstrapped or fails closed.
+        if current_kind is None:
+            return True
+        if not bootstrap or not current_id:
+            return False
+        try:
+            result = reconcile_instance_binding(
+                instance_id=current_id,
+                instance_kind=current_kind,
+                reconcile=_bootstrap_deferred_migration,
+            )
+        except Exception:
+            return False
+        return bool(result.get("ok") and result.get("ready"))
+    if state.get("state") == INSTANCE_BINDING_STATE_PENDING_KIND:
+        # Usable legacy state: no kind bypass is claimable anyway.
+        return current_kind is None and (
+            not current_id or state.get("instance_id") == current_id
+        )
+    if state.get("state") in {INSTANCE_BINDING_STATE_RECONCILING, INSTANCE_BINDING_STATE_INVALID}:
+        return False
+    if state.get("state") != INSTANCE_BINDING_STATE_READY:
+        return False
+    if current_kind is None:
+        # Legacy/invalid no-kind pairing stays usable (fail-open).
+        return True
+    return (
+        bool(current_id)
+        and state.get("instance_id") == current_id
+        and state.get("instance_kind") == current_kind
+    )

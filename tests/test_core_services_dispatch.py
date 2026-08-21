@@ -17,8 +17,11 @@ streaming lands) cannot break the public contract silently.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
+import weakref
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -129,6 +132,84 @@ def test_streaming_registers_turn_sink_and_waits_for_result():
     assert received == []
     # No longer stashed on the context.
     assert "turn_chunk_callback" not in (ctx.platform_specific or {})
+
+
+def test_streaming_dispatch_releases_lifecycle_snapshot_after_handler_returns() -> None:
+    """Scenario: MEMORY-INDEP-011."""
+
+    class _Snapshot:
+        pass
+
+    async def exercise() -> None:
+        controller = MagicMock()
+        handler_returned = asyncio.Event()
+        snapshot_reference = None
+        sinks: dict[str, dict] = {}
+
+        async def handle_user_message(
+            _context,
+            _text,
+            *,
+            lifecycle_snapshot=None,
+        ):
+            nonlocal snapshot_reference
+            snapshot_reference = weakref.ref(lifecycle_snapshot)
+            handler_returned.set()
+            return None
+
+        def register_sink(
+            session_key,
+            *,
+            on_chunk,
+            done_event,
+            turn_token=None,
+            context=None,
+        ) -> None:
+            sinks[session_key] = {
+                "on_chunk": on_chunk,
+                "done_event": done_event,
+                "turn_token": turn_token,
+                "context": context,
+            }
+
+        controller.message_handler = SimpleNamespace(
+            handle_user_message=handle_user_message,
+        )
+        controller._get_session_key = MagicMock(return_value="slack::C")
+        controller._get_turn_sink_key = MagicMock(return_value="slack::C")
+        controller.get_turn_sink = MagicMock(
+            side_effect=lambda key: sinks.get(key)
+        )
+        controller.register_turn_sink = MagicMock(side_effect=register_sink)
+        controller.pop_turn_sink = MagicMock(
+            side_effect=lambda key, _done=None: sinks.pop(key, None)
+        )
+
+        snapshot = _Snapshot()
+        dispatch = asyncio.create_task(
+            dispatch_turn_with_outcome(
+                controller,
+                _ctx(),
+                "hi",
+                on_chunk=AsyncMock(),
+                lifecycle_snapshot=snapshot,
+            )
+        )
+        del snapshot
+
+        await asyncio.wait_for(handler_returned.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        gc.collect()
+        assert snapshot_reference is not None
+        assert snapshot_reference() is None
+
+        sink = sinks["slack::C"]
+        sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
+        sink["done_event"].set()
+        outcome = await asyncio.wait_for(dispatch, timeout=1.0)
+        assert outcome.settled_by == SETTLED_BY_TERMINAL_RESULT
+
+    asyncio.run(exercise())
 
 
 def test_on_chunk_absent_keeps_platform_specific_untouched():

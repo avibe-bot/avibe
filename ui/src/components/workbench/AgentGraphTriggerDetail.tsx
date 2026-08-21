@@ -9,6 +9,7 @@ import type { HarnessRun, HarnessTask, HarnessWatch } from '../../context/ApiCon
 import { useToast } from '../../context/ToastContext';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
+import { onPageReactivated } from '../../lib/pageActivity';
 import { formatLocalDateTime } from '../../lib/datetime';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import {
@@ -210,7 +211,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     void refresh(false);
     // Skip ticks while the tab is hidden — an idle backgrounded panel must not
     // keep issuing unpaginated list reads every 4s (matches AgentGraphTab's
-    // visibility-gated poll) — and refresh at once when visibility returns.
+    // visibility-gated poll) — and refresh at once when the page comes back.
     let timer: number | undefined;
     const tick = () => {
       if (stopped) return;
@@ -218,15 +219,12 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
       timer = window.setTimeout(tick, TRIGGER_DETAIL_POLL_MS);
     };
     timer = window.setTimeout(tick, TRIGGER_DETAIL_POLL_MS);
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') void refresh(true);
-    };
-    document.addEventListener('visibilitychange', onVisibility);
+    const stopReactivation = onPageReactivated(() => void refresh(true));
 
     return () => {
       stopped = true;
       if (timer !== undefined) window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
+      stopReactivation();
     };
   }, [api, definitionId, isWatch, chipEnabled]);
 

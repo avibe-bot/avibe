@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.resources as package_resources
 import json
@@ -19,8 +20,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
-from typing import Any
+from typing import Any, Iterator
 
+from config.atomic_io import write_atomic
 from core.dependency_network import (
     dependency_error_details,
     dependency_error_message,
@@ -29,7 +31,13 @@ from core.dependency_network import (
     probe_url,
     redact_url,
 )
-from storage.lock import MigrationFileLock, MigrationLockTimeout
+from storage.lock import (
+    MigrationFileLock,
+    MigrationLockTimeout,
+    fcntl_available,
+    try_windows_exclusive_lock,
+    unlock_windows_exclusive_lock,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -338,7 +346,46 @@ class ManagedRuntimeManager:
             user_agent=f"avibe-{self.spec.runtime_id}-doctor",
         )
 
-    def clean(self, *, keep_previous: int = 1) -> dict[str, Any]:
+    def clean(self, *, keep_previous: int = 1, dry_run: bool = False) -> dict[str, Any]:
+        if dry_run:
+            # Read-only preview: no lock acquisition (the file lock would create
+            # ``.install.lock`` and mutate persistent state), so previews also
+            # work on read-only runtime directories. Busy checks exclude both
+            # same-process staging (in-process lock) and cross-process staging
+            # (read-only existence probe of the lock file) — a preview must not
+            # advertise removing live staging state. The probe stays held
+            # through candidate planning so an install cannot start between
+            # the check and the ``install-*`` enumeration.
+            with self._preview_guard() as busy_reason:
+                if busy_reason:
+                    return {
+                        "ok": False,
+                        "removed": [],
+                        "reason": busy_reason,
+                        "message": "an install is currently running",
+                    }
+                try:
+                    result = self._clean_locked(keep_previous=keep_previous, dry_run=True, removed=[])
+                    if self._preview_raced_busy():
+                        return {
+                            "ok": False,
+                            "removed": [],
+                            "reason": self._reason("install_already_running"),
+                            "message": "an install is currently running",
+                        }
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Managed %s runtime dry-run inspection failed",
+                        self.spec.runtime_id,
+                        exc_info=True,
+                    )
+                    return {
+                        "ok": False,
+                        "removed": [],
+                        "reason": self._reason("clean_inspection_failed"),
+                        "message": str(exc),
+                    }
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception as exc:  # noqa: BLE001
@@ -355,25 +402,229 @@ class ManagedRuntimeManager:
                 "removed": [],
                 "reason": self._reason("install_already_running"),
             }
+        removed: list[str] = []
         try:
-            return self._clean_locked(keep_previous=keep_previous)
+            return self._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
+        except Exception as cop:  # noqa: BLE001
+            # Real cleanups hit the same traversal errors dry runs do; return
+            # the structured inspection failure instead of raising through
+            # _clean_git_runtime into a reasonless result. Staging removals
+            # that already happened stay in the result.
+            logger.exception("Managed %s runtime cleanup failed", self.spec.runtime_id)
+            return {
+                "ok": False,
+                "removed": list(removed),
+                "reason": self._reason("clean_inspection_failed"),
+                "message": str(cop),
+            }
         finally:
             self._release_mutation_lock(file_lock)
 
-    def _clean_locked(self, *, keep_previous: int) -> dict[str, Any]:
-        removed: list[str] = []
+    @contextlib.contextmanager
+    def _preview_guard(self):
+        """Hold the read-only busy probe through preview candidate planning."""
+        busy = self._preview_busy_reason()
+        try:
+            yield busy
+        finally:
+            self._release_preview_guard()
+
+    def _release_preview_guard(self) -> None:
+        fd = getattr(self, "_preview_guard_fd", None)
+        if fd is not None:
+            if getattr(self, "_preview_guard_msvcrt", False):
+                unlock_windows_exclusive_lock(fd)
+                self._preview_guard_msvcrt = False
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._preview_guard_fd = None
+        if getattr(self, "_preview_held_install_lock", False):
+            self._preview_held_install_lock = False
+            try:
+                self._install_lock.release()
+            except RuntimeError:
+                pass
+
+    def _guard_path_matches_fd(self, fd: int) -> bool:
+        """True when the live path still names the locked descriptor."""
+        try:
+            open_stat = os.fstat(fd)
+            path_stat = self._install_file_lock_path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(open_stat.st_mode)
+            and open_stat.st_nlink == 1
+            and not stat.S_ISLNK(open_stat.st_mode)
+            and stat.S_ISREG(path_stat.st_mode)
+            and path_stat.st_nlink == 1
+            and not stat.S_ISLNK(path_stat.st_mode)
+            and (open_stat.st_dev, open_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+        )
+
+    def _windows_preview_busy_reason(self) -> str | None:
+        """Read-only Windows busy probe covering the pre-staging interval."""
+        probe = self._preview_lock_probe()
+        if probe is not None:
+            return probe
+        if getattr(self, "_preview_lock_was_absent", False):
+            return None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(self._install_file_lock_path, flags)
+        except OSError:
+            return self._reason("install_already_running")
+        try:
+            if not try_windows_exclusive_lock(fd):
+                os.close(fd)
+                return self._reason("install_already_running")
+            if not self._guard_path_matches_fd(fd):
+                os.close(fd)
+                return self._reason("install_already_running")
+            self._preview_guard_fd = fd
+            self._preview_guard_msvcrt = True
+            return None
+        except OSError:
+            os.close(fd)
+            return self._reason("install_already_running")
+
+    def _preview_busy_reason(self) -> str | None:
+        """Read-only busy check for previews: never creates or rewrites files.
+
+        On POSIX success the shared flock stays held (stored on the instance)
+        until ``_release_preview_guard`` so an exclusive installer cannot
+        start between the probe and staging enumeration. Native Windows uses
+        a non-blocking ``msvcrt.locking`` on an existing lock file instead.
+        After either acquisition, the live path is rechecked against the
+        descriptor so a same-user swap cannot leave the preview on an
+        orphaned inode.
+        """
+        if not self._install_lock.acquire(blocking=False):
+            return self._reason("install_already_running")
+        self._preview_held_install_lock = True
+        try:
+            if not fcntl_available():
+                return self._windows_preview_busy_reason()
+            import fcntl
+
+            probe = self._preview_lock_probe()
+            if probe is not None:
+                return probe
+            if getattr(self, "_preview_lock_was_absent", False):
+                return None
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                fd = os.open(self._install_file_lock_path, flags)
+            except OSError:
+                # Existing but unopenable (ACLs/permissions): a preview cannot
+                # know whether an install is active — report it as busy rather
+                # than risking a misleading "0 entries" preview.
+                return self._reason("install_already_running")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                if not self._guard_path_matches_fd(fd):
+                    os.close(fd)
+                    return self._reason("install_already_running")
+                self._preview_guard_fd = fd
+                return None
+            except OSError:
+                os.close(fd)
+                return self._reason("install_already_running")
+        except BaseException:
+            self._release_preview_guard()
+            raise
+
+    def _preview_lock_missing(self) -> bool:
+        try:
+            self._install_file_lock_path.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    def _preview_lock_probe(self) -> str | None:
+        try:
+            info = self._install_file_lock_path.lstat()
+        except FileNotFoundError:
+            self._preview_lock_was_absent = True
+            return None
+        except OSError:
+            self._preview_lock_was_absent = False
+            return self._reason("install_already_running")
+        self._preview_lock_was_absent = False
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return self._reason("install_already_running")
+        return None
+
+    def _preview_raced_busy(self) -> bool:
+        """True when an install started after a lock-absent preview probe."""
+        if getattr(self, "_preview_guard_fd", None) is not None:
+            return False
+        if not getattr(self, "_preview_lock_was_absent", False):
+            return False
+        return not self._preview_lock_missing()
+
+    def _rglob_install_metadata(self, versions_dir: Path) -> Iterator[Path]:
+        """rglob metadata files with error-preserving traversal.
+
+        ``Path.rglob`` suppresses subtree traversal errors and silently
+        returns an incomplete candidate set; raise instead so the caller's
+        inspection handling reports it (a misleading empty preview must not
+        hide an unreadable versions tree).
+        """
+        stack: list[Path] = [versions_dir]
+        while stack:
+            parent = stack.pop()
+            try:
+                iterator = os.scandir(parent)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise OSError(f"versions traversal failed: {parent}") from exc
+            try:
+                for entry in iterator:
+                    if entry.name == self.spec.metadata_filename:
+                        yield parent / entry.name
+                    elif entry.is_dir(follow_symlinks=False):
+                        stack.append(parent / entry.name)
+            except OSError as exc:
+                raise OSError(f"versions traversal failed: {parent}") from exc
+            finally:
+                iterator.close()
+
+    def _clean_locked(
+        self,
+        *,
+        keep_previous: int,
+        dry_run: bool = False,
+        removed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if removed is None:
+            removed = []
         for staging_dir in self.runtime_dir.glob("install-*"):
             if staging_dir.is_dir():
-                shutil.rmtree(staging_dir, ignore_errors=True)
+                if not dry_run:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
                 removed.append(str(staging_dir))
 
         versions_dir = self.runtime_dir / "versions"
-        if not versions_dir.is_dir():
+        try:
+            versions_is_dir = stat.S_ISDIR(versions_dir.stat().st_mode)
+        except FileNotFoundError:
+            return {"ok": True, "removed": removed}
+        except OSError as exc:
+            # An uninspectable versions tree must not silently preview as
+            # empty (misleading "0 entries") — surface an inspection failure.
+            raise OSError(f"versions directory cannot be inspected: {versions_dir}") from exc
+        if not versions_is_dir:
             return {"ok": True, "removed": removed}
 
         install_dirs = {
             metadata_path.parent
-            for metadata_path in versions_dir.rglob(self.spec.metadata_filename)
+            for metadata_path in self._rglob_install_metadata(versions_dir)
             if metadata_path.parent.is_dir()
         }
         current = self._current_install_dir(versions_dir)
@@ -384,9 +635,11 @@ class ManagedRuntimeManager:
             reverse=True,
         )
         for path in candidates[max(0, keep_previous) :]:
-            shutil.rmtree(path, ignore_errors=True)
+            if not dry_run:
+                shutil.rmtree(path, ignore_errors=True)
             removed.append(str(path))
-        self._prune_empty_version_dirs(versions_dir)
+        if not dry_run:
+            self._prune_empty_version_dirs(versions_dir)
         return {"ok": True, "removed": removed}
 
     def _manifest_installable(self, manifest: ManagedRuntimeManifest) -> bool:
@@ -476,7 +729,7 @@ class ManagedRuntimeManager:
         if cache_remote:
             cached_manifest = self._remote_manifest_cache_path()
             try:
-                write_bytes_atomic(cached_manifest, payload)
+                write_atomic(cached_manifest, payload)
             except OSError:
                 logger.warning("Failed to cache %s manifest", self.spec.runtime_id, exc_info=True)
         return manifest
@@ -927,15 +1180,7 @@ def env_flag_enabled(name: str, *, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def write_bytes_atomic(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(path)
-
-
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    # ``sort_keys`` keeps the manifest and install-state files diffable across
+    # runs; the swap itself belongs to ``write_atomic``.
+    write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")

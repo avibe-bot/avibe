@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import multiprocessing
 import threading
@@ -9,7 +10,6 @@ import pytest
 
 from config.v2_config import (
     AgentsConfig,
-    CONFIG_LOCK,
     MemoryCloudConfig,
     MemoryConfig,
     MemoryEndpointConfig,
@@ -42,6 +42,69 @@ def _complete_processing(*, llm_url: str = "https://llm.example.test/v1") -> dic
     }
 
 
+# Budget for one interleaved config writer, shared by every test below so the
+# value has a single owner. It looks like a handoff between two threads, but it
+# has to cover *two* sequential load -> merge -> validate -> write cycles: a
+# writer holds CONFIG_LOCK plus the Memory file lock across the rendezvous, so
+# the other one cannot even start its own cycle until the first one is done.
+# One cycle measures ~0.5s median and ~1.7s worst case on a fast dev machine, so
+# the pair alone can reach several seconds before a slower CI runner is priced
+# in; the previous 5s went flaky on the `memory-first` orders. These budgets are
+# timing slack and never part of what the tests assert, so prefer them loose.
+_WRITER_TIMEOUT_SECONDS = 30
+# A writer parked on a rendezvous only gives up after `_WRITER_TIMEOUT_SECONDS`
+# and still has its write to finish, so joining on that same budget could call a
+# writer stuck one moment before it unwinds on its own.
+_WRITER_JOIN_TIMEOUT_SECONDS = _WRITER_TIMEOUT_SECONDS * 2
+
+
+def _config_writer(
+    target,
+    *,
+    name: str,
+    args: tuple = (),
+) -> threading.Thread:
+    """Build a config writer that cannot outlive the test session.
+
+    `get_vibe_remote_dir()` reads `AVIBE_HOME` on every call and falls back to
+    `Path.home()`, so a writer still running once monkeypatch has restored the
+    environment resolves against the developer's real home -- measured: a
+    non-daemon writer released after the session resolved
+    `$HOME/.avibe/config/config.json`. A daemon thread is killed at interpreter
+    shutdown rather than joined, so a writer nothing can release still cannot
+    reach real user state.
+    """
+
+    return threading.Thread(target=target, name=name, args=args, daemon=True)
+
+
+def _join_config_writers(
+    *writers: threading.Thread,
+    timeout: float = _WRITER_JOIN_TIMEOUT_SECONDS,
+) -> None:
+    """Join every writer, and fail here rather than leaving one running.
+
+    A writer that outlives its test resolves against whatever the environment
+    holds by then; while the session is still running that is the *next* test's
+    config, which surfaces as a bogus assertion there instead of a hang here.
+    `_config_writer` bounds what happens past the end of the session, and this
+    reports the overrun at the test that caused it. Call it from a `finally` so
+    a failed wait above still names the writer that actually hung.
+    """
+
+    stuck: list[str] = []
+    for writer in writers:
+        # An unstarted writer (an earlier wait failed before its `start()`)
+        # reports the same `is_alive()` as a finished one, and `join()` would
+        # raise on it.
+        if writer.is_alive():
+            writer.join(timeout)
+        if writer.is_alive():
+            stuck.append(writer.name)
+    if stuck:
+        pytest.fail(f"config writers still running: {', '.join(stuck)}")
+
+
 def _stale_whole_config_writer(
     config_path,
     loaded,
@@ -50,7 +113,7 @@ def _stale_whole_config_writer(
 ) -> None:
     stale = V2Config.load(config_path)
     loaded.set()
-    if not start.wait(10):
+    if not start.wait(_WRITER_TIMEOUT_SECONDS):
         raise TimeoutError("whole-config writer was not released")
     stale.language = "zh"
     stale.save(config_path)
@@ -65,7 +128,7 @@ def _memory_writer(
     done,
 ) -> None:
     ready.set()
-    if not start.wait(10):
+    if not start.wait(_WRITER_TIMEOUT_SECONDS):
         raise TimeoutError("Memory writer was not released")
 
     def update(memory: MemoryConfig) -> MemoryConfig:
@@ -78,20 +141,6 @@ def _memory_writer(
 
     atomic_update_memory(update, config_path=config_path)
     done.set()
-
-
-class _ObservedConfigLock:
-    def __init__(self, contender_entered: threading.Event) -> None:
-        self._contender_entered = contender_entered
-
-    def __enter__(self):
-        if threading.current_thread().name == "second-config-save":
-            self._contender_entered.set()
-        CONFIG_LOCK.acquire()
-        return self
-
-    def __exit__(self, *_args) -> None:
-        CONFIG_LOCK.release()
 
 
 def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
@@ -240,11 +289,13 @@ def test_memory_rerank_round_trips_without_projecting_its_key(tmp_path) -> None:
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     projected = config_to_payload(config)["memory"]["processing"]["rerank"]
     assert stored["memory"]["processing"]["rerank"]["api_key"] == "rerank-secret"
+    assert stored["memory"]["processing"]["rerank"]["provider"] == "deepinfra"
     assert projected == {
         "base_url": "https://rerank.example.test/v1/inference",
         "model": "rerank-model",
         "api_key": None,
         "has_api_key": True,
+        "provider": "deepinfra",
     }
 
 
@@ -271,6 +322,94 @@ def test_memory_multimodal_round_trips_without_projecting_its_key(tmp_path) -> N
         "api_key": None,
         "has_api_key": True,
     }
+
+
+def test_memory_rerank_infers_dashscope_from_maas_url_when_provider_is_omitted() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://llm-space.example.maas.aliyuncs.com",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.rerank.provider == "dashscope"
+    assert config.memory.processing.rerank.rerank_provider() == "dashscope"
+
+
+def test_memory_rerank_infers_dashscope_from_maas_url_with_explicit_port() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://llm-space.example.maas.aliyuncs.com:443",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.rerank.provider == "dashscope"
+
+
+def test_memory_rerank_keeps_omitted_provider_as_deepinfra_for_gte_model_name() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "base_url": "https://api.deepinfra.com/v1/inference",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+
+    assert config.memory.processing.rerank.provider == "deepinfra"
+    assert config.memory.processing.rerank.rerank_provider() == "deepinfra"
+
+
+def test_memory_rerank_persists_explicit_provider(tmp_path) -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "provider": "dashscope",
+        "base_url": "https://dashscope.aliyuncs.com",
+        "model": "gte-rerank-v2",
+        "api_key": "rerank-secret",
+    }
+    config = V2Config.from_payload(
+        _payload({"enabled": True, "processing": processing})
+    )
+    config.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    loaded = V2Config.load(tmp_path / "config.json")
+    assert stored["memory"]["processing"]["rerank"]["provider"] == "dashscope"
+    assert loaded.memory.processing.rerank.rerank_provider() == "dashscope"
+    assert loaded.memory.processing.rerank.model == "gte-rerank-v2"
+
+
+def test_memory_rerank_rejects_unknown_provider() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "provider": "cohere",
+        "base_url": "https://rerank.example.test/v1/inference",
+        "model": "rerank-model",
+        "api_key": "rerank-secret",
+    }
+    with pytest.raises(ValueError, match="provider must be deepinfra, vllm, or dashscope"):
+        V2Config.from_payload(_payload({"enabled": False, "processing": processing}))
+
+
+def test_memory_rerank_rejects_unsupported_dashscope_model() -> None:
+    processing = _complete_processing()
+    processing["rerank"] = {
+        "provider": "dashscope",
+        "base_url": "https://dashscope.aliyuncs.com",
+        "model": "qwen3-vl-rerank",
+        "api_key": "rerank-secret",
+    }
+    with pytest.raises(ValueError, match="gte-rerank-v2"):
+        V2Config.from_payload(_payload({"enabled": False, "processing": processing}))
 
 
 @pytest.mark.parametrize("missing", ["base_url", "model", "api_key"])
@@ -419,7 +558,9 @@ def _acknowledged_organization_cloud() -> dict:
             "chat": True,
             "embedding": True,
             "multimodal": False,
+            "memory_llm": True,
         },
+        "memory_llm_source": "chat_fallback",
         "embedding_identity": "emb-org",
         "revision": 4,
         "quota_enforced": False,
@@ -434,10 +575,72 @@ def _acknowledged_organization_cloud() -> dict:
     }
 
 
+def test_memory_cloud_persists_effective_memory_llm_source() -> None:
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "cloud": {
+                    "capabilities": {
+                        "asr": False,
+                        "chat": False,
+                        "embedding": True,
+                        "multimodal": False,
+                        "memory_llm": True,
+                    },
+                    "memory_llm_source": "dedicated",
+                    "embedding_identity": "emb-dedicated",
+                }
+            }
+        )
+    )
+
+    assert config.memory.cloud.memory_llm_source == "dedicated"
+    assert config.memory.cloud.capabilities.memory_available() is True
+
+    payload = config_to_payload(config)
+    assert payload["memory"]["cloud"]["memory_llm_source"] == "dedicated"
+    assert payload["memory"]["cloud"]["capabilities"]["memory_llm"] is True
+
+
+@pytest.mark.parametrize(
+    ("chat", "source"),
+    [(False, "chat_fallback"), (True, "future_source")],
+)
+def test_disk_recovery_of_untrusted_memory_llm_source_disables_cloud_memory(
+    tmp_path,
+    chat: bool,
+    source: str,
+) -> None:
+    config_path = tmp_path / "config.json"
+    cloud = _acknowledged_organization_cloud()
+    cloud["capabilities"]["chat"] = chat
+    cloud["memory_llm_source"] = source
+    payload = _payload(
+        {
+            "enabled": True,
+            "mode": "platform",
+            "processing": _complete_processing(),
+            "cloud": cloud,
+        }
+    )
+
+    with pytest.raises(ValueError, match="memory_llm_source"):
+        V2Config.from_payload(payload)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path)
+
+    assert loaded.memory.cloud.memory_llm_source is None
+    assert loaded.memory.cloud.capabilities.memory_llm is False
+    assert loaded.memory.cloud.runtime_ready() is False
+    assert loaded.memory.runtime_source() == "unavailable"
+
+
 @pytest.mark.parametrize(
     ("field", "invalid"),
     [
         ("scope", "unsupported"),
+        ("memory_llm_source", "unsupported"),
         ("capabilities", []),
         ("embedding_identity", 7),
         ("revision", "four"),
@@ -684,7 +887,7 @@ def test_memory_config_drops_retired_proactive_capture_flag(tmp_path) -> None:
 
 
 def test_fresh_config_save_fsyncs_parent_after_replace(monkeypatch, tmp_path) -> None:
-    from config import v2_config
+    from config import atomic_io
 
     config_path = tmp_path / "config.json"
     observed: list[tuple[Path, str]] = []
@@ -692,7 +895,7 @@ def test_fresh_config_save_fsyncs_parent_after_replace(monkeypatch, tmp_path) ->
     def observe_directory_sync(directory: Path) -> None:
         observed.append((directory, config_path.read_text(encoding="utf-8")))
 
-    monkeypatch.setattr(v2_config, "_fsync_directory", observe_directory_sync)
+    monkeypatch.setattr(atomic_io, "_fsync_directory", observe_directory_sync)
 
     V2Config.from_payload(
         _payload({"recovery_intent": "rebuild"})
@@ -707,7 +910,7 @@ def test_config_save_cleans_temporary_file_when_replace_fails(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from config import v2_config
+    from config import atomic_io
 
     config_path = tmp_path / "config.json"
     config = V2Config.from_payload(_payload({"recovery_intent": "rebuild"}))
@@ -717,7 +920,7 @@ def test_config_save_cleans_temporary_file_when_replace_fails(
     def fail_replace(source: Path, target: Path) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(v2_config.os, "replace", fail_replace)
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
         config.language = "zh"
@@ -868,6 +1071,56 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
     assert saved.memory.recovery_intent == "rebuild"
 
 
+def test_config_writers_cannot_outlive_the_test_session() -> None:
+    """No writer can resolve a config path once the isolation is restored.
+
+    Asserted at the single owner, plus the property that every writer is built
+    there -- listing today's writers would pass forever while the next one
+    added silently reopens the escape.
+    """
+
+    assert _config_writer(lambda: None, name="probe").daemon is True
+
+    module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    factory = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "_config_writer"
+    )
+    built_outside_the_factory = [
+        node.lineno
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Thread"
+        and not (factory.lineno <= node.lineno <= factory.end_lineno)
+    ]
+    assert built_outside_the_factory == []
+
+
+def test_join_config_writers_reports_a_writer_that_overruns() -> None:
+    """An overrunning writer is named here instead of leaking into a later test.
+
+    The `finally` releases the worker so this test does not itself leak one.
+    Containment for a writer that *cannot* be released is a separate property,
+    owned by `test_config_writers_cannot_outlive_the_test_session`.
+    """
+
+    release = threading.Event()
+    worker = _config_writer(
+        release.wait,
+        args=(_WRITER_TIMEOUT_SECONDS,),
+        name="slow-writer",
+    )
+    worker.start()
+    try:
+        with pytest.raises(pytest.fail.Exception, match="slow-writer"):
+            _join_config_writers(worker, timeout=0.05)
+    finally:
+        release.set()
+        _join_config_writers(worker)
+
+
 def test_concurrent_generic_config_saves_preserve_both_updates(
     monkeypatch,
     tmp_path,
@@ -884,6 +1137,7 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
     V2Config.from_payload(_payload({})).save()
     first_merged = threading.Event()
     release_first = threading.Event()
+    second_started = threading.Event()
     second_done = threading.Event()
     failures: list[BaseException] = []
     merge = api._deep_merge_dicts
@@ -892,7 +1146,7 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
         merged = merge(base, update)
         if threading.current_thread().name == "first-config-save":
             first_merged.set()
-            if not release_first.wait(5):
+            if not release_first.wait(_WRITER_TIMEOUT_SECONDS):
                 raise TimeoutError("first config save was not released")
         return merged
 
@@ -903,31 +1157,32 @@ def test_concurrent_generic_config_saves_preserve_both_updates(
             failures.append(exc)
 
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_first_merge)
-    first = threading.Thread(
-        target=save,
+    first = _config_writer(
+        save,
         args=({"language": "zh"},),
         name="first-config-save",
     )
-    second = threading.Thread(target=save, args=({"runtime": {"log_level": "DEBUG"}},))
 
     def observed_second_save() -> None:
+        second_started.set()
         save({"runtime": {"log_level": "DEBUG"}})
         second_done.set()
 
-    second = threading.Thread(target=observed_second_save)
+    second = _config_writer(
+        observed_second_save,
+        name="second-config-save",
+    )
 
-    first.start()
-    assert first_merged.wait(5)
-    second.start()
-    # While the first save holds the transaction (mid-merge), the second
-    # must be blocked on the config file lock — generous negative window.
-    assert not second_done.wait(1.0), "second save entered while first held the lock"
-    release_first.set()
-    first.join(5)
-    second.join(5)
+    try:
+        first.start()
+        assert first_merged.wait(_WRITER_TIMEOUT_SECONDS)
+        second.start()
+        assert second_started.wait(_WRITER_TIMEOUT_SECONDS)
+        assert not second_done.wait(1.0), "second save entered while first held the lock"
+    finally:
+        release_first.set()
+        _join_config_writers(first, second)
 
-    assert not first.is_alive()
-    assert not second.is_alive()
     assert failures == []
     persisted = V2Config.load()
     assert persisted.language == "zh"
@@ -955,7 +1210,7 @@ def test_generic_config_save_preserves_interleaved_memory_update(
             }
         )
     ).save()
-    rendezvous = threading.Barrier(2, timeout=5)
+    rendezvous = threading.Barrier(2, timeout=_WRITER_TIMEOUT_SECONDS)
     failures: list[BaseException] = []
     merge = api._deep_merge_dicts
 
@@ -992,20 +1247,19 @@ def test_generic_config_save_preserves_interleaved_memory_update(
             failures.append(exc)
 
     monkeypatch.setattr(api, "_deep_merge_dicts", hold_config_first)
-    generic_thread = threading.Thread(target=save_generic)
-    memory_thread = threading.Thread(target=save_memory)
+    generic_thread = _config_writer(save_generic, name="generic-config-save")
+    memory_thread = _config_writer(save_memory, name="memory-config-save")
     first, second = (
         (memory_thread, generic_thread)
         if memory_first
         else (generic_thread, memory_thread)
     )
-    first.start()
-    second.start()
-    first.join(5)
-    second.join(5)
+    try:
+        first.start()
+        second.start()
+    finally:
+        _join_config_writers(first, second)
 
-    assert not first.is_alive()
-    assert not second.is_alive()
     assert failures == []
     persisted = V2Config.load()
     assert persisted.language == "zh"
@@ -1167,8 +1421,8 @@ def test_spawned_writers_preserve_memory_and_non_memory_updates(
     try:
         for process in processes:
             process.start()
-        assert stale_loaded.wait(10)
-        assert memory_ready.wait(10)
+        assert stale_loaded.wait(_WRITER_TIMEOUT_SECONDS)
+        assert memory_ready.wait(_WRITER_TIMEOUT_SECONDS)
 
         first_start, first_done, second_start = (
             (memory_start, memory_done, config_start)
@@ -1176,13 +1430,13 @@ def test_spawned_writers_preserve_memory_and_non_memory_updates(
             else (config_start, config_done, memory_start)
         )
         first_start.set()
-        assert first_done.wait(10)
+        assert first_done.wait(_WRITER_TIMEOUT_SECONDS)
         second_start.set()
 
-        assert config_done.wait(10)
-        assert memory_done.wait(10)
+        assert config_done.wait(_WRITER_TIMEOUT_SECONDS)
+        assert memory_done.wait(_WRITER_TIMEOUT_SECONDS)
         for process in processes:
-            process.join(10)
+            process.join(_WRITER_TIMEOUT_SECONDS)
             assert process.exitcode == 0
     finally:
         for process in processes:

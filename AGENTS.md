@@ -112,9 +112,32 @@ Hard rules:
   preparation, readiness checks, Show Runtime setup, metadata, and cleanup
 - `master` is the long-running unified four-platform environment; keep it online,
   preserve product state, sync source, and restart the service in place
-- `worktree` targets are temporary isolated environments; delete with
-  `python3 scripts/incus_regression.py delete --target worktree --yes` or
-  `cleanup-stale --yes` when merged, abandoned, or stale
+- `worktree` targets are temporary isolated environments; delete each one
+  explicitly with
+  `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
+  when merged, abandoned, or stale
+- `reconcile` lists every worktree environment Incus holds — including ones
+  created outside the runner, which no metadata-driven command can see — and
+  forgets metadata rows whose environment is already gone. It never deletes an
+  environment: no recorded field can prove one is unwanted, so that call stays
+  with the operator. It reports the names the daemon gave, never re-derived from
+  the slug, because a discovered name is bounded by what Incus accepts and
+  `--slug` is stricter; one it would reject gets its objects named for a manual
+  reclamation instead of a command that would exit on its own argument
+- a metadata row is dropped only when the daemon that owns it completed a
+  listing whose every entry was readable, that listing held neither its project
+  nor its instance, and the row is not a reservation whose `up` may still be
+  running. A reservation lives exactly as long as its run: an `up` that fails
+  gives its row back while the daemon reports no project for that slug and the
+  row is still the one that run wrote, both read at that moment rather than
+  remembered from an earlier one — so a project that may bind the port, a
+  listing that cannot answer, and a concurrent `up` that took the slug over all
+  keep the row. `worktrees.json` is reached only through an accessor bound to the
+  daemon it describes — it reserves host ports on this machine and records what
+  this machine's daemon holds — so a `--remote` command cannot name it and
+  neither reads nor writes it: `reconcile --remote` reports the remote inventory
+  with no local provenance, `delete --remote` keeps the local row, and
+  `up --remote` requires `--host-port`
 - never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
   Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
 - after any regression update, verify service health before reporting success
@@ -288,7 +311,9 @@ Source-of-truth rule:
 ## 9. Release Notes
 
 - tags follow the latest version number +1 (for example `v1.0.1` -> `v1.0.2`)
-- before publishing a release, explicitly decide whether the version should notify users; add `<!-- avibe:update-notification=none -->` to the GitHub Release body when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The legacy `vibe-remote` marker is still parsed for compatibility.
+- before publishing a release, explicitly decide whether the version should notify users; put `<!-- avibe:update-notification=none -->` in the annotated tag message when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The workflow emits both the current and legacy `vibe-remote` markers into the GitHub Release body for installed-client compatibility.
+- for an official `v*` release, the annotated tag is the operator's only release-state input: put silent-update intent in the tag annotation, push the tag, and do not pre-create or manually edit a GitHub Release
+- the official workflows stage assets and generated notes in a Draft; `Release (AI Notes)` may update notes but never publishes. The `Publish to PyPI` workflow is the single finalizer: it verifies the exact notes run, publishes the asset-complete GitHub Release, and only then allows PyPI publication so package manifests never point at private Draft assets
 - GitHub-only pre-releases should use the `gh-vX.Y.ZrcN` format (for example `gh-v2.2.8rc2`) so they stay distinct from PyPI-triggering `v*` tags
 - GitHub-only pre-releases must include installable artifacts in the GitHub release assets: a wheel built with `ui/dist` and bundled `vibe/show_runtime/*.tgz`, plus the sdist
 - releases are published automatically by workflow after tagging/push

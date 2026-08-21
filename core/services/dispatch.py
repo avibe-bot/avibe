@@ -83,6 +83,7 @@ async def dispatch_turn(
     source: str = SOURCE_HUMAN,
     on_chunk: Optional[ChunkCallback] = None,
     logical_turn_id: str | None = None,
+    lifecycle_snapshot: object | None = None,
 ) -> Optional[str]:
     """Run one agent turn for ``context`` and return the primary message id.
 
@@ -97,6 +98,7 @@ async def dispatch_turn(
         source=source,
         on_chunk=on_chunk,
         logical_turn_id=logical_turn_id,
+        lifecycle_snapshot=lifecycle_snapshot,
     )
     return outcome.error
 
@@ -109,11 +111,14 @@ async def dispatch_turn_with_outcome(
     source: str = SOURCE_HUMAN,
     on_chunk: Optional[ChunkCallback] = None,
     logical_turn_id: str | None = None,
+    lifecycle_snapshot: object | None = None,
 ) -> TurnDispatchOutcome:
     """Run one agent turn for ``context`` and report how its waiter was released.
 
     ``source`` selects between the human-initiated and scheduler-initiated
     paths in ``MessageHandler``; today they only differ in source tagging.
+    ``lifecycle_snapshot`` is a process-local capture token passed explicitly
+    to the handler; it never enters the JSON-oriented platform payload.
 
     ``on_chunk`` (the N3 socket / web Chat path) receives each notify/result
     emit for this turn as it happens. Because the agent backends are
@@ -130,9 +135,25 @@ async def dispatch_turn_with_outcome(
     handler = controller.message_handler
 
     async def _run() -> Optional[str]:
+        nonlocal lifecycle_snapshot
+        snapshot = lifecycle_snapshot
+        lifecycle_snapshot = None
+        snapshot_options = (
+            {"lifecycle_snapshot": snapshot}
+            if snapshot is not None
+            else {}
+        )
         if source == SOURCE_SCHEDULED:
-            return await handler.handle_scheduled_message(context, text)
-        return await handler.handle_user_message(context, text)
+            return await handler.handle_scheduled_message(
+                context,
+                text,
+                **snapshot_options,
+            )
+        return await handler.handle_user_message(
+            context,
+            text,
+            **snapshot_options,
+        )
 
     if on_chunk is None:
         # IM / CLI: fire-and-forget; no live stream to hold open.

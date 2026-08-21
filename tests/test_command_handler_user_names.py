@@ -8,7 +8,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.memory.runtime import MemorySessionLifecycleBusyError
 from modules.im import MessageContext
 
 # Imported before ``_load_command_handlers_class`` runs: that loader swaps
@@ -458,39 +457,6 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_new(context)
         return controller
-
-    async def test_new_localizes_memory_session_fence_timeout_in_english(self):
-        controller = await self._run_new_with_memory_lifecycle_error(
-            MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ),
-            language="en",
-        )
-
-        self.assertEqual(controller.cleared_sessions, [])
-        self.assertEqual(
-            controller.im_client.sent_messages,
-            [
-                (
-                    "wx-chat",
-                    "❌ Memory is still processing this session. Please try /new again.",
-                )
-            ],
-        )
-
-    async def test_new_localizes_memory_session_fence_timeout_in_chinese(self):
-        controller = await self._run_new_with_memory_lifecycle_error(
-            MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ),
-            language="zh",
-        )
-
-        self.assertEqual(controller.cleared_sessions, [])
-        self.assertEqual(
-            controller.im_client.sent_messages,
-            [("wx-chat", "❌ 记忆系统仍在处理当前会话，请稍后重试 /new。")],
-        )
 
     async def test_new_preserves_generic_error_detail(self):
         controller = await self._run_new_with_memory_lifecycle_error(

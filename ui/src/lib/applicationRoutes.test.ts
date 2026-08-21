@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   APPLICATION_DYNAMIC_ROUTE_PATHS,
   APPLICATION_ROUTE_PATHS,
+  inAppChatPath,
   isApplicationRouteHref,
 } from './applicationRoutes';
 
@@ -72,5 +73,22 @@ describe('AppShell route policy', () => {
     expect(isApplicationRouteHref('/apps/show/session-123')).toBe(true);
     expect(isApplicationRouteHref('/projects/report.md')).toBe(false);
     expect(isApplicationRouteHref('/admin/settings/custom.json')).toBe(false);
+  });
+
+  it('keeps same-origin chat destinations on the SPA path', () => {
+    expect(APPLICATION_DYNAMIC_ROUTE_PATHS).toContain('/chat/:sessionId');
+    const current = 'https://alex-app.avibe.bot/chat/session-123';
+    expect(inAppChatPath('/chat/session-456?msg=latest#reply')).toBe(
+      '/chat/session-456?msg=latest#reply',
+    );
+    expect(inAppChatPath('/chat/session-456/')).toBe('/chat/session-456');
+    expect(inAppChatPath('https://alex-app.avibe.bot/chat/session-456', current)).toBe(
+      '/chat/session-456',
+    );
+    expect(inAppChatPath('https://github.com/avibe-bot/avibe/chat/session-456', current)).toBeNull();
+    expect(inAppChatPath('/apps/files')).toBeNull();
+    expect(inAppChatPath('/chat/session-456/notes.md')).toBeNull();
+    expect(inAppChatPath('./chat/session-456')).toBeNull();
+    expect(inAppChatPath('https://alex-app.avibe.bot/chat/session-456')).toBeNull();
   });
 });

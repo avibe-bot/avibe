@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api, cli
+from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     UpgradePlan,
     build_upgrade_plan,
@@ -21,7 +25,33 @@ from vibe.upgrade import (
     get_restart_shell_command,
     get_running_vibe_path,
     get_safe_cwd,
+    installed_package_name,
+    pinned_package_spec,
+    RollbackTarget,
+    rollback_target,
 )
+
+
+@pytest.fixture(autouse=True)
+def _tree_is_not_an_installed_distribution(monkeypatch):
+    """Every test here describes a machine, not the machine running the tests.
+
+    `installed_package_name()` asks this process's own metadata which
+    distribution provides `vibe`, and the answer differs by checkout: a developer
+    running from a source tree gets nothing, while CI installs the package first
+    and gets `avibe-os`. Tests written against the first answer pass locally and
+    then fail on a runner for a reason that has nothing to do with the change --
+    `test_a_spec_that_cannot_carry_a_pin_is_refused` did exactly that, because an
+    installed name outranks the configured spec whose refusal it was asserting.
+
+    Answering `[]` here is the honest state for a checkout, and it is the state
+    every test in this module was already written against. Only the ambient
+    metadata is removed; the interpreter-path heuristic stays live, so a test can
+    still hand in a uv tool path and be answered from it, and a test that wants a
+    measured name sets one explicitly.
+    """
+
+    monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
 
 
 def test_build_upgrade_plan_uses_uv_and_preserves_tool_bin_dir(monkeypatch):
@@ -90,6 +120,403 @@ def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
         "--upgrade",
         "--force",
     ]
+
+
+#: How each installer spells "do it even though you believe it is already done".
+#: Written as a mapping rather than as two assertions so that an installer added
+#: to `build_upgrade_plan` later fails this test until someone decides what its
+#: word is, instead of silently shipping a rollback path that can no-op.
+FORCES_THE_INSTALL = {"uv": "--force", "pip": "--force-reinstall"}
+
+
+def test_a_pinned_plan_never_asks_for_an_upgrade_and_always_forces_the_install(monkeypatch):
+    # Two ways for a rollback command to install nothing and still exit 0, one
+    # per word, and both silent on every installer path.
+    #
+    # Asking for an upgrade resolves forward to the exact release being rolled
+    # back FROM: uv resolves past the pin, pip declines to move backwards at all.
+    #
+    # Not forcing leaves the installer free to decide the pin is already
+    # satisfied -- and on the case this change exists for, it is. Installing
+    # `avibe-os` over a `vibe-remote` machine never uninstalls `vibe-remote`, so
+    # that distribution's metadata still stands and still claims the old version,
+    # while the files under `vibe/` are the new release's, written over the top.
+    # `pip install vibe-remote==<old>` reads as satisfied, pip does nothing, and
+    # the supervisor starts the failed generation again and calls it a recovery.
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    uv_plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/custom/bin/vibe",
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+    )
+    assert uv_plan.method == "uv"
+    assert uv_plan.command == [
+        "/usr/local/bin/uv",
+        "tool",
+        "install",
+        "avibe-os==3.0.10",
+        # Unconditional here: the version already installed is the newer one, so
+        # without it uv reports the tool as satisfied and installs nothing.
+        "--force",
+    ]
+    assert "--upgrade" not in uv_plan.command
+
+    pip_plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+    )
+    assert pip_plan.method == "pip"
+    assert pip_plan.command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "avibe-os==3.0.10",
+    ]
+
+    for plan in (uv_plan, pip_plan):
+        assert "--upgrade" not in plan.command
+        assert FORCES_THE_INSTALL[plan.method] in plan.command
+
+
+def _metadata_records(monkeypatch, distribution: str, version: str) -> None:
+    """One distribution provides `vibe`, and its metadata records `version`."""
+
+    monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [distribution])
+    monkeypatch.setattr("importlib.metadata.version", lambda name: version if name == distribution else "0")
+
+
+def test_a_forward_upgrade_forces_the_install_once_metadata_stops_describing_the_code(monkeypatch):
+    """The rollback's own no-op, one release later and with a person watching.
+
+    A rollback installs `vibe-remote==3.0.10` over a machine whose forward upgrade
+    installed `avibe-os==3.0.11`, and pip never uninstalls the distribution it
+    replaced. So the tree ends up holding both: the files under `vibe/` are 3.0.10,
+    and `avibe-os` still records 3.0.11 with nothing on disk behind it.
+
+    Then `vibe upgrade` runs. It compares this process's 3.0.10 against the
+    published 3.0.11 and decides to install; pip reads `avibe-os==3.0.11` as
+    already satisfied and does nothing; the command reports success and the
+    machine keeps running 3.0.10 -- silently, indefinitely, and now on the path a
+    user invokes by hand.
+
+    So `--force-reinstall` is not a property of pinned plans, it is a property of
+    asking for a version that is not the version on disk. Measured from our own
+    two answers, never read off the metadata that is the thing in doubt.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    _metadata_records(monkeypatch, "avibe-os", "3.0.11")
+    monkeypatch.setattr("vibe.__version__", "3.0.10")
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.method == "pip"
+    # Still an upgrade: the version being asked for is whatever the index has
+    # newest. Forced as well, because the metadata pip would consult to decide is
+    # describing a release that is not what is running.
+    assert "--upgrade" in plan.command
+    assert "--force-reinstall" in plan.command
+
+
+def test_the_rename_pair_left_by_a_rollback_forces_the_next_install(monkeypatch):
+    """The state this check exists for is the one where two distributions are present.
+
+    A rollback across the rename installs `vibe-remote==3.0.10` over a tree whose
+    forward upgrade installed `avibe-os==3.0.11`, and pip does not uninstall the
+    distribution it replaced. So both are recorded and only one of them can be
+    describing the files under `vibe/`. Asking a single distribution -- or
+    treating "more than one" as unreadable -- would make this exact machine the
+    one machine that answers "metadata agrees", which is how the no-op ships:
+    the next upgrade asks pip for a version `avibe-os` already claims, pip does
+    nothing, and the instance keeps running the rolled-back code forever.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    recorded = {"avibe-os": "3.0.11", "vibe-remote": "3.0.10"}
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
+    monkeypatch.setattr("vibe.__version__", "3.0.10")
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert "--force-reinstall" in plan.command
+
+
+def test_a_forward_upgrade_on_an_undamaged_install_is_left_to_the_installer(monkeypatch):
+    """Forcing is the exception, and has to stay one.
+
+    `--force-reinstall` makes pip rebuild and rewrite every dependency in the
+    tree, so making it unconditional turns each routine upgrade into a much longer
+    and much wider write on a machine nobody is watching. The ordinary case is an
+    install whose metadata and files agree, and there the installer's own
+    already-satisfied judgement is correct and cheaper.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    _metadata_records(monkeypatch, "avibe-os", "3.0.11")
+    monkeypatch.setattr("vibe.__version__", "3.0.11")
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert "--upgrade" in plan.command
+    assert "--force-reinstall" not in plan.command
+
+
+@pytest.mark.parametrize(
+    ("case", "distributions", "recorded", "running"),
+    [
+        # A source checkout or an editable install: nothing published to compare.
+        ("no distribution provides the package", [], "3.0.11", "3.0.11"),
+        # Mid-rename, or a vendored environment. Both are asked, and here both
+        # agree with the code, so there is nothing to force -- the count of
+        # distributions is not by itself a disagreement.
+        ("two distributions provide it and both agree", ["avibe-os", "vibe-remote"], "3.0.11", "3.0.11"),
+        # A regression build. Its version describes a tree, not a release, so a
+        # disagreement with published metadata is expected rather than evidence.
+        ("the running version names no release", ["avibe-os"], "3.0.11", "0.0.0.dev0+abc1234"),
+        ("the recorded version names no release", ["avibe-os"], "0.0.0.dev0+abc1234", "3.0.11"),
+    ],
+)
+def test_an_unknown_install_shape_is_never_forced_on_a_guess(monkeypatch, case, distributions, recorded, running):
+    """Only a disagreement between two published releases is evidence.
+
+    Every other answer is an environment this measurement cannot read, and the
+    honest response to one is to leave the installer alone rather than to force a
+    full reinstall on a machine whose shape we guessed at. Stated as the property
+    -- unknown means unforced -- so a shape nobody has met yet inherits it.
+    """
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: distributions)
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded)
+    monkeypatch.setattr("vibe.__version__", running)
+
+    plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert "--force-reinstall" not in plan.command, case
+
+
+def test_a_rollback_pins_the_distribution_the_install_actually_came_from(monkeypatch):
+    # Which distribution published the running version and which one the next
+    # upgrade should ask for are different questions, and on a machine that
+    # predates the rename they have different answers. Going forward wants the
+    # configured spec -- that is what the rename is for. Going back wants this,
+    # because `avibe-os==2.x` names a release that was never published under that
+    # name, so the rollback resolves to nothing and the instance stays dark.
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
+
+    legacy = "/home/ai/.local/share/uv/tools/vibe-remote/bin/python"
+    assert pinned_package_spec("2.9.4", python_executable=legacy) == "vibe-remote==2.9.4"
+    plan = build_upgrade_plan(
+        python_executable=legacy,
+        uv_path="/usr/local/bin/uv",
+        base_env={"PATH": "/usr/bin"},
+        version="2.9.4",
+    )
+    assert "vibe-remote==2.9.4" in plan.command
+    assert not any(argument.startswith("avibe-os") for argument in plan.command)
+
+    # An install whose path says nothing about a distribution -- pip into a shared
+    # environment -- has only the configured spec to go on, and gets it.
+    assert pinned_package_spec("3.0.10", python_executable="/usr/bin/python3") == "avibe-os==3.0.10"
+
+
+def test_the_rename_pair_still_names_the_distribution_that_describes_the_code(monkeypatch):
+    """Two providers is not an unreadable machine, it is the aftermath of a rollback.
+
+    Installing `avibe-os` over a `vibe-remote` machine never uninstalls the older
+    distribution, so once a rollback has crossed the rename the tree holds both
+    for good. Every upgrade after that measures its rollback target in this state,
+    which is why reading two providers as unanswerable does not cost one recovery
+    -- it costs every recovery the machine will ever attempt.
+
+    The metadata is what tells them apart: `avibe-os` records the release that
+    failed, `vibe-remote` records the files that are running. Naming neither left
+    `package=None`, `pinned_package_spec` fell back to the configured forward
+    name, and `avibe-os==2.9.0` was never published under that name -- so the one
+    recovery attempt could only fail, on an instance that is already down.
+    """
+
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    recorded = {"avibe-os": "3.0.11", "vibe-remote": "2.9.0"}
+    monkeypatch.setattr("importlib.metadata.version", lambda name: recorded[name])
+    monkeypatch.setattr("vibe.__version__", "2.9.0", raising=False)
+
+    assert installed_package_name() == "vibe-remote"
+
+    # And the consequence the name is measured for: the pin this machine's next
+    # failed upgrade rolls back to names a release that exists.
+    launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    target = rollback_target()
+    assert target is not None and target.package == "vibe-remote"
+    assert pinned_package_spec(target.version, package_name=target.package) == "vibe-remote==2.9.0"
+
+
+def test_providers_that_cannot_be_told_apart_are_left_to_the_path(monkeypatch):
+    """Metadata answers this only while it distinguishes them.
+
+    Two distributions recording the same release is a vendored or mid-rename
+    environment, not a rollback, and there is nothing in the metadata to prefer
+    one name over the other. Guessing would put the pin on a distribution that may
+    never have published the version -- the same failure, arrived at from the
+    opposite direction -- so the interpreter path answers instead, and `None` when
+    it cannot either.
+    """
+
+    monkeypatch.setattr(
+        "vibe.upgrade._distributions_providing_this_package",
+        lambda: ["avibe-os", "vibe-remote"],
+    )
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "3.0.11")
+    monkeypatch.setattr("vibe.__version__", "3.0.11", raising=False)
+
+    monkeypatch.setattr("vibe.upgrade.sys.executable", "/usr/bin/python3")
+    assert installed_package_name() is None
+
+    monkeypatch.setattr("vibe.upgrade.sys.executable", "/home/ai/.local/share/uv/tools/vibe-remote/bin/python")
+    assert installed_package_name() == "vibe-remote"
+
+
+def test_a_spec_that_cannot_carry_a_pin_is_refused(monkeypatch):
+    # The alternative to refusing is falling back to the unpinned spec, which is
+    # the reinstall-the-failure command above. Whoever configured a wheel path or
+    # an index URL as the upgrade source gets a rollback that fails loudly instead
+    # of one that lies. The message must not quote the spec: it can be an index
+    # URL carrying credentials, and it is written to a restart log.
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "https://user:secret@example.invalid/simple/avibe-os")
+
+    with pytest.raises(ValueError) as refusal:
+        pinned_package_spec("3.0.10")
+    assert "secret" not in str(refusal.value)
+
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    with pytest.raises(ValueError):
+        build_upgrade_plan(
+            python_executable="/usr/bin/python3",
+            uv_path=None,
+            base_env={"PATH": "/usr/bin"},
+            version="3.0.10",
+        )
+
+
+def test_a_tree_with_no_published_release_has_no_rollback_target(monkeypatch):
+    # A source checkout, an editable install, and a regression build all report
+    # the same placeholder version, which names no release. Handing it on as a
+    # target buys an index round-trip that fails, and then tells whoever is
+    # looking at a dark instance that the rollback mechanism is broken, when the
+    # truth is that this install never had a release to go back to.
+    from vibe import UNKNOWN_VERSION
+
+    monkeypatch.setattr("vibe.__version__", UNKNOWN_VERSION, raising=False)
+    assert rollback_target() is None
+
+    # And a tree that does name a release answers with the distribution and the
+    # install too, in one value: all three are read here, in the process that
+    # still predates the install, and there is no way to obtain one without the
+    # others. The install matters as much as the version -- a rollback across the
+    # `vibe-remote` -> `avibe-os` rename reinstalls into a directory this process
+    # is not running out of, so a target that named only the version would be
+    # restored correctly and then started from the wrong generation.
+    launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
+    monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
+    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+    assert rollback_target() == RollbackTarget(version="3.0.10", package="vibe-remote", launcher=launcher)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+#: Everything shipped to a user's machine.
+SHIPPED_SOURCE_ROOTS = ("main.py", "config", "core", "modules", "storage", "vibe")
+
+
+def test_only_the_plan_builder_can_ask_what_this_install_is():
+    """One caller, found by looking rather than by remembering.
+
+    The measurement has always been documented as something to take before the
+    install and never after, and both upgrade paths took it after anyway --
+    inside `if result.returncode == 0:`, describing an install that by then had
+    already been overwritten. A rule that lives in a docstring is enforced by
+    whoever happens to have read it.
+
+    Moving it into `UpgradePlan` removes the ordering from every caller: a plan
+    is what produces the command, so the measurement cannot happen later than the
+    install unless someone reaches past the plan. This counts over the whole
+    shipped tree so that reaching past it fails here, when it is written, rather
+    than on a machine that predates the rename months later.
+    """
+
+    callers = {}
+    for root in SHIPPED_SOURCE_ROOTS:
+        target = REPO_ROOT / root
+        for source in [target] if target.is_file() else sorted(target.rglob("*.py")):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            calls = sum(
+                1
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and (getattr(node.func, "id", None) or getattr(node.func, "attr", None)) == "rollback_target"
+            )
+            if calls:
+                callers[source.relative_to(REPO_ROOT).as_posix()] = calls
+
+    assert callers == {"vibe/upgrade.py": 1}
+
+
+def test_the_plan_that_installs_carries_what_it_is_replacing(monkeypatch):
+    # A forward plan describes an install that is about to stop existing, so it
+    # takes the measurement while there is still something to measure. A pinned
+    # plan IS the rollback -- the process building one is the release that failed
+    # -- so measuring there would hand the failure forward as its own recovery
+    # target, which is the shape of every way this has gone wrong so far.
+    launcher = ServiceLauncher(python="/uv/tools/vibe-remote/bin/python", main="/uv/tools/vibe-remote/service_main.py")
+    monkeypatch.setattr("vibe.__version__", "3.0.10", raising=False)
+    monkeypatch.setattr("vibe.upgrade.installed_package_name", lambda *args, **kwargs: "vibe-remote")
+    monkeypatch.setattr("vibe.runtime.current_service_launcher", lambda: launcher)
+
+    forward = build_upgrade_plan(python_executable="/usr/bin/python3", uv_path=None, base_env={"PATH": "/usr/bin"})
+    assert forward.rollback_to == RollbackTarget(version="3.0.10", package="vibe-remote", launcher=launcher)
+
+    pinned = build_upgrade_plan(
+        python_executable="/usr/bin/python3", uv_path=None, base_env={"PATH": "/usr/bin"}, version="3.0.9"
+    )
+    assert pinned.rollback_to is None
 
 
 def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
@@ -408,11 +835,24 @@ def test_get_restart_environment_normalizes_relative_pythonpath_entries(monkeypa
     assert env["PYTHONPATH"] == f"{source_root}{os.pathsep}{tmp_path}{os.pathsep}{tmp_path / 'src'}"
 
 
+#: A machine that predates the rename, as its own plan describes it. The upgrade
+#: paths below cannot be handed this any other way, which is the point: the
+#: measurement is a field of the plan precisely so that no caller is left with an
+#: ordering to remember, and a test that could still inject it late would be
+#: describing a seam that no longer exists.
+LEGACY_INSTALL = RollbackTarget(
+    version="3.0.10",
+    package="vibe-remote",
+    launcher=ServiceLauncher("/uv/tools/vibe-remote/bin/python", "/uv/tools/vibe-remote/service_main.py"),
+)
+
+
 def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     plan = UpgradePlan(
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
         env={"UV_TOOL_BIN_DIR": "/custom/bin"},
         method="uv",
+        rollback_to=LEGACY_INSTALL,
     )
     calls: dict[str, Any] = {}
 
@@ -446,6 +886,12 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
         "vibe_path": "/custom/bin/vibe",
         "trigger": "upgrade",
         "prepare_show_runtime": True,
+        # The install this process was running, taken BEFORE it was replaced and
+        # carried here by the plan that replaced it: what the restart reinstalls
+        # if it cannot bring the new one up. Version, distribution and launcher
+        # together, because a pin needs the first two and a machine that predates
+        # the rename does not answer "avibe-os" for either.
+        "rollback_to": LEGACY_INSTALL,
     }
 
 
@@ -657,6 +1103,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
         env={"UV_TOOL_BIN_DIR": "/custom/bin"},
         method="uv",
+        rollback_to=LEGACY_INSTALL,
     )
     calls: dict[str, Any] = {}
 
@@ -695,6 +1142,8 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         "vibe_path": "/custom/bin/vibe",
         "trigger": "upgrade",
         "prepare_show_runtime": True,
+        # See the do_upgrade case: the restart is handed the install to fall back to.
+        "rollback_to": LEGACY_INSTALL,
     }
 
 

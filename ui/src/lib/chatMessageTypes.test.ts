@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
+import {
+  isBoundaryMessage,
+  isDetachedCompletionMessage,
+  isNotifyMessageType,
+  isTerminalAgentMessage,
+  isTranscriptMessage,
+  shouldRefreshAgentActivityForMessage,
+} from './chatMessageTypes';
+import { messageTypeNames, specFor } from './messageTypes';
 
 describe('isTranscriptMessage', () => {
   it('shows the rows the transcript has always shown, and hides process log', () => {
@@ -70,5 +78,56 @@ describe('isTerminalAgentMessage', () => {
       }),
     ).toBe(false);
     expect(isTerminalAgentMessage({ author: 'user', type: 'result' })).toBe(false);
+  });
+
+  it('never lets a detached legacy result settle the active turn', () => {
+    for (const type of ['result', 'error', 'notify']) {
+      expect(isTerminalAgentMessage({ author: 'agent', type, metadata: { detached: true } }), type).toBe(false);
+    }
+  });
+});
+
+describe('isBoundaryMessage', () => {
+  it('recognizes current output rows and legacy detached results', () => {
+    expect(isBoundaryMessage({ type: 'output' })).toBe(true);
+    expect(isBoundaryMessage({ type: 'result', metadata: { detached: true } })).toBe(true);
+    expect(isBoundaryMessage({ type: 'result' })).toBe(false);
+  });
+
+  it('keeps every status-rendered type in its notification family when detached', () => {
+    const statusTypes = messageTypeNames().filter((type) => specFor(type).render === 'status');
+    expect(statusTypes.length).toBeGreaterThan(0);
+    for (const type of statusTypes) {
+      expect(isBoundaryMessage({ type, metadata: { detached: true } }), type).toBe(false);
+    }
+  });
+});
+
+describe('isDetachedCompletionMessage', () => {
+  it('classifies lifecycle provenance independently from presentation', () => {
+    for (const type of ['result', 'error', 'notify']) {
+      expect(isDetachedCompletionMessage({ type, metadata: { detached: true } }), type).toBe(true);
+    }
+    expect(isDetachedCompletionMessage({ type: 'output', metadata: { detached: true } })).toBe(false);
+    expect(isDetachedCompletionMessage({ type: 'result' })).toBe(false);
+  });
+});
+
+describe('shouldRefreshAgentActivityForMessage', () => {
+  it('refreshes Activity groups for terminal replies and detached completions', () => {
+    for (const type of ['output', 'result', 'error']) {
+      expect(shouldRefreshAgentActivityForMessage({ author: 'agent', type }), type).toBe(true);
+    }
+    for (const type of ['result', 'error', 'notify']) {
+      expect(
+        shouldRefreshAgentActivityForMessage({ author: 'agent', type, metadata: { detached: true } }),
+        type,
+      ).toBe(true);
+    }
+  });
+
+  it('ignores non-boundary process and user rows', () => {
+    expect(shouldRefreshAgentActivityForMessage({ author: 'agent', type: 'assistant' })).toBe(false);
+    expect(shouldRefreshAgentActivityForMessage({ author: 'user', type: 'result' })).toBe(false);
   });
 });

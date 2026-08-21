@@ -34,7 +34,11 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import SSE_MAX_FRAME_BYTES, SSE_MAX_LINE_BYTES
+from core.handlers.model_hub.stream_wire import (
+    SSE_MAX_FRAME_BYTES,
+    SSE_MAX_LINE_BYTES,
+    ProtocolUsageReport,
+)
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -106,13 +110,14 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
 
     async def run() -> tuple[bytes, object, object]:
         prelude = client_module._StreamPrelude()
-        state, outcome = await client_module._read_stream_prelude(
+        state = client_module.ProtocolSSEState("anthropic")
+        outcome = await client_module._read_stream_prelude(
             response=response,
             first=first,
             prelude=prelude,
+            wire_state=state,
             source=source,
             model_id="claude-sonnet-4-5",
-            protocol="anthropic",
             timeout=1,
         )
         payload = b"".join([chunk async for chunk in prelude.chunks()])
@@ -124,6 +129,71 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
     assert payload == first + output
     assert state.model_output_started is True
     assert outcome is None
+
+
+def test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 4960016618: usage reported before model output survives the failure.
+
+    Anthropic bills input tokens on `message_start`, which arrives while the
+    prelude is still buffering. A read that then times out never hands a body
+    onward, so the resolver is the only half of metering that will ever see this
+    call — and it can only see what the returned outcome carries.
+    """
+
+    async def run() -> None:
+        message_start = (
+            b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+            b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+        )
+        reads = iter([message_start])
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                try:
+                    return next(reads)
+                except StopIteration:
+                    raise asyncio.TimeoutError from None
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_billedhalt",
+            vendor="anthropic",
+            protocol="anthropic",
+            base_url="https://billed.example.test",
+            credential_ref="cred_billedhalt",
+            allowed_origins=("codex",),
+            model_ids=("claude-sonnet-4-5",),
+            prefix="billed",
+        )
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15221", "management", "gateway")
+        )
+
+        handle = await client.invoke(source, "claude-sonnet-4-5", {}, stream=True)
+        outcome = await handle.outcome()
+
+        assert handle.stream is None
+        assert outcome.kind == RawOutcomeKind.TIMEOUT
+        assert outcome.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
+
+    asyncio.run(run())
 
 
 def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
@@ -195,6 +265,76 @@ def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
         assert preludes[0].stored_bytes <= budget
         assert preludes[0].closed is True
         assert preludes[0].physical_close_calls == 1
+
+    asyncio.run(run())
+
+
+def test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-USAGE-005, review 4965677908: the vendor billed the frame that broke the buffer.
+
+    Every earlier round of this class was a reader that could not reach an
+    observed fact. This one is the producer: the socket delivered a complete
+    usage report, and the only reason it would go unrecorded is that the prelude
+    had no room left to keep a replay of the bytes carrying it. Whether we can
+    store a copy is not a question about what the upstream said.
+    """
+
+    async def run() -> None:
+        message_start = (
+            b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+            b'{"input_tokens":900,"cache_read_input_tokens":128}}}\n\n'
+        )
+        filler = b": " + b"k" * 4090 + b"\n\n"
+        budget = len(filler) + len(message_start) - 1
+        reads = iter([filler, message_start])
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=budget, total_limit=budget)
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return next(reads)
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_overflowbill",
+            vendor="anthropic",
+            protocol="anthropic",
+            base_url="https://overflow.example.test",
+            credential_ref="cred_overflowbill",
+            allowed_origins=("codex",),
+            model_ids=("claude-sonnet-4-5",),
+            prefix="overflow",
+        )
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15222", "management", "gateway")
+        )
+
+        handle = await client.invoke(source, "claude-sonnet-4-5", {}, stream=True)
+        outcome = await handle.outcome()
+
+        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
+        assert outcome.usage == ProtocolUsageReport(input_tokens=1028, cached_input_tokens=128)
 
     asyncio.run(run())
 
@@ -672,7 +812,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 5, **supervisor.status()}
+    projected = {"contract_version": 6, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"

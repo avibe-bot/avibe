@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,9 +22,9 @@ from config.v2_sessions import (
     migrate_session_state_mappings,
 )
 from config.v2_settings import SettingsState, load_settings_state_from_json
-from storage.backups import BACKUP_MANIFEST_VERSION, prune_state_backups
+from storage.backups import BACKUP_MANIFEST_VERSION, next_backup_sequence, prune_state_backups
 from storage.db import create_sqlite_engine
-from storage.lock import MigrationFileLock
+from storage.lock import MigrationFileLock, migration_lock_path_for
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import (
     agents,
@@ -53,25 +54,59 @@ class MigrationImportReport:
     counts: dict[str, int] = field(default_factory=dict)
 
 
+_ensured_lock = threading.Lock()
+_ensured_targets: dict[tuple[Path, Path], MigrationImportReport] = {}
+
+
+def reset_ensured_sqlite_state() -> None:
+    """Forget which targets this process already ensured.
+
+    Production relies on process lifetime: a target is ensured once and stays
+    ensured. Tests call this around isolated homes so a rebuilt database is
+    migrated again instead of trusting a previous test's result.
+    """
+
+    with _ensured_lock:
+        _ensured_targets.clear()
+
+
 def ensure_sqlite_state(
     *,
     db_path: Path | None = None,
     state_dir: Path | None = None,
     primary_platform: str | None = None,
 ) -> MigrationImportReport:
-    """Create/migrate the SQLite DB and import existing JSON state once."""
+    """Create/migrate the SQLite DB and import existing JSON state once.
+
+    Callers treat this as a cheap precondition and put it in front of ordinary
+    operations, so repeating it must cost nothing. The full body takes a
+    cross-process migration lock and re-runs the whole Alembic upgrade
+    pipeline; running that per request serializes unrelated work machine-wide
+    and turns any transient SQLite contention into a user-visible failure. Once
+    a target is ensured, this process is done with it.
+    """
 
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
+    ensured_key = (target_db, target_state_dir)
+    with _ensured_lock:
+        ensured = _ensured_targets.get(ensured_key)
+    # The database file is the evidence; a caller that removed it out from
+    # under us gets a real migration rather than a stale promise.
+    if ensured is not None and target_db.exists():
+        return ensured
     guard_source_checkout_default_state_migration(target_db)
     _ensure_sqlite_target_dirs(
         target_state_dir=target_state_dir,
         target_db=target_db,
         use_default_dirs=db_path is None and state_dir is None,
     )
-    lock_path = target_state_dir / "migration.lock"
-
-    with MigrationFileLock(lock_path):
+    # The same lock `run_migrations` takes, re-entered rather than duplicated,
+    # and derived from the database so the two can never resolve differently.
+    # Held across the JSON import as well: the import is the other half of
+    # establishing this database, and a second process must not start migrating
+    # it in between.
+    with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
         run_migrations(target_db, prune_backups_after_upgrade=False)
         engine = create_sqlite_engine(target_db)
         report: MigrationImportReport | None = None
@@ -134,6 +169,8 @@ def ensure_sqlite_state(
         if report is None:
             raise RuntimeError("SQLite state initialization completed without a report")
         prune_state_backups(target_state_dir / "backups")
+        with _ensured_lock:
+            _ensured_targets[ensured_key] = report
         return report
 
 
@@ -232,7 +269,9 @@ def _set_background_import_marker(conn: Connection) -> None:
 
 
 def _run_sqlite_data_migrations(conn: Connection) -> dict[str, int]:
-    return {}
+    from storage.resource_access_service import migrate_legacy_deferred_resource_contexts
+
+    return migrate_legacy_deferred_resource_contexts(conn)
 
 
 def _backup_json_state(state_dir: Path) -> Path:
@@ -260,6 +299,12 @@ def _backup_json_state(state_dir: Path) -> Path:
             "managed_by": "avibe",
             "kind": "json-state-migration",
             "created_at": _utc_now_iso(),
+            # Recorded here for the same reason the sqlite window records it:
+            # nothing reading this directory later can tell what a clock did
+            # between two snapshots. Written by both kinds so that reading the
+            # order off the timestamps stays a compatibility path for backups an
+            # older release made, rather than a rule still in use.
+            "backup_sequence": next_backup_sequence(backups_dir),
             "files": {},
         }
         for name in (

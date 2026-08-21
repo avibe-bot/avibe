@@ -147,10 +147,9 @@ def test_final_flush_client_outlasts_the_controller_deadline() -> None:
 
 
 def test_session_archive_client_has_no_reporting_timeout() -> None:
-    # Scope resolution and the cancellation-safe archive commit include
-    # unbounded local filesystem/SQLite work. The controller keeps the provider
-    # final-flush deadline, but the reporting transport must await its terminal
-    # result instead of returning a retryable-looking failure mid-commit.
+    # The archive commit includes unbounded local filesystem/SQLite work. The
+    # reporting transport must await that terminal write instead of returning a
+    # retryable-looking failure mid-commit. Memory flush is not on this round-trip.
     assert "timeout" not in inspect.signature(memory_archive_session).parameters
 
 

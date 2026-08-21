@@ -124,12 +124,136 @@ Temporary worktree environment:
 python3 scripts/incus_regression.py up --target worktree
 python3 scripts/incus_regression.py status --target worktree
 python3 scripts/incus_regression.py delete --target worktree --yes
-python3 scripts/incus_regression.py cleanup-stale --yes
+python3 scripts/incus_regression.py reconcile
+python3 scripts/incus_regression.py reconcile --yes
 ```
 
 Delete worktree environments promptly after the worktree is merged, abandoned,
 or removed. The persistent `master` environment should stay running and preserve
 its product state across normal source updates.
+
+`reconcile` answers "what is actually still here?". It enumerates worktree
+environments from Incus rather than from the runner's metadata, so an
+environment created outside the runner shows up too — otherwise it is invisible
+to every command that reads `.runtime/incus-regression/worktrees.json`, and can
+only be removed by hand. For each one it prints what Incus was observed to hold
+— its project and its instance, reported separately, because an environment can
+be half gone — plus whatever provenance the metadata holds and the `delete`
+command that removes it. Every instance Incus reported under that name is listed,
+because Incus scopes instance names per project and one name can be several
+instances. An instance living in a project other than the one its slug implies is
+listed with that project and warned about by hand: `delete --slug` derives the
+project from the slug, so it would report success without touching the instance.
+An environment holding both kinds gets both the command and the warning — one
+statement covers what the convention reaches, the other what it does not.
+
+Those names are the ones the daemon reported, never derived a second time from
+the slug. A slug here is an observed name with a known prefix removed, so it is
+bounded by what Incus accepts rather than by what the runner would choose — and
+`--slug` is stricter than Incus. A discovered name the runner would not have
+minted therefore gets no command at all: the report names its project and
+instance for a manual reclamation instead of printing a `delete --slug` that
+would exit on its own argument.
+
+Deletion stays a separate, explicit call. Nothing recorded about an environment
+can prove it is no longer wanted: the recorded path is the checkout the runner
+was invoked from, shared by every environment created there and still present
+long after that worktree is gone; the slug is chosen by the caller; and an
+environment may sit on a detached HEAD with no branch whose merge status could
+be checked. `reconcile --yes` therefore changes exactly one thing — it drops
+metadata rows for environments Incus no longer has, releasing their reserved
+host ports. Without `--yes` it only reports, and `--dry-run` withholds the write
+even with it.
+
+Reporting is what the command is for, so having something to report is not a
+failure: `reconcile` exits 0 whether or not any row was stale. A non-zero exit
+for the case the command exists to show cannot be told apart from a command that
+broke, by a `&&` chain, a CI step, or anyone reading `$?` — while the report it
+just printed says the run went fine.
+
+"No longer has" is read strictly, because releasing a port that is still in use
+is worse than keeping a row nobody needs:
+
+- The daemon must have completed a listing that held neither the environment's
+  project nor its instance, and every entry in that listing must have been
+  readable. A daemon that could not be reached, or an entry the runner could not
+  identify, is an unanswered question rather than an absence, and aborts instead.
+- A row whose slug a live `up` is still holding is left alone. `up` records the
+  slug and its port before it creates the project and the instance, so this is
+  what a concurrent `up` looks like from the outside. Who holds a slug is asked
+  of the kernel, not of the file: an `up` takes that environment's update lock —
+  named by the daemon and the project, so a `--remote` run is never read as the
+  local environment of the same name — before it writes the row and holds it until
+  the environment is built, so `reconcile` answers the question by trying to take
+  the same lock. Every command that changes what a slug names holds it, not just
+  `up`: a `delete` takes it across removing the objects and forgetting the row,
+  and stops rather than waiting when somebody else has it. Those two halves are
+  one change, and a delete that split them around a live `up` would remove
+  nothing — the objects do not exist yet — drop that run's reservation anyway,
+  and leave the finished environment untracked with its host port free for the
+  next slug. Nothing a run writes
+  could answer it. A record over-reports — a run killed outright leaves its own
+  behind — and under-reports, since a run from an older checkout writes no field
+  a newer `reconcile` would recognise; a lock does neither, because the kernel
+  drops it however the run ends and every version of the runner that builds a
+  worktree environment takes the same one. So an abandoned reservation is
+  reported as an environment the daemon no longer has and `--yes` prunes it,
+  while a live run's row is kept without any operator having to tell the two
+  apart. Not knowing counts as held: a platform without `flock`, or a lock file
+  that cannot be opened, keeps the row like every other unanswered question here.
+  Two things the rule does not cover, and both are in older checkouts rather than
+  in the rule. Their `up` writes the row and then takes the lock, so a
+  `reconcile --yes` landing between the two prunes a reservation whose build is
+  about to start. What that exposes is those two operations and not the build:
+  between releasing the mapping lock and acquiring the update lock they run one
+  `git rev-parse` and the two lock calls, and contention shortens the window
+  rather than widening it, since a slug whose lock somebody is already holding
+  reads as in flight. The older run then repairs the row itself, because its `up`
+  rewrites the mapping when the build finishes. What is left of it needs a third
+  `up` to start inside that same window and take the freed port, and that ends
+  loudly: an `up` creating a local environment re-checks the host port inside its
+  own update lock before it builds. Their `up` also keys the lock on the project
+  alone, so a released `up --remote` takes the local environment's lock and reads
+  as a local run — which errs towards in flight, and keeps a row. Closing either
+  from this side would mean deciding on the row's stamp again, written by a clock
+  this command cannot check and no evidence about whether a run is live, or never
+  pruning a row without a claim, which is every row any release has written.
+
+  Giving a row back at the end of a failed `up` is still worth doing — it frees
+  the port now instead of at the next `reconcile --yes` — and both of its
+  conditions are read at that moment rather than remembered from an earlier one.
+  The daemon must report no project for the slug, since a project it holds may
+  bind that port. The row must also still be the one that run wrote, which is
+  what the opaque claim in it is for: `up` merges over whatever row it finds, so
+  a later run can take the row over, and the first one failing afterwards must
+  not free a port the second is building on. `reserved_at` and `updated_at` are
+  provenance for whoever reads the file, and nothing decides on them: a stamp
+  written by another machine's clock, or by this one before it was corrected, is
+  no evidence about whether an `up` is running right now. For the same reason a
+  reservation records no branch or commit until it completes — the run that built
+  the environment is the one that can say what it built — so a slug reserved
+  again reports the branch it is still running, not the one being installed over
+  it.
+- `worktrees.json` is reached only through an accessor bound to the daemon it
+  describes. The file reserves host ports on this machine and records what this
+  machine's daemon holds, so every read of it and every write to it is a claim
+  about exactly one authority, and a `--remote` command has no name for it: it
+  neither reads nor writes a byte. `reconcile --remote` reports the remote
+  inventory and says once that runner metadata is not shown; `delete --remote`
+  removes the remote environment and says it kept the local row; `up --remote`
+  requires `--host-port`, because allocating from this machine's reservations is
+  no evidence about which of another daemon's ports are free. The `delete`
+  commands `reconcile --remote` prints carry `--remote`, or they would name the
+  same slug on the wrong daemon. The lock over that file belongs to the same
+  accessor, for the same reason: a `--remote` command holds nothing of this
+  file's inside its listings, so it does not keep local runs out of the file
+  while it waits on another daemon.
+- An empty `--remote` names this machine's daemon, normalized once where the
+  flag is defined rather than at each reader. An unexpanded
+  `--remote "$INCUS_REMOTE"` would otherwise be two authorities at once: the
+  environment created here, while the accessor bound to some other daemon and
+  recorded nothing about it — leaving the host port allocated with no row naming
+  it.
 
 Useful flags:
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from core.handlers.admin_notifications import send_admin_text
 from core.controller import Controller
 
@@ -41,13 +43,13 @@ async def test_admin_text_routes_only_to_active_platform_clients() -> None:
     delivered = await send_admin_text(
         controller,
         ["slack::U1", "discord::D1", "telegram::123"],
-        "Memory processing paused",
-        log_label="Memory alert",
+        "Update available",
+        log_label="update notification",
     )
 
     assert delivered == {"slack"}
-    assert slack.calls == [("U1", "Memory processing paused")]
-    assert discord.calls == [("D1", "Memory processing paused")]
+    assert slack.calls == [("U1", "Update available")]
+    assert discord.calls == [("D1", "Update available")]
     assert fallback.calls == []
 
 
@@ -76,44 +78,84 @@ async def test_admin_text_routes_legacy_unknown_users_to_the_primary_platform() 
 
 
 class _Store:
+    def __init__(self) -> None:
+        self.get_admins_calls = 0
+
     def get_admins(self) -> dict[str, object]:
-        return {"slack::U1": object()}
+        self.get_admins_calls += 1
+        return {
+            "slack::U1": object(),
+            "wechat::W1": object(),
+        }
 
 
 class _SettingsManager:
+    def __init__(self) -> None:
+        self.store = _Store()
+
     def get_store(self) -> _Store:
-        return _Store()
+        return self.store
 
 
 class _ControllerCallbackStub:
-    def __init__(self, client: _Client) -> None:
+    def __init__(self) -> None:
         self.settings_manager = _SettingsManager()
-        self.im_clients = {"slack": client}
-        self.im_client = client
-        self.translation_calls: list[tuple[str, dict[str, object]]] = []
+        self.im_clients = {
+            "slack": _Client({"ok": True}),
+            "wechat": _Client({"ok": True}),
+        }
+        self.im_client = self.im_clients["slack"]
+        self.primary_platform = "slack"
 
-    def _t(self, key: str, **kwargs: object) -> str:
-        self.translation_calls.append((key, kwargs))
-        return key
 
+async def test_memory_indep_012_processing_events_stay_in_service_logs(caplog) -> None:
+    """MEMORY-INDEP-012: processing health stays observable without IM delivery."""
 
-async def test_memory_processing_callback_selects_copy_and_acks_delivery() -> None:
-    client = _Client({"ok": True})
-    controller = _ControllerCallbackStub(client)
+    controller = _ControllerCallbackStub()
 
-    delivered = await Controller._send_memory_processing_event(
-        controller,
-        "fault",
-        "credential",
-        "2026-01-01T00:00:00.000Z",
-        4,
-    )
+    with caplog.at_level(logging.INFO, logger="core.controller"):
+        results = [
+            await Controller._log_memory_processing_event(
+                controller,
+                "fault",
+                "credential",
+                "2026-01-01T00:00:00.000Z",
+                4,
+            ),
+            await Controller._log_memory_processing_event(
+                controller,
+                "fault",
+                "engine",
+                "2026-01-01T00:01:00.000Z",
+                2,
+            ),
+            await Controller._log_memory_processing_event(
+                controller,
+                "recovered",
+                None,
+                "2026-01-01T00:02:00.000Z",
+                0,
+            ),
+        ]
 
-    assert delivered is True
-    assert controller.translation_calls == [
+    assert results == [True, True, True]
+    assert controller.settings_manager.store.get_admins_calls == 0
+    assert all(client.calls == [] for client in controller.im_clients.values())
+    records = [record for record in caplog.records if record.name == "core.controller"]
+    assert [(record.levelno, record.getMessage()) for record in records] == [
         (
-            "memory.alert.credential",
-            {"occurred_at": "2026-01-01T00:00:00.000Z", "queued": 4},
-        )
+            logging.WARNING,
+            "Memory processing event=fault kind=credential "
+            "occurred_at=2026-01-01T00:00:00.000Z queued=4",
+        ),
+        (
+            logging.WARNING,
+            "Memory processing event=fault kind=engine "
+            "occurred_at=2026-01-01T00:01:00.000Z queued=2",
+        ),
+        (
+            logging.INFO,
+            "Memory processing event=recovered kind=none "
+            "occurred_at=2026-01-01T00:02:00.000Z queued=0",
+        ),
     ]
-    assert client.calls == [("U1", "memory.alert.credential")]

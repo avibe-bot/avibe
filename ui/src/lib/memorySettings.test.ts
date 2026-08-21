@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildEndpointPatch,
+  draftFromConfig,
   memoryNavShouldBeVisible,
   memoryRuntimeRecoveryAvailable,
   memorySetupStage,
@@ -96,5 +97,96 @@ describe('buildEndpointPatch', () => {
       false,
       true,
     )).toEqual({ api_key: null, base_url: null, model: null });
+  });
+
+  it('does not attach a provider to non-rerank drafts', () => {
+    expect(draftFromConfig({
+      base_url: 'https://llm.example.test/v1',
+      model: 'chat',
+      api_key: null,
+      has_api_key: true,
+    })).toEqual({
+      baseUrl: 'https://llm.example.test/v1',
+      model: 'chat',
+      apiKey: '',
+      clearKey: false,
+    });
+  });
+
+  it('sends the selected rerank provider when creating an optional endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://llm-space.example.test',
+        model: 'gte-rerank-v2',
+        apiKey: 'rerank-secret',
+        clearKey: false,
+        provider: 'dashscope',
+      },
+      {
+        base_url: null,
+        model: null,
+        api_key: null,
+        has_api_key: false,
+      },
+      true,
+      false,
+      true,
+      true,
+    )).toEqual({
+      base_url: 'https://llm-space.example.test',
+      model: 'gte-rerank-v2',
+      api_key: 'rerank-secret',
+      provider: 'dashscope',
+    });
+  });
+
+  it('sends a provider-only change for an already configured rerank endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://api.deepinfra.com/v1/inference',
+        model: 'Qwen/Qwen3-Reranker-4B',
+        apiKey: '',
+        clearKey: false,
+        provider: 'vllm',
+      },
+      {
+        base_url: 'https://api.deepinfra.com/v1/inference',
+        model: 'Qwen/Qwen3-Reranker-4B',
+        api_key: null,
+        has_api_key: true,
+        provider: 'deepinfra',
+      },
+      true,
+      false,
+      true,
+      true,
+    )).toEqual({ provider: 'vllm' });
+  });
+
+  it('includes an explicit rerank provider when it differs from the saved endpoint', () => {
+    expect(buildEndpointPatch(
+      {
+        baseUrl: 'https://dashscope.aliyuncs.com',
+        model: 'gte-rerank-v2',
+        apiKey: 'rerank-secret',
+        clearKey: false,
+        provider: 'dashscope',
+      },
+      {
+        base_url: null,
+        model: null,
+        api_key: null,
+        has_api_key: false,
+      },
+      true,
+      false,
+      true,
+      true,
+    )).toEqual({
+      base_url: 'https://dashscope.aliyuncs.com',
+      model: 'gte-rerank-v2',
+      api_key: 'rerank-secret',
+      provider: 'dashscope',
+    });
   });
 });

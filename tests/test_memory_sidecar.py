@@ -736,6 +736,7 @@ def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeyp
         "rerank_base_url": "https://rerank.example.test/v1/inference",
         "rerank_model": "rerank-model",
         "rerank_api_key": "rerank-secret",
+        "rerank_provider": None,
         "multimodal_base_url": "https://vision.example.test/v1",
         "multimodal_model": "vision-model",
         "multimodal_api_key": "vision-secret",

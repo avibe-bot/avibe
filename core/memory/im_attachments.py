@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
-from core.handlers.inbound_attachments import (
+from core.inbound_attachment_lease import (
     InboundAttachmentLease,
     leased_attachment_records,
     open_leased_attachment_record,

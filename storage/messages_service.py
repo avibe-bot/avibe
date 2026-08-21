@@ -1091,6 +1091,7 @@ INBOX_ACTIVITY_TYPES = types_with("inboxActivity")
 TRANSCRIPT_TYPES = types_with("transcript")
 _INBOX_PREVIEW_TYPES = types_with("inboxPreview")
 _INBOX_SETTLES_REPLY_TYPES = types_with("inboxSettlesReply")
+_DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _UNREAD_TYPES = types_with("unread")
 
 
@@ -1264,6 +1265,7 @@ def list_inbox_sessions(
         types: Optional[tuple[str, ...]] = None,
         conversation_only: bool = False,
         input_turn_only: bool = False,
+        active_turn_reply_only: bool = False,
     ) -> Any:
         msg = messages.alias()
         order_value = transcript_order_value(msg)
@@ -1281,6 +1283,14 @@ def list_inbox_sessions(
             query = query.where(msg.c.author == author)
         if types is not None:
             query = query.where(msg.c.type.in_(types))
+        if active_turn_reply_only:
+            query = query.where(
+                ~and_(
+                    msg.c.type.in_(_DETACHED_COMPLETION_TYPES),
+                    func.coalesce(func.json_extract(msg.c.metadata_json, "$.detached"), 0)
+                    == 1,
+                )
+            )
         if input_turn_only:
             query = query.where(
                 or_(
@@ -1301,8 +1311,16 @@ def list_inbox_sessions(
     last_author = _latest_message_value("author", conversation_only=True)
     preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
     preview_at = _latest_message_value(None, types=_INBOX_PREVIEW_TYPES)
-    last_terminal_id = _latest_message_value("id", types=_INBOX_SETTLES_REPLY_TYPES)
-    last_terminal_at = _latest_message_value(None, types=_INBOX_SETTLES_REPLY_TYPES)
+    last_terminal_id = _latest_message_value(
+        "id",
+        types=_INBOX_SETTLES_REPLY_TYPES,
+        active_turn_reply_only=True,
+    )
+    last_terminal_at = _latest_message_value(
+        None,
+        types=_INBOX_SETTLES_REPLY_TYPES,
+        active_turn_reply_only=True,
+    )
     last_turn_terminal_id = (
         select(session_turns.c.id)
         .where(

@@ -36,10 +36,23 @@ ROOT = Path(__file__).parents[1]
 DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 TURN_GATEWAY = ROOT / "core/handlers/model_hub/turn_gateway.py"
 SERVICE = ROOT / "core/handlers/model_hub/service.py"
+USAGE = ROOT / "core/handlers/model_hub/usage.py"
+RPC = ROOT / "core/handlers/model_hub/rpc.py"
+V2_CONFIG = ROOT / "config/v2_config.py"
 PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
 CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
+HUB_CLIENT = ROOT / "vibe/model_hub_client.py"
+UI_SERVER = ROOT / "vibe/ui_server.py"
+INVOKE_CONTRACT = ROOT / "core/handlers/model_hub/adapter.py"
+# Every name a caller reaches the usage ledger's read through. Two processes
+# forbid reaching it the easy way for one reason -- the read blocks on the lock
+# the writers hold across an fsync -- so the rule is declared once here instead
+# of restated in each loop's scan, where a second reader would escape both.
+LEDGER_READ_NAMES = frozenset({"usage_summary"})
+LEDGER_TOUCH_NAMES = LEDGER_READ_NAMES | {"usage"}
+PRODUCT_PACKAGES = ("core", "config", "modules", "vibe")
 FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
 STREAM_TRANSPORT_FIXTURES = json.loads((FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8"))[
     "cases"
@@ -267,6 +280,22 @@ def _call_name(node: ast.AST) -> str | None:
     return None
 
 
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+
+def _reaches_the_ledger(node: ast.AST) -> bool:
+    # ``self.usage.<anything>`` -- the ledger object itself, not the writer beside
+    # it, which is a different property with a different rule.
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "usage"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
+    )
+
+
 def _bool_keyword(call: ast.Call, name: str) -> bool | None:
     return next(
         (
@@ -300,6 +329,19 @@ def _raw_outcome_constructors(tree: ast.AST) -> tuple[ast.Call, ...]:
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and _call_name(node) == "RawCallOutcome"
+    )
+
+
+def _ledger_writes(tree: ast.AST) -> tuple[ast.Attribute, ...]:
+    """Every reference to the usage ledger's write, called or handed to a thread."""
+
+    return tuple(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"record", "record_many"}
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr in {"usage", "ledger"}
     )
 
 
@@ -363,7 +405,11 @@ def test_g2_outcome_reads_have_one_settlement_owner() -> None:
     )
     assert response_owner is not None
     stream_at = response_owner.index("response = web.StreamResponse")
-    settle_at = response_owner.index("await self._settle_turn_handle", stream_at)
+    # Settlement now reaches the handle through the one function that meters the
+    # turn first, so the t4 slot in this ordering is named by that owner. The
+    # ordering it constrains is unchanged: the response exists, then the turn is
+    # ended, then the terminal copy renders into it.
+    settle_at = response_owner.index("await self._settle_metered_turn", stream_at)
     render_at = response_owner.index("await self._write_stream_terminal_copy", settle_at)
     eof_at = response_owner.index("await self._downstream_io(response.write_eof())", render_at)
     assert settle_at < render_at < eof_at
@@ -503,6 +549,415 @@ def test_protocol_outcome_owner_guard_rejects_each_bypassed_kind() -> None:
             ast.parse("RawCallOutcome(kind=RawOutcomeKind.HTTP_ERROR)")
         )
     ) == 1
+
+
+def test_usage_metering_has_one_owner_per_call_population() -> None:
+    # Review 4958923279 finding 3: a turn can make several upstream calls, and the
+    # gateway only ever sees the one whose body it forwards. Metering therefore has
+    # two owners over populations split by ``handle.stream is not None``, and a
+    # third write anywhere — or a second caller of either owner — would double
+    # count or silently drop a billed call.
+    service_tree = _tree(SERVICE)
+    gateway_tree = _tree(TURN_GATEWAY)
+    recorder = _functions(gateway_tree)["_record_usage"]
+    owners = (_functions(service_tree)["_meter_call"], recorder)
+    # Reviews 4964754924 / 4964894667: an owner decides *that* a call is metered,
+    # but how long that write outlives whoever queued it is a third property and
+    # belongs to neither population. `UsageWriter` owns it once, so neither owner
+    # may touch the ledger itself and a population added later inherits the
+    # lifetime by construction instead of by remembering to.
+    assert not _ledger_writes(service_tree)
+    assert not _ledger_writes(gateway_tree)
+    writer = next(
+        node
+        for node in ast.walk(_tree(USAGE))
+        if isinstance(node, ast.ClassDef) and node.name == "UsageWriter"
+    )
+    persist = _functions(writer)["_flush_pending"]
+    writes = _ledger_writes(writer)
+    assert writes
+    assert all(write in set(ast.walk(persist)) for write in writes)
+    # Which leaves each owner one job at the writer, and leaves nothing else in
+    # either module recording anything at all.
+    handoffs = [
+        node
+        for tree in (service_tree, gateway_tree)
+        for node in ast.walk(tree)
+        if _call_name(node) == "record"
+    ]
+    assert handoffs
+    assert all(any(handoff in set(ast.walk(owner)) for owner in owners) for handoff in handoffs)
+    assert all(
+        len([handoff for handoff in handoffs if handoff in set(ast.walk(owner))]) == 1
+        for owner in owners
+    )
+    invoke = _functions(service_tree)["_invoke"]
+    meter_calls = [
+        node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
+    ]
+    assert len(meter_calls) == 1
+    assert meter_calls[0] in set(ast.walk(invoke))
+    # Any of the gateway's endings may report the forwarded call, so exactly-once
+    # rests on the write it owns; a caller that pre-checks or clears that handle
+    # would move the decision outside the owner. An ending may still need to know
+    # whether a row is owed — the abandonment path decides whether to run at all —
+    # so that question is a property of the turn and the only other reader of the
+    # handle. Review 4970...: it used to ask whether the turn was *settled*, which
+    # a forced terminal had already made true for a call the vendor billed.
+    owes = _functions(gateway_tree)["owes_metering"]
+    readers = (recorder, owes)
+    handles = [
+        node
+        for node in ast.walk(gateway_tree)
+        if isinstance(node, ast.Attribute) and node.attr == "usage_write"
+    ]
+    assert handles
+    assert all(any(handle in set(ast.walk(reader)) for reader in readers) for handle in handles)
+    assert not [
+        node
+        for node in ast.walk(owes)
+        if isinstance(node, ast.Assign) or isinstance(node, ast.AugAssign)
+    ]
+
+
+def test_settling_a_turn_is_what_meters_it_for_every_ending_there_will_be() -> None:
+    # Review 4970...: metering was positioned relative to bookkeeping rather than to
+    # the upstream call, and each ending paid for it differently — one settled first
+    # and skipped the row when settlement raised, one never metered at all. Naming
+    # the class instead of its endings: there is one function that ends a metered
+    # turn, the recorder is its first statement, and no ending can settle without
+    # going through it. An ending added later inherits the order rather than
+    # restating it, because there is nowhere else to state it.
+    gateway_tree = _tree(TURN_GATEWAY)
+    functions = _functions(gateway_tree)
+    owner = functions["_settle_metered_turn"]
+    recorded = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_record_usage"]
+    assert len(recorded) == 1
+    assert recorded[0] in set(ast.walk(owner))
+    # The first *executable* statement, and the statement itself rather than
+    # anything nested in one: metering under a condition is what every ending that
+    # got this wrong already did.
+    body = [node for node in owner.body if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))]
+    assert isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Await)
+    assert body[0].value.value is recorded[0]
+    # And the settlement it wraps is reachable only through it, so "settled here"
+    # cannot come apart from "metered here" at a call site the next round adds.
+    settlements = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_turn_handle"]
+    assert len(settlements) == 1
+    assert settlements[0] in set(ast.walk(owner))
+    endings = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_metered_turn"]
+    assert len(endings) >= 2
+    assert all(
+        any(ending in set(ast.walk(functions[name])) for name in ("_settle_boundary_termination", "_resolved_response"))
+        for ending in endings
+    )
+
+
+def test_a_metered_row_is_dated_by_the_call_and_not_by_what_followed_it() -> None:
+    # Review 4970...: the other half of the same class. The recorder read the clock
+    # itself, so a row carried the moment bookkeeping got around to it rather than
+    # the moment the call ended — across local midnight, the wrong day's usage for a
+    # call the vendor billed on the previous one. Asserted here rather than driven,
+    # because the fix is what makes it unreachable: nothing suspends between the
+    # body ending and the row being queued, so no clock can move in between and no
+    # test can make one. What is left to protect is where the instant comes from.
+    gateway_tree = _tree(TURN_GATEWAY)
+    functions = _functions(gateway_tree)
+    # Captured where the upstream body ends, which is the one function that has a
+    # body to end. A capture anywhere else is a second answer to when the call
+    # finished, and the endings are exactly the places that would get it wrong.
+    captures = [
+        node
+        for node in ast.walk(gateway_tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute) and target.attr == "completed_at"
+            for target in node.targets
+        )
+    ]
+    assert captures
+    assert all(capture in set(ast.walk(functions["_resolved_response"])) for capture in captures)
+    # And carried from there to the ledger rather than re-read at the write.
+    handoff = next(
+        node for node in ast.walk(functions["_record_usage"]) if _call_name(node) == "record"
+    )
+    dated = next(keyword for keyword in handoff.keywords if keyword.arg == "at")
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "completed_at"
+        for node in ast.walk(dated.value)
+    )
+
+
+def test_how_long_a_turn_waits_on_the_ledger_is_the_writers_to_bound() -> None:
+    # Reviews 4964754924 / 4964894667 / 4970...: the wait was spelled at each
+    # metering call site, which made the bound the one property a new site could
+    # omit by writing the obvious `await` — and one did, putting an unresponsive
+    # disk on a turn's critical path and in front of the next failover hop. Both
+    # halves, shield and bound, now sit behind one name. The scan keys on the usage
+    # write specifically, so an unrelated shielded task is not mistaken for one.
+    waited = {"shield", "wait_for"}
+    usage_names = {"record", "usage_write", "wait_recorded", "usage_writer"}
+
+    def wraps_a_usage_write(tree: ast.AST) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(tree)
+            if _call_name(node) in waited
+            and any(
+                isinstance(inner, ast.Attribute) and inner.attr in usage_names
+                or isinstance(inner, ast.Name) and inner.id in usage_names
+                for argument in node.args
+                for inner in ast.walk(argument)
+            )
+        ]
+
+    usage_tree = _tree(USAGE)
+    waiter = _functions(usage_tree)["wait_recorded"]
+    assert {name for node in ast.walk(waiter) if (name := _call_name(node)) in waited} == waited
+    # Inside the writer the wait is spelled over its own parameter, so the name-keyed
+    # scan is aimed outward: at the modules that hold a `usage_write` and could wait
+    # on it themselves. Every one of them must go through the name above instead.
+    assert all(node in set(ast.walk(waiter)) for node in wraps_a_usage_write(usage_tree))
+    for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
+        if module == USAGE:
+            continue
+        assert not wraps_a_usage_write(_tree(module)), module.name
+
+
+def test_every_body_fact_the_turn_reads_can_come_from_the_engine_that_read_it() -> None:
+    # Review 4965405530: the gateway forwards a body the engine had already begun
+    # reading, and each round of this class was one more fact of that body that
+    # existed only in bytes the gateway itself had pulled — so every ending that
+    # opens before the first pull answered it wrong, one fact at a time. The
+    # property is not which facts those are: it is that a fact read from the
+    # gateway's own tracker is a fact about the forwarded body, and every one of
+    # them can be answered by the observation that saw the body first.
+    execution = next(
+        node
+        for node in ast.walk(_tree(TURN_GATEWAY))
+        if isinstance(node, ast.ClassDef) and node.name == "_TurnExecution"
+    )
+
+    def reads(owner: ast.AST, attribute: str) -> bool:
+        return any(
+            isinstance(node, ast.Attribute)
+            and node.attr == attribute
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            for node in ast.walk(owner)
+        )
+
+    body_facts = [
+        node
+        for node in execution.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(decorator, ast.Name) and decorator.id == "property"
+            for decorator in node.decorator_list
+        )
+        and reads(node, "wire_state")
+    ]
+    assert body_facts
+    assert [fact.name for fact in body_facts if not reads(fact, "upstream_observation")] == []
+
+    # Which the engine can only answer if the whole boundary crosses: a member the
+    # contract declares and the one real implementation drops is a fact that stops
+    # at the hand-off, and the reader above would be asking a fake for it.
+    def members(tree: ast.AST, name: str) -> set[str]:
+        owner = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == name
+        )
+        return {
+            node.name
+            for node in owner.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    declared = members(_tree(INVOKE_CONTRACT), "InvokeHandle")
+    assert "observed" in declared
+    assert declared <= members(_tree(CLIENT), "EngineInvokeHandle")
+
+
+def test_model_identity_is_decided_only_by_its_owner() -> None:
+    # Review 4959575659 finding 11: config, resolution, and metering only agree on
+    # what "the same model" is while one function decides it. A module that reaches
+    # for the raw bound instead is re-deriving the rule, and the notions drift apart
+    # again — that is exactly how one model became two ledger rows.
+    #
+    # Review 4965885614: which function is the right one depends on whether the
+    # module may answer no. The service admits, so it asks the admission question;
+    # the ledger meters a call that already happened, so asking it there dropped
+    # every call made under an identifier a legacy file kept loadable. Neither may
+    # spell the bound, and neither may borrow the other's question.
+    #
+    # Review 4966041599: within the ledger the same split appears again by
+    # direction. Deriving a key for a call cannot refuse it; accepting a key a row
+    # already carries can, and must not re-derive it. One function serving both
+    # forced the fold to start late enough to be idempotent, which is what let a
+    # legacy identifier occupy a folded key and share another model's row.
+    assert "canonical_model_id" in SERVICE.read_text(encoding="utf-8")
+    usage_source = USAGE.read_text(encoding="utf-8")
+    assert "usage_ledger_key" in usage_source
+    assert "persisted_ledger_key" in usage_source
+    assert "canonical_model_id" not in usage_source
+    for path in (SERVICE, USAGE):
+        source = path.read_text(encoding="utf-8")
+        assert "MODEL_ID_MAX_LENGTH" not in source
+    # Review 4960570946: a third admission path had picked up neither half, so
+    # the half that is always safe moved to the one validator every path goes
+    # through. The bound cannot follow it there — that validator also loads files
+    # older releases wrote — so it stays where a request can be refused.
+    config_source = V2_CONFIG.read_text(encoding="utf-8")
+    assert "normalized_model_id" in config_source
+    assert "MODEL_ID_MAX_LENGTH" not in config_source
+
+
+def test_the_usage_ledger_is_never_touched_from_the_controller_loop() -> None:
+    # Review 4960570946: the read blocks on the same lock the writers hold across
+    # fsync, so "off the loop" is a property of the ledger, not of whichever
+    # caller happened to remember it. Every RPC entry into it is checked here so
+    # the next one cannot quietly be the exception.
+    tree = _tree(RPC)
+    parents = _parents(tree)
+    touches = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in LEDGER_TOUCH_NAMES]
+    assert touches
+    for touch in touches:
+        enclosing = touch
+        off_loop = False
+        while enclosing in parents:
+            enclosing = parents[enclosing]
+            if _call_name(enclosing) == "to_thread":
+                off_loop = True
+                break
+        assert off_loop, f"{touch.attr} is reached on the controller loop"
+
+
+def test_the_ledger_read_is_the_whole_of_what_both_loops_are_told_to_watch() -> None:
+    # Review 4966281026: two processes now scan for this read by name, and a
+    # second read added to the service would satisfy neither name list and so
+    # pass both scans. The list is therefore declared once and asserted here to
+    # be the whole of what the service exposes -- a new reader fails next to the
+    # declaration that has to grow with it, rather than in a review round.
+    readers = {
+        name for name, fn in _functions(_tree(SERVICE)).items() if any(map(_reaches_the_ledger, ast.walk(fn)))
+    }
+    assert readers == set(LEDGER_READ_NAMES)
+
+
+def test_the_ledger_read_reaches_the_web_ui_awaited_and_off_the_compat_surface() -> None:
+    # Review 4966281026 finding 4: the same property as the controller guard
+    # above, one process over. The read blocks on the writers' lock across an
+    # fsync, so reaching it from the compat surface -- whose handlers are sync and
+    # run in a threadpool worker -- occupies a UI worker for as long as the disk
+    # takes. Awaiting it on the native surface is what keeps that cost on the
+    # event loop's own terms.
+    tree = _tree(UI_SERVER)
+    parents = _parents(tree)
+    touches = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in LEDGER_TOUCH_NAMES]
+    assert touches
+    for touch in touches:
+        awaited = False
+        native = False
+        enclosing = touch
+        while enclosing in parents:
+            enclosing = parents[enclosing]
+            if isinstance(enclosing, ast.Await):
+                awaited = True
+            if isinstance(enclosing, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assert isinstance(enclosing, ast.AsyncFunctionDef), f"{enclosing.name} reaches {touch.attr} sync"
+                native = native or any(
+                    _call_name(node) == "_dispatch_native_ui_request" for node in ast.walk(enclosing)
+                )
+        assert awaited, f"{touch.attr} is called rather than awaited"
+        assert native, f"{touch.attr} is served off the native FastAPI surface"
+
+    # The client the route reaches it through has to keep the same shape: one sync
+    # method here would move the block back into a worker with nothing in
+    # `ui_server.py` to show for it.
+    for name, fn in _functions(_tree(HUB_CLIENT)).items():
+        if name not in LEDGER_READ_NAMES:
+            continue
+        assert isinstance(fn, ast.AsyncFunctionDef), f"{name} is a sync RPC"
+        assert not any(_call_name(node) == "_rpc_sync" for node in ast.walk(fn))
+
+
+def test_a_usage_row_is_labelled_without_its_caller_knowing_how_it_was_keyed() -> None:
+    # Review 4966281026 finding 1: a row's key is an identity or a bounded head
+    # plus a digest of it, and which one is a fold only this module performs. Three
+    # heads running, the reviewer has found a caller keying its own lookup at a
+    # new call site each time -- so the class is closed by leaving no caller with
+    # a key to join on. The service hands identities down and the ledger keys both
+    # sides of the join itself.
+    importers = set()
+    for package in PRODUCT_PACKAGES:
+        for path in (ROOT / package).rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            if "usage_ledger_key" not in source:
+                continue
+            if any(
+                isinstance(node, ast.ImportFrom) and any(alias.name == "usage_ledger_key" for alias in node.names)
+                for node in ast.walk(ast.parse(source))
+            ):
+                importers.add(path)
+    assert importers == {USAGE}
+
+    reader = _functions(_tree(SERVICE))["usage_summary"]
+    # Subscripting a row is how the fold leaked the first two times: the caller
+    # read `row["source_id"]` and looked a label up under an identity the row does
+    # not carry, reporting every folded row as unlabelled while it still existed.
+    assert not [
+        node
+        for node in ast.walk(reader)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value in {"source_id", "model_id", "sources", "models"}
+    ]
+    handoffs = [node for node in ast.walk(reader) if _call_name(node) == "summary"]
+    assert len(handoffs) == 1
+    assert "identities" in {keyword.arg for keyword in handoffs[0].keywords}
+    # Review 4967250750 finding 1: a mapping built here is a join key whose arity the
+    # caller chose, and arity is what went wrong on the fourth head. A metered model's
+    # identity is the pair (source, model), so a flat ``{model.id: ...}`` answered for
+    # a model removed from one Source as long as another Source still listed it.
+    # Handing the nesting down as a typed record leaves no arity to get wrong.
+    assert not [node for node in ast.walk(reader) if isinstance(node, (ast.Dict, ast.DictComp))]
+
+
+def test_no_hub_worker_thread_can_be_waited_on_at_process_exit() -> None:
+    """Review 4967250750 finding 3: metering must be abandonable, not merely bounded.
+
+    Every wait the hub makes a caller do is bounded, which is what keeps a served turn
+    off a disk. Shutdown is where a bound stops being the question: the work is still
+    running after the last bounded wait returned, so what matters is whether the
+    runtime will walk away from it. `ThreadPoolExecutor` will not — it registers an
+    `atexit` hook that joins non-daemon workers — so a worker wedged in `fsync` holds
+    interpreter shutdown open forever.
+
+    Scanned over the package rather than asserted about the one class that had the
+    defect: a second worker started anywhere in the hub inherits the same rule, which
+    is the part nobody remembers when adding one. ``MH-USAGE-015`` proves the
+    behaviour; this keeps the next thread from having to rediscover it.
+    """
+
+    started = 0
+    for path in sorted((ROOT / "core/handlers/model_hub").rglob("*.py")):
+        for node in ast.walk(_tree(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            assert name not in {
+                "ThreadPoolExecutor",
+                "ProcessPoolExecutor",
+            }, f"{path.name} builds a pool whose workers are joined at exit"
+            if name != "Thread":
+                continue
+            started += 1
+            daemon = [keyword for keyword in node.keywords if keyword.arg == "daemon"]
+            assert len(daemon) == 1, f"{path.name} starts a thread without saying whether it is a daemon"
+            assert daemon[0].value.value is True, f"{path.name} starts a thread the runtime will wait on"
+    assert started, "no hub worker thread found -- the scan has stopped covering anything"
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:
@@ -938,3 +1393,46 @@ def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:
         seen_states.add(settlement_state)
         assert state.terminal_outcome == (None if settlement_state == "pending" else settlement_state)
     assert seen_states == set(STREAM_BOUNDARY_DIMENSIONS["settlement_state"])
+
+
+def test_wire_bytes_reach_the_observer_before_the_buffer_that_can_refuse_them() -> None:
+    """Review 4965677908: a full prelude must not erase a report it received.
+
+    Two questions get asked about the same bytes and only the second can fail:
+    what they say, and whether there is room to keep a replay of them. Every
+    arrival site therefore hands them to one owner, and that owner reads before
+    it stores — so a site added later cannot reintroduce the order that drops a
+    usage frame the vendor already billed.
+    """
+
+    source = CLIENT.read_text(encoding="utf-8")
+    assert source.count("prelude.write(") == 1
+    owner = ast.get_source_segment(source, _functions(_tree(CLIENT))["_received"])
+    assert owner is not None
+    assert "prelude.write(" in owner
+    assert owner.index("wire_state.observe(") < owner.index("prelude.write(")
+
+
+def test_no_model_hub_module_spells_its_own_atomic_replacement() -> None:
+    """Review 4965677908: a failed replacement must not leave a temp file behind.
+
+    Cleanup is unobservable from outside — the writers swallow ``OSError`` so a
+    full disk cannot break metering — so it cannot be maintained one collection
+    at a time. A module that spells its own temporary file is a second owner of
+    the property, whether or not it remembers the cleanup.
+
+    Stated as "nobody here re-implements it" rather than "exactly ``state_file``
+    implements it": the owner has since moved out of this package entirely, into
+    ``config.atomic_io``, and naming the owner made this guard fail for the one
+    change that satisfied it best.
+    """
+
+    second_owners = {
+        module.name
+        for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py"))
+        if any(
+            marker in module.read_text(encoding="utf-8")
+            for marker in ("tempfile", "os.replace", "os.rename")
+        )
+    }
+    assert second_owners == set()

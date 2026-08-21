@@ -63,6 +63,7 @@ import {
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
+import { onPageReactivated } from './lib/pageActivity';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -105,19 +106,7 @@ import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
-import { OrganizationOverviewPage } from './features/organization/pages/OrganizationOverviewPage';
-import { OrganizationMembersPage } from './features/organization/pages/OrganizationMembersPage';
-import {
-  OrganizationGroupDetailPage,
-  OrganizationGroupsPage,
-} from './features/organization/pages/OrganizationGroupsPages';
-import { OrganizationInstancesPage } from './features/organization/pages/OrganizationInstancesPage';
-import {
-  InstanceAccessPage,
-  InstanceProjectsPage,
-} from './features/organization/pages/OrganizationInstancePages';
-import { OrganizationResourcesPage } from './features/organization/pages/OrganizationResourcesPage';
-import { OrganizationShell } from './features/organization/OrganizationShell';
+import { PermissionsPage } from './features/permissions/PermissionsPage';
 
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
@@ -346,17 +335,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         if (guardStatus !== 'remote-login-required' || !shouldDeferRemoteAuthRedirect()) return;
 
         let recheckStarted = false;
-        const recheckAfterLogin = () => {
-            if (document.visibilityState !== 'visible' || recheckStarted) return;
+        return onPageReactivated(() => {
+            if (recheckStarted) return;
             recheckStarted = true;
             setAuthCheckVersion((version) => version + 1);
-        };
-        document.addEventListener('visibilitychange', recheckAfterLogin);
-        window.addEventListener('focus', recheckAfterLogin);
-        return () => {
-            document.removeEventListener('visibilitychange', recheckAfterLogin);
-            window.removeEventListener('focus', recheckAfterLogin);
-        };
+        });
     }, [guardStatus]);
 
     useEffect(() => {
@@ -504,8 +487,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
-    if (bypassSetupGuard) return children;
-    if (guardStatus === 'needs-setup') {
+    if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
         if (location.pathname === '/setup' && authorizationSession) {
             return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
         }
@@ -526,6 +508,10 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         return <Navigate to="/setup" replace />;
     }
     if (!authorizationSession) {
+        // Diagnostics / Logs remain reachable before a session exists so an
+        // unfinished install can still inspect doctor output. Once the session
+        // lands, wrap it so AppShell does not treat the owner as denied.
+        if (bypassSetupGuard) return children;
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
     return (
@@ -758,17 +744,7 @@ const router = createBrowserRouter(
         {/* Control Panel mode — existing pages moved under /admin/* */}
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard" element={<Dashboard />} />
-        <Route path="/admin/organization" element={<OrganizationShell />}>
-          <Route index element={<Navigate to="/admin/organization/overview" replace />} />
-          <Route path="overview" element={<OrganizationOverviewPage />} />
-          <Route path="members" element={<OrganizationMembersPage />} />
-          <Route path="groups" element={<OrganizationGroupsPage />} />
-          <Route path="groups/:groupId" element={<OrganizationGroupDetailPage />} />
-          <Route path="instances" element={<OrganizationInstancesPage />} />
-          <Route path="instances/:instanceId/access" element={<InstanceAccessPage />} />
-          <Route path="instances/:instanceId/projects" element={<InstanceProjectsPage />} />
-          <Route path="resources" element={<OrganizationResourcesPage />} />
-        </Route>
+        <Route path="/admin/permissions" element={<PermissionsPage />} />
         <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />

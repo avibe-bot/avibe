@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -11,8 +12,12 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
+from vibe import runtime as runtime_mod
+
+
+logger = logging.getLogger(__name__)
 
 PACKAGE_NAME = "avibe-os"
 LEGACY_PACKAGE_NAME = "vibe-remote"
@@ -21,6 +26,14 @@ CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
+# A spec that names nothing but a package, so appending ``==<version>`` to it
+# yields a requirement rather than a broken string. PEP 508 names only:
+# anything with a path separator, a URL scheme, extras, a marker, or a version
+# of its own is deliberately excluded. See `pinned_package_spec`.
+_BARE_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+# uv names a tool's directory after the distribution it installed, so this reads
+# back the name THIS process was installed under. See `installed_package_name`.
+_UV_TOOL_PATH_RE = re.compile(r"/uv/tools/(?P<name>[^/]+)/")
 # PEP 440-ish parser: release + optional pre-release (a/b/rc) + optional
 # post + optional dev, plus a local version segment (``+local``) that we
 # accept but ignore for ordering. Word forms (alpha/beta/preview) are listed
@@ -49,9 +62,28 @@ _PRE_ORDER = {
 
 @dataclass(frozen=True)
 class UpgradePlan:
+    """A command that installs a version of avibe, and what it will replace.
+
+    `rollback_to` travels with the command because of WHEN it has to be taken,
+    not because the two are related ideas. It describes the install this command
+    is about to overwrite, and running the command is what destroys the evidence
+    it is read from -- so the only safe moment to take it is before there is a
+    command to run.
+
+    Left as a function the caller was told to call early, both call sites called
+    it late: after `subprocess.run(plan.command)` had already installed
+    `avibe-os` over a `vibe-remote` machine, so the question "what was this
+    install published as" had two answers and returned neither, and the rollback
+    pinned `avibe-os==2.x`, a release that was never published under that name.
+    Writing the ordering rule into a docstring is what failed; a field cannot be
+    called late, because there is no plan without the measurement and no install
+    without the plan.
+    """
+
     command: list[str]
     env: dict[str, str] | None
     method: str
+    rollback_to: RollbackTarget | None = None
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
@@ -435,6 +467,164 @@ def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
     return f"/uv/tools/{LEGACY_PACKAGE_NAME}/" in executable
 
 
+def installed_package_name(python_executable: str | None = None) -> str | None:
+    """The distribution this install was published as.
+
+    Which distribution published the running version is not the same question as
+    which one the next install should ask for, and the two genuinely differ: a
+    machine still on `vibe-remote` upgrades to `avibe-os`, that being the rename.
+    Anything going FORWARD wants the configured spec. Anything going BACK wants
+    this, because `avibe-os==2.x` names a release that was never published under
+    that name and an install of it can only fail.
+
+    Asked of the installed metadata first, because that is where the answer
+    actually is: the distribution that provides the running `vibe` package says
+    so itself, whatever layout it was installed into. Reading it off the
+    interpreter path recognised exactly one layout -- uv's tool directory -- and
+    answered `None` for every supported install that is not one, pip into a
+    virtualenv among them. `None` there is not neutral: the caller falls back to
+    the configured FORWARD package, so a `vibe-remote` install in a virtualenv
+    armed a rollback to `avibe-os==2.x` and spent the one recovery attempt on a
+    release that was never published.
+
+    The path heuristic stays as the fallback for the case metadata genuinely
+    cannot answer -- a source checkout, or providers that record the same release,
+    where naming one would be a guess. `None` when neither can say, which is the
+    honest answer for a tree that was never installed at all.
+    """
+
+    executable = (python_executable or sys.executable or "").replace("\\", "/")
+    # Only this process can be asked about its own metadata. A path belonging to
+    # some OTHER interpreter is answerable only by the layout it is written in.
+    if not python_executable or executable == (sys.executable or "").replace("\\", "/"):
+        distributions = _distributions_providing_this_package()
+        if len(distributions) == 1:
+            return distributions[0]
+        # More than one provider is not an unanswerable environment. It is the
+        # state a rollback leaves behind and never cleans up, so it is the state
+        # every subsequent upgrade measures its own rollback target in -- see
+        # `_providers_describing_running_code`.
+        describing = _providers_describing_running_code()
+        if len(describing) == 1:
+            return describing[0]
+
+    match = _UV_TOOL_PATH_RE.search(executable)
+    return match.group("name") if match else None
+
+
+def _distributions_providing_this_package() -> list[str]:
+    """Every installed distribution that provides the package this module is in."""
+
+    try:
+        from importlib.metadata import packages_distributions
+    except ImportError:  # pragma: no cover - importlib.metadata ships with 3.10+
+        return []
+    try:
+        return sorted(set(packages_distributions().get(__name__.split(".")[0], [])))
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read installed distribution metadata", exc_info=True)
+        return []
+
+
+def _providers_recording_a_published_release() -> list[tuple[str, str]]:
+    """Every distribution providing this package, with the release it records.
+
+    Unpublished recordings are dropped rather than reported. A `dev` or local
+    version records the tree it was built from, so it can neither confirm nor
+    contradict a released one, and an environment that answers nothing at all --
+    no provider, unreadable metadata, nothing published -- comes back empty. Both
+    callers read empty as "no evidence", never as evidence of disagreement.
+    """
+
+    distributions = _distributions_providing_this_package()
+    if not distributions:
+        return []
+    try:
+        from importlib.metadata import version as distribution_version
+
+        recorded = [(name, distribution_version(name)) for name in distributions]
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read the installed distribution version", exc_info=True)
+        return []
+    return [(name, version) for name, version in recorded if _names_a_published_release(version)]
+
+
+def _providers_describing_running_code() -> list[str]:
+    """The providers whose recorded release is the one this process is running.
+
+    One owner for a question two callers ask for different purposes:
+    `installed_package_name` wants WHICH provider describes the files on disk,
+    and `installed_metadata_describes_running_code` wants WHETHER they all do.
+    Answering them separately is how the rename pair got two different rulings one
+    function apart -- the second was taught that two providers is the state it
+    exists for, while the first went on reading it as unanswerable.
+
+    That asymmetry is not academic, because the pair is permanent: installing
+    `avibe-os` over a `vibe-remote` machine never uninstalls the older
+    distribution, so once a rollback has crossed the rename the tree holds both
+    forever. `avibe-os` records the release that failed and `vibe-remote` records
+    the files actually running, and the metadata is what distinguishes them --
+    naming neither meant every later upgrade armed its rollback with no
+    distribution, and `pinned_package_spec` fell back to the configured forward
+    name. `avibe-os==2.9.0` was never published, so that one recovery attempt
+    could only fail, on a machine that is already down.
+    """
+
+    from vibe import __version__
+
+    return [
+        name
+        for name, recorded in _providers_recording_a_published_release()
+        if recorded == __version__
+    ]
+
+
+def installed_metadata_describes_running_code() -> bool:
+    """Whether the installed distribution's recorded version matches the files.
+
+    pip decides whether to act by reading metadata, and a rollback is the one
+    operation that makes metadata stop describing the code. Installing `avibe-os`
+    over a `vibe-remote` machine never uninstalls the older distribution, so
+    after the rollback reinstalls `vibe-remote==3.0.10` the tree holds two: the
+    files under `vibe/` are 3.0.10, and `avibe-os` still records 3.0.11 with
+    nothing on disk to back it.
+
+    The next forward upgrade is then a silent no-op. `vibe upgrade` compares this
+    process's 3.0.10 against the published 3.0.11 and decides to install; pip
+    reads `avibe-os==3.0.11` as already satisfied and does nothing; the command
+    reports success and the machine keeps running 3.0.10. Same shape as the
+    rollback no-op, one release later and with a person watching it happen.
+
+    Measured by comparing our own two answers rather than by trusting either --
+    the version this process bound at import against the version the metadata
+    records for each distribution providing it. Unknown answers `True`: only a
+    disagreement between two published releases is evidence, so a source checkout
+    or an editable install is never forced on a guess.
+
+    Every provider is asked, not just a single one, because the rename pair is
+    the state this exists for: after a rollback across `vibe-remote` ->
+    `avibe-os` the tree holds BOTH, and only one of them can be describing the
+    files on disk. Treating "more than one provider" as unknown would have made
+    the exact state described above the one state that answers `True` -- the
+    check declining to fire on its own scenario. `installed_package_name` reads
+    the same measurement for the other half of that state; both go through
+    `_providers_describing_running_code` so neither can be taught it alone.
+    """
+
+    from vibe import __version__
+
+    if not _names_a_published_release(__version__):
+        return True
+
+    published = _providers_recording_a_published_release()
+    if not published:
+        return True
+    # Metadata describes the code only if EVERY provider recording a published
+    # release records this one; a single dissenter is a distribution pip would
+    # read as already satisfied.
+    return len(_providers_describing_running_code()) == len(published)
+
+
 def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     current_vibe = get_running_vibe_path(vibe_path=vibe_path)
     if not current_vibe:
@@ -443,35 +633,201 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
+class RollbackTarget(NamedTuple):
+    """The install being replaced, described completely enough to restore it.
+
+    Every field travels with the others because they are one measurement, and
+    splitting them is exactly how this went wrong, repeatedly and in the same
+    shape each time: the version was read in the process that predates the
+    install and the distribution in the one that follows it, so a `vibe-remote`
+    machine pinned `avibe-os==2.9.4`, a release that never existed. Then the same
+    seam reappeared one step later -- the right distribution reinstalled, and the
+    service started from whatever interpreter the restarting process happened to
+    be running, which after a rename is the tool that replaced this one. It put
+    the failed release back up and reported the rollback a success.
+
+    So the rule is that nothing about the replaced install is looked up again
+    later. Anything a rollback needs to know about it is measured here, once, in
+    the only process that can still see it, and carried. There is no constructor
+    that reads one field.
+    """
+
+    version: str
+    package: str | None
+    launcher: runtime_mod.ServiceLauncher
+
+
+def _names_a_published_release(version: str) -> bool:
+    """Whether an index could serve `version`, as opposed to it naming this tree.
+
+    A development build's version describes the tree it was built from rather
+    than anything published: PEP 440 spells that as a `dev` segment, a local
+    segment (`+<sha>`), or both, and the regression builder emits exactly that
+    shape. Testing for one hard-coded sentinel string recognised the fallback
+    version and nothing else, so a regression instance armed a rollback to
+    `avibe-os==0.0.0.dev0+<sha>` and spent its one recovery attempt asking an
+    index for a release that cannot exist there.
+
+    Asking the property instead of listing the strings is what stops the next
+    unlisted shape from costing the same attempt. Unparseable reads as
+    unpublished for the same reason: a version this codebase cannot even order is
+    not one it should pin an install to.
+    """
+
+    match = _VERSION_RE.match(version)
+    if match is None:
+        return False
+    return not (match.group("dev") or match.group("local"))
+
+
+def rollback_target() -> RollbackTarget | None:
+    """The install a failed restart of THIS process could be put back on.
+
+    Everything here is measured from the running process, and that is the whole
+    point rather than an implementation detail: this describes the install the
+    upgrade is about to replace, and once it has been replaced there is nothing
+    left on the machine to measure. Calling this from the detached restart job
+    would answer for the install that did the replacing, which is not a rollback.
+
+    Which is why the only caller is :func:`build_upgrade_plan`, and why the
+    answer reaches everyone else as `UpgradePlan.rollback_to`. As a function
+    anyone could reach, it was reached at the wrong time -- both upgrade paths
+    called it after the install they were describing had already been overwritten.
+
+    So: the version from this process's already-bound `__version__`, which the
+    install on disk cannot change underneath it; the distribution from this
+    install's own metadata; and the launcher that started this process, because
+    reinstalling a distribution does not tell anyone how to run it and a rollback
+    that crosses the `vibe-remote` -> `avibe-os` rename lands in a different tool
+    directory than the one this process is running out of.
+
+    `None` when the running tree reports no release an index could serve -- a
+    source checkout, an editable install, a regression build. Handing that string
+    on as a target would spend the one recovery attempt on a round-trip that
+    fails, and then report a broken rollback mechanism to whoever is looking at a
+    dark instance, when the truth is that this install never had a release to go
+    back to.
+    """
+
+    from vibe import __version__
+
+    if not _names_a_published_release(__version__):
+        return None
+    return RollbackTarget(
+        version=__version__,
+        package=installed_package_name(),
+        launcher=runtime_mod.current_service_launcher(),
+    )
+
+
+def pinned_package_spec(
+    version: str, *, python_executable: str | None = None, package_name: str | None = None
+) -> str:
+    """The distribution this install came from, pinned to exactly one version.
+
+    `package_name` is the name measured before the forward install ran, and it
+    wins when given. Reading the name here instead would read it on the wrong side
+    of the event: the upgrade replaces the tool before it schedules the restart,
+    so by the time the detached supervisor asks, the install it can see is the new
+    one. Only the caller that ran before the install can answer for what was
+    replaced.
+
+    Falling back to the install on disk, and to configuration after that. A pin is
+    a claim that a specific release exists under a specific name, and something
+    has to witness which name that was.
+
+    Raises when the resulting name cannot carry a pin -- a local path, a direct
+    URL, or a spec that already states its own version. Refusing is the whole
+    point of the function existing: the caller that wants a pin is rolling back,
+    and an unpinned command resolves forward to the release it is rolling back
+    FROM, reinstalling the failure and reporting success. A rollback that cannot
+    be pinned has to fail loudly instead.
+
+    The message never quotes the spec. An operator-supplied spec can be an index
+    URL carrying credentials, and this error is written to a restart log.
+    """
+
+    spec = package_name or installed_package_name(python_executable) or get_upgrade_package_spec()
+    if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
+        raise ValueError("The configured upgrade package spec cannot carry a version pin")
+    return f"{spec}=={version}"
+
+
 def build_upgrade_plan(
     *,
     python_executable: str | None = None,
     uv_path: str | None = None,
     vibe_path: str | None = None,
     base_env: dict[str, str] | None = None,
+    version: str | None = None,
+    package_name: str | None = None,
 ) -> UpgradePlan:
+    """How to install avibe: the newest release, or `version` exactly.
+
+    A pinned plan is not an upgrade plan with an extra argument. It never asks
+    for the newest release, because the caller pinning a version is going
+    backwards from one -- and both package managers treat "upgrade" as a
+    direction, not a preference: uv resolves forward past the pin's own
+    requirement, and pip's `--upgrade` declines to install an older version than
+    the one already there. So the pin replaces the upgrade request rather than
+    qualifying it, and `--force` becomes unconditional on the uv path, where
+    installing over an existing tool is otherwise refused.
+    """
+
     executable = python_executable or sys.executable
+    # Taken here, before the command below exists, because that command is what
+    # makes it unanswerable. A pinned plan is itself a rollback and has none of
+    # its own: the process building one is the release that failed, so measuring
+    # there would carry the failure forward as its own recovery target.
+    rollback_to = None if version else rollback_target()
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
-    package_spec = get_upgrade_package_spec()
+    package_spec = (
+        pinned_package_spec(version, python_executable=executable, package_name=package_name)
+        if version
+        else get_upgrade_package_spec()
+    )
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
         vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
         if vibe_bin_dir:
             env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
-        command = [uv_binary, "tool", "install", package_spec, "--upgrade"]
-        if package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
+        command = [uv_binary, "tool", "install", package_spec]
+        if not version:
+            command.append("--upgrade")
+        if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
             command.append("--force")
         return UpgradePlan(
             command=command,
             env=env,
             method="uv",
+            rollback_to=rollback_to,
         )
 
+    command = [executable, "-m", "pip", "install"]
+    if not version:
+        command.append("--upgrade")
+    # Neither a pin nor `--upgrade` makes pip act; metadata does, and a rollback
+    # is what makes metadata stop describing the code. So the command forces
+    # whenever the version being asked for is not already the version on disk --
+    # measured here, never read off the metadata that is the thing in doubt.
+    #
+    # A pinned plan always forces: it IS the rollback, running on a machine where
+    # `avibe-os` was just installed over `vibe-remote`, so `pip install
+    # vibe-remote==<old>` reads as already satisfied, pip does nothing, and the
+    # supervisor starts the failed generation again and reports success. The uv
+    # branch above has always forced a pinned install; this branch quietly did
+    # not. A forward plan forces only once that has happened -- the leftover
+    # `avibe-os==3.0.11` metadata would otherwise make the next upgrade a no-op
+    # too, silently, with a person watching it report success.
+    if version or not installed_metadata_describes_running_code():
+        command.append("--force-reinstall")
+    command.append(package_spec)
     return UpgradePlan(
-        command=[executable, "-m", "pip", "install", "--upgrade", package_spec],
+        command=command,
         env=dict(base_env or os.environ),
         method="pip",
+        rollback_to=rollback_to,
     )
 
 

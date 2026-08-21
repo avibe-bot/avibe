@@ -56,11 +56,13 @@ from core.memory.admission import (
     WORKBENCH_PLATFORM,
     CaptureAdmission,
     InboundTurnFacts,
+    admitted_user_id,
 )
 from core.memory.blocking import run_blocking
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory_telemetry import log_attachment_capture
 from vibe.i18n import get_supported_languages, t as i18n_t
+from vibe.runtime import mark_service_instance_started
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +265,8 @@ class Controller:
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
         self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
         self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
+        self._archive_memory_flush_tasks: set[asyncio.Task[None]] = set()
+        self._archive_memory_flush_registration_open = True
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -483,7 +487,7 @@ class Controller:
 
         self.memory_runtime = create_memory_runtime(
             getattr(self.config, "memory", None) or MemoryConfig(),
-            processing_event=self._send_memory_processing_event,
+            processing_event=self._log_memory_processing_event,
             on_config_settled=self._adopt_settled_memory_config,
         )
         self.memory_module = self.memory_runtime.module
@@ -860,7 +864,7 @@ class Controller:
                             artifact_manager=getattr(runtime, "artifact_manager", None),
                             process_factory=getattr(runtime, "process_factory", None),
                             effective_home=runtime.effective_home,
-                            processing_event=self._send_memory_processing_event,
+                            processing_event=self._log_memory_processing_event,
                             on_config_settled=self._adopt_settled_memory_config,
                         )
                         if not await self._retain_failed_factory_reset_runtime(
@@ -896,7 +900,7 @@ class Controller:
                         artifact_manager=runtime.artifact_manager,
                         process_factory=runtime.process_factory,
                         effective_home=runtime.effective_home,
-                        processing_event=self._send_memory_processing_event,
+                        processing_event=self._log_memory_processing_event,
                         on_config_settled=self._adopt_settled_memory_config,
                     )
                     activation = await fresh.activate_fresh(settled)
@@ -1434,6 +1438,40 @@ class Controller:
         except Exception:
             logger.error("Background IM message callback failed", exc_info=True)
 
+    def _publish_readiness_unless_im_runtime_failed(self) -> None:
+        """Announce a started service instance, unless the IM runtime already died.
+
+        Readiness is what the upgrade supervisor waits for before it decides an
+        upgrade worked, so publishing it is the one irreversible statement this
+        startup makes: after it, nothing rolls back. The IM runtime is the piece
+        most likely to fail on a bad release and the only piece that fails on
+        another thread, which is why this asks it rather than assuming.
+
+        It asks for the recorded exception and not `Thread.is_alive()`. A Web-only
+        install with no IM platform configured has `im_client.run()` return
+        immediately and legitimately, so a liveness check would refuse readiness
+        forever on a service that is working perfectly.
+
+        Reaching this at all is now most of the answer. `MultiIMClient.run()`
+        emits the ready callback unconditionally once the platform threads are
+        started -- with zero platforms configured too, which is why a Web-only
+        install still gets here -- so an aggregate runtime that dies before that
+        point never calls this at all. Readiness is withheld by absence, rather
+        than by winning a race with the event loop's first pass the way it had
+        to when `run()` announced.
+
+        Which leaves the recorded exception as the weaker of the two checks
+        rather than the load-bearing one: the emitting thread blocks on this
+        callback, so it cannot record a failure while the callback runs. It is
+        kept because it belongs to the primitive and not to one caller -- move
+        the emission point and it is the check that survives the move.
+        """
+
+        if self._im_run_exception is not None:
+            logger.error("Not publishing service readiness: the IM runtime failed during startup")
+            return
+        mark_service_instance_started()
+
     def _run_im_runtime(self) -> None:
         try:
             self.im_client.run()
@@ -1442,8 +1480,21 @@ class Controller:
             logger.error("IM runtime thread exited with error: %s", exc, exc_info=True)
         finally:
             loop = self._loop
-            if loop and loop.is_running():
-                loop.call_soon_threadsafe(loop.stop)
+            if loop is not None:
+                try:
+                    # Scheduled whether or not the loop has started yet. The
+                    # `is_running()` guard that used to stand here dropped the
+                    # stop in exactly the case that matters: this thread is
+                    # started just before `run_forever()`, so an adapter that
+                    # fails immediately -- the shape a bad release takes -- lands
+                    # here while the loop is merely created, and the stop was
+                    # discarded. `run_forever()` then ran forever with no IM
+                    # runtime and nothing left to ask it to stop. A callback
+                    # queued before the loop starts runs as soon as it does.
+                    loop.call_soon_threadsafe(loop.stop)
+                except RuntimeError:
+                    # A closed loop has already stopped; nothing left to ask.
+                    logger.debug("IM runtime could not signal the event loop to stop", exc_info=True)
 
     async def _restore_active_polls(self, platforms: set[str]) -> None:
         opencode_agent = self.agent_service.agents.get("opencode")
@@ -1490,7 +1541,24 @@ class Controller:
         return self.im_client.is_transport_ready(platform)
 
     async def _on_runtime_ready(self) -> None:
-        """Start aggregate services without waiting for external connectivity."""
+        """Start aggregate services, and announce readiness once they are started.
+
+        The steps below the readiness line are best-effort by construction: each
+        catches its own failure and continues, so none of them can mean the
+        service is not up. The steps above it are the opposite -- a failure
+        there aborts this function, so the steps below never run, and a service
+        with no durable delivery owners, no scheduled tasks and no watch service
+        is not a started service however alive its process looks.
+
+        Readiness is what the upgrade supervisor waits for before it decides an
+        upgrade worked, so which side of that line a step falls on decides
+        whether a release dying in its own startup gets rolled back or gets
+        recorded as a success. It used to be announced from `run()`, before this
+        callback had run at all: recovery could fail, request shutdown, and
+        re-raise, and the supervisor had already been told the service was up.
+        Put the line here and a startup step added later is inside the claim or
+        outside it because someone chose, not because of where it was written.
+        """
         logger.info("IM runtime ready, starting core services")
         workbench_platforms = {"avibe"}
         if self.primary_platform == "avibe":
@@ -1501,6 +1569,12 @@ class Controller:
         except Exception:
             self.request_shutdown("runtime owner recovery failed")
             raise
+
+        # --- everything above must have succeeded for the service to be up ---
+        # A no-op in any process that does not hold the service lock, so the
+        # embedded and test paths that run a controller are unaffected.
+        self._publish_readiness_unless_im_runtime_failed()
+
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -1523,11 +1597,14 @@ class Controller:
         except Exception as e:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
 
-        claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
-        if (claude_timeout > 0 or codex_timeout > 0) and (
-            self.cleanup_task is None or self.cleanup_task.done()
-        ):
-            self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+        try:
+            claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
+            if (claude_timeout > 0 or codex_timeout > 0) and (
+                self.cleanup_task is None or self.cleanup_task.done()
+            ):
+                self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+        except Exception as e:
+            logger.error("Failed to start idle session cleanup: %s", e, exc_info=True)
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
@@ -1895,6 +1972,18 @@ class Controller:
         include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        metadata = payload.get("message_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        memory_user_id = admitted_user_id(metadata)
+        if memory_user_id is not None:
+            user_id = memory_user_id
+        else:
+            # IM: the platform sender id is what admission and
+            # ``principal_for_user_key(f"{platform}:{user_id}")`` expect.
+            # Workbench without a Memory principal in delivery metadata keeps
+            # the scope fallback (typically ``"workbench"``), which admission
+            # rejects.
+            user_id = getattr(context, "user_id", None)
         workdir = None
         if include_workdir:
             try:
@@ -1903,7 +1992,7 @@ class Controller:
                 workdir = None
         return InboundTurnFacts(
             platform=context.platform or payload.get("platform"),
-            user_id=getattr(context, "user_id", None),
+            user_id=user_id,
             message_id=getattr(context, "message_id", None),
             session_id=session_id,
             workdir=workdir,
@@ -2044,6 +2133,16 @@ class Controller:
             return scope
         return None
 
+    def _forget_memory_cli_session(self, session_id: str) -> None:
+        """Drop process-local Memory authorization after a terminal archive."""
+
+        scopes = getattr(self, "_memory_scopes_by_session", None)
+        if isinstance(scopes, dict):
+            scopes.pop(session_id, None)
+        facts = getattr(self, "_memory_cli_facts_by_session", None)
+        if isinstance(facts, dict):
+            facts.pop(session_id, None)
+
     def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
         """Return the principal associated with an admitted Agent session."""
 
@@ -2097,7 +2196,7 @@ class Controller:
         *,
         deadline_seconds: float = 5.0,
     ) -> _MemorySessionLifecycleResult:
-        """Run an IM session reset behind Memory's exact capture fence."""
+        """Run an IM session reset, skipping Memory flush if capture is busy."""
 
         scope = self._memory_scope_for_im_session(context, raw_session_id)
         if scope is None:
@@ -2219,22 +2318,97 @@ class Controller:
             logger.debug("Memory multi-scope final flush failed", exc_info=True)
             return False
 
+    def _schedule_best_effort_archive_memory_flush(self, raw_session_id: str) -> None:
+        """Flush Memory for an archived session without owning the archive result."""
+
+        if not getattr(self, "_archive_memory_flush_registration_open", True):
+            self._forget_memory_cli_session(raw_session_id)
+            return
+
+        async def _flush() -> None:
+            try:
+                await self.final_flush_memory_cli_session(raw_session_id)
+            except Exception:
+                logger.debug(
+                    "archive: best-effort Memory flush failed for %s",
+                    raw_session_id,
+                    exc_info=True,
+                )
+            finally:
+                self._forget_memory_cli_session(raw_session_id)
+
+        def _consume(task: asyncio.Task[None]) -> None:
+            tasks = getattr(self, "_archive_memory_flush_tasks", None)
+            if tasks is not None:
+                tasks.discard(task)
+            try:
+                task.result()
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                return
+            except Exception:
+                logger.debug(
+                    "archive: best-effort Memory flush failed for %s",
+                    raw_session_id,
+                    exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(self, "_loop", None)
+            if loop is None or loop.is_closed() or not loop.is_running():
+                logger.debug(
+                    "archive: Memory flush dropped; no running event loop for %s",
+                    raw_session_id,
+                )
+                self._forget_memory_cli_session(raw_session_id)
+                return
+            try:
+                loop.call_soon_threadsafe(
+                    self._schedule_best_effort_archive_memory_flush,
+                    raw_session_id,
+                )
+            except RuntimeError:
+                logger.debug(
+                    "archive: Memory flush dropped; event loop stopped for %s",
+                    raw_session_id,
+                )
+                self._forget_memory_cli_session(raw_session_id)
+            return
+
+        scheduled = _flush()
+        try:
+            task = loop.create_task(
+                scheduled,
+                name=f"archive-memory-flush:{raw_session_id}",
+            )
+        except RuntimeError:
+            scheduled.close()
+            logger.debug(
+                "archive: Memory flush dropped; event loop stopped for %s",
+                raw_session_id,
+            )
+            self._forget_memory_cli_session(raw_session_id)
+            return
+        tasks = getattr(self, "_archive_memory_flush_tasks", None)
+        if tasks is None:
+            self._archive_memory_flush_tasks = tasks = set()
+        tasks.add(task)
+        task.add_done_callback(_consume)
+
     async def archive_memory_cli_session(
         self,
         raw_session_id: str,
         *,
         deadline_seconds: float = 5.0,
     ) -> dict[str, Any]:
-        """Archive one Workbench session inside its exact Memory capture fence.
+        """Archive one Workbench session without waiting on Memory.
 
-        This is a closed controller-owned use case for the UI process. The UI
-        supplies only the durable Workbench session ID; canonical Memory identity
-        is resolved here, and the terminal database mutation stays inside the same
-        runtime lifecycle operation as final flush.
+        The controller still owns the terminal session write. Memory final flush
+        is best-effort after that write commits: a failed, busy, or fenced Memory
+        runtime must not block or roll back archive.
         """
 
-        from core.memory.project_ids import DEFAULT_MEMORY_PROJECT_ID
-        from core.memory.store import is_principal_id, is_project_id
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
         from storage.db import create_sqlite_engine
@@ -2261,6 +2435,7 @@ class Controller:
 
         existing = await asyncio.to_thread(read_session)
         if existing.get("status") == "archived":
+            self._forget_memory_cli_session(raw_session_id)
             return existing
 
         def archive_session() -> dict[str, Any]:
@@ -2275,59 +2450,35 @@ class Controller:
                 engine.dispose()
 
         async def archive_operation() -> dict[str, Any]:
-            # Cancelling the socket request must not release Memory admission
-            # while SQLite is still committing the terminal transition.
-            return await run_blocking(archive_session)
+            loop = asyncio.get_running_loop()
 
-        async def run_memory_lifecycle() -> dict[str, Any]:
-            live_scope = self.memory_scope_for_cli_session(raw_session_id)
-            runtime = getattr(self, "memory_runtime", None)
-            resolve_scopes = getattr(runtime, "resolve_current_session_scopes", None)
-            if not callable(resolve_scopes):
-                raise RuntimeError("Memory session scope recovery is unavailable")
-            durable_scopes = await resolve_scopes(raw_session_id)
-            if durable_scopes is None:
-                raise RuntimeError("Memory session scopes could not be recovered safely")
+            def archive_and_schedule() -> dict[str, Any]:
+                session = archive_session()
+                # Schedule before run_blocking can re-raise a pending cancellation.
+                try:
+                    loop.call_soon_threadsafe(
+                        self._schedule_best_effort_archive_memory_flush,
+                        raw_session_id,
+                    )
+                except RuntimeError:
+                    logger.debug(
+                        "archive: Memory flush dropped; event loop closed for %s",
+                        raw_session_id,
+                    )
+                    self._forget_memory_cli_session(raw_session_id)
+                return session
 
-            scopes = set(durable_scopes)
-            if live_scope is not None:
-                scopes.add(live_scope)
-            if not scopes:
-                return await archive_operation()
-            for scope in scopes:
-                if (
-                    not isinstance(scope, tuple)
-                    or len(scope) != 2
-                    or not is_principal_id(scope[0])
-                    or not is_project_id(scope[1])
-                ):
-                    raise RuntimeError("invalid canonical Memory session scope")
-            canonical_scopes = tuple(
-                sorted(
-                    scopes,
-                    key=lambda scope: (scope[1] != DEFAULT_MEMORY_PROJECT_ID, scope),
-                )
-            )
-
-            run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
-            if not callable(run_lifecycle):
-                raise RuntimeError("Memory session lifecycle is unavailable")
-            return await run_lifecycle(
-                scopes=canonical_scopes,
-                raw_session_id=raw_session_id,
-                operation=archive_operation,
-                deadline_seconds=deadline_seconds,
-            )
+            return await run_blocking(archive_and_schedule)
 
         turn_manager = getattr(self, "session_turns", None)
         turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
         if callable(turn_lifecycle):
             return await turn_lifecycle(
                 raw_session_id,
-                run_memory_lifecycle,
+                archive_operation,
                 deadline_seconds=deadline_seconds,
             )
-        return await run_memory_lifecycle()
+        return await archive_operation()
 
     async def _final_flush_memory_scope(
         self,
@@ -2631,31 +2782,26 @@ class Controller:
                 int((time.monotonic() - started_at) * 1000),
             )
 
-    async def _send_memory_processing_event(
+    async def _log_memory_processing_event(
         self,
         event: str,
         kind: str | None,
         occurred_at: str,
         queued: int,
     ) -> bool:
-        from core.handlers.admin_notifications import send_admin_text
+        """Record one durable Memory health event without notifying IM users."""
 
-        store = self.settings_manager.get_store()
-        admin_ids = list(store.get_admins().keys()) if store else []
-        if not admin_ids:
-            return True
-        if event == "recovered":
-            key = "memory.alert.recovered"
-        else:
-            key = "memory.alert.credential" if kind == "credential" else "memory.alert.engine"
-        text = self._t(key, occurred_at=occurred_at, queued=queued)
-        delivered = await send_admin_text(
-            self,
-            admin_ids,
-            text,
-            log_label="Memory processing notification",
+        logger.log(
+            logging.INFO if event == "recovered" else logging.WARNING,
+            "Memory processing event=%s kind=%s occurred_at=%s queued=%d",
+            event,
+            kind or "none",
+            occurred_at,
+            queued,
         )
-        return bool(delivered)
+        # Logging is the terminal sink for this durable event. Acknowledge it so
+        # the coordinator does not replay the same record on every drain tick.
+        return True
 
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""
@@ -3052,6 +3198,16 @@ class Controller:
             self._im_thread.start()
             if self._shutdown_requested:
                 self._ensure_shutdown_task("pre-loop request")
+            # Readiness is NOT published here, and where it is published is the
+            # whole point rather than a placement detail. This function starts
+            # startup; it does not finish it. Announcing from a line in the
+            # middle means every step written after that line is outside the
+            # claim by accident, which is the mistake this loop has now made
+            # four times at four different steps -- the caller, the IM thread,
+            # the UI probe, and the durable-owner recovery. The announcement
+            # belongs at a stated boundary inside the function that runs the
+            # startup steps, so a step added later is inside or outside it by
+            # decision. See `_on_runtime_ready`.
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception
@@ -3242,11 +3398,31 @@ class Controller:
             if callable(cancel):
                 await cancel()
 
+        async def _cancel_archive_memory_flush_tasks() -> None:
+            tasks = getattr(self, "_archive_memory_flush_tasks", None)
+            if not isinstance(tasks, set):
+                return
+            pending = tuple(task for task in tasks if not task.done())
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            tasks.clear()
+
+        # Close registration before the loop-owned sweep so a completed archive
+        # cannot add another optional flush behind Memory runtime shutdown.
+        self._archive_memory_flush_registration_open = False
+
         # Close registration and sweep the resulting closed task set in one
         # event-loop turn. This does not depend on platform shutdown ordering.
         _stop_loop_coroutine(
             _cancel_memory_capture_tasks(),
             "Memory capture tasks",
+            timeout=None,
+        )
+        _stop_loop_coroutine(
+            _cancel_archive_memory_flush_tasks(),
+            "Archive Memory flush tasks",
             timeout=None,
         )
         memory_runtime = getattr(self, "memory_runtime", None)

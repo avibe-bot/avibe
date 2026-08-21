@@ -36,9 +36,29 @@ def is_controller_process() -> bool:
     return _CONTROLLER_PROCESS
 
 
+class _Subscription:
+    """One subscriber's queue, plus what this bus failed to hand it.
+
+    Same shape and same reason as ``vibe/sse_broker.py``: a bounded queue makes
+    "slow subscriber" and "lost events" one condition, and the loss is invisible
+    from both ends. This is the first of the two queues on the controller →
+    browser path, so a discard here never reaches the UI server's broker at all:
+    ids stay contiguous, the browser socket keeps heartbeating, and nothing
+    downstream can tell that a gap exists. Counting it is what lets the feed's
+    owner end the subscription and make the reconnect announce the gap.
+    """
+
+    __slots__ = ("loop", "queue", "dropped")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue) -> None:
+        self.loop = loop
+        self.queue = queue
+        self.dropped = 0
+
+
 class InboxEventBus:
     def __init__(self) -> None:
-        self._subscribers: dict[int, tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = {}
+        self._subscribers: dict[int, _Subscription] = {}
         self._callbacks: dict[int, Callable[[str, Any], None]] = {}
         self._next_id = 0
         self._lock = threading.Lock()
@@ -49,8 +69,21 @@ class InboxEventBus:
         with self._lock:
             sub_id = self._next_id
             self._next_id += 1
-            self._subscribers[sub_id] = (loop, queue)
+            self._subscribers[sub_id] = _Subscription(loop, queue)
         return sub_id, queue
+
+    def dropped_count(self, sub_id: int) -> int:
+        """How many events this bus discarded for one subscriber, ever.
+
+        Monotonic for the life of the subscription so a caller compares it
+        against its own last reading, never resetting it out from under another
+        reader. Returns 0 for an unknown ``sub_id``: a subscription that no
+        longer exists has no continuity left to speak for.
+        """
+
+        with self._lock:
+            subscription = self._subscribers.get(sub_id)
+        return subscription.dropped if subscription is not None else 0
 
     def subscribe_callback(self, callback: Callable[[str, Any], None]) -> int:
         """Register an in-process callback run synchronously before queue fan-out.
@@ -85,18 +118,28 @@ class InboxEventBus:
                 callback(event_type, data)
             except Exception:
                 logger.exception("inbox event callback failed for %s", event_type)
-        for loop, queue in subs:
+        for subscription in subs:
             try:
-                loop.call_soon_threadsafe(self._put_nowait, queue, event_type, data)
+                subscription.loop.call_soon_threadsafe(
+                    self._put_nowait, subscription, event_type, data
+                )
             except RuntimeError:
                 # Loop closed mid-publish; drop silently.
                 pass
 
     @staticmethod
-    def _put_nowait(queue: asyncio.Queue, event_type: str, data: Any) -> None:
+    def _put_nowait(subscription: _Subscription, event_type: str, data: Any) -> None:
+        """Hand one event to one subscriber, and record it if that fails.
+
+        Every path here that does not enqueue is a lost event and must count as
+        one. Runs on the subscriber's loop thread via ``call_soon_threadsafe``,
+        same as the feed that reads the count, so the counter needs no lock.
+        """
+
         try:
-            queue.put_nowait((event_type, data))
+            subscription.queue.put_nowait((event_type, data))
         except asyncio.QueueFull:
+            subscription.dropped += 1
             logger.warning("inbox event bus subscriber queue full; dropping %s", event_type)
 
 

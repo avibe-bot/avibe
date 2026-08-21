@@ -67,6 +67,24 @@ capabilities:
       - tests/test_memory_cli.py
       - ui/src/components/settings/memory/MemorySearchPanel.test.tsx
       - ui/src/context/ApiContext.memoryList.test.tsx
+  - id: memory_independence
+    name: Memory remains optional across delivery and session lifecycle
+    status: active
+    catalog: tests/scenarios/memory_independence/catalog.yaml
+    observations: tests/scenarios/memory_independence/observations.yaml
+    scenario_tests:
+      - tests/test_session_delivery_fsm.py
+    unit_or_contract_tests:
+      - tests/test_message_handler_typing.py
+      - tests/test_command_handler_user_names.py
+      - tests/test_memory_runtime.py
+      - tests/test_internal_server.py
+      - tests/test_memory_admission.py
+      - tests/test_memory_slice3.py
+      - tests/test_controller_dispatch_loop.py
+      - tests/test_native_session_providers.py
+      - tests/test_core_services_dispatch.py
+      - tests/test_admin_notifications.py
   - id: memory_im_attachment_capture
     name: Bound-DM attachment capture through EverOS multimodal ingest
     status: active
@@ -117,7 +135,12 @@ capabilities:
       - tests/test_model_hub_resolution.py
       - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
+      - tests/test_model_hub_l3.py
+      - tests/test_model_hub_usage.py
       - tests/test_opencode_server.py
+      - ui/src/components/settings/models/UsageTab.test.tsx
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+      - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active
@@ -158,7 +181,19 @@ capabilities:
       - tests/test_claude_agent_sessions.py
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py
-      - tests/test_cloud_management.py
+  - id: current_instance_permissions
+    name: Current-instance Permissions policy and authority
+    status: active
+    catalog: tests/scenarios/permissions/catalog.yaml
+    observations: tests/scenarios/permissions/observations.yaml
+    scenario_tests:
+      - tests/scenarios/permissions/test_permissions_scenarios.py
+    harness:
+      - tests/scenario_harness/permissions.py
+    unit_or_contract_tests:
+      - tests/test_permissions.py
+      - ui/src/features/permissions/PermissionsPage.test.tsx
+      - ui/src/components/workbench/ShowPageSharingSettings.test.tsx
   - id: message_delivery
     name: scheduled result delivery
     status: active

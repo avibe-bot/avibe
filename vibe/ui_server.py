@@ -170,6 +170,10 @@ _AUTHORIZATION_REVOKED_WEBSOCKET_CLOSE_CODE = 4403
 _AUTHORIZATION_UNAVAILABLE_WEBSOCKET_CLOSE_CODE = 4503
 _AUTHORIZATION_CHANGED_WEBSOCKET_CLOSE_CODE = 1012
 _AUTHORIZATION_REVISION_RECHECK_SECONDS = 1.0
+# How often ``GET /api/events`` proves the stream is alive. It doubles as the
+# proxy keep-alive -- Cloudflare Tunnel's default idle is well below 100s, and
+# mid-tier proxies are happier still with something this short.
+WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S = 15.0
 _TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
@@ -579,8 +583,6 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 def _is_mutation_guard_exempt() -> bool:
     if request.path in {
         "/auth/callback",
-        "/auth/organization/callback",
-        "/auth/organization/start",
         "/auth/show-identity/callback",
     }:
         return True
@@ -1585,8 +1587,6 @@ def _remote_auth_exempt_path() -> bool:
         path == "/health"
         or path == "/auth/login"
         or path == "/auth/callback"
-        or path == "/auth/organization/callback"
-        or path == "/auth/organization/start"
         or path == "/auth/show-identity/callback"
         or path == "/auth/logout"
         or path == "/api/session"
@@ -1610,8 +1610,6 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         request.path
         in {
             "/auth/callback",
-            "/auth/organization/callback",
-            "/auth/organization/start",
             "/auth/logout",
             "/api/session",
             "/api/csrf-token",
@@ -2165,7 +2163,7 @@ _oauth_diag_log_lock = threading.Lock()
 _oauth_diag_log_state: dict[str, list[float]] = {}
 
 
-def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
+def _log_oauth_diag(key: str, message: str, *args: Any, exc_info: BaseException | None = None) -> None:
     """Emit an unauthenticated-reachable OAuth diagnostic at WARNING, rate-limited
     per ``key`` (~once / ``_OAUTH_DIAG_LOG_INTERVAL_SECONDS``).
 
@@ -2181,7 +2179,34 @@ def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
             return
         _oauth_diag_log_state[key] = [now, 0]
     extra = f" [+{int(suppressed)} suppressed in {int(_OAUTH_DIAG_LOG_INTERVAL_SECONDS)}s]" if suppressed else ""
-    logger.warning(message + extra, *args)
+    logger.warning(message + extra, *args, exc_info=exc_info)
+
+
+def _log_oauth_callback_failure(stage: str, exc: BaseException) -> None:
+    """Log one failed OAuth callback stage so the cause stays attributable.
+
+    ``OAuthCodeExchangeError`` is the expected shape: it carries its own reason
+    and detail, and any unauthenticated caller can produce one at will. Anything
+    else is a bug or an environment fault (a locked, full, or read-only database
+    all arrive as a bare ``OperationalError``) whose only remaining description
+    is the traceback. Those get one — in the service log, never in the response,
+    which still exposes just the exception class name — plus a rate-limit budget
+    of their own, so a flood of bad codes cannot suppress the line that matters.
+    """
+
+    from vibe import remote_access
+
+    expected = isinstance(exc, remote_access.OAuthCodeExchangeError)
+    reason = exc.reason if expected else exc.__class__.__name__
+    _log_oauth_diag(
+        f"{stage}_{'rejected' if expected else 'error'}",
+        "vibe cloud oauth %s failed: reason=%s",
+        stage,
+        reason,
+        # The exception object, not ``True``: ``True`` reads ambient
+        # ``sys.exc_info()`` and silently logs nothing outside a live handler.
+        exc_info=None if expected else exc,
+    )
 
 
 def _oauth_callback_error_response(
@@ -2481,6 +2506,23 @@ def _has_runtime_owner_access(context: Any) -> bool:
     return bool(context is not None and context.is_instance_owner)
 
 
+def _access_administration_forbidden(context: Any = None):
+    """Return a 403 response unless the caller may administer instance access.
+
+    The route policy table (``authorization._ACCESS_ADMINISTRATION_HTTP_RULES``)
+    is one layer; this is the one that travels with the handler, so a route
+    re-registered under a different path keeps the gate. Both answer the same
+    question: may this caller change who reaches the instance? The member set is
+    cloud allowlist entries *and* multi-platform IM bound users, so IM bind codes
+    and bound-user mutation are member management.
+    """
+
+    resolved = _request_authorization_context(context)
+    if resolved is not None and resolved.can_manage_access_members:
+        return None
+    return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+
+
 def _runtime_record_session_id(record: Any) -> str | None:
     if not isinstance(record, Mapping):
         return None
@@ -2634,14 +2676,6 @@ def enforce_instance_role_capabilities():
     except (LookupError, RuntimeError):
         # This helper is also exercised by pure policy tests outside a request.
         context = None
-    # Cloud-management routes re-establish identity themselves (OAuth handshake,
-    # silent reauthorization). They must admit an authenticated remote principal
-    # who is not yet an active Organization member, so they bypass the
-    # Organization-admitted-identity role gate; each handler re-validates cloud
-    # identity before acting.
-    is_identity_bootstrap_path = request.path.startswith("/api/cloud-management/")
-    if is_identity_bootstrap_path:
-        return None
     try:
         if context is None:
             raise InstanceAuthorizationError(minimum_role)
@@ -2655,6 +2689,233 @@ def enforce_instance_role_capabilities():
             }
         ), 403
     return None
+
+
+def _permissions_error_response(error: Exception):
+    from vibe import permissions
+
+    if isinstance(error, permissions.PermissionsNotPairedError):
+        return jsonify({"ok": False, "error": "permissions_not_paired"}), 409
+    if isinstance(error, permissions.PermissionsPairingChangedError):
+        return jsonify({"ok": False, "error": "permissions_pairing_changed"}), 409
+    if isinstance(error, permissions.PermissionsUnavailableError):
+        return jsonify(
+            {"ok": False, "error": "permissions_unavailable", "offline": True}
+        ), 503
+    if isinstance(error, permissions.PermissionsBackendError):
+        return jsonify({"ok": False, **error.payload}), error.status
+    if isinstance(error, permissions.PermissionsInvalidResponseError):
+        return jsonify({"ok": False, "error": str(error)}), 502
+    if isinstance(error, permissions.PermissionsInvalidRequestError):
+        return jsonify({"ok": False, "error": str(error)}), 422
+    logger.warning("Permissions request failed: %s", error.__class__.__name__)
+    return jsonify({"ok": False, "error": "permissions_unavailable"}), 503
+
+
+def _permissions_mutation_payload(
+    payload: Any,
+    allowed_keys: set[str],
+    item_shapes: dict[str, frozenset[str]],
+):
+    if not isinstance(payload, dict) or set(payload) != allowed_keys:
+        return None
+    expected_instance_id = payload.get("if_match_instance_id")
+    if not isinstance(expected_instance_id, str) or not expected_instance_id:
+        return None
+    for field, allowed_item_keys in item_shapes.items():
+        items = payload.get(field)
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict) or set(item) != allowed_item_keys
+            for item in items
+        ):
+            return None
+    return payload
+
+
+def _resource_access_mutation_payload(payload: Any):
+    if not isinstance(payload, dict) or set(payload) != {
+        "access_level",
+        "group_ids",
+        "if_match_revision",
+        "if_match_instance_id",
+    }:
+        return None
+    access_level = payload.get("access_level")
+    group_ids = payload.get("group_ids")
+    revision = payload.get("if_match_revision")
+    instance_id = payload.get("if_match_instance_id")
+    if (
+        access_level not in {"private", "public", "scope"}
+        or not isinstance(group_ids, list)
+        or any(not isinstance(group_id, str) or not group_id.strip() for group_id in group_ids)
+        or len(group_ids) != len(set(group_ids))
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(instance_id, str)
+        or not instance_id
+    ):
+        return None
+    if (access_level == "scope") != bool(group_ids):
+        return None
+    return payload
+
+
+@app.get("/api/permissions", include_in_schema=False)
+async def current_instance_permissions_get(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_read_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            result = await asyncio.to_thread(permissions.get_current_permissions)
+            response = jsonify(permissions.response_payload(result))
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/permissions/authorized-users", include_in_schema=False)
+async def current_instance_permissions_authorized_users_put(
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_access_members:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _permissions_mutation_payload(
+            raw_payload,
+            {"entries", "if_match_revision", "if_match_instance_id"},
+            {"entries": frozenset({"kind", "value", "role"})},
+        )
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(permissions.replace_authorized_users, payload)
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/permissions/projects/{project_id}/access", include_in_schema=False)
+async def current_instance_permissions_project_access_put(
+    project_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _permissions_mutation_payload(
+            raw_payload,
+            {"mode", "bindings", "if_match_revision", "if_match_instance_id"},
+            {
+                "bindings": frozenset(
+                    {"principal_kind", "principal_value", "access_role"}
+                )
+            },
+        )
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(
+                permissions.update_project_access,
+                project_id,
+                payload,
+            )
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get(
+    "/api/permissions/resources/{resource_kind}/{resource_id}/access",
+    include_in_schema=False,
+)
+async def current_instance_permissions_resource_access_get(
+    resource_kind: str,
+    resource_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_read_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            result = await asyncio.to_thread(
+                permissions.get_resource_access,
+                resource_kind,
+                resource_id,
+            )
+            response = jsonify(result)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put(
+    "/api/permissions/resources/{resource_kind}/{resource_id}/access",
+    include_in_schema=False,
+)
+async def current_instance_permissions_resource_access_put(
+    resource_kind: str,
+    resource_id: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import permissions
+
+        authorization_context = getattr(g, "authorization_context", None)
+        if authorization_context is None or not authorization_context.can_manage_instance:
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+        try:
+            body = await starlette_request.body()
+            raw_payload = await starlette_request.json() if body else None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raw_payload = None
+        payload = _resource_access_mutation_payload(raw_payload)
+        if payload is None:
+            return jsonify({"ok": False, "error": "invalid_request"}), 422
+        try:
+            result = await asyncio.to_thread(
+                permissions.update_resource_access,
+                resource_kind,
+                resource_id,
+                payload,
+            )
+            return jsonify(result)
+        except Exception as error:
+            return _permissions_error_response(error)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 _PROJECT_RESOURCE_PATHS = (
@@ -2697,18 +2958,32 @@ def enforce_project_role_capabilities():
         if minimum_instance_role is not None
         else required_instance_role(request.method, request.path)
     )
-    if minimum_instance_role not in {"viewer", "editor"}:
+    if minimum_instance_role not in {"viewer", "editor", "member"}:
         return None
+    # A ``member`` route is instance-wide Project administration, but it still
+    # names one Project, and the instance role does not say *which* Projects the
+    # caller may touch. Ceiling this at "editor" is what let a member mutate a
+    # restricted Project by id that ``list_projects`` hides from them.
+    #
+    # The floor for those routes is the Project ACL's *visibility* floor, not
+    # "member": a member holding an explicit editor binding on a restricted
+    # Project has an effective Project role of editor, so demanding a "member"
+    # Project role would refuse the very Projects the list shows them. The
+    # instance-role half of the authorization is already enforced by the HTTP
+    # policy before this hook runs; this half only asks whether the Project is
+    # theirs to see.
+    required_project_role = "viewer" if minimum_instance_role == "member" else minimum_instance_role
     resource = _project_access_resource(request.path)
     if resource is None:
         return None
 
     kind, resource_id = resource
     if kind == "show_page":
-        # Show Page reads are governed by the page's own ACL. Project ACL is
-        # required by ShowPageStore for create/edit operations, but applying
-        # the generic project middleware here treats a session id as a project
-        # id and rejects valid pages (including pages without a live session).
+        # Show Page ``/show`` admission is the §3.2 Instance Viewer role alone.
+        # Project ACL is required by ShowPageStore for create/edit operations,
+        # but applying the generic project middleware here treats a session id
+        # as a project id and rejects valid pages (including pages without a
+        # live session).
         return None
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -2717,7 +2992,7 @@ def enforce_project_role_capabilities():
             if kind == "project"
             else project_access_service.get_effective_session_role(conn, context, resource_id)
         )
-    if not project_access_service.role_allows(role, minimum_instance_role):
+    if not project_access_service.role_allows(role, required_project_role):
         return jsonify({"ok": False, "error": "not_found"}), 404
     return None
 
@@ -3046,11 +3321,9 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         from vibe.authorization import context_from_session_payload
 
         authorization_context = context_from_session_payload(remote_payload)
-        if not _websocket_context_authorized(
-            authorization_context,
-            minimum_role="viewer",
-            project_session_id=session_id,
-        ):
+        # §3.2: HMR drives live mutation of the page, so it is an Editor surface.
+        # A Viewer may read /show but must not open HMR (nor POST/PUT/PATCH/DELETE).
+        if not _show_page_mutation_allowed(authorization_context):
             await websocket.close(code=1008)
             return
 
@@ -3082,9 +3355,7 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         from vibe.sse_broker import broker
 
         access_sub_id, access_queue = broker.subscribe()
-        if not authorization_context.has_role("viewer") or not _show_page_resource_access_allowed(
-            authorization_context, session_id
-        ):
+        if not _show_page_mutation_allowed(authorization_context):
             broker.unsubscribe(access_sub_id)
             await websocket.close(code=1008)
             return
@@ -3387,8 +3658,8 @@ def _websocket_context_authorized(
     if project_session_id is None or _has_runtime_owner_access(context):
         return True
     if minimum_role == "viewer":
-        # Show Page runtime reads use the independent Show Page ACL. Project
-        # ACL remains an edit/create requirement in ShowPageStore.
+        # §3.2: /show admission is the Instance Viewer role alone, independent of
+        # the Project ACL (which stays an edit/create requirement in ShowPageStore).
         return context.has_role("viewer") and _show_page_resource_access_allowed(context, project_session_id)
     return _project_session_access_allowed(context, project_session_id, minimum_role)
 
@@ -3445,25 +3716,39 @@ async def _wait_for_show_page_access_loss(
         event_type, _payload = await queue.get()
         if event_type != "authorization.changed":
             continue
-        if not context.has_role("viewer") or not _show_page_resource_access_allowed(context, session_id):
+        if not _show_page_mutation_allowed(context):
             return
 
 
 def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
-    from storage import resource_access_service
+    """§3.2 ``/show`` admission: Instance Viewer role alone, never an email grant.
+
+    The Workbench is reachable by every Instance role (owner/editor/viewer) and
+    independent of the sharing list. A signed ``show_page_email`` session is a
+    ``/p``-only read visitor, so it never enters ``/show``. show_page has no
+    Resource ACL row anymore, so nothing is read from ``resource_access_service``.
+    ``session_id`` is retained for call-site symmetry but the decision does not
+    depend on it.
+    """
 
     if context is None:
         return False
-    if context.instance_access_source == "show_page_email":
-        return context.can_use_show_page(session_id)
-    try:
-        return resource_access_service.can_use_resource(
-            context,
-            "show_page",
-            session_id,
-        )
-    except resource_access_service.ResourceAccessError:
+    return context.has_role("viewer") and context.instance_access_source != "show_page_email"
+
+
+def _show_page_mutation_allowed(context: Any) -> bool:
+    """§3.2 mutation boundary: only an Instance Editor/owner may drive ``/show``.
+
+    ``/show`` reads admit every Instance Viewer, but the route also forwards
+    POST/PUT/PATCH/DELETE to Show Runtime and exposes a live HMR websocket —
+    both mutation surfaces. Viewers stay read-only: mutations and HMR require
+    ``has_role("editor")``. A ``show_page_email`` session is Viewer-only, so it
+    can never pass an Editor check.
+    """
+
+    if context is None:
         return False
+    return context.has_role("editor") and context.instance_access_source != "show_page_email"
 
 
 async def _wait_for_remote_session_authorization_loss(
@@ -4473,6 +4758,30 @@ def model_hub_events_get():
         return _model_hub_error(exc)
 
 
+@app.get("/api/models/usage", include_in_schema=False)
+async def model_hub_usage_get(starlette_request: FastAPIRequest):
+    # Native rather than on the compat surface, and awaited rather than called:
+    # this read blocks on the lock the usage ledger's writers hold across an
+    # fsync, so reaching it from a threadpool worker would occupy that worker for
+    # as long as the disk takes. The controller side of the same rule is in
+    # `rpc.py`, which keeps the read off the event loop there.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+        from core.handlers.model_hub.usage import USAGE_DEFAULT_WINDOW_DAYS
+
+        try:
+            days = int(starlette_request.query_params.get("days") or USAGE_DEFAULT_WINDOW_DAYS)
+        except (TypeError, ValueError):
+            days = USAGE_DEFAULT_WINDOW_DAYS
+        try:
+            usage = await _model_hub_service().usage_summary(days=days)
+            return _model_hub_success(usage=usage)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chain", methods=["GET"])
 def model_hub_agent_chain_get(backend):
     from core.handlers.model_hub import ModelHubError
@@ -4719,6 +5028,12 @@ def vibe_agent_onboarding():
 
     try:
         user_context = getattr(g, "authorization_context", None)
+        # Owner identity rather than can_manage_access_members: this is an
+        # instance-wide one-way Agent migration, not member management. The store
+        # repeats the check in ``_require_agent_onboarding_access`` so non-HTTP
+        # callers are gated too; both layers ask the same question.
+        if not _has_runtime_owner_access(user_context):
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         if request.method == "POST":
             return jsonify(api.onboard_vibe_agents(user_context=user_context))
         return jsonify(api.get_vibe_agent_onboarding(user_context=user_context))
@@ -5412,7 +5727,6 @@ def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
 
 def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) -> dict:
     from storage import project_access_service
-    from storage import resource_access_service
 
     session_id = str(payload.get("session_id") or "")
     if not project_access_service.session_exists(conn, session_id):
@@ -5425,15 +5739,10 @@ def _show_page_payload_for_connection(payload: dict, context: Any, conn: Any) ->
     )
     if project_access_service.role_allows(effective_role, "editor"):
         return payload
-    # Legacy and IM-scoped pages have no project role. Their resource ACL
-    # remains the authority for the page owner/editor, but it must not override
-    # an effective project Viewer downgrade on project-attached sessions.
-    if project_id is None and resource_access_service.can_manage_resource_acl(
-        context,
-        "show_page",
-        session_id,
-        connection=conn,
-    ):
+    # Legacy and IM-scoped pages have no project role. §3.2 makes the Instance
+    # Editor role their authority for the page owner/editor, but it must not
+    # override an effective project Viewer downgrade on project-attached sessions.
+    if project_id is None and context.has_role("editor"):
         return payload
     return {key: value for key, value in payload.items() if key != "path"}
 
@@ -5505,6 +5814,32 @@ def show_page_availability_post(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>", methods=["GET"])
+def show_page_get(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    status = 200
+    try:
+        context = _request_authorization_context()
+        response = jsonify(
+            _show_page_payload_for_request(
+                api.get_show_page(session_id, user_context=context),
+                context,
+            )
+        )
+    except ShowPageError as exc:
+        response, status = _show_page_error_response(exc)
+    # Same per-caller page data the ensure POST returned, now over a method caches
+    # are allowed to store by default — so EVERY outcome of this route is marked,
+    # not just the success. A 404 is heuristically cacheable, and a cached "no page
+    # here" would survive the page's creation and leave the share panel empty until
+    # it expired.
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response, status
+
+
 @app.route("/api/show-pages/<session_id>/ensure", methods=["POST"])
 def show_page_ensure_post(session_id):
     from core.show_pages import ShowPageError
@@ -5561,19 +5896,9 @@ def _show_access_page_identity_matches(body: Any, page_id: str) -> bool:
 
 
 def _valid_show_access_apply_payload(payload: dict[str, Any]) -> bool:
-    return bool(
-        isinstance(payload.get("page_id"), str)
-        and not isinstance(payload.get("expected_revision"), bool)
-        and isinstance(payload.get("expected_revision"), int)
-        and payload["expected_revision"] >= 0
-        and isinstance(payload.get("target_access_mode"), str)
-        and (
-            payload.get("target_share_id") is None
-            or isinstance(payload.get("target_share_id"), str)
-        )
-        and isinstance(payload.get("target_emails"), list)
-        and all(isinstance(email, str) for email in payload["target_emails"])
-    )
+    from core.show_pages import parse_show_access_apply_request
+
+    return parse_show_access_apply_request(payload) is not None
 
 
 @app.route("/api/show-pages/<session_id>/access-settings/read", methods=["POST"])
@@ -5622,19 +5947,12 @@ async def show_page_access_settings_apply(session_id):
     from vibe import api, internal_client
 
     payload = request.json if isinstance(request.json, dict) else {}
-    required = {
-        "page_id",
-        "expected_revision",
-        "target_access_mode",
-        "target_share_id",
-        "target_emails",
-    }
     if payload.get("page_id") != session_id:
         return _show_access_http_response(
             {"ok": False, "error": "show_access_page_identity_mismatch"},
             400,
         )
-    if set(payload) != required or not _valid_show_access_apply_payload(payload):
+    if not _valid_show_access_apply_payload(payload):
         return _show_access_http_response(
             {"ok": False, "error": "invalid_show_access_apply_request"},
             400,
@@ -6110,6 +6428,13 @@ def version():
     return jsonify(api.get_version_info())
 
 
+@app.route("/api/version/local")
+def local_version():
+    from vibe import api
+
+    return jsonify(api.get_local_version_info())
+
+
 # =============================================================================
 # POST Endpoints
 # =============================================================================
@@ -6313,8 +6638,26 @@ async def config_post():
     # falsy shapes that happen to exist today.
     payload = request.json
     authorization_context = getattr(g, "authorization_context", None)
-    editor_write = authorization_context is not None and not authorization_context.can_manage_instance
-    if editor_write:
+    # Persisting a credential is an Owner act, so the write schema is selected
+    # by ownership and by nothing else. ``can_manage_instance`` used to pick it,
+    # which stopped being an owner test the moment a member acquired that
+    # capability: a member fell past this branch into a filter that removed only
+    # ``remote_access``, and every other section — ``slack.bot_token``,
+    # ``discord.bot_token``, ``lark.app_secret``, gateway secrets — reached the
+    # save path and was reconciled onto the live platform.
+    #
+    # There is one non-owner write schema and it is ``_EDITOR_CONFIG_WRITE_FIELDS``,
+    # a closed allowlist of non-secret preferences. Closed is the whole point:
+    # no credential-bearing section has to be enumerated here, and a secret
+    # added to ``api._PLATFORM_SECRET_FIELDS`` (or to any config section) is
+    # unreachable below Owner by construction rather than by remembering to add
+    # it to a strip list. Pairing identity is covered by the same rule —
+    # ``remote_access`` is not on the allowlist, so it is refused outright
+    # instead of silently dropped.
+    non_owner_write = (
+        authorization_context is not None and not authorization_context.can_manage_access_members
+    )
+    if non_owner_write:
         try:
             payload = api.editor_config_write_payload(payload)
         except ValueError as exc:
@@ -6332,11 +6675,11 @@ async def config_post():
             payload,
         )
     except ValueError as exc:
-        # Same chokepoint as the allowlist rejection above: an Editor write
+        # Same chokepoint as the allowlist rejection above: a non-owner write
         # answers with a stable code whichever layer refused it, including
         # value validation raised deep inside ``V2Config.from_payload``. Owner
         # saves keep the descriptive message the Settings pages already show.
-        if editor_write:
+        if non_owner_write:
             code = api.editor_config_write_error_code(exc)
             return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
         message = str(exc)
@@ -6454,6 +6797,9 @@ def remote_access_status():
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
 
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is None or not authorization_context.can_manage_access_members:
+        return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
     payload = request.json or {}
     result = remote_access.pair(
         payload.get("pairing_key", ""),
@@ -6491,477 +6837,6 @@ def remote_access_optimize_route():
     return jsonify(result), 202 if result.get("ok") else 409
 
 
-def _cloud_management_subject(config: V2Config | None) -> str | None:
-    payload = getattr(g, "remote_session_payload", None)
-    if payload is None and config is not None and _is_remote_access_request(config):
-        payload = _resolved_remote_session_payload(config)
-    subject = payload.get("sub") if isinstance(payload, Mapping) else None
-    return subject if isinstance(subject, str) and subject else None
-
-
-def _cloud_management_callback_origin(config: V2Config) -> str | None:
-    if _is_remote_access_request(config):
-        origin = _remote_access_request_origin(config)
-    else:
-        origin = _remote_access_public_origin(config)
-    return origin if origin and urlsplit(origin).scheme == "https" else None
-
-
-def _cloud_management_json(payload: dict[str, Any], status: int = 200) -> Response:
-    response = jsonify(payload)
-    response.status_code = status
-    response.headers["Cache-Control"] = "no-store, private"
-    return response
-
-
-def _cloud_management_cookie_secure() -> bool:
-    return urlsplit(_current_origin()).scheme.lower() == "https"
-
-
-def _set_cloud_management_cookie(
-    response: Response,
-    name: str,
-    value: str,
-    *,
-    max_age: int,
-) -> None:
-    response.set_cookie(
-        name,
-        value,
-        max_age=max_age,
-        httponly=True,
-        secure=_cloud_management_cookie_secure(),
-        samesite="Lax",
-        path="/",
-    )
-
-
-def _delete_cloud_management_cookie(response: Response, name: str) -> None:
-    response.delete_cookie(
-        name,
-        path="/",
-        secure=_cloud_management_cookie_secure(),
-        samesite="Lax",
-    )
-
-
-def _mark_cloud_management_manual(response: Response) -> None:
-    from vibe import cloud_management
-
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.MANUAL_COOKIE_NAME,
-        secrets.token_urlsafe(16),
-        max_age=180 * 24 * 60 * 60,
-    )
-
-
-def _cloud_management_error_response(error: Exception) -> Response:
-    from vibe import cloud_management
-
-    if isinstance(error, cloud_management.CloudManagementError):
-        return _cloud_management_json(
-            {"error": error.code, "retryable": error.retryable},
-            error.status,
-        )
-    logger.warning("Cloud management request failed: %s", error.__class__.__name__)
-    return _cloud_management_json(
-        {"error": "cloud_management_unavailable", "retryable": True},
-        503,
-    )
-
-
-def _cloud_management_redirect(next_path: str, error: str | None = None) -> Response:
-    target = urlsplit(next_path)
-    params = list(parse_qsl(target.query, keep_blank_values=True))
-    if error:
-        params.append(("cloud_management_error", error))
-    location = urlunsplit(("", "", target.path, urlencode(params), ""))
-    response = redirect(location)
-    response.headers["Cache-Control"] = "no-store, private"
-    return response
-
-
-@app.route("/api/cloud-management/session", methods=["GET"])
-def cloud_management_session_get():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if not cloud_management.cloud_is_configured(config):
-        return _cloud_management_json(
-            {"connected": False, "state": "cloud_not_connected"}
-        )
-    handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
-    remote_subject = _cloud_management_subject(config)
-    grant, error = cloud_management.resolve_grant(
-        handle,
-        browser_id,
-        remote_subject,
-    )
-    if error:
-        response = _cloud_management_json(
-            {"connected": False, "state": "subject_mismatch", "error": error},
-            409,
-        )
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    if grant is None:
-        manual = bool(request.cookies.get(cloud_management.MANUAL_COOKIE_NAME))
-        return _cloud_management_json(
-            {
-                "connected": False,
-                "state": "authorization_required",
-                "can_silent_reauthorize": (
-                    not manual
-                    and cloud_management.can_silent_reauthorize(
-                        browser_id,
-                        remote_subject,
-                    )
-                ),
-            }
-        )
-    return _cloud_management_json(
-        {
-            "connected": True,
-            "state": "connected",
-            "user": {"subject": grant.subject, "email": grant.email},
-            "expires_in": max(0, int(grant.expires_at - time.time())),
-        }
-    )
-
-
-@app.route("/api/cloud-management/session/start", methods=["POST"])
-def cloud_management_session_start():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if config is None:
-        return _cloud_management_json(
-            {"error": "cloud_management_not_connected", "retryable": False},
-            409,
-        )
-    payload = request.json if isinstance(request.json, dict) else {}
-    silent = payload.get("mode") == "silent"
-    if silent and request.cookies.get(cloud_management.MANUAL_COOKIE_NAME):
-        return _cloud_management_json(
-            {"error": "cloud_management_authorization_required", "retryable": False},
-            401,
-        )
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
-    remote_subject = _cloud_management_subject(config)
-    if silent and not cloud_management.can_silent_reauthorize(
-        browser_id,
-        remote_subject,
-    ):
-        return _cloud_management_json(
-            {"error": "cloud_management_authorization_required", "retryable": False},
-            401,
-        )
-    if not browser_id:
-        browser_id = cloud_management.new_browser_id()
-    callback_origin = _cloud_management_callback_origin(config)
-    if callback_origin is None:
-        return _cloud_management_json(
-            {"error": "cloud_management_not_connected", "retryable": False},
-            409,
-        )
-    try:
-        authorize_url, state = cloud_management.begin_authorization(
-            config,
-            browser_id=browser_id,
-            remote_subject=remote_subject,
-            callback_origin=callback_origin,
-            next_path=cloud_management.validate_next_path(payload.get("next")),
-            silent=silent,
-        )
-    except Exception as exc:
-        return _cloud_management_error_response(exc)
-    current_origin = _current_origin()
-    if not _same_origin(callback_origin, current_origin):
-        authorize_url = (
-            f"{callback_origin}/auth/organization/start?"
-            f"{urlencode({'state': state})}"
-        )
-    response = _cloud_management_json(
-        {"ok": True, "authorize_url": authorize_url, "mode": "silent" if silent else "interactive"},
-        202,
-    )
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.BROWSER_COOKIE_NAME,
-        browser_id,
-        max_age=180 * 24 * 60 * 60,
-    )
-    if not silent:
-        _delete_cloud_management_cookie(response, cloud_management.MANUAL_COOKIE_NAME)
-    return response
-
-
-@app.route("/auth/organization/start", methods=["GET"])
-def cloud_management_authorization_handoff():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if config is None or not _is_remote_access_request(config):
-        return _cloud_management_json({"error": "cloud_management_invalid_callback"}, 400)
-    if _auth_rate_limited():
-        return _auth_rate_limit_response()
-    state = str(request.args.get("state") or "")
-    try:
-        result = cloud_management.authorization_url_for_handoff(config, state, None)
-    except Exception as exc:
-        return _cloud_management_error_response(exc)
-    if result is None:
-        response = _cloud_management_redirect(
-            "/admin/organization/overview",
-            "invalid_cloud_management_state",
-        )
-        _mark_cloud_management_manual(response)
-        return response
-    authorize_url, browser_id = result
-    response = redirect(authorize_url)
-    response.headers["Cache-Control"] = "no-store, private"
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.BROWSER_COOKIE_NAME,
-        browser_id,
-        max_age=180 * 24 * 60 * 60,
-    )
-    return response
-
-
-@app.route("/auth/organization/callback", methods=["GET"])
-def cloud_management_auth_callback():
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if config is None or not _is_remote_access_request(config):
-        return _cloud_management_json({"error": "cloud_management_invalid_callback"}, 400)
-    if _auth_rate_limited():
-        return _auth_rate_limit_response()
-    state = str(request.args.get("state") or "")
-    upstream_error = str(request.args.get("error") or "")
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
-    # This route is unauthenticated and CSRF-exempt, so a cross-site top-level
-    # link reaches it with the `SameSite=Lax` management cookies attached. Only
-    # a callback that resolves to this browser's own live handshake may tear
-    # down its existing grant; an unrelated or forged one leaves the current
-    # session exactly as it was instead of forcing a logout.
-    owns_flow = cloud_management.callback_owns_flow(state, browser_id)
-    if upstream_error:
-        if not owns_flow:
-            return _cloud_management_redirect("/admin/organization/overview", upstream_error)
-        next_path = cloud_management.fail_handshake(state)
-        response = _cloud_management_redirect(next_path, upstream_error)
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
-    failure_next_path = (
-        cloud_management.handshake_next_path(state, browser_id)
-        or "/admin/organization/overview"
-    )
-    try:
-        grant, next_path = cloud_management.complete_authorization(
-            config,
-            state=state,
-            code=str(request.args.get("code") or ""),
-            browser_id=browser_id,
-            remote_subject=_cloud_management_subject(config),
-        )
-    except Exception as exc:
-        code = (
-            exc.code
-            if isinstance(exc, cloud_management.CloudManagementError)
-            else "cloud_management_unavailable"
-        )
-        response = _cloud_management_redirect(
-            failure_next_path,
-            code,
-        )
-        if not owns_flow:
-            return response
-        cloud_management.invalidate_grant(
-            request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
-        )
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    response = _cloud_management_redirect(next_path)
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.HANDLE_COOKIE_NAME,
-        grant.handle,
-        max_age=cloud_management.MANAGEMENT_TOKEN_MAX_TTL_SECONDS,
-    )
-    _set_cloud_management_cookie(
-        response,
-        cloud_management.BROWSER_COOKIE_NAME,
-        grant.browser_id,
-        max_age=180 * 24 * 60 * 60,
-    )
-    _delete_cloud_management_cookie(response, cloud_management.MANUAL_COOKIE_NAME)
-    return response
-
-
-@app.route("/api/cloud-management/session", methods=["DELETE"])
-def cloud_management_session_delete():
-    from vibe import cloud_management
-
-    cloud_management.invalidate_grant(
-        request.cookies.get(cloud_management.HANDLE_COOKIE_NAME),
-        browser_id=request.cookies.get(cloud_management.BROWSER_COOKIE_NAME),
-        clear_subject=True,
-    )
-    response = _cloud_management_json({"ok": True, "connected": False})
-    _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-    _mark_cloud_management_manual(response)
-    return response
-
-
-async def _read_cloud_management_json_body(starlette_request: FastAPIRequest) -> Any:
-    from vibe import cloud_management
-
-    body = bytearray()
-    async for chunk in starlette_request.stream():
-        if len(body) + len(chunk) > cloud_management.MAX_REQUEST_BYTES:
-            raise cloud_management.CloudManagementError(
-                "cloud_management_request_too_large",
-                status=413,
-                retryable=False,
-            )
-        body.extend(chunk)
-    if not body:
-        return {}
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise StarletteHTTPException(status_code=400, detail="Malformed JSON") from exc
-    return {} if payload is None else payload
-
-
-async def _cloud_management_proxy(
-    starlette_request: FastAPIRequest,
-    upstream_path: str,
-) -> Response:
-    from vibe import cloud_management
-
-    config = _load_remote_access_config()
-    if not cloud_management.cloud_is_configured(config):
-        return _cloud_management_json(
-            {"error": "cloud_management_not_connected", "retryable": False},
-            409,
-        )
-    handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
-    remote_subject = _cloud_management_subject(config)
-    grant, error = cloud_management.resolve_grant(
-        handle,
-        browser_id,
-        remote_subject,
-    )
-    if error:
-        response = _cloud_management_json({"error": error, "retryable": False}, 409)
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-        return response
-    if grant is None:
-        return _cloud_management_json(
-            {
-                "error": "cloud_management_authorization_required",
-                "retryable": False,
-                "can_silent_reauthorize": (
-                    not bool(request.cookies.get(cloud_management.MANUAL_COOKIE_NAME))
-                    and cloud_management.can_silent_reauthorize(
-                        browser_id,
-                        remote_subject,
-                    )
-                ),
-            },
-            401,
-        )
-    try:
-        content_length = int(request.headers.get("Content-Length") or "0")
-    except ValueError:
-        content_length = cloud_management.MAX_REQUEST_BYTES + 1
-    if content_length > cloud_management.MAX_REQUEST_BYTES:
-        return _cloud_management_json(
-            {"error": "cloud_management_request_too_large", "retryable": False},
-            413,
-        )
-    try:
-        body = (
-            await _read_cloud_management_json_body(starlette_request)
-            if request.method in MUTATING_METHODS
-            else None
-        )
-    except cloud_management.CloudManagementError as exc:
-        return _cloud_management_error_response(exc)
-    try:
-        status, payload = await asyncio.to_thread(
-            cloud_management.proxy_request,
-            config,
-            grant=grant,
-            method=request.method,
-            upstream_path=upstream_path,
-            query=list(request.args.multi_items()),
-            json_body=body,
-        )
-    except Exception as exc:
-        return _cloud_management_error_response(exc)
-    response = _cloud_management_json(payload, status)
-    if status == 401:
-        cloud_management.invalidate_grant(handle)
-        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
-        _mark_cloud_management_manual(response)
-    return response
-
-
-async def _dispatch_cloud_management_proxy(
-    starlette_request: FastAPIRequest,
-    upstream_path: str,
-) -> Response:
-    async def handler() -> Response:
-        return await _cloud_management_proxy(starlette_request, upstream_path)
-
-    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
-
-
-@app.get("/api/cloud-management/organizations", include_in_schema=False)
-async def cloud_management_organizations_root_proxy(starlette_request: FastAPIRequest):
-    return await _dispatch_cloud_management_proxy(starlette_request, "/api/organizations")
-
-
-@app.api_route(
-    "/api/cloud-management/organizations/{management_path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    include_in_schema=False,
-)
-async def cloud_management_organizations_proxy(
-    starlette_request: FastAPIRequest,
-    management_path: str,
-):
-    return await _dispatch_cloud_management_proxy(
-        starlette_request,
-        f"/api/organizations/{management_path}",
-    )
-
-
-@app.api_route(
-    "/api/cloud-management/instances/{management_path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    include_in_schema=False,
-)
-async def cloud_management_instances_proxy(
-    starlette_request: FastAPIRequest,
-    management_path: str,
-):
-    return await _dispatch_cloud_management_proxy(
-        starlette_request,
-        f"/api/instances/{management_path}",
-    )
 @app.route("/api/remote-access/network-interfaces", methods=["GET"])
 def remote_access_network_interfaces():
     from vibe import remote_access
@@ -7120,8 +6995,7 @@ def remote_access_auth_callback():
             next_target = _strip_show_page_reauth_param(next_target)
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
-        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
-        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: reason=%s", reason)
+        _log_oauth_callback_failure("code_exchange", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
@@ -7134,8 +7008,7 @@ def remote_access_auth_callback():
             session_claims=session_claims,
         )
     except Exception as exc:
-        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
-        _log_oauth_diag("exchange_failed", "vibe cloud session cookie creation failed: reason=%s", reason)
+        _log_oauth_callback_failure("session_cookie", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     response = Response(status=302)
@@ -7251,233 +7124,6 @@ def _remote_resource_access_context():
         payload,
         is_remote=True,
     )
-
-
-def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, connection: Any) -> dict[str, Any]:
-    from storage import resource_access_service
-
-    can_manage = resource_access_service.can_manage_resource_acl(
-        user_context,
-        policy["resource_kind"],
-        policy["resource_id"],
-        connection=connection,
-    )
-    group_ids = policy.get("group_ids") or []
-    if not can_manage:
-        group_ids = sorted(set(group_ids).intersection(user_context.group_ids or set()))
-    return {
-        "resource_kind": policy["resource_kind"],
-        "resource_id": policy["resource_id"],
-        "access_level": policy["access_level"],
-        "owner_user_id": policy.get("owner_user_id"),
-        "organization_id": policy.get("organization_id"),
-        "group_ids": group_ids,
-        "policy_revision": policy.get("policy_revision"),
-        "last_applied_control_plane_revision": policy.get("last_applied_control_plane_revision"),
-        "can_use": resource_access_service.can_use_resource(
-            user_context,
-            policy["resource_kind"],
-            policy["resource_id"],
-            connection=connection,
-        ),
-        "can_manage": can_manage,
-    }
-
-
-@app.route("/api/org/context", methods=["GET"])
-def organization_context_get():
-    _config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    organization = None
-    if user_context.is_active_organization_member:
-        organization = {
-            "id": user_context.organization_id,
-            "member_id": user_context.organization_member_id,
-            "role": user_context.organization_role,
-            "group_ids": sorted(user_context.group_ids or []),
-            "membership_version": user_context.membership_version,
-        }
-    response = jsonify(
-        {
-            "user": {"sub": user_context.subject, "email": user_context.email},
-            "instance_id": _payload.get("vibe_instance_id", _payload.get("instance_id")),
-            "organization": organization,
-            "instance_role": user_context.instance_role,
-            "instance_access_source": user_context.instance_access_source,
-        }
-    )
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["Vary"] = "Cookie"
-    return response
-
-
-@app.route("/api/org/groups", methods=["GET"])
-def organization_groups_get():
-    _config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    if not user_context.is_active_organization_member:
-        return jsonify({"error": "organization_context_required"}), 403
-    # The frozen device protocol carries group IDs but no mutable group metadata.
-    # These are signed current-member groups, not an authorization cache; a later
-    # metadata endpoint can enrich names and archived state without affecting ACL
-    # evaluation.
-    response = jsonify(
-        {
-            "groups": [
-                {"id": group_id, "name": None, "archived_at": None}
-                for group_id in sorted(user_context.group_ids or [])
-            ]
-        }
-    )
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["Vary"] = "Cookie"
-    return response
-
-
-@app.route("/api/resource-policies", methods=["GET"])
-def resource_policies_get():
-    from storage import resource_access_service
-
-    _config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    resource_kind = request.args.get("kind")
-    if resource_kind and resource_kind not in resource_access_service.RESOURCE_KINDS:
-        return jsonify({"error": "invalid_resource_kind"}), 422
-    engine = _projects_engine()
-    try:
-        with engine.connect() as connection:
-            if user_context.is_active_organization_member:
-                policies = resource_access_service.list_resource_policies(
-                    resource_kind=resource_kind,
-                    organization_id=user_context.organization_id,
-                    connection=connection,
-                )
-            elif user_context.subject:
-                policies = resource_access_service.list_resource_policies(
-                    resource_kind=resource_kind,
-                    owner_user_id=user_context.subject,
-                    connection=connection,
-                )
-            else:
-                policies = []
-            serialized = [
-                _resource_policy_api_payload(policy, user_context, connection)
-                for policy in policies
-                if resource_access_service.can_use_resource(
-                    user_context,
-                    policy["resource_kind"],
-                    policy["resource_id"],
-                    connection=connection,
-                )
-                or resource_access_service.can_manage_resource_acl(
-                    user_context,
-                    policy["resource_kind"],
-                    policy["resource_id"],
-                    connection=connection,
-                )
-            ]
-    finally:
-        engine.dispose()
-    response = jsonify({"policies": serialized})
-    response.headers["Cache-Control"] = "no-store, private"
-    response.headers["Vary"] = "Cookie"
-    return response
-
-
-@app.route("/api/resource-policies/<resource_kind>/<resource_id>", methods=["PUT"])
-def resource_policy_put(resource_kind: str, resource_id: str):
-    from storage import resource_access_service
-    from vibe import remote_access
-
-    config, _payload, user_context = _remote_resource_access_context()
-    if user_context is None:
-        return jsonify({"error": "remote_access_context_required"}), 401
-    if resource_kind not in resource_access_service.RESOURCE_KINDS:
-        return jsonify({"error": "invalid_resource_kind"}), 422
-    body = request.json or {}
-    if not isinstance(body, dict):
-        return jsonify({"error": "invalid_request"}), 422
-
-    engine = _projects_engine()
-    try:
-        with engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                resource_kind,
-                resource_id,
-                connection=connection,
-            )
-            if policy is None:
-                return jsonify({"error": "resource_not_found"}), 404
-            if policy.get("organization_id"):
-                # Resource existence is hidden from non-member callers and from
-                # callers whose Organization membership does not match the
-                # resource's owning Organization; surface not_found in either
-                # case so the existence of an unrelated Organization's policy
-                # is not leaked.
-                if (
-                    not user_context.is_active_organization_member
-                    or user_context.organization_id != policy.get("organization_id")
-                ):
-                    return jsonify({"error": "resource_not_found"}), 404
-            if not resource_access_service.can_manage_resource_acl(
-                user_context,
-                resource_kind,
-                resource_id,
-                connection=connection,
-            ):
-                return jsonify({"error": "resource_acl_forbidden"}), 403
-
-        try:
-            access_level, group_ids = resource_access_service.normalize_policy_request(
-                body.get("access_level"),
-                body.get("group_ids", []),
-                policy.get("organization_id"),
-            )
-        except resource_access_service.ResourceAccessError as exc:
-            return jsonify({"error": exc.code}), 422
-
-        if policy.get("organization_id"):
-            # Desired organization ACLs are written by the hosted resource API.
-            # This local route only reconciles an intent before returning state;
-            # it never invents a local revision that could overwrite a newer one.
-            sync = remote_access.sync_resource_acl_once(config, organization_id=str(policy["organization_id"]))
-            if not sync.get("ok"):
-                return jsonify({"error": sync.get("error") or "resource_acl_sync_failed", "sync": sync}), 503
-            with engine.connect() as connection:
-                refreshed = resource_access_service.get_resource_policy(
-                    resource_kind,
-                    resource_id,
-                    connection=connection,
-                )
-                if refreshed is None:
-                    return jsonify({"error": "resource_not_found"}), 404
-                serialized = _resource_policy_api_payload(refreshed, user_context, connection)
-            if refreshed["access_level"] == access_level and sorted(refreshed.get("group_ids") or []) == sorted(group_ids):
-                return jsonify({"policy": serialized, "sync": sync})
-            return jsonify(
-                {
-                    "error": "resource_acl_control_plane_required",
-                    "policy": serialized,
-                    "sync": sync,
-                }
-            ), 409
-
-        with engine.begin() as connection:
-            updated = resource_access_service.update_local_non_organization_policy(
-                connection,
-                resource_kind=resource_kind,
-                resource_id=resource_id,
-                access_level=access_level,
-                group_ids=group_ids,
-                updated_by_user_id=user_context.subject,
-            )
-            serialized = _resource_policy_api_payload(updated, user_context, connection)
-        return jsonify({"policy": serialized})
-    finally:
-        engine.dispose()
 
 
 @app.route("/api/cloud/token", methods=["GET"])
@@ -7882,7 +7528,7 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     if not isinstance(token, str) or not token.strip():
         return
 
-    from config.v2_config import config_lock_transaction
+    from config.v2_config import config_file_lock
     from vibe import api as vibe_api
 
     new_bot_token = token.strip()
@@ -7895,7 +7541,7 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     # enabled-list mutation are derived from the lock-fresh snapshot, so
     # a concurrent wechat/platform save between an earlier read and this
     # write can no longer be overwritten by stale section values.
-    with config_lock_transaction():
+    with config_file_lock():
         try:
             base = vibe_api.load_config()
         except FileNotFoundError:
@@ -7904,23 +7550,18 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
             from core.services import settings as settings_service
 
             base = settings_service.default_config()
-        current = vibe_api.config_to_payload(base, include_secrets=True)
-        wechat = dict(current.get("wechat") or {})
-        wechat["bot_token"] = new_bot_token
+        wechat = {"bot_token": new_bot_token}
         if new_base_url:
             wechat["base_url"] = new_base_url
-        elif not wechat.get("base_url"):
+        elif not base.wechat.base_url:
             wechat["base_url"] = "https://ilinkai.weixin.qq.com"
 
-        platforms = dict(current.get("platforms") or {})
-        enabled = list(platforms.get("enabled") or [])
-        if "wechat" not in enabled:
-            enabled.append("wechat")
-        platforms["enabled"] = enabled
-        if not platforms.get("primary") or platforms.get("primary") == "avibe":
-            platforms["primary"] = "wechat"
-
-        vibe_api.save_config({"wechat": wechat, "platforms": platforms})
+        vibe_api.save_config(
+            {
+                "wechat": wechat,
+                "__avibe_list_ops": {"platforms.enabled": {"add": ["wechat"]}},
+            }
+        )
 
 
 WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -8567,6 +8208,11 @@ def projects_create():
             )
     except (FileNotFoundError, NotADirectoryError) as err:
         return jsonify({"error": str(err)}), 400
+    except LookupError as err:
+        # The folder is already held by a Project this caller cannot see, so
+        # create-or-reuse answers exactly as the id-keyed routes do rather than
+        # reusing, reviving, or duplicating it.
+        return jsonify({"error": str(err)}), 404
     return jsonify(project), 201
 
 
@@ -10023,9 +9669,9 @@ async def _archive_publish_run_updates(
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
-    For an active row, the controller owns one closed lifecycle operation: it
-    holds Memory capture admission across final flush and the first irreversible
-    archive write. If that controller seam is unavailable, archive fails closed.
+    For an active row, the controller owns the terminal session write. Memory
+    final flush is best-effort after that write and never blocks archive. If the
+    controller seam itself is unavailable, archive fails closed.
 
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in
     ``archive_session``. Cancelling an in-flight chat turn lives in the controller
@@ -10847,12 +10493,12 @@ def _media_row_show_page_access_allowed(context: Any, row: dict[str, Any]) -> bo
     """Whether *context* may still read a Show annotation's screenshot bytes.
 
     A `show_annotation` screenshot is part of the page it was drawn on, so it
-    inherits that page's resource ACL rather than only the Project/session role
-    the rest of the media proxy checks. Without this the media token outlives
-    the access that produced it: a caller who saw a private page once keeps its
-    screenshot readable after the page policy stops naming them, and being the
-    Instance owner does not override the page ACL either -- a direct read of a
-    page owned by another subject is denied, so its screenshot must be too.
+    inherits the page's ``/show`` admission (the §3.2 Instance Viewer gate)
+    rather than only the Project/session role the rest of the media proxy
+    checks. Without this the media token outlives the access that produced it:
+    a caller who saw the Workbench once keeps its screenshot readable after
+    their Instance role is revoked, and an email-grant ``/p`` visitor never
+    reaches the annotation bytes at all.
 
     Media from any other source is unaffected and keeps the Project/session
     authorization below as its only gate.
@@ -10874,6 +10520,12 @@ def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
     context = getattr(g, "authorization_context", None)
     if not _media_row_show_page_access_allowed(context, row):
         return False
+    if (row.get("source") or "") == "show_annotation":
+        # §3.2: annotation media inherits the /show Instance Viewer gate alone
+        # (already applied by _media_row_show_page_access_allowed). The
+        # Project/session role below must not stack on top, or an admitted
+        # Instance Viewer who is outside the page's Project loses the screenshot.
+        return True
     if context is None or _has_runtime_owner_access(context):
         return True
     session_ids = media_service.referenced_session_ids(conn, token)
@@ -11467,6 +11119,11 @@ async def sessions_messages_create(session_id: str):
     in Step 6 — the session-scoped stream replaced it.
     """
 
+    from core.memory.admission import (
+        MEMORY_CLI_ADMITTED_METADATA,
+        MEMORY_ORDINARY_TEXT_METADATA,
+        MEMORY_USER_ID_METADATA,
+    )
     from core.services import sessions as workbench_sessions_service
     from core.web_push_notifications import (
         WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
@@ -11567,9 +11224,9 @@ async def sessions_messages_create(session_id: str):
                 {
                     **(payload.get("metadata") or {}),
                     "_web_push_user_key": web_push_user_key,
-                    "_memory_user_id": memory_user_id,
-                    "_memory_cli_admitted": memory_cli_admitted,
-                    "_memory_ordinary_text": memory_ordinary_text,
+                    MEMORY_USER_ID_METADATA: memory_user_id,
+                    MEMORY_CLI_ADMITTED_METADATA: memory_cli_admitted,
+                    MEMORY_ORDINARY_TEXT_METADATA: memory_ordinary_text,
                 },
                 getattr(g, "authorization_context", None),
             )
@@ -12008,15 +11665,50 @@ def _workbench_event_data(payload: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _workbench_event_heartbeat_interval_ms() -> int:
+    return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
+
+
+def _workbench_event_connected_frame(sub_id: int) -> str:
+    """The handshake: this subscription's id, and the cadence it is owed.
+
+    Carrying the cadence here is what lets a client hold a brand-new stream to a
+    deadline. The promise arrives before the first heartbeat does, so a stream
+    that opens and then goes silent has something to have broken -- without it,
+    the client's only options are to trust an unproven stream for a whole window
+    or to watchdog servers that never promised anything.
+
+    A declaration, never proof: a server too old to send this field is simply
+    never held to a cadence, and a client must still wait for a heartbeat before
+    believing the stream is carrying events.
+    """
+    interval_ms = _workbench_event_heartbeat_interval_ms()
+    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms}}}\n\n'
+
+
+def _workbench_event_heartbeat_frame() -> str:
+    """A frame whose only job is to be seen.
+
+    An SSE comment keeps proxies awake but never reaches ``EventSource``, so a
+    client watching a quiet stream cannot distinguish it from a socket that died
+    while the tab was suspended -- iOS in particular leaves such a stream in a
+    zombie ``OPEN`` state with no ``error``. Carrying the cadence lets the client
+    size its own staleness tolerance from the server that sets it, rather than
+    duplicating the interval on both sides -- which is also why the interval
+    belongs in the payload even though nothing else here needs a body.
+    """
+    interval_ms = _workbench_event_heartbeat_interval_ms()
+    return f'event: heartbeat\ndata: {{"interval_ms":{interval_ms}}}\n\n'
+
+
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
     if context is None:
         return True
     if event_type == "show.event":
-        # A Show Page carries its own resource ACL, and being the Instance owner
-        # does not override it: a direct read of a page whose policy names
-        # another subject is denied, so the workbench stream must not hand the
-        # same page's annotation text and attachment metadata to that owner
-        # either. Fail closed when the frame has no session to check.
+        # A Show Page's Workbench stream follows §3.2 Instance Viewer admission,
+        # so any Instance role sees its page's live events while an email-grant
+        # ``/p`` visitor never receives annotation text or attachment metadata.
+        # Fail closed when the frame has no session to check.
         data = _workbench_event_data(payload)
         session_id = data.get("session_id") if data else None
         if not isinstance(session_id, str) or not session_id:
@@ -12024,8 +11716,8 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
         if not _show_page_resource_access_allowed(context, session_id):
             return False
         # Show Page event visibility is intentionally independent from Project
-        # ACL. Project ACL gates page creation/editing, while the page ACL gates
-        # Viewer reads and live event delivery.
+        # ACL. Project ACL gates page creation/editing, while §3.2 instance
+        # admission gates Viewer reads and live event delivery.
         return context.has_role("viewer")
     if _has_runtime_owner_access(context):
         return True
@@ -12130,9 +11822,10 @@ async def workbench_events():
 
     Browsers open this once and keep it open; the route streams JSON
     events (message.new, session.activity, inbox.unread.changed) as
-    they happen elsewhere in the app, plus a 15-second keep-alive
-    comment line so Cloudflare-style proxies don't kill the idle TCP
-    connection.
+    they happen elsewhere in the app, plus a ``heartbeat`` event every
+    ``WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S`` so Cloudflare-style proxies
+    don't kill the idle TCP connection and the client can tell a quiet
+    stream from a dead one.
 
     Native FastAPI ``StreamingResponse`` so the loop stays async and
     each browser only costs one task, not one OS thread.
@@ -12174,6 +11867,14 @@ async def workbench_events():
 
     async def generate():
         sub_id, queue = broker.subscribe()
+        # Baselined here, before anything can suspend or reach the client. A
+        # fresh subscription is owed everything from this instant on, so the
+        # count is 0 by construction -- reading it late looked equivalent and is
+        # not: the authorization await and the handshake below are suspension
+        # points, and the client can finish its connect catch-up while this
+        # generator is parked between them. A burst discarded in that window
+        # would then become the baseline and never be reported.
+        last_dropped = broker.dropped_count(sub_id)
         try:
             state = await authorization_state()
             if state != "current":
@@ -12182,7 +11883,7 @@ async def workbench_events():
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield f"event: connected\ndata: {{\"sub_id\": {sub_id}}}\n\n"
+            yield _workbench_event_connected_frame(sub_id)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,
@@ -12192,13 +11893,50 @@ async def workbench_events():
                 separators=(",", ":"),
             )
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
+            last_heartbeat_at = time.monotonic()
             while True:
                 state = await authorization_state()
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
                     return
+                # A subscriber that lost an event is not a subscriber any more,
+                # so end its stream and let it reconnect: the fresh subscription
+                # gets an empty queue and the client's reconnect path already
+                # catches consumers up exactly once, with backoff if the load
+                # that overflowed the queue is still going. Announcing the hole
+                # on this stream instead looks cheaper and is not -- the queue
+                # stays full, so the next iteration finds another discard and
+                # announces again, starving the payload frames it was warning
+                # about. Reopening is the actual repair here, unlike the
+                # controller leg, which announces in place because a new socket
+                # would inherit the same severed bridge.
+                #
+                # Checked before the heartbeat: a heartbeat claims this stream is
+                # worth trusting, which stopped being true.
+                dropped = broker.dropped_count(sub_id)
+                if dropped > last_dropped:
+                    logger.warning(
+                        "workbench events: ending subscriber %s after %s dropped event(s)",
+                        sub_id,
+                        dropped - last_dropped,
+                    )
+                    return
+                # A fixed cadence, deliberately not "only when the queue went
+                # quiet". Data frames are no proof of life to a client that may
+                # be filtered out of all of them, and one unconditional clock
+                # means each side has exactly one thing to stamp.
+                since_heartbeat = time.monotonic() - last_heartbeat_at
+                if since_heartbeat >= WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S:
+                    yield _workbench_event_heartbeat_frame()
+                    last_heartbeat_at = time.monotonic()
+                    continue
                 try:
-                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    # Floored so an event arriving just short of the deadline
+                    # cannot spin this loop; the heartbeat is at most that late.
+                    event_type, payload = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=max(0.25, WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S - since_heartbeat),
+                    )
                     state = await authorization_state()
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
@@ -12235,13 +11973,9 @@ async def workbench_events():
                         )
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
-                    state = await authorization_state()
-                    if state != "current":
-                        yield _remote_authorization_sse_frame(state)
-                        return
-                    # 15s keep-alive — Cloudflare Tunnel default idle is well
-                    # below 100s but this still keeps mid-tier proxies happy.
-                    yield ": ping\n\n"
+                    # Nothing to forward. Loop round so the heartbeat is emitted
+                    # by the one branch that owns it, after a fresh auth check.
+                    continue
         except asyncio.CancelledError:
             raise
         finally:
@@ -12729,6 +12463,9 @@ def users_post():
     from vibe import api
     from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     try:
         return jsonify(api.save_users(payload))
@@ -12742,6 +12479,9 @@ def users_post():
 def users_toggle_admin(user_id):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     return jsonify(api.toggle_admin(user_id, payload.get("is_admin", False), payload.get("platform") or None))
 
@@ -12750,6 +12490,9 @@ def users_toggle_admin(user_id):
 def users_delete(user_id):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     result = api.remove_user(user_id, request.args.get("platform") or None)
     if not result.get("ok"):
         return jsonify(result), 400
@@ -12760,6 +12503,10 @@ def users_delete(user_id):
 def bind_codes_get():
     from vibe import api
 
+    # The listing carries the codes themselves, so reading it mints access.
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     return jsonify(api.get_bind_codes())
 
 
@@ -12767,6 +12514,9 @@ def bind_codes_get():
 def bind_codes_post():
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     result = api.create_bind_code(
         code_type=payload.get("type", "one_time"),
@@ -12781,6 +12531,9 @@ def bind_codes_post():
 def bind_codes_delete(code):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     result = api.delete_bind_code(code)
     if not result.get("ok"):
         return jsonify(result), 404
@@ -12791,6 +12544,10 @@ def bind_codes_delete(code):
 def setup_first_bind_code():
     from vibe import api
 
+    # Named "setup", but it mints a live bind code rather than reporting state.
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     return jsonify(api.get_first_bind_code())
 
 
@@ -12998,8 +12755,133 @@ def _show_page_offline_response():
     return Response(html, status=401, mimetype="text/html; charset=utf-8")
 
 
+def _show_page_accept_quality(accept: str, target: str) -> float:
+    """Return the preferred quality for a response media type."""
+    target_type, target_subtype = target.split("/", 1)
+    best_specificity = -1
+    best_quality = 0.0
+    for item in accept.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        media_range = parts[0].lower()
+        if "/" not in media_range:
+            continue
+        range_type, range_subtype = media_range.split("/", 1)
+        if range_type not in {target_type, "*"} or range_subtype not in {target_subtype, "*"}:
+            continue
+        specificity = (range_type != "*") + (range_subtype != "*")
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition("=")
+            if name.strip().lower() != "q" or not separator:
+                continue
+            try:
+                quality = float(value.strip().strip('"'))
+            except ValueError:
+                quality = 0.0
+            break
+        if not 0.0 <= quality <= 1.0:
+            quality = 0.0
+        if specificity > best_specificity:
+            best_specificity = specificity
+            best_quality = quality
+    return best_quality
+
+
+def _show_page_accepts_html() -> bool:
+    """Choose HTML only when it is preferred and explicitly acceptable."""
+    accept = request.headers.get("Accept", "").strip()
+    if not accept:
+        return False
+    html_quality = _show_page_accept_quality(accept, "text/html")
+    json_quality = _show_page_accept_quality(accept, "application/json")
+    return html_quality > 0.0 and html_quality > json_quality
+
+
+def _show_page_not_found_html_response():
+    language = _request_ui_language()
+    title = html.escape(t("show.pageUnavailable.title", language), quote=True)
+    heading = html.escape(t("show.pageUnavailable.heading", language))
+    message = html.escape(t("show.pageUnavailable.message", language))
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
+    </main>
+  </body>
+</html>
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message)
+    response = Response(html_body, status=404, mimetype="text/html; charset=utf-8")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _show_page_not_found_response():
+    if (
+        request.method in {"GET", "HEAD"}
+        and _show_page_accepts_html()
+    ):
+        return _show_page_not_found_html_response()
     return jsonify({"error": "not_found"}), 404
+
+
+def _show_page_access_denied_html_response(*, include_back_link: bool = True):
+    language = _request_ui_language()
+    title = html.escape(t("show.pageAccessDenied.title", language), quote=True)
+    heading = html.escape(t("show.pageAccessDenied.heading", language))
+    message = html.escape(t("show.pageAccessDenied.message", language))
+    back = html.escape(t("show.pageAccessDenied.back", language))
+    back_link = f'<a href="/">{back}</a>' if include_back_link else ""
+    html_body = """<!doctype html>
+<html lang="__LANGUAGE__">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__TITLE__</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; }
+      main { width: min(560px, 100%); border: 1px solid rgba(23, 32, 51, 0.12); border-radius: 12px; background: white; padding: 32px; box-shadow: 0 20px 60px rgba(23, 32, 51, 0.10); }
+      h1 { margin: 0; font-size: clamp(28px, 7vw, 42px); line-height: 1.05; letter-spacing: 0; }
+      p { margin: 14px 0 0; line-height: 1.65; color: #526078; }
+      a { display: inline-block; margin-top: 22px; color: #3157d5; font-weight: 600; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__HEADING__</h1>
+      <p>__MESSAGE__</p>
+      __BACK_LINK__
+    </main>
+  </body>
+</html>
+""".replace("__LANGUAGE__", language).replace("__TITLE__", title).replace("__HEADING__", heading).replace("__MESSAGE__", message).replace("__BACK_LINK__", back_link)
+    response = Response(html_body, status=403, mimetype="text/html; charset=utf-8")
+    return _with_limited_show_policy(response)
+
+
+def _show_page_access_denied_response(*, include_back_link: bool = True):
+    if (
+        request.method in {"GET", "HEAD"}
+        and _show_page_accepts_html()
+    ):
+        return _show_page_access_denied_html_response(include_back_link=include_back_link)
+    response = jsonify({"error": "show_access_forbidden"})
+    response.status_code = 403
+    return _with_limited_show_policy(response)
 
 
 def _show_page_file_not_found_response():
@@ -13034,16 +12916,26 @@ def _is_show_page_spa_route_request(asset_path: str, starlette_request: FastAPIR
     relative = _decode_show_page_asset_path(asset_path)
     if relative in {"", "index.html"}:
         return True
+    if "text/html" not in starlette_request.headers.get("accept", "").lower():
+        return False
     segments = [segment for segment in relative.split("/") if segment]
     if not segments or segments[0] in {"api", "__show"}:
         return False
-    if "." not in segments[-1]:
-        return True
+    return True
 
-    # The runtime gets first refusal for real files. After a 404, Accept is the
-    # remaining distinction between a dotted route parameter (document navigation)
-    # and a missing script/style/image asset.
-    return "text/html" in starlette_request.headers.get("accept", "").lower()
+
+def _show_page_runtime_asset_exists(session_id: str, asset_path: str) -> bool:
+    relative = _decode_show_page_asset_path(asset_path)
+    if not relative:
+        return False
+    workspace = paths.get_show_page_dir(session_id)
+    try:
+        for candidate in (workspace / relative, workspace / "public" / relative):
+            if candidate.is_file() or (candidate.is_dir() and (candidate / "index.html").is_file()):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _decode_show_page_asset_path(asset_path: str) -> str:
@@ -13328,6 +13220,64 @@ def _show_public_editor_context():
     if not (_is_local_request(config) or _is_loopback_origin_proxy_request()):
         return None
     return instance_owner_context()
+
+
+def _show_public_authenticated_context(config: V2Config | None):
+    from vibe.authorization import context_from_session_payload
+
+    session = _resolved_remote_session_payload(config) if config is not None else None
+    return context_from_session_payload(session) if session is not None else None
+
+
+def _show_access_visitor_from_context(context: Any):
+    from core.show_pages import ShowAccessVisitor, normalize_show_access_email
+
+    if context is None:
+        return None
+    normalized_email = ""
+    if context.email:
+        try:
+            normalized_email = normalize_show_access_email(context.email)
+        except (TypeError, ValueError):
+            normalized_email = ""
+    return ShowAccessVisitor(
+        normalized_email=normalized_email,
+        organization_id=context.organization_id,
+        organization_member_id=context.organization_member_id,
+        organization_role=context.organization_role,
+        group_ids=frozenset(context.group_ids or ()),
+    )
+
+
+def _limited_show_access_grant(access: Any, visitor: Any):
+    from core.show_pages import limited_show_access_grant
+
+    if access is None or visitor is None:
+        return None
+    return limited_show_access_grant(access, visitor)
+
+
+def _limited_show_access_admits(access: Any, visitor: Any) -> bool:
+    return _limited_show_access_grant(access, visitor) is not None
+
+
+def _limited_show_access_grant_is_current(access: Any, grant: Any) -> bool:
+    from core.show_pages import limited_show_access_grant_is_current
+
+    return access is not None and limited_show_access_grant_is_current(access, grant)
+
+
+def _show_limited_viewer_is_allowed(
+    context: Any,
+    access: Any,
+    page_id: str,
+    *,
+    allow_page_scoped: bool = True,
+) -> bool:
+    allowlisted = _limited_show_access_admits(
+        access, _show_access_visitor_from_context(context)
+    )
+    return allowlisted or (allow_page_scoped and context.can_use_show_page(page_id))
 
 
 async def _show_public_request_author() -> dict[str, str] | None:
@@ -13950,16 +13900,9 @@ async def _show_events_stream(
                     yield _remote_authorization_sse_frame(state)
                     return
                 yield ": show events connected\n\n"
-                if not public and (
-                    not _project_session_access_allowed(
-                        authorization_context,
-                        session_id,
-                        "viewer",
-                    )
-                    or not _show_page_resource_access_allowed(
-                        authorization_context,
-                        session_id,
-                    )
+                if not public and not _show_page_resource_access_allowed(
+                    authorization_context,
+                    session_id,
                 ):
                     if remote_session_payload is not None:
                         yield _remote_authorization_sse_frame("revoked")
@@ -14005,11 +13948,7 @@ async def _show_events_stream(
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
                     if event_type == "authorization.changed" and not public:
-                        if not _project_session_access_allowed(
-                            authorization_context,
-                            session_id,
-                            "viewer",
-                        ) or not _show_page_resource_access_allowed(
+                        if not _show_page_resource_access_allowed(
                             authorization_context,
                             session_id,
                         ):
@@ -14146,9 +14085,6 @@ async def show_session_prewarm(session_id: str):
     if not _is_cli_show_event_request():
         return jsonify({"ok": False, "code": "forbidden"}), 403
     payload = _show_events_payload_from_request()
-    base_path = payload.get("base_path")
-    if base_path is not None and not isinstance(base_path, str):
-        return jsonify({"ok": False, "code": "invalid_base_path"}), 400
     from core.show_runtime import ShowRuntimeContext, prewarm_show_page_session
 
     try:
@@ -14156,7 +14092,7 @@ async def show_session_prewarm(session_id: str):
     except (TypeError, ValueError):
         return jsonify({"ok": False, "code": "invalid_show_runtime_context"}), 400
 
-    result = await prewarm_show_page_session(session_id, context=context, base_path=base_path)
+    result = await prewarm_show_page_session(session_id, context=context)
     status_code = 200 if result.available else 202
     return jsonify({"ok": result.available, "reason": result.reason, "base_url": result.base_url}), status_code
 
@@ -14323,10 +14259,16 @@ async def _show_page_runtime_response(
             path = f"{path}?{starlette_request.url.query}"
         return path
 
-    runtime_path = runtime_app_path(asset_path)
     forwarded_headers = _show_runtime_forwarded_headers(starlette_request.headers)
-    if external_prefix:
-        forwarded_headers["x-vibe-show-base"] = f"{external_prefix.rstrip('/')}/"
+    history_route_candidate = (
+        not _is_show_page_entry_asset(asset_path)
+        and _is_show_page_spa_route_request(asset_path, starlette_request)
+    )
+    served_entry_fallback = history_route_candidate and not _show_page_runtime_asset_exists(
+        session_id,
+        asset_path,
+    )
+    runtime_path = runtime_app_path("" if served_entry_fallback else asset_path)
     context = ShowRuntimeContext.SHARED if external_prefix else ShowRuntimeContext.PRIVATE
     envelope = ShowRuntimeProtocolEnvelope(context)
     body = await starlette_request.body()
@@ -14339,20 +14281,6 @@ async def _show_page_runtime_response(
         headers=forwarded_headers,
         body=body or None,
     )
-    served_entry_fallback = False
-    if proxied.status_code == 404 and _is_show_page_spa_route_request(asset_path, starlette_request):
-        # Compatibility fallback for runtimes predating History-mode serving.
-        # The requested file/handler had first refusal above; only a route-shaped
-        # miss retries the entry document under the same private/public base.
-        runtime_path = runtime_app_path("")
-        proxied = await manager.request(
-            starlette_request.method,
-            runtime_path,
-            envelope=envelope,
-            headers=forwarded_headers,
-            body=body or None,
-        )
-        served_entry_fallback = True
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
     if (
         proxy_duration_ms >= SHOW_RUNTIME_SLOW_REQUEST_MS
@@ -14373,12 +14301,11 @@ async def _show_page_runtime_response(
         for key, value in proxied.headers.items()
         if key.lower() in _SHOW_RUNTIME_RESPONSE_HEADER_ALLOWLIST
     }
-    if location := response_headers.get("location"):
-        response_headers["location"] = _rewrite_show_runtime_location(
-            session_id,
-            location,
-            external_prefix=external_prefix,
-        )
+    _rewrite_show_runtime_url_headers(
+        response_headers,
+        session_id=session_id,
+        external_prefix=external_prefix,
+    )
     response_headers["X-Content-Type-Options"] = "nosniff"
     response_headers["Referrer-Policy"] = "no-referrer"
     content = proxied.content
@@ -14534,7 +14461,11 @@ def _show_response_is_compressible(content_type: str | None) -> bool:
 
 
 def _show_response_is_rewritable_show_runtime_source(content_type: str | None) -> bool:
-    return _show_response_is_javascript(content_type) or _show_response_is_html(content_type)
+    return (
+        _show_response_is_javascript(content_type)
+        or _show_response_is_html(content_type)
+        or bool(content_type and "text/css" in content_type.lower())
+    )
 
 
 def _rewrite_public_show_runtime_client(
@@ -14788,18 +14719,57 @@ def _inject_show_runtime_config(
     return html.encode("utf-8")
 
 
-def _rewrite_show_runtime_location(session_id: str, location: str, *, external_prefix: str | None = None) -> str:
-    parsed = urlsplit(location)
+def _rewrite_show_runtime_url_headers(
+    headers: dict[str, str],
+    *,
+    session_id: str,
+    external_prefix: str | None,
+) -> None:
+    for header in ("location", "sourcemap", "x-sourcemap"):
+        value = _response_header(headers, header)
+        if value is None:
+            continue
+        _set_response_header(
+            headers,
+            header,
+            _rewrite_show_runtime_url(session_id, value, external_prefix=external_prefix),
+        )
+
+
+def _rewrite_show_runtime_url(session_id: str, value: str, *, external_prefix: str | None = None) -> str:
+    parsed = urlsplit(value)
+    if (parsed.scheme or parsed.netloc) and not _is_local_show_runtime_url(parsed):
+        return value
     internal_prefix = f"/sessions/{quote(session_id, safe='')}/app"
-    external_prefix = (external_prefix or f"/show/{quote(session_id, safe='')}").rstrip("/")
+    private_prefix = f"/show/{quote(session_id, safe='')}"
+    resolved_external_prefix = (external_prefix or private_prefix).rstrip("/")
     if parsed.path == internal_prefix:
-        public_path = f"{external_prefix}/"
+        public_path = f"{resolved_external_prefix}/"
     elif parsed.path.startswith(f"{internal_prefix}/"):
         suffix = parsed.path[len(internal_prefix) :].lstrip("/")
-        public_path = f"{external_prefix}/{suffix}"
+        public_path = f"{resolved_external_prefix}/{suffix}"
+    elif external_prefix and parsed.path == private_prefix:
+        public_path = f"{resolved_external_prefix}/"
+    elif external_prefix and parsed.path.startswith(f"{private_prefix}/"):
+        suffix = parsed.path[len(private_prefix) :].lstrip("/")
+        public_path = f"{resolved_external_prefix}/{suffix}"
     else:
-        return location
+        return value
     return urlunsplit(("", "", public_path, parsed.query, parsed.fragment))
+
+
+def _is_local_show_runtime_url(parsed) -> bool:
+    if parsed.scheme.lower() != "http":
+        return False
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
@@ -14923,6 +14893,12 @@ async def serve_private_show_page(session_id, asset_path):
             author=show_author,
             page=page,
         )
+        # §3.2: /show reads admit every Instance Viewer, but the route forwards
+        # mutation methods straight to Show Runtime — keep Viewers read-only.
+        if request.method not in {"GET", "HEAD"} and not _show_page_mutation_allowed(
+            _request_authorization_context()
+        ):
+            return _show_page_access_forbidden_response()
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
@@ -14972,6 +14948,17 @@ async def serve_private_show_page(session_id, asset_path):
 def _show_identity_error_response(error: str, status: int):
     response = jsonify({"ok": False, "error": error})
     response.status_code = status
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _show_identity_not_found_response():
+    """Hide whether a share exists when identity admission is denied."""
+    if _show_page_accepts_html():
+        return _show_page_not_found_html_response()
+    response = jsonify({"error": "not_found"})
+    response.status_code = 404
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -15061,6 +15048,14 @@ def _with_limited_show_policy(response: Response) -> Response:
     return response
 
 
+def _show_limited_not_found_response():
+    result = _show_page_not_found_response()
+    if isinstance(result, tuple):
+        response, status = result
+        return _with_limited_show_policy(response), status
+    return _with_limited_show_policy(result)
+
+
 @app.route("/auth/show-identity/callback", methods=["POST"])
 async def complete_show_identity_login():
     from core.show_pages import ShowPageStore
@@ -15081,6 +15076,8 @@ async def complete_show_identity_login():
         if "error" in fields:
             if fields["error"] not in {"identity_not_verified", "identity_unavailable"}:
                 raise show_identity.ShowIdentityError("invalid_callback")
+            if fields["error"] == "identity_not_verified":
+                return _show_identity_not_found_response()
             return _show_identity_error_response(
                 fields["error"],
                 _show_identity_error_status(fields["error"]),
@@ -15104,13 +15101,15 @@ async def complete_show_identity_login():
     try:
         page = store.get_by_share_id(state.share_id)
         if page is None:
-            return _show_identity_error_response("not_found", 404)
+            return _show_identity_not_found_response()
         if page.visibility == "offline":
-            return _show_identity_error_response("show_access_forbidden", 403)
+            return _show_identity_not_found_response()
         access = store.get_access(page.session_id)
         if access is None:
-            return _show_identity_error_response("not_found", 404)
+            return _show_identity_not_found_response()
         if access.access_mode == "public":
+            if page.visibility != "public":
+                return _show_identity_not_found_response()
             try:
                 show_identity.consume_verified_show_identity(identity)
             except show_identity.ShowIdentityError as exc:
@@ -15119,12 +15118,14 @@ async def complete_show_identity_login():
                     _show_identity_error_status(exc.reason),
                 )
             return redirect(state.return_target, code=303)
+        grant = _limited_show_access_grant(access, identity.visitor())
         if (
             access.access_mode != "limited"
+            or page.visibility != "limited"
             or access.share_id != state.share_id
-            or identity.normalized_email not in access.normalized_emails
+            or grant is None
         ):
-            return _show_identity_error_response("show_access_forbidden", 403)
+            return _show_identity_not_found_response()
 
         try:
             show_identity.consume_verified_show_identity(identity)
@@ -15141,6 +15142,7 @@ async def complete_show_identity_login():
             page_id=page.session_id,
             share_id=state.share_id,
             normalized_email=identity.normalized_email,
+            grant=grant,
         )
         response = redirect(state.return_target, code=303)
         response.set_cookie(
@@ -15201,6 +15203,10 @@ async def serve_public_show_page(share_id, asset_path):
         page = store.get_by_share_id(share_id)
         if page is None and lease is not None:
             page = store.get(lease.page_id)
+            if page is not None:
+                access = store.get_access(page.session_id)
+                if access is None or access.share_id != share_id:
+                    return _show_limited_not_found_response()
         if page is None:
             return _show_page_not_found_response()
         limited_guest = (
@@ -15232,10 +15238,75 @@ async def serve_public_show_page(share_id, asset_path):
                     if query:
                         private_target = f"{private_target}?{query}"
                     return redirect(private_target)
+        if limited_guest:
+            # A guest lease does not grant a grace period after access changes.
+            # Already-rendered pages are not proactively closed, but every
+            # subsequent request must match the current local access record.
+            access = store.get_access(page.session_id)
+            lease_is_current = (
+                access is not None
+                and page.visibility == "limited"
+                and access.access_mode == "limited"
+                and access.share_id == share_id
+                and _limited_show_access_grant_is_current(access, lease.grant)
+            )
+            if not lease_is_current:
+                current_limited_binding = (
+                    access is not None
+                    and page.visibility == "limited"
+                    and access.access_mode == "limited"
+                    and access.share_id == share_id
+                )
+                if current_limited_binding:
+                    authenticated_context = await asyncio.to_thread(
+                        _show_public_authenticated_context,
+                        config,
+                    )
+                    if (
+                        authenticated_context is not None
+                        and request.method == "GET"
+                        and is_spa_navigation
+                        and _show_page_accepts_html()
+                    ):
+                        if not _show_limited_viewer_is_allowed(
+                            authenticated_context,
+                            access,
+                            page.session_id,
+                            allow_page_scoped=False,
+                        ):
+                            return _show_page_access_denied_response(
+                                include_back_link=(
+                                    authenticated_context.instance_access_source
+                                    != "show_page_email"
+                                )
+                            )
+                        # The current identity may be allowed again, but the
+                        # old lease must not be treated as valid guest access.
+                        limited_guest = False
+                    else:
+                        return _show_limited_not_found_response()
+                else:
+                    return _show_limited_not_found_response()
         if page.visibility == "limited":
             if not limited_guest:
                 if request.method != "GET" or not is_spa_navigation:
                     return _show_page_not_found_response()
+                authenticated_context = await asyncio.to_thread(
+                    _show_public_authenticated_context,
+                    config,
+                )
+                if authenticated_context is not None:
+                    access = store.get_access(page.session_id)
+                    if not _show_limited_viewer_is_allowed(
+                        authenticated_context,
+                        access,
+                        page.session_id,
+                    ):
+                        return _show_page_access_denied_response(
+                            include_back_link=(
+                                authenticated_context.instance_access_source != "show_page_email"
+                            )
+                        )
                 if config is None:
                     return _show_identity_error_response("identity_unavailable", 503)
                 return_target = request.full_path if request.query_string else request.path
@@ -15559,7 +15630,6 @@ async def _reconcile_startup_dependencies_task() -> None:
                     session_prewarm = await prewarm_show_page_session(
                         session_id,
                         context=context,
-                        base_path=page.get("base_path") if isinstance(page.get("base_path"), str) else None,
                     )
                     page_results.append(
                         {

@@ -370,6 +370,41 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     assert deleted_scopes == [("telegram", "-1001", "42")]
 
 
+def test_the_usage_read_is_served_natively_rather_than_from_a_compat_worker(monkeypatch):
+    """Review 4966281026 finding 4: this read blocks, so where it is served matters.
+
+    Summarising the ledger takes the lock its writers hold across an fsync. The
+    compat surface hands a sync handler to a threadpool worker, so serving it
+    there occupies a UI worker for as long as the disk takes — while the native
+    surface awaits it on the loop, which is what the async client below exists
+    for. `ui_compat` names its endpoints `<name>_compat_endpoint`, so the route
+    table is where the two are told apart.
+    """
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    asked: list[int] = []
+
+    class LedgerClient:
+        async def usage_summary(self, *, days: int) -> dict:
+            asked.append(days)
+            return {"window_days": days}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: LedgerClient())
+
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/models/usage" and "GET" in route.methods
+    )
+    assert route.endpoint.__name__ == "model_hub_usage_get"
+
+    response = app.test_client().get("/api/models/usage?days=7")
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {"window_days": 7}
+    assert asked == [7]
+
+
 def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(monkeypatch):
     from core.services import settings as settings_service
     from storage.settings_service import StaleScopeAgentBindingError
@@ -2578,26 +2613,144 @@ def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_
     assert "hidden-secret" not in body
 
 
-def test_workbench_events_allow_show_events_when_show_page_acl_allows(monkeypatch, tmp_path) -> None:
+def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch, tmp_path):
+    """A browser must be able to tell a quiet stream from a dead one.
+
+    The keep-alive comment cannot say it -- ``EventSource`` never surfaces a
+    comment -- so the stream emits an observable frame on a wall-clock cadence
+    that no amount of traffic can suppress.
+    """
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
     from vibe.ui_compat import g
-    from storage import resource_access_service
-    from storage.db import create_sqlite_engine
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as connection:
-        resource_access_service.ensure_resource_policy(
-            connection,
-            resource_kind="show_page",
-            resource_id="show-session-1",
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-    engine.dispose()
+    # Only to keep the test quick. The client reads the cadence off the frame
+    # rather than assuming the shipped value.
+    monkeypatch.setattr(ui_server, "WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S", 0.05)
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_heartbeats() -> tuple[str, str, str]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                handshake = [decode(await iterator.__anext__()) for _ in range(3)]
+                idle = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+                # A stream carrying events this viewer may not see is silent
+                # from the browser's side while being anything but idle, so a
+                # cadence measured from the last delivered frame would leave
+                # exactly this subscriber unable to prove its stream alive.
+                broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
+                busy = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+            finally:
+                await iterator.aclose()
+        return handshake[1], decode(idle), decode(busy)
+
+    connected, idle, busy = asyncio.run(collect_heartbeats())
+
+    # The handshake declares the cadence before anything proves it. That promise
+    # is what lets a client hold a brand-new stream to a deadline: without it, a
+    # stream that opens and then goes silent has nothing to have broken, and the
+    # client's only options are to trust it for a whole window or to watchdog
+    # servers that never promised anything.
+    assert "event: connected" in connected
+    assert '"interval_ms":50' in connected
+
+    assert "event: heartbeat" in idle
+    # The cadence rides along here too, because only a heartbeat is proof, and
+    # proof is what the staleness window is measured from.
+    assert '"interval_ms":50' in idle
+    assert "event: heartbeat" in busy
+    assert "hidden-secret" not in busy
+
+
+def test_workbench_events_end_a_subscriber_whose_queue_overflowed(monkeypatch, tmp_path):
+    """A subscriber that lost an event is not a subscriber any more.
+
+    The broker's per-subscriber queue is bounded, so "slow subscriber" and "lost
+    events" are one condition -- and nothing else on the wire betrays it: the
+    socket stays open and the heartbeats keep proving it alive. Ending the stream
+    is the repair, because the client's reconnect path gets a fresh empty queue
+    and catches consumers up exactly once, with backoff if the load that
+    overflowed the queue is still going. Announcing the hole on this stream
+    instead keeps a full queue full: the next iteration finds another discard and
+    announces again, starving the payload frames it was warning about.
+    """
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_until_end() -> tuple[int, list[str], bool, int]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            frames: list[str] = []
+            ended = False
+            try:
+                handshake = [decode(await iterator.__anext__()) for _ in range(3)]
+                sub_id = int(json.loads(handshake[1].split("data: ", 1)[1])["sub_id"])
+                # Park the stream inside its read loop before overflowing the
+                # queue. A discard from before the loop started is already
+                # covered by the handshake the client just received, so only a
+                # later one is worth acting on.
+                pending = asyncio.create_task(iterator.__anext__())
+                await asyncio.sleep(0)
+
+                for index in range(400):
+                    broker.publish("session.activity", {"session_id": f"ses{index}"})
+                # One yield runs the whole batch of ``call_soon_threadsafe``
+                # handoffs, so every discard has happened by the time the count
+                # is read.
+                await asyncio.sleep(0)
+                dropped = broker.dropped_count(sub_id)
+
+                # Bounded well below the ~200 frames still sitting in the queue:
+                # a stream that kept serving them would run out of the budget
+                # rather than end, which is the failure this asserts against.
+                for _ in range(5):
+                    awaitable = pending if pending is not None else iterator.__anext__()
+                    pending = None
+                    try:
+                        frames.append(decode(await asyncio.wait_for(awaitable, timeout=2)))
+                    except StopAsyncIteration:
+                        ended = True
+                        break
+            finally:
+                await iterator.aclose()
+        # Read after the generator has exited: its ``finally`` releases the
+        # subscription, so the client's reconnect starts from a clean slate
+        # rather than inheriting a count that would end the new stream too.
+        return dropped, frames, ended, broker.dropped_count(sub_id)
+
+    dropped, frames, ended, dropped_after_release = asyncio.run(collect_until_end())
+
+    assert dropped > 0
+    assert ended
+    assert dropped_after_release == 0
+    # Not by announcing the hole on the stream that has it: nothing about a
+    # subscriber whose view is incomplete is worth another frame.
+    assert not [frame for frame in frames if "workbench.events.gap" in frame]
+
+
+def test_workbench_events_allow_show_events_when_show_gate_allows(monkeypatch, tmp_path) -> None:
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
 
     async def collect_show_event() -> str:
         with app.test_request_context("/api/events"):

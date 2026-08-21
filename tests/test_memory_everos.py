@@ -13,9 +13,12 @@ import pytest
 
 from core.memory import artifact as memory_artifact
 from core.memory.everos import (
+    PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS,
     _AGENTIC_ROUND_HEADER,
     _AGENTIC_TIMEOUT_HEADER,
     _ATTACHMENT_ADD_REJECTION_CODES_VALIDATED_EVEROS_VERSION,
+    _PREFLIGHT_TIMEOUT_SECONDS,
+    _chat_probe_response_issue,
     AddAck,
     AddRejected,
     AgenticRecallTelemetry,
@@ -78,6 +81,17 @@ class _FailingResponseStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         raise self._failure_type("response body lost", request=self._request)
         yield b""  # pragma: no cover - keeps this an async generator
+
+
+def _thinking_chat_completion(*, role: str = "assistant", finish_reason: str | None = "length") -> dict:
+    message = {"role": role}
+    choice: dict = {"finish_reason": finish_reason, "index": 0, "message": message}
+    if finish_reason is None:
+        del choice["finish_reason"]
+    return {
+        "choices": [choice],
+        "usage": {"completion_tokens": 0, "prompt_tokens": 1, "total_tokens": 1},
+    }
 
 
 def _health_envelope(recorder) -> dict:
@@ -1238,6 +1252,63 @@ def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> No
     assert json.loads(items[0].text)["implicit_traits"][0]["evidence"] == "Three recent planning discussions."
 
 
+def test_profile_repairs_provider_summary_pinned_to_first_explicit_item() -> None:
+    profile_data = {
+        "summary": "Continue",
+        "explicit_info": [
+            {"category": "conversation", "description": "Continue"},
+            {
+                "category": "engineering",
+                "description": "Prefers evidence-backed engineering decisions.",
+            },
+        ],
+        "implicit_traits": [
+            {
+                "trait": "systematic",
+                "description": "Builds a causal model before choosing scope.",
+            }
+        ],
+        "profile_timestamp_ms": 1_757_000_000_000,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"profiles": [{"user_id": "owner-1", "profile_data": profile_data}]}},
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert items[0].profile is not None
+    assert items[0].profile.summary == "Prefers evidence-backed engineering decisions."
+    # The compatibility correction is read-only; raw provider data remains available.
+    assert json.loads(items[0].text)["summary"] == "Continue"
+
+
+def test_profile_preserves_provider_summary_that_is_not_the_first_item() -> None:
+    profile_data = {
+        "summary": "A concise portrait of the user's stable preferences.",
+        "explicit_info": [
+            {"description": "Uses Python."},
+            {"description": "Prefers written updates."},
+        ],
+        "profile_timestamp_ms": 1_757_000_000_000,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"profiles": [{"user_id": "owner-1", "profile_data": profile_data}]}},
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert items[0].profile is not None
+    assert items[0].profile.summary == profile_data["summary"]
+
+
 def test_profile_timestamp_without_recognized_content_uses_the_raw_fallback() -> None:
     raw_profile = {
         "profile_timestamp_ms": 1_754_012_345_678,
@@ -1313,7 +1384,18 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path.endswith("/chat/completions"):
-            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+            return httpx.Response(
+                200,
+                json={
+                    "model": "provider-slot-model",
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {"content": "", "role": "assistant"},
+                        }
+                    ],
+                },
+            )
         return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
 
     async def run() -> bool:
@@ -1339,6 +1421,7 @@ def test_processing_health_probes_both_authenticated_endpoints() -> None:
 
     assert [request.url.path for request in requests] == ["/v1/chat/completions", "/v1/embeddings"]
     assert all(request.headers["authorization"].startswith("Bearer ") for request in requests)
+    assert json.loads(requests[0].content)["max_tokens"] == 8
 
 
 def test_processing_health_serializes_identical_provider_credentials(monkeypatch) -> None:
@@ -1427,6 +1510,298 @@ def test_processing_preflight_projects_sanitized_provider_error() -> None:
     assert "secret" not in result.failure.diagnostic.message
 
 
+@pytest.mark.parametrize("content", ["", None])
+def test_processing_preflight_accepts_truncated_chat_completion_from_resolved_slot(content) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-probe",
+                    "object": "chat.completion",
+                    "model": "provider-slot-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "length",
+                            "message": {
+                                "role": "assistant",
+                                "content": content,
+                                "reasoning_content": "O",
+                            },
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="client-alias",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    request_payload = json.loads(requests[0].content)
+    assert request_payload["model"] == "client-alias"
+    assert request_payload["max_tokens"] == 8
+
+
+def test_preflight_timeout_budget_stays_above_health_probe_budget() -> None:
+    assert _PREFLIGHT_TIMEOUT_SECONDS == 30.0
+    assert PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS == 8.0
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (_thinking_chat_completion(), None),
+        ({"choices": [{"message": {"content": "OK"}}]}, None),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "OK"},
+                    }
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": None},
+                    }
+                ]
+            },
+            None,
+        ),
+        (
+            _thinking_chat_completion(finish_reason=None),
+            "provider_response_missing_finish_reason",
+        ),
+        (
+            _thinking_chat_completion(role="user"),
+            "provider_response_invalid_role",
+        ),
+        (
+            {"choices": [{"finish_reason": "length", "message": {}}]},
+            "provider_response_invalid_role",
+        ),
+        ({"choices": [{}]}, "provider_response_missing_message"),
+    ],
+)
+def test_chat_probe_validator_accepts_thinking_model_and_openai_shapes(
+    payload: dict, expected: str | None
+) -> None:
+    assert _chat_probe_response_issue(payload) == expected
+
+
+def test_processing_preflight_accepts_thinking_model_chat_completions() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(200, json=_thinking_chat_completion())
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests] == [
+        "/v1/chat/completions",
+        "/v1/embeddings",
+        "/v1/chat/completions",
+    ]
+
+
+def test_processing_health_accepts_thinking_model_chat_completions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+        return httpx.Response(200, json=_thinking_chat_completion())
+
+    async def run() -> bool:
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat-model",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embedding-model",
+            embedding_api_key="embedding-secret",
+            multimodal_base_url="https://vision.example.test/v1",
+            multimodal_model="vision-model",
+            multimodal_api_key="vision-secret",
+        ).processing_healthy()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        assert asyncio.run(run()) is True
+
+
+def test_processing_preflight_reports_the_rejected_2xx_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{}]})
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.diagnostic.http_status == 200
+    assert result.failure.diagnostic.message == "provider_response_missing_message"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ({"content": ""}, "provider_response_invalid_role"),
+        ({"role": "assistant", "content": ""}, "provider_response_missing_finish_reason"),
+        ({"content": " "}, "provider_response_invalid_role"),
+        ({"role": "assistant", "content": " "}, "provider_response_missing_finish_reason"),
+    ],
+)
+def test_processing_preflight_requires_completion_metadata_for_empty_chat_content(
+    message: dict[str, str], expected: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": message}]})
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.diagnostic.message == expected
+
+
+def test_processing_preflight_rejects_unhashable_finish_reason() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": {},
+                            "message": {"role": "assistant", "content": ""},
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert result.failure is not None
+    assert result.failure.diagnostic.http_status == 200
+    assert result.failure.diagnostic.message == "provider_response_invalid_finish_reason"
+
+
 def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     requests: list[httpx.Request] = []
     recorded: list[dict[str, object]] = []
@@ -1476,6 +1851,137 @@ def test_processing_preflight_probes_configured_rerank_endpoint() -> None:
     assert "model" not in recorded[-1]["request"]
 
 
+def test_processing_preflight_probes_vllm_rerank_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="http://localhost:8000/v1",
+            rerank_model="Qwen/Qwen3-Reranker-4B",
+            rerank_api_key="rerank-secret",
+            rerank_provider="vllm",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests][-1] == "/v1/rerank"
+    assert json.loads(requests[-1].content) == {
+        "model": "Qwen/Qwen3-Reranker-4B",
+        "query": "OK",
+        "documents": ["OK"],
+    }
+
+
+def test_processing_preflight_probes_dashscope_rerank_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(
+            200,
+            json={"output": {"results": [{"index": 0, "relevance_score": 0.9}]}},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="https://dashscope.aliyuncs.com",
+            rerank_model="gte-rerank-v2",
+            rerank_api_key="rerank-secret",
+            rerank_provider="dashscope",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests][-1] == (
+        "/api/v1/services/rerank/text-rerank/text-rerank"
+    )
+    assert json.loads(requests[-1].content) == {
+        "model": "gte-rerank-v2",
+        "input": {"query": "OK", "documents": ["OK"]},
+        "parameters": {"return_documents": False, "top_n": 1},
+    }
+
+
+def test_processing_preflight_infers_dashscope_from_maas_url_without_provider() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(200, json={"data": [{"embedding": [0.1]}]})
+        return httpx.Response(
+            200,
+            json={"output": {"results": [{"index": 0, "relevance_score": 0.9}]}},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="llm-secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="embedding-secret",
+            rerank_base_url="https://llm-space.example.maas.aliyuncs.com",
+            rerank_model="gte-rerank-v2",
+            rerank_api_key="rerank-secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is True
+    assert [request.url.path for request in requests][-1] == (
+        "/api/v1/services/rerank/text-rerank/text-rerank"
+    )
+    assert json.loads(requests[-1].content)["input"] == {"query": "OK", "documents": ["OK"]}
+
+
 def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
     """MEMORY-IM-ATTACH-001: opt-in is admitted with synthetic image data only."""
 
@@ -1521,6 +2027,7 @@ def test_processing_preflight_probes_configured_multimodal_endpoint() -> None:
     ]
     payload = json.loads(requests[-1].content)
     assert payload["model"] == "vision-model"
+    assert payload["max_tokens"] == 8
     assert payload["messages"][0]["content"][0] == {
         "type": "text",
         "text": "Reply with OK.",

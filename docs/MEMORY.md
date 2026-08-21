@@ -25,8 +25,12 @@ Only direct, ordinary files shared by a human are eligible. Bot, system,
 forwarded, edited, quoted, rich, and unrecognized native message shapes are
 excluded. Avibe then validates each eligible file against one shared format and
 content policy. Supported formats are plain text, Markdown, CSV/TSV, VTT, PDF,
-bitmap images, audio, HTML, and EML. Unsupported or malformed files are skipped
-independently, so eligible text and valid siblings can still be captured.
+bitmap images, audio, HTML, EML, and Office / iWork / ODF / RTF documents when
+LibreOffice is installed. Native Windows currently skips these Office formats;
+Linux and macOS hosts can enable them with a sidecar-visible LibreOffice install.
+SVG and video stay excluded. Unsupported or malformed
+files are skipped independently, so eligible text and valid siblings can still
+be captured.
 
 Each turn is limited to 8 captured attachments, 25 MiB per attachment, and
 100 MiB in total. Admitted files are copied into private Avibe storage until the
@@ -55,12 +59,17 @@ non-empty query switches the same tab back to relevance-ordered search.
 
 ## Optional reranking endpoint
 
-The third processing endpoint in **Settings > Memory** is optional. Configure
-its Base URL, model, and API key together to let the pinned Memory runtime use
-its reranking capability; changing a configured endpoint is admitted by the
-same bounded preflight before it is saved. Leave all three fields empty to keep
-the standard Memory search tier. Removing the saved reranking endpoint clears
-all three values and does not rebuild the embedding index.
+The third processing endpoint in **Settings > Memory** is optional. Choose one
+EverOS rerank provider (`deepinfra`, `vllm`, or `dashscope`) and configure that
+provider's Base URL, model, and API key together. Changing a configured
+endpoint is admitted by a provider-specific bounded preflight before it is
+saved. Older configs without `provider` keep the DeepInfra probe and sidecar
+protocol, except an omitted-provider Bailian workspace host
+(`*.maas.aliyuncs.com`) is inferred as DashScope. Leave the rerank fields empty
+to keep the standard Memory search tier. Removing the saved reranking endpoint
+clears the provider and the three endpoint values and does not rebuild the
+embedding index. DashScope currently accepts only `gte-rerank-v2`; the Base URL
+is either `https://dashscope.aliyuncs.com` or a Bailian workspace host.
 
 ## Processing Record
 
@@ -70,6 +79,11 @@ existing processing timeline. It has an explicit Refresh action rather than a
 composite status poll. A section may be marked stale or unavailable while the
 other independently sourced sections continue to render, including while
 Memory is disabled.
+
+Memory processing pause and recovery events are written only to the main Avibe
+service log, including the fault kind, occurrence time, and queued-capture
+count. They are not sent as direct messages to administrators on Slack,
+Discord, Telegram, Lark, WeChat, or other IM transports.
 
 The timeline is the installation operator's view across every valid project and
 user. Each row and its detail view visibly includes the full **Project ID** and

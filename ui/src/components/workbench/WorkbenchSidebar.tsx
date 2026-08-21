@@ -27,7 +27,7 @@ import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
@@ -217,7 +217,7 @@ export const SessionRow: React.FC<{
 }> = ({ projectId, session, unread, canChat, canManageMetadata }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { renameSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsActions();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -685,7 +685,6 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     createSessionForProject,
     renameProject,
     archiveProject,
-    upsertProjectToTop,
   } = useWorkbenchProjectsTree();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
@@ -940,10 +939,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
       {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setShowNewProject(false);
-            upsertProjectToTop(project);
-          }}
+          onCreated={() => setShowNewProject(false)}
         />
       )}
     </div>

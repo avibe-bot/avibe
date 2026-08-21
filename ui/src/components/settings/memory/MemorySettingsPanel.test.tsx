@@ -358,8 +358,10 @@ describe('MemorySettingsPanel', () => {
 
     expect(screen.queryByText('memory.settings.multimodalTitle')).toBeNull();
     expect(screen.queryByText('memory.settings.disclosureAttachment')).toBeNull();
-    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
-    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(2);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(2);
+    expect(screen.getByPlaceholderText('https://api.deepinfra.com/v1/inference')).not.toBeNull();
+    expect(screen.getByPlaceholderText('Qwen/Qwen3-Reranker-4B')).not.toBeNull();
   });
 
   it('renders optional multimodal configuration once IM capture is available', () => {
@@ -378,10 +380,12 @@ describe('MemorySettingsPanel', () => {
     );
 
     expect(screen.getByText('memory.settings.rerankTitle')).not.toBeNull();
+    expect(screen.getByLabelText('memory.settings.rerankProvider')).not.toBeNull();
     expect(screen.getByText('memory.settings.multimodalTitle')).not.toBeNull();
     expect(screen.getByText('memory.settings.disclosureAttachment')).not.toBeNull();
-    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(4);
-    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(4);
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+    expect(screen.getByPlaceholderText('https://api.deepinfra.com/v1/inference')).not.toBeNull();
   });
 
   it('submits a complete multimodal endpoint as the IM attachment opt-in', async () => {
@@ -410,8 +414,8 @@ describe('MemorySettingsPanel', () => {
     const baseUrls = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder');
     const models = screen.getAllByPlaceholderText('memory.settings.modelPlaceholder');
     const keys = screen.getAllByPlaceholderText('memory.settings.apiKeyPlaceholder');
-    await user.type(baseUrls[3], 'https://vision.example.test/v1');
-    await user.type(models[3], 'vision-model');
+    await user.type(baseUrls[2], 'https://vision.example.test/v1');
+    await user.type(models[2], 'vision-model');
     await user.type(keys[3], 'vision-secret');
     await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
 

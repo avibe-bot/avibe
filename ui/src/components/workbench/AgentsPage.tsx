@@ -47,6 +47,7 @@ import type { ComboboxOption } from '../ui/combobox';
 import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { onPageReactivated } from '../../lib/pageActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
@@ -122,9 +123,14 @@ export const AgentsPage: React.FC = () => {
   const visibleTabs = capabilities.can_use_agents ? AGENTS_TAB_ORDER : (['definitions'] as const);
   const activeTab = capabilities.can_use_agents ? agentsTab : 'definitions';
   const canEditAgents = capabilities.can_manage_agents;
+  // Bulk Agent onboarding is a one-way instance-wide migration and stays Owner
+  // on the HTTP policy, so it follows owner identity rather than the Agent-CRUD
+  // capability a member also has: keying the fetch off `can_manage_agents` sent
+  // a member's page load into an owner-only GET and surfaced the 403 as a toast.
+  const canOnboardAgents = capabilities.is_instance_owner;
 
   const refreshOnboarding = useCallback(async () => {
-    if (!capabilities.can_manage_agents) {
+    if (!canOnboardAgents) {
       setOnboardingInventory(null);
       return;
     }
@@ -134,7 +140,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setOnboardingInventory(null);
     }
-  }, [api, capabilities.can_manage_agents]);
+  }, [api, canOnboardAgents]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -214,16 +220,11 @@ export const AgentsPage: React.FC = () => {
       return;
     }
     return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          setEventBridgeConnected(true);
-          fetchRunningActiveCount();
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) fetchRunningActiveCount();
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the indicator's level: it comes with its own
+      // `onConnected`, and refetching from both would pay twice for one gap.
+      onConnected: () => fetchRunningActiveCount(),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => fetchRunningActiveCount(),
       onTurnStart: () => fetchRunningActiveCount(),
@@ -271,18 +272,12 @@ export const AgentsPage: React.FC = () => {
       timer = window.setTimeout(tick, intervalMs);
     };
 
-    const refreshNow = () => {
-      if (document.visibilityState === 'visible') void tick();
-    };
-
     timer = window.setTimeout(tick, intervalMs);
-    document.addEventListener('visibilitychange', refreshNow);
-    window.addEventListener('focus', refreshNow);
+    const stopReactivation = onPageReactivated(() => void tick());
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', refreshNow);
-      window.removeEventListener('focus', refreshNow);
+      stopReactivation();
     };
   }, [capabilities.can_use_agents, eventBridgeConnected, fetchRunningActiveCount]);
 
@@ -502,7 +497,7 @@ export const AgentsPage: React.FC = () => {
       {/* The run graph follows the Agent capability. */}
       {capabilities.can_use_agents && activeTab === 'running' && <AgentGraphTab />}
 
-      {activeTab === 'definitions' && onboardingInventory && (
+      {activeTab === 'definitions' && canOnboardAgents && onboardingInventory && (
         <OrganizationAgentOnboarding
           inventory={onboardingInventory}
           expanded={onboardingExpanded}

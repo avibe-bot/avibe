@@ -36,7 +36,6 @@ import os
 import re
 import socket
 import stat
-import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -48,6 +47,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from config.atomic_io import write_atomic
 from core.memory.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
@@ -658,46 +658,35 @@ def create_app(
 
     @app.post("/internal/show-access/apply")
     async def _show_access_apply(request: Request) -> Any:
-        from core.show_pages import ShowPageError, ShowPageStore, show_access_payload
+        from core.show_pages import (
+            ShowPageError,
+            ShowPageStore,
+            parse_show_access_apply_request,
+            show_access_payload,
+        )
 
         payload = await _safe_json(request)
-        required = {
-            "page_id",
-            "expected_revision",
-            "target_access_mode",
-            "target_share_id",
-            "target_emails",
-        }
-        if (
-            set(payload) != required
-            or not isinstance(payload.get("page_id"), str)
-            or isinstance(payload.get("expected_revision"), bool)
-            or not isinstance(payload.get("expected_revision"), int)
-            or payload["expected_revision"] < 0
-            or not isinstance(payload.get("target_access_mode"), str)
-            or not (
-                payload.get("target_share_id") is None
-                or isinstance(payload.get("target_share_id"), str)
-            )
-            or not isinstance(payload.get("target_emails"), list)
-            or any(not isinstance(email, str) for email in payload["target_emails"])
-        ):
+        parsed = parse_show_access_apply_request(payload)
+        if parsed is None:
             return JSONResponse(
                 status_code=400,
                 content={"ok": False, "error": "invalid_show_access_apply_request"},
             )
-        page_id = payload["page_id"]
+        page_id = parsed["page_id"]
 
         def _apply() -> dict[str, Any]:
             store = ShowPageStore()
             try:
-                result = store.apply_access(
-                    page_id,
-                    expected_revision=payload["expected_revision"],
-                    target_access_mode=payload["target_access_mode"],
-                    target_share_id=payload["target_share_id"],
-                    target_emails=payload["target_emails"],
-                )
+                apply_kwargs = {
+                    "expected_revision": parsed["expected_revision"],
+                    "target_access_mode": parsed["target_access_mode"],
+                    "target_share_id": parsed["target_share_id"],
+                }
+                if "target_emails" in parsed:
+                    apply_kwargs["target_emails"] = parsed["target_emails"]
+                else:
+                    apply_kwargs["target_entries"] = parsed["target_entries"]
+                result = store.apply_access(page_id, **apply_kwargs)
             finally:
                 store.close()
             if result.show_access.page_id != page_id:
@@ -1281,7 +1270,7 @@ def create_app(
 
     @app.post("/internal/memory/archive-session")
     async def _memory_archive_session(request: Request) -> Any:
-        """Archive one Workbench session through the controller lifecycle."""
+        """Archive one Workbench session through the controller-owned write."""
 
         payload = await _safe_json(request)
         if (
@@ -1321,14 +1310,7 @@ def create_app(
             )
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            from core.memory.runtime import MemorySessionLifecycleBusyError
-
-            code = (
-                error.code
-                if isinstance(error, MemorySessionLifecycleBusyError)
-                else "session_archive_unavailable"
-            )
+        except Exception:
             logger.debug(
                 "internal Workbench session archive failed for %s",
                 payload["session_id"],
@@ -1336,7 +1318,7 @@ def create_app(
             )
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": code},
+                content={"ok": False, "error": "session_archive_unavailable"},
             )
         if not isinstance(session, dict):
             return JSONResponse(
@@ -2034,19 +2016,41 @@ def create_app(
         from core.inbox_events import bus
 
         sub_id, queue = bus.subscribe()
+        # Baselined before the handshake below, because that yield reaches the
+        # bridge and a discard after it is a hole in what this feed promised.
+        last_dropped = bus.dropped_count(sub_id)
 
         async def _stream():
             try:
-                # A REAL ``connected`` event (not a ``:`` comment, which the
-                # internal_client parser swallows) so it flows bridge → broker →
-                # browser. The UI sidebar refetches on this, which reconciles
-                # agent-status dots after a CONTROLLER restart while the UI server
-                # + browser SSE stay up: only this bridge reconnects, so the
-                # browser's own ``connected`` never fires and the crash-recovery
-                # ``running → idle`` reset (broadcast to no subscriber) would
-                # otherwise be invisible until a manual reload (Codex P2).
+                # A REAL ``connected`` event, not a ``:`` comment, which the
+                # internal_client parser swallows: the bridge has to be able to
+                # observe this handshake. It consumes the frame rather than
+                # relaying it, and publishes the bridge-status transition that
+                # browsers actually key off. Either way the UI reconciles after a
+                # CONTROLLER restart that leaves the UI server + browser SSE up:
+                # only this bridge reconnects, so the browser's own ``connected``
+                # never fires and the crash-recovery ``running → idle`` reset
+                # (broadcast to no subscriber) would otherwise stay invisible
+                # until a manual reload (Codex P2).
                 yield _sse_event("connected", {})
                 while True:
+                    # Same rule as the UI server's browser feed: a subscriber
+                    # that lost an event is not a subscriber any more. Ending it
+                    # makes the bridge reconnect, and a reconnect flips the
+                    # bridge status, which is what tells browsers to reconcile.
+                    # Announcing the hole down this stream instead cannot work --
+                    # the queue is still full, so the next iteration finds
+                    # another discard and announces again. Checked before
+                    # ``get()`` so no event is relayed as if it followed the
+                    # previous one when it does not.
+                    dropped = bus.dropped_count(sub_id)
+                    if dropped > last_dropped:
+                        logger.warning(
+                            "internal events: ending subscriber %s after %s dropped event(s)",
+                            sub_id,
+                            dropped - last_dropped,
+                        )
+                        return
                     event_type, data = await queue.get()
                     yield _sse_event(event_type, data)
             finally:
@@ -2296,38 +2300,22 @@ def _write_internal_server_status(
 ) -> None:
     """Persist internal-server lifecycle state for the out-of-process CLI."""
 
-    target = paths.get_internal_server_status_path()
+    payload: dict[str, str] = {
+        "state": state,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if error is not None:
+        payload["error"] = error
+    if detail is not None:
+        payload["detail"] = detail
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "state": state,
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        if error is not None:
-            payload["error"] = error
-        if detail is not None:
-            payload["detail"] = detail
-        file_descriptor, temporary_name = tempfile.mkstemp(
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
+        # Compact: the CLI polls this, nobody reads it by eye. Losing the write is
+        # survivable — the status file is a courtesy to an out-of-process reader,
+        # not something the server's own lifecycle depends on.
+        write_atomic(
+            paths.get_internal_server_status_path(),
+            json.dumps(payload, separators=(",", ":")),
         )
-        temporary = Path(temporary_name)
-        try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(file_descriptor, 0o600)
-            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream, separators=(",", ":"))
-            file_descriptor = -1
-            os.replace(temporary, target)
-        except Exception:
-            if file_descriptor >= 0:
-                try:
-                    os.close(file_descriptor)
-                except OSError:
-                    pass
-            temporary.unlink(missing_ok=True)
-            raise
     except OSError:
         logger.warning("could not persist internal dispatch server status", exc_info=True)
 

@@ -74,6 +74,51 @@ def _txn_worker_b(home: str, attempted: threading.Event, done: threading.Event, 
     done.set()
 
 
+def _migration_lock_worker(home: str, entered: threading.Event, release: threading.Event) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config import paths as _paths
+    from config.v2_config import _config_file_lock
+
+    with _config_file_lock(_paths.get_config_path()):
+        entered.set()
+        assert release.wait(timeout=15), "migration lock worker never released"
+
+
+def _ordinary_save_worker(home: str, attempted: threading.Event, done: threading.Event) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import V2Config
+
+    attempted.set()
+    config = V2Config.load()
+    config.language = "zh"
+    config.save()
+    done.set()
+
+
+def _transaction_worker(
+    home: str,
+    attempted: threading.Event,
+    entered: threading.Event,
+    done: threading.Event,
+) -> None:
+    import os as _os
+
+    _os.environ["AVIBE_HOME"] = home
+    from config.v2_config import update_config_fields
+
+    def mutator(config: V2Config) -> None:
+        entered.set()
+        config.language = "zh"
+
+    attempted.set()
+    update_config_fields(mutator)
+    done.set()
+
+
 def test_transaction_blocks_second_process_until_first_releases(
     isolated_config_home: Path,
 ) -> None:
@@ -119,6 +164,81 @@ def test_transaction_blocks_second_process_until_first_releases(
     assert loaded.runtime.log_level == "DEBUG"
     # B's snapshot was loaded after A's save (inside the lock).
     assert saw_queue.get(timeout=5) == "zh"
+
+
+def test_ordinary_save_waits_for_migration_file_lock(
+    isolated_config_home: Path,
+) -> None:
+    """Every ordinary save must share the lock used by migration persistence."""
+
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    entered = ctx.Event()
+    release = ctx.Event()
+    attempted = ctx.Event()
+    done = ctx.Event()
+    home = str(isolated_config_home.parent.parent)
+
+    migration = ctx.Process(
+        target=_migration_lock_worker,
+        args=(home, entered, release),
+    )
+    saver = ctx.Process(
+        target=_ordinary_save_worker,
+        args=(home, attempted, done),
+    )
+    migration.start()
+    assert entered.wait(timeout=15), "migration worker never acquired its lock"
+    saver.start()
+    assert attempted.wait(timeout=15), "save worker never reached save"
+    assert not done.wait(timeout=1.0), "ordinary save bypassed the migration file lock"
+
+    release.set()
+    migration.join(timeout=15)
+    saver.join(timeout=15)
+    assert migration.exitcode == 0, f"migration worker failed: {migration.exitcode}"
+    assert saver.exitcode == 0, f"save worker failed: {saver.exitcode}"
+    assert V2Config.load().language == "zh"
+
+
+def test_transaction_load_and_mutator_wait_for_migration_file_lock(
+    isolated_config_home: Path,
+) -> None:
+    """The transaction owns the migration lock before it reads or mutates."""
+
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    migration_entered = ctx.Event()
+    release = ctx.Event()
+    attempted = ctx.Event()
+    mutator_entered = ctx.Event()
+    done = ctx.Event()
+    home = str(isolated_config_home.parent.parent)
+    migration = ctx.Process(
+        target=_migration_lock_worker,
+        args=(home, migration_entered, release),
+    )
+    writer = ctx.Process(
+        target=_transaction_worker,
+        args=(home, attempted, mutator_entered, done),
+    )
+
+    migration.start()
+    assert migration_entered.wait(timeout=15), "migration worker never acquired its lock"
+    writer.start()
+    assert attempted.wait(timeout=15), "transaction writer never reached the transaction"
+    assert not mutator_entered.wait(timeout=1.0), "transaction mutated before taking the migration lock"
+
+    release.set()
+    migration.join(timeout=15)
+    writer.join(timeout=15)
+    assert migration.exitcode == 0, f"migration worker failed: {migration.exitcode}"
+    assert writer.exitcode == 0, f"transaction writer failed: {writer.exitcode}"
+    assert mutator_entered.is_set()
+    assert done.is_set()
+    assert V2Config.load().language == "zh"
 
 
 def test_mutator_exception_aborts_without_write(isolated_config_home: Path) -> None:

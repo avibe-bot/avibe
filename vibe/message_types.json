@@ -7,6 +7,7 @@
     "inboxPreview": false,
     "inboxSettlesReply": false,
     "activityRole": "none",
+    "detachedCompletion": false,
     "terminalWhenEvents": [],
     "unread": false,
     "webPush": false,
@@ -63,6 +64,7 @@
       "inboxPreview": true,
       "inboxSettlesReply": true,
       "activityRole": "terminal",
+      "detachedCompletion": true,
       "unread": true,
       "webPush": true,
       "render": "agent"
@@ -72,6 +74,7 @@
       "inboxActivity": true,
       "inboxPreview": true,
       "inboxSettlesReply": true,
+      "detachedCompletion": true,
       "terminalWhenEvents": [
         "backend_failure"
       ],
@@ -93,6 +96,7 @@
       "inboxPreview": true,
       "inboxSettlesReply": true,
       "activityRole": "terminal",
+      "detachedCompletion": true,
       "webPush": true,
       "render": "status"
     },

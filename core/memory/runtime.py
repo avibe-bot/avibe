@@ -39,7 +39,7 @@ from core.memory.artifact import (
 from core.memory.attachments import IM_ATTACHMENT_CAPTURE_PLATFORMS
 from core.memory.blocking import run_blocking
 from core.memory.clear_intent import ClearSurface
-from core.memory.confined_filesystem import required_no_follow_flag
+from core.memory.confined_filesystem import ConfinedRoot, required_no_follow_flag
 from core.memory.everos import (
     EverOSPort,
     MemoryProviderFailure,
@@ -380,7 +380,10 @@ class MemoryRuntime:
     ) -> None:
         self._config = config
         self._restart_config = deepcopy(config)
-        self._effective_home = effective_home or paths.get_vibe_remote_dir()
+        self._filesystem_root = ConfinedRoot.from_home(
+            effective_home or paths.get_vibe_remote_dir()
+        )
+        self._effective_home = self._filesystem_root.physical_home
         self._maintenance: MemoryMaintenance | None = None
         self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
         self._provider_root_owner = ProviderRoot(
@@ -448,7 +451,7 @@ class MemoryRuntime:
             return True
         try:
             required_no_follow_flag()
-            opened = store or MemoryStore()
+            opened = store or MemoryStore(effective_home=self._effective_home)
             self._artifact_manager.set_provider_root(self._provider_root)
             module = MemoryModule(
                 opened,
@@ -1094,16 +1097,10 @@ class MemoryRuntime:
             claims_paused = True
             embedding_guard_rejected = False
             try:
-                if await asyncio.to_thread(self._provider_data_exists_strict):
+                if not await self._embedding_change_is_admissible(self._config, config):
                     embedding_guard_rejected = True
                     self._runtime_error = "memory_clear_failed"
                     return {"ok": False, "error": self._runtime_error}
-            except Exception:
-                # An indeterminate root/queue state cannot safely accept an
-                # embedding change because it could mix vector spaces.
-                embedding_guard_rejected = True
-                self._runtime_error = "memory_clear_failed"
-                return {"ok": False, "error": self._runtime_error}
             finally:
                 if embedding_guard_rejected and resume_claims_on_failure:
                     self.module.resume_claims()
@@ -1122,7 +1119,12 @@ class MemoryRuntime:
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
             error = _runtime_error_for_status(await asyncio.to_thread(self._artifact_manager.status))
-            if not (self._process and self._process.running):
+            if not self._sidecar.snapshot().retains_active_config:
+                # No retained supervisor can run now or relaunch with the prior
+                # settings, including one that exhausted its restart budget.
+                # Retain the desired config so a first artifact install can
+                # activate it without waiting for another reconciliation.
+                self._config = config
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
                 self.module.resume_claims()
@@ -1154,10 +1156,11 @@ class MemoryRuntime:
         self.module.replace_provider(self._provider)
         try:
             meta = await asyncio.to_thread(self._store.ensure_meta)
+            active_metadata = self._active_provider_root_metadata()
             await run_blocking(
                 self._provider_root_owner.ensure,
                 meta,
-                self._active_provider_root_metadata(),
+                active_metadata,
             )
         except Exception:
             self._runtime_error = "memory_clear_failed"
@@ -1170,7 +1173,14 @@ class MemoryRuntime:
             call_log_db_path=self._call_log_db_path,
         )
         try:
-            started = await self._sidecar.start(python, settings)
+            started = await self._sidecar.start(
+                python,
+                settings,
+                provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                    meta,
+                    active_metadata,
+                ),
+            )
         except BaseException:
             raise
         if not started:
@@ -2284,7 +2294,7 @@ class MemoryRuntime:
             def reset_provider_root() -> None:
                 meta = self._store.ensure_meta()
                 if self._provider_root.exists():
-                    self._provider_root_owner.recreate_empty(
+                    self._provider_root_owner.recreate_empty_for_clear(
                         meta,
                         self._active_provider_root_metadata(),
                     )
@@ -2399,10 +2409,10 @@ class MemoryRuntime:
             # including its terminal "down" state, while claims are fenced so a
             # repair can safely replace the executable it might otherwise relaunch.
             supervisor = self._process
-            # A HEALTHY running sidecar must not be force-stopped/replaced through
-            # Repair — that requires a coordinated disable first. Only a retained
-            # supervisor in its terminal "down" state (no live child) may be stopped
-            # here so Repair can recover enabled/down Memory.
+            # A healthy running sidecar must not be force-stopped/replaced through
+            # Repair — that requires a coordinated disable first. Any retained
+            # supervisor without a live child can be stopped here: Stop revokes
+            # delayed-retry authority before Repair adopts the durable config.
             if supervisor is not None and supervisor.running:
                 return {
                     "ok": False,
@@ -2423,6 +2433,20 @@ class MemoryRuntime:
                             "download_error": None,
                         }
                     try:
+                        activation_config = await asyncio.to_thread(
+                            lambda: V2Config.load().memory
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Memory Runtime repair could not load the durable config"
+                        )
+                        self._runtime_error = "memory_runtime_install_failed"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
+                    try:
                         await supervisor.stop()
                     except Exception:
                         self._runtime_error = "memory_runtime_install_failed"
@@ -2434,6 +2458,23 @@ class MemoryRuntime:
                     self._process = None
                     self._process_records_calls = False
                     self._ensure_call_log_retention()
+                    if (
+                        activation_config.recovery_intent is None
+                        and not await self._embedding_change_is_admissible(
+                            self._config,
+                            activation_config,
+                        )
+                    ):
+                        self._runtime_error = "memory_clear_failed"
+                        return {
+                            "ok": False,
+                            "reason": self._runtime_error,
+                            "download_error": None,
+                        }
+                    # The prior supervisor's launch authority is now retired.
+                    # Artifact activation must use the durable desired settings,
+                    # not the active snapshot that was kept while it could retry.
+                    self._config = deepcopy(activation_config)
             self._artifact_installing = True
         ensure_task = asyncio.create_task(
             asyncio.to_thread(self._artifact_manager.ensure, force=True)
@@ -2525,6 +2566,9 @@ class MemoryRuntime:
             rerank_base_url=(processing.rerank.base_url if processing.rerank else None),
             rerank_model=(processing.rerank.model if processing.rerank else None),
             rerank_api_key=(processing.rerank.api_key if processing.rerank else None),
+            rerank_provider=(
+                processing.rerank.rerank_provider() if processing.rerank else None
+            ),
             multimodal_base_url=(
                 processing.multimodal.base_url
                 if processing.multimodal
@@ -2845,6 +2889,7 @@ class MemoryRuntime:
                 except Exception:
                     # Retain the supervisor: only its successful stop proves
                     # that no owned child tree remains.
+                    logger.exception("Memory sidecar restart failed")
                     self._runtime_error = "memory_restart_failed"
                     return {"ok": False, "error": self._runtime_error}
                 self._process = None
@@ -2862,10 +2907,11 @@ class MemoryRuntime:
             self.module.replace_provider(self._provider)
             try:
                 meta = await asyncio.to_thread(self._store.ensure_meta)
+                active_metadata = self._active_provider_root_metadata()
                 await run_blocking(
                     self._provider_root_owner.ensure,
                     meta,
-                    self._active_provider_root_metadata(),
+                    active_metadata,
                 )
             except Exception:
                 self._runtime_error = "memory_clear_failed"
@@ -2878,6 +2924,10 @@ class MemoryRuntime:
                     _process_settings(
                         self._config,
                         call_log_db_path=self._call_log_db_path,
+                    ),
+                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                        meta,
+                        active_metadata,
                     ),
                 )
             except Exception:
@@ -3059,11 +3109,30 @@ class MemoryRuntime:
             self.module.replace_provider(self._provider)
 
             if has_data:
+                try:
+                    meta = await asyncio.to_thread(self._store.ensure_meta)
+                    active_metadata = self._active_provider_root_metadata()
+                    await run_blocking(
+                        self._provider_root_owner.ensure,
+                        meta,
+                        active_metadata,
+                    )
+                except Exception:
+                    self._runtime_error = "memory_rebuild_failed"
+                    return {
+                        "ok": False,
+                        "error": self._runtime_error,
+                        "result": "failed",
+                    }
                 rebuild_process = EverOSRebuildProcess(
                     python,
                     effective_home=self._effective_home,
                     provider_root=self._provider_root,
                     settings=rebuild_settings,
+                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                        meta,
+                        active_metadata,
+                    ),
                 )
                 child_result = await rebuild_process.run()
                 mapped = _rebuild_public_result(child_result)
@@ -3148,10 +3217,11 @@ class MemoryRuntime:
 
             try:
                 meta = await asyncio.to_thread(self._store.ensure_meta)
+                active_metadata = self._active_provider_root_metadata()
                 await run_blocking(
                     self._provider_root_owner.ensure,
                     meta,
-                    self._active_provider_root_metadata(),
+                    active_metadata,
                 )
             except Exception:
                 self._runtime_error = "memory_restart_failed"
@@ -3170,6 +3240,10 @@ class MemoryRuntime:
                     _process_settings(
                         self._config,
                         call_log_db_path=self._call_log_db_path,
+                    ),
+                    provider_root_guard=lambda: self._provider_root_owner.require_owned(
+                        meta,
+                        active_metadata,
                     ),
                 )
             except Exception:
@@ -3467,6 +3541,9 @@ class MemoryRuntime:
                                 meta,
                                 candidate,
                             )
+                        previous_python = await asyncio.to_thread(
+                            self._artifact_manager.resolve_python
+                        )
                         commit()
                         result = await self._reconcile_locked(
                             self._config,
@@ -3475,6 +3552,14 @@ class MemoryRuntime:
                             resume_claims_on_failure=False,
                         )
                         if result.get("ok") is not True:
+                            if previous_python is None:
+                                # First artifact admission is durable even when
+                                # its desired config cannot activate immediately.
+                                # Publish restart authority only when the failed
+                                # start retained a supervisor carrying that config.
+                                if self._sidecar.snapshot().supervisor_can_restart:
+                                    self._restart_config = deepcopy(self._config)
+                                return
                             raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
                         self._restart_config = deepcopy(self._config)
                         return
@@ -3724,6 +3809,22 @@ class MemoryRuntime:
         stats = self._store.queue_stats()
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
 
+    async def _embedding_change_is_admissible(
+        self,
+        current: MemoryConfig,
+        candidate: MemoryConfig,
+    ) -> bool:
+        """Require a freshly proven-empty vector surface for an embedding change."""
+
+        if not _embedding_configuration_changed(current, candidate):
+            return True
+        try:
+            return not await asyncio.to_thread(self._provider_data_exists_strict)
+        except Exception:
+            # An indeterminate root/queue state cannot safely accept an
+            # embedding change because it could mix vector spaces.
+            return False
+
     def _settle_rebuild_intent(self, candidate: MemoryConfig) -> MemoryConfig | None:
         """Clear a rebuild intent when the durable vector-space identity still matches.
 
@@ -3761,6 +3862,7 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
         "rerank_base_url": rerank.base_url if rerank else None,
         "rerank_model": rerank.model if rerank else None,
         "rerank_api_key": rerank.api_key if rerank else None,
+        "rerank_provider": rerank.rerank_provider() if rerank else None,
         "multimodal_base_url": multimodal.base_url if multimodal else None,
         "multimodal_model": multimodal.model if multimodal else None,
         "multimodal_api_key": multimodal.api_key if multimodal else None,

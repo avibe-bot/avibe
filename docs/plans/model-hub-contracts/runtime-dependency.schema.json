@@ -7,7 +7,7 @@
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 5 },
+    "contract_version": { "const": 6 },
     "host_platform": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:-[a-z0-9_]+)+$",
@@ -127,7 +127,7 @@
   },
   "examples": [
     {
-      "contract_version": 5,
+      "contract_version": 6,
       "host_platform": "darwin-arm64",
       "manifest": {
         "name": "cliproxyapi",

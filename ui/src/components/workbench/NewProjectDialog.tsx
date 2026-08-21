@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Folder, FolderOpen, Loader2, X } from 'lucide-react';
 
-import { useApi } from '../../context/ApiContext';
 import type { WorkbenchProject } from '../../context/ApiContext';
+import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { DirectoryBrowser } from '../ui/directory-browser';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -11,6 +11,11 @@ import { errorMessage } from '@/lib/errorMessage';
 
 interface NewProjectDialogProps {
   onClose: () => void;
+  /** The project is already in the shared tree by the time this fires — the
+   *  provider owns that commit so it can fence it against an authorization
+   *  change landing mid-request. Use it only for what is local to the caller
+   *  (close the modal, select the row). It does NOT fire when the commit was
+   *  refused, because there is then no row for the caller to point at. */
   onCreated: (project: WorkbenchProject) => void;
 }
 
@@ -20,7 +25,7 @@ interface NewProjectDialogProps {
 // basename — keep the input empty to accept that default.
 export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onCreated }) => {
   const { t } = useTranslation();
-  const api = useApi();
+  const { createProject } = useWorkbenchProjectsActions();
   const [phase, setPhase] = useState<'pick' | 'confirm'>('pick');
   const [folderPath, setFolderPath] = useState<string>('');
   const [displayName, setDisplayName] = useState<string>('');
@@ -46,10 +51,16 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
     setSubmitting(true);
     setError(null);
     try {
-      const project = await api.createProject({
+      const project = await createProject({
         folder_path: folderPath,
         display_name: displayName.trim() || undefined,
       });
+      // null = created, but an authorization change landed while we waited, so
+      // this document no longer holds a tree to place it in. Just close.
+      if (!project) {
+        onClose();
+        return;
+      }
       onCreated(project);
     } catch (err) {
       setError(errorMessage(err) ?? String(err));

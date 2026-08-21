@@ -19,19 +19,28 @@ import { ConfirmDialog } from '../../ui/confirm-dialog';
 import { InfoHint } from '../../ui/info-hint';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
+import { Select } from '../../ui/select';
 import { Switch } from '../../ui/switch';
 import { useApi } from '../../../context/ApiContext';
 import type {
   MemoryEndpointConfig,
   MemoryMaintenance,
+  MemoryRerankProvider,
   MemorySettings,
   MemorySettingsPatch,
   MemorySettingsResult,
 } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
-import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
-import type { EndpointDraft } from '../../../lib/memorySettings';
 import { isMemoryOk, memoryErrorMessage } from '../../../lib/memoryRead';
+import {
+  DASHSCOPE_RERANK_MODEL,
+  DEFAULT_MEMORY_RERANK_PROVIDER,
+  MEMORY_RERANK_PROVIDERS,
+  buildEndpointPatch,
+  draftFromConfig,
+  normalizeRerankProvider,
+} from '../../../lib/memorySettings';
+import type { EndpointDraft } from '../../../lib/memorySettings';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 
@@ -40,6 +49,21 @@ const EMPTY_ENDPOINT: MemoryEndpointConfig = {
   model: null,
   api_key: null,
   has_api_key: false,
+};
+
+const RERANK_FIELD_HINTS: Record<MemoryRerankProvider, { baseUrl: string; model: string }> = {
+  deepinfra: {
+    baseUrl: 'https://api.deepinfra.com/v1/inference',
+    model: 'Qwen/Qwen3-Reranker-4B',
+  },
+  vllm: {
+    baseUrl: 'http://localhost:8000/v1',
+    model: 'Qwen/Qwen3-Reranker-4B',
+  },
+  dashscope: {
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    model: DASHSCOPE_RERANK_MODEL,
+  },
 };
 
 const EndpointFields: React.FC<{
@@ -53,6 +77,7 @@ const EndpointFields: React.FC<{
   identityHint?: string;
   canClearKey: boolean;
   clearKeyLabel?: string;
+  showProvider?: boolean;
 }> = ({
   title,
   help,
@@ -64,9 +89,12 @@ const EndpointFields: React.FC<{
   identityHint,
   canClearKey,
   clearKeyLabel,
+  showProvider = false,
 }) => {
   const { t } = useTranslation();
   const clearLabel = clearKeyLabel ?? t('memory.settings.clearKeyLabel');
+  const provider = showProvider ? normalizeRerankProvider(draft.provider) : DEFAULT_MEMORY_RERANK_PROVIDER;
+  const hints = showProvider ? RERANK_FIELD_HINTS[provider] : null;
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
@@ -79,13 +107,38 @@ const EndpointFields: React.FC<{
         )}
       </div>
       {identityHint ? <p className="text-[11.5px] leading-snug text-muted">{identityHint}</p> : null}
+      {showProvider ? (
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-[12px] text-muted">{t('memory.settings.rerankProvider')}</Label>
+          <Select
+            value={provider}
+            disabled={disabled}
+            aria-label={t('memory.settings.rerankProvider')}
+            onChange={(event) => {
+              const nextProvider = normalizeRerankProvider(event.target.value);
+              const nextModel = nextProvider === 'dashscope'
+                ? DASHSCOPE_RERANK_MODEL
+                : draft.model === DASHSCOPE_RERANK_MODEL
+                  ? ''
+                  : draft.model;
+              onChange({ ...draft, provider: nextProvider, model: nextModel });
+            }}
+          >
+            {MEMORY_RERANK_PROVIDERS.map((value) => (
+              <option key={value} value={value}>
+                {t(`memory.settings.rerankProviders.${value}`)}
+              </option>
+            ))}
+          </Select>
+        </div>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1.5">
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
             value={draft.baseUrl}
             disabled={disabled}
-            placeholder={t('memory.settings.baseUrlPlaceholder')}
+            placeholder={hints?.baseUrl ?? t('memory.settings.baseUrlPlaceholder')}
             onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
             className="text-[13px]"
           />
@@ -94,8 +147,8 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
             value={draft.model}
-            disabled={disabled}
-            placeholder={t('memory.settings.modelPlaceholder')}
+            disabled={disabled || provider === 'dashscope'}
+            placeholder={hints?.model ?? t('memory.settings.modelPlaceholder')}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
             className="text-[13px]"
           />
@@ -184,7 +237,7 @@ export const MemorySettingsPanel: React.FC<{
   const [modeDraft, setModeDraft] = useState<MemorySettings['mode']>(settings.mode);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
-  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT, { includeProvider: true }));
   const [multimodalDraft, setMultimodalDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -197,7 +250,7 @@ export const MemorySettingsPanel: React.FC<{
     setModeDraft(settings.mode);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
-    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT, { includeProvider: true }));
     setMultimodalDraft(draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   }, [settings]);
 
@@ -233,6 +286,7 @@ export const MemorySettingsPanel: React.FC<{
       settings.processing.rerank ?? EMPTY_ENDPOINT,
       true,
       false,
+      true,
       true,
     );
     const multimodalPatch = settings.im_attachment_capture_available === true
@@ -566,6 +620,7 @@ export const MemorySettingsPanel: React.FC<{
             identityHint={t('memory.settings.rerankIdentityHint')}
             canClearKey
             clearKeyLabel={t('memory.settings.rerankClearLabel')}
+            showProvider
           />
 
           {settings.im_attachment_capture_available === true ? (

@@ -33,6 +33,7 @@ from tzlocal import get_localzone_name
 from sqlalchemy import select
 
 from config import SettingsStore, paths
+from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
@@ -1184,12 +1185,102 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     return False
 
 
+def _restart_failure_summary(payload: dict) -> str:
+    """Describe a recorded restart failure on the single line doctor prints.
+
+    Why it failed is the entire value of the item, so the recorded error is
+    carried through rather than summarized away, with its whitespace collapsed
+    because the report prints one line per item.
+    """
+
+    pairs = (
+        ("state", payload.get("state") or "unknown"),
+        ("error", " ".join(str(payload.get("error") or "").split())),
+        ("trigger", payload.get("trigger")),
+        ("job_id", payload.get("job_id")),
+        ("log", payload.get("log_path")),
+    )
+    return " ".join(f"{name}={value}" for name, value in pairs if value)
+
+
 def _restart_state_items() -> list[dict]:
     items: list[dict] = []
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
         _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
+        return items
+
+    # Both clauses are read now, from what is on disk and what is running now.
+    # Nothing here asks what was true at some earlier moment, which is the whole
+    # design: an earlier version of this decided downtime from a liveness snapshot
+    # the supervisor had stamped into the record, and every interleaving between
+    # taking that snapshot and acting on it was a way to get the answer wrong. A
+    # rule with no remembered observation in it has no such window.
+    #
+    # The cost is bounded and in the safe direction. A restart that failed without
+    # stopping the old service -- the spawn path never stops anything -- leaves a
+    # record that outlives its relevance, so after that service is later stopped on
+    # purpose this reports a failure that is history. Both halves of the sentence
+    # are still true, and `vibe start` ends it. Suppressing it instead would mean
+    # trusting a remembered snapshot to stay true, and for a diagnostic the
+    # asymmetry decides it: a stale `fail` is a true statement with a self-clearing
+    # next step, while a wrong `pass` is the eight-day silent outage in #1567
+    # sitting behind a green health check.
+    #
+    # Note what the action must not say, which is the original defect: never offer
+    # the marker-deleting repair here. The reader may be genuinely down, and that
+    # command both destroys the only record of why and makes doctor pass again --
+    # an operator following it would silence their own health check.
+    #
+    # This has to be read before the staleness branch below, because terminal
+    # metadata goes stale after DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that
+    # branch offers a repair that deletes the marker -- on a still-down instance,
+    # the reason it is down.
+    #
+    # Liveness asks `verified_service_running`, never the broader
+    # `service_process_running`. The broad one reports whatever occupies this data
+    # dir, which is the right question for refusing a second start and the wrong
+    # one here: a pid reserved by a process that never acquired the lock is the
+    # wreckage of a failed start, not a recovery, and reading it as one would
+    # suppress the very failure it came from. Nor does holding the lock make a
+    # process a service, because the lock is taken before the database is
+    # migrated -- the generation that hung mid-migration in #1567 held it for
+    # eight days -- so the owner also requires the holder's own published start.
+    #
+    # What that leaves the reader is a process `start_service` refuses to start
+    # past, because it asks the broad question -- so the action has to cover it,
+    # and `_service_lifecycle_items` cannot be the one to do that here: its
+    # extra-process item is behind `--deep` and the default run is exactly where a
+    # reader of this lands.
+    #
+    # Which is the whole discipline for the text below. Every sentence of procedure
+    # is a claim about control flow this item does not own, and each one is
+    # separately falsifiable: earlier revisions deferred to an item that is not
+    # rendered by default, and then told the reader to start again after a repair
+    # that starts the service itself. So it names each command once, in order, and
+    # says the one thing the reader cannot see -- that the repair brings the
+    # service up -- because that is what stops them from running start twice and
+    # reading `ServiceAlreadyRunningError` as a failed recovery.
+    #
+    # The occupier decides which command, and only one of them can be prescribed
+    # blind: `duplicate-service-processes` stops what the scan sees beside the lock
+    # owner, so it reaches a holder whose record answers no pid and skips one that
+    # answers its own -- and a holder stuck mid-startup is exactly the second kind.
+    # `vibe stop` is what covers that one. Anything beyond naming both is a
+    # prediction, and the commands report their own outcomes.
+    if payload.get("ok") is False and not runtime.verified_service_running():
+        _add_doctor_item(
+            items,
+            "fail",
+            f"Last restart failed and no service is running: {_restart_failure_summary(payload)}",
+            "Read the restart log named above for the cause, then run `vibe start`. If that reports a "
+            "service already running, the failed generation is still occupying this instance: run "
+            "`vibe doctor repair duplicate-service-processes`, which stops a process holding no lock and "
+            "brings the service up, or `vibe stop` if the failed process holds the lock itself, and then "
+            "repeat the start above.",
+            code="runtime.restart_failed",
+        )
         return items
 
     if _restart_status_is_stale(payload, restart_path):
@@ -9656,31 +9747,6 @@ def cmd_vault_fetch(args):
     return 0 if 200 <= status <= 299 else 1
 
 
-def _write_private_file(path: Path, content: str) -> None:
-    """Atomically write ``content`` to ``path`` as a 0600 file.
-
-    ``tempfile.mkstemp`` creates the temp file 0600 from the start, so the secret is never
-    momentarily world-readable even when ``path`` pre-existed with looser perms (``O_TRUNC``
-    would have kept the old mode until a late ``chmod``). ``os.replace`` swaps it in
-    atomically — a crash mid-write leaves either the old file or the complete new one, never
-    a truncated/partial secret.
-    """
-    import tempfile
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def cmd_vault_export(args):
     # Deprecated. avault (the custody core) deliberately has no plaintext-to-stdout sink —
     # emitting `export NAME=...` for `eval` would hand the decrypted value back to the shell
@@ -9820,9 +9886,10 @@ def cmd_vault_key_export(args):
         blob = api.avault_key_export(passphrase)
         out = getattr(args, "out", None)
         if out:
-            # Create 0600 from the start (the blob holds the passphrase-wrapped key) —
-            # no window where it's world-readable under a permissive umask.
-            _write_private_file(Path(out), json.dumps(blob, indent=2) + "\n")
+            # 0600 from the moment the file exists (the blob holds the passphrase-wrapped
+            # key) — write_atomic leaves no window where it's world-readable, whatever the
+            # umask and whatever mode ``out`` already had.
+            write_atomic(Path(out), json.dumps(blob, indent=2) + "\n")
             _print_cli_payload("vault_key_export", written=True, path=str(out))
         else:
             print(json.dumps(blob, indent=2))
@@ -10759,6 +10826,49 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             code="show_runtime.status_failed",
         )
         return items
+
+    try:
+        archive_cache = manager.archive_cache_status()
+    except Exception:  # noqa: BLE001
+        archive_cache = None
+    doctor_language = _configured_cli_language()
+    archive_skipped_reason = str((archive_cache or {}).get("skipped_reason") or "")
+    if archive_cache and archive_skipped_reason == "archive_inspection_failed":
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+        )
+    elif archive_cache and archive_skipped_reason:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("runtime.doctor.archiveCacheSkipped", doctor_language, reason=archive_skipped_reason),
+            i18n_t("runtime.doctor.archiveCacheSkippedAction", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+        )
+    elif archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t(
+                "runtime.doctor.archiveCacheReclaimable",
+                doctor_language,
+                count=int(archive_cache.get("candidate_count") or 0),
+                size=_format_byte_size(int(archive_cache.get("candidate_bytes") or 0)),
+            ),
+            i18n_t("runtime.doctor.archiveCacheReclaimableAction", doctor_language),
+            code="show_runtime.archive_cache_reclaimable",
+        )
+    elif archive_cache is not None:
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("runtime.doctor.archiveCacheClean", _configured_cli_language()),
+            code="show_runtime.archive_cache_clean",
+        )
 
     provider = str(status.get("provider") or "unknown")
     explicit_command = status.get("explicit_command")
@@ -11700,19 +11810,13 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
 
 
 def _write_refreshed_runtime_status() -> None:
+    # Asked, not re-derived. A repair that wrote its own idea of the state word
+    # would be the second place deciding one fact -- and the one that persists
+    # it, so a lock holder still migrating would be recorded as `running` and
+    # every later reader would inherit that answer instead of measuring.
     status = runtime.read_status()
-    ui_pid = status.get("ui_pid")
-    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
-    extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
-    if owner_pid:
-        detail = f"pid={owner_pid}"
-        if extra_pids:
-            detail = f"{detail}; extra_service_pids={','.join(map(str, extra_pids))}"
-        runtime.write_status("running", detail, owner_pid, ui_pid)
-    elif extra_pids:
-        runtime.write_status("degraded", f"lockless service process detected pid={extra_pids[0]}", extra_pids[0], ui_pid)
-    else:
-        runtime.write_status("stopped", "process not running", None, ui_pid)
+    resolved = runtime.resolve_service_state()
+    runtime.write_status(resolved.state, resolved.detail, resolved.service_pid, status.get("ui_pid"))
 
 
 def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
@@ -12197,20 +12301,31 @@ def cmd_start():
             language = normalize_language(getattr(config, "language", None))
             print(i18n_t("memory.cli.partialRestartWarning", language))
             print("")
-    service_ready = runtime.service_pid_recorded(service_pid)
-    if not service_ready:
+    # The WAIT below is asked unconditionally. The predicate that used to guard
+    # it is the lock, which is taken before the database is migrated -- so it is
+    # already true of a process that has not finished starting and may never, and
+    # guarding with it skipped the wait in exactly the case the wait exists for.
+    # Nothing is paid for asking: a service that is up answers on the first probe.
+    #
+    # The provisional "starting" WRITE is guarded, and the difference is the
+    # point: `write_status` carries `started_at` forward only across consecutive
+    # `running` writes, so announcing a transition for a service this command did
+    # not start resets its recorded uptime to now and briefly shows a starting
+    # service to every status consumer. `vibe start` against a live instance is
+    # idempotent and must stay observably so.
+    if not service_reused:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
-        # Resolve the authoritative service.lock holder rather than waiting on the
-        # raw pid start_service handed back: under a delegated user scope that pid
-        # can be a launcher that never takes the lock, so wait_for_service_ready
-        # adopts and returns the real owner instead of stalling the full timeout.
-        resolved_pid = runtime.wait_for_service_ready(
-            service_pid,
-            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-        )
-        if resolved_pid is not None:
-            service_pid = resolved_pid
-            service_ready = True
+    # The wait resolves the authoritative service.lock holder rather than waiting
+    # on the raw pid start_service handed back: under a delegated user scope that
+    # pid can be a launcher that never takes the lock, so wait_for_service_ready
+    # adopts and returns the real owner instead of stalling the full timeout.
+    resolved_pid = runtime.wait_for_service_ready(
+        service_pid,
+        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+    )
+    service_ready = resolved_pid is not None
+    if resolved_pid is not None:
+        service_pid = resolved_pid
     if service_ready:
         runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
     elif runtime.pid_alive(service_pid):
@@ -12813,9 +12928,8 @@ def _prewarm_show_page_session_best_effort(
     session_id: str,
     *,
     context: str,
-    base_path: str | None = None,
 ) -> None:
-    if _request_show_page_prewarm_best_effort(session_id, context=context, base_path=base_path) is None:
+    if _request_show_page_prewarm_best_effort(session_id, context=context) is None:
         logger.debug("Show Page session prewarm skipped for %s", session_id)
 
 
@@ -12910,12 +13024,10 @@ def cmd_show_update(args):
                 message = "Show Page has been taken offline. Local files were not deleted."
 
         if updated.visibility != "offline":
-            base_path = f"/p/{updated.share_id}/" if updated.visibility == "public" and updated.share_id else None
-            context = ShowRuntimeContext.SHARED if base_path else ShowRuntimeContext.PRIVATE
+            context = ShowRuntimeContext.SHARED if updated.visibility == "public" else ShowRuntimeContext.PRIVATE
             _prewarm_show_page_session_best_effort(
                 updated.session_id,
                 context=context.value,
-                base_path=base_path,
             )
         payload = _show_page_result(updated, message=message, extra=extra)
         if getattr(args, "json", False):
@@ -13039,7 +13151,6 @@ def _request_show_page_prewarm_best_effort(
     session_id: str,
     *,
     context: str,
-    base_path: str | None = None,
 ) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 
@@ -13047,8 +13158,6 @@ def _request_show_page_prewarm_best_effort(
     if not targets:
         return None
     payload = {"context": context}
-    if base_path:
-        payload["base_path"] = base_path
     body = json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -13922,6 +14031,7 @@ def cmd_upgrade():
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        rollback_to=plan.rollback_to,
                     )
                 except Exception as exc:
                     print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
@@ -14029,10 +14139,11 @@ def cmd_runtime(args) -> int:
     if command == "prepare":
         offline = True if getattr(args, "offline", False) else None
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
-        askill = _ensure_askill_during_prepare(offline=bool(offline))
-        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
-        git = _ensure_git_during_prepare(offline=offline, force=getattr(args, "force", False))
-        avault = _ensure_avault_during_prepare(offline=bool(offline))
+        force = bool(getattr(args, "force", False))
+        askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
+        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
+        git = _ensure_git_during_prepare(offline=offline, force=force)
+        avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         payload["askill"] = askill
         payload["avault"] = avault
         payload["tmux"] = tmux
@@ -14078,15 +14189,76 @@ def cmd_runtime(args) -> int:
         strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
-        payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
-        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))
+        dry_run = bool(getattr(args, "dry_run", False))
+        payload = manager.clean(
+            keep_previous=getattr(args, "keep_previous", 1),
+            dry_run=dry_run,
+        )
+        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1), dry_run=dry_run)
         payload["git"] = git
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
+            language = _configured_cli_language()
+            archives = payload.get("archives") or {}
+            skipped_reason = str(archives.get("skipped_reason") or "")
+            outcome = str(archives.get("outcome") or "")
+            # Show/Git results are reported independently of the archive
+            # outcome: a skipped archive pass must not hide what the rest of
+            # the cleanup actually reclaimed (or would reclaim).
+            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
-            print(f"Removed {len(removed)} Show Runtime cache item(s).")
-            print(f"Removed {len(git.get('removed') or [])} Git Runtime cache item(s).")
+            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            is_partial_run = outcome == "partial" and not dry_run
+            if is_partial_run:
+                print(
+                    i18n_t(
+                        "runtime.clean.removedArchives",
+                        language,
+                        count=int(archives.get("removed_count") or 0),
+                        size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
+                    )
+                )
+                print(
+                    i18n_t("runtime.clean.partiallyRemoved", language, failed=int(archives.get("failed_count") or 0)),
+                    file=sys.stderr,
+                )
+            elif skipped_reason:
+                # A skipped/failed archive pass is not a completed zero-removal
+                # cleanup; say so instead of printing placeholder counts, with
+                # remediation that matches the actual reason.
+                if skipped_reason == "archive_removal_failed":
+                    print(
+                        i18n_t(
+                            "runtime.clean.removalFailed",
+                            language,
+                            failed=int(archives.get("failed_count") or 0),
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    skip_key = (
+                        "runtime.clean.skippedInspection"
+                        if skipped_reason == "archive_inspection_failed"
+                        else "runtime.clean.skipped"
+                    )
+                    print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
+            else:
+                archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
+                archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
+                print(
+                    i18n_t(
+                        f"{prefix_key}Archives",
+                        language,
+                        count=archive_count,
+                        size=_format_byte_size(archive_bytes),
+                    )
+                )
+            if git.get("ok") is False and git.get("reason"):
+                git_skip_key = "runtime.clean.gitSkippedPreview" if dry_run else "runtime.clean.gitSkipped"
+                print(i18n_t(git_skip_key, language, reason=git["reason"]), file=sys.stderr)
+            else:
+                print(i18n_t(f"{prefix_key}Git", language, count=len(git.get("removed") or [])))
         return 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
@@ -14123,25 +14295,67 @@ def _prepare_show_runtime_after_install(vibe_path: str | None) -> None:
         print(detail)
 
 
-def _ensure_askill_during_prepare(offline: bool = False) -> dict:
+def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) -> dict:
     """Ensure askill (a required local dependency) alongside the Show Runtime.
 
     Folded into ``vibe runtime prepare`` so askill auto-installs at exactly the
     same lifecycle points as the Show Page runtime (post install / upgrade),
     with a ``VIBE_INSTALL_SKIP_ASKILL`` escape hatch mirroring the Show Runtime
     one. Skipped under ``--offline`` (the askill installer needs the network).
-    Refreshes askill to latest even when a binary already exists — prepare is
-    the chokepoint that keeps required local deps current on upgrade. An askill
-    hiccup never fails the prepare; the Dependencies page offers a manual retry.
+    Refreshes askill to latest so prepare stays the chokepoint that keeps
+    required local deps current on upgrade, but asks whether that refresh would
+    change anything before running the installer: askill.sh re-downloads the CLI
+    on every run, so an unconditional refresh charged every prepare ~30s to
+    install the version already on disk. An askill hiccup never fails the
+    prepare; the Dependencies page offers a manual retry.
+
+    ``force`` is prepare's ``--force``, and it means repair, not currency: a
+    corrupted binary can still report the current version, so an explicit
+    ``vibe runtime prepare --force`` must reinstall rather than ask. Currency is
+    the default; repair stays available on request, exactly as it is for the
+    Show Runtime, tmux, and git phases.
+
+    Only an explicit ``up_to_date`` verdict may report ready. Any other verdict
+    that installed nothing means currency was not established, not that it holds,
+    so prepare installs instead of claiming a fact it never checked.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
-        return api.ensure_askill_installed(force=True)
+        if force:
+            return api.ensure_askill_installed(force=True)
+        result = api.refresh_askill_if_stale()
+        if not (result.get("ok") and result.get("action") is None):
+            return result
+        if result.get("reason") != "up_to_date":
+            # The owner skipped without establishing currency — today that is
+            # ``latest_unavailable``, when the upstream version probe failed.
+            # Prepare is the chokepoint that must *make* the dependency current,
+            # so with no evidence either way it does what it did before this fast
+            # path existed and installs. The probe and the askill.sh installer
+            # are independent paths: a rate-limited or blipped version lookup
+            # says nothing about whether the install would succeed, and reporting
+            # ready off the back of it would claim currency we never checked.
+            # Only ``up_to_date`` may report ready, so a skip reason added later
+            # takes this branch rather than inheriting a false pass.
+            refreshed = api.ensure_askill_installed(force=True)
+            refreshed["action"] = "refresh_currency_unknown"
+            return refreshed
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
+    # Already current, and the owner said so: report ready rather than skipped so
+    # prepare's dependency lines read the same way as the pinned providers when
+    # nothing needed doing.
+    status = result.get("status") or {}
+    return {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": status.get("path"),
+        "version": status.get("version"),
+    }
 
 
 def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> dict:
@@ -14175,23 +14389,42 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         return {"ok": False, "message": str(exc)}
 
 
-def _clean_git_runtime(*, keep_previous: int) -> dict:
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
+
+
+def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
     try:
         from core.git_runtime import get_git_runtime_manager
 
-        return get_git_runtime_manager().clean(keep_previous=keep_previous)
+        return get_git_runtime_manager().clean(keep_previous=keep_previous, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "removed": [], "message": str(exc)}
 
 
-def _ensure_avault_during_prepare(offline: bool = False) -> dict:
-    """Ensure avault (the Vault custody core) alongside other local deps."""
+def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) -> dict:
+    """Ensure avault (the Vault custody core) alongside other local deps.
+
+    Raises avault to the managed pin on upgrade, but only downloads when the pin
+    is not already satisfied: the reinstall it used to force on every prepare
+    took ~20s to put back the release that was already installed. ``force`` is
+    prepare's ``--force`` repair request and still reinstalls the managed
+    release, since a corrupted binary can report the pinned version.
+    """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
-        return api.ensure_avault_installed(force=True)
+        if force:
+            return api.ensure_avault_installed(force=True)
+        return api.refresh_avault_if_stale()
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 
@@ -14248,13 +14481,11 @@ def build_parser():
         default=0,
         help="Schedule the restart to run asynchronously after N seconds, then exit immediately.",
     )
-    supervisor_parser = subparsers.add_parser("__restart-supervisor", help=argparse.SUPPRESS)
-    supervisor_parser.add_argument("--job-id", required=True)
-    supervisor_parser.add_argument("--delay-seconds", type=_non_negative_float, default=0)
-    supervisor_parser.add_argument("--trigger", default="cli")
-    supervisor_parser.add_argument("--scope", default="all", choices=("all", "service"))
-    supervisor_parser.add_argument("--vibe-path")
-    supervisor_parser.add_argument("--prepare-show-runtime", action="store_true")
+    # `__restart-supervisor` is deliberately absent here. It is never typed: this
+    # program spawns it, and `vibe/restart_supervisor.py` owns both the argv it
+    # builds and the parser that reads it back. Restating those flags here made
+    # this parser a second, silently authoritative owner -- and the one that runs
+    # first. See `_dispatch_restart_supervisor`.
     subparsers.add_parser("status", help="Show service status")
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -14432,6 +14663,11 @@ def build_parser():
 
     runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
+    runtime_clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=i18n_t("runtime.clean.dryRunHelp", _configured_cli_language()),
+    )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(
         "remote",
@@ -15949,8 +16185,32 @@ def build_parser():
     return parser
 
 
+def _dispatch_restart_supervisor(argv: list[str]) -> int:
+    """Hand a spawned restart job's own argv straight to its own parser.
+
+    `__restart-supervisor` is not a command a person types; `schedule_restart`
+    builds this argv and `vibe/restart_supervisor.py` parses it back. Declaring
+    those flags on the top-level parser as well made two owners for one command,
+    with a hand-copied translation between them -- and the top-level one runs
+    first, so a flag added only to the supervisor's parser was not merely
+    unavailable, it was rejected. That is how the rollback flags shipped dead:
+    every unit test called `restart_supervisor.main([...])` directly, and the one
+    path that goes through this file was the one path nothing exercised.
+
+    Passing the tail through leaves a single parser for the command, so the two
+    can no longer disagree.
+    """
+
+    from vibe.restart_supervisor import main as restart_supervisor_main
+
+    return restart_supervisor_main(argv)
+
+
 def main():
     cache_running_vibe_path()
+    argv = sys.argv[1:]
+    if argv and argv[0] == "__restart-supervisor":
+        sys.exit(_dispatch_restart_supervisor(argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 
@@ -15960,24 +16220,6 @@ def main():
         sys.exit(cmd_start())
     if args.command == "restart":
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
-    if args.command == "__restart-supervisor":
-        from vibe.restart_supervisor import main as restart_supervisor_main
-
-        sys.exit(
-            restart_supervisor_main(
-                [
-                    "--job-id",
-                    args.job_id,
-                    "--delay-seconds",
-                    str(args.delay_seconds),
-                    "--trigger",
-                    args.trigger,
-                    *(["--scope", args.scope] if args.scope != "all" else []),
-                    *(["--prepare-show-runtime"] if args.prepare_show_runtime else []),
-                    *(["--vibe-path", args.vibe_path] if args.vibe_path else []),
-                ]
-            )
-        )
     if args.command == "status":
         sys.exit(cmd_status())
     if args.command == "memory":

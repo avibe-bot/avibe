@@ -1,6 +1,7 @@
 import json
 import os
 import pytest
+import re
 import signal
 import shlex
 import sqlite3
@@ -185,6 +186,29 @@ def test_status_written(tmp_path, monkeypatch):
     assert payload["detail"] == "pid=123"
 
 
+@pytest.mark.parametrize("state", ["running", "starting", "stopped", "error", "degraded"])
+@pytest.mark.parametrize("ok", [False, None, True], ids=["failed", "in-flight", "succeeded"])
+def test_a_restart_record_survives_every_status_write(tmp_path, monkeypatch, state, ok):
+    """Nothing about writing runtime status touches the restart record.
+
+    The record is the restart subsystem's own account of its last job, and doctor
+    reads it against live facts rather than against anything a status write
+    remembered. Seeded across every outcome and every state a caller can write, so
+    a status path added later inherits the assertion instead of needing its own.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    payload = {"ok": ok, "state": "failed" if ok is False else "succeeded", "job_id": "job-1"}
+    runtime.write_json(restart_path, payload)
+
+    runtime.write_status(state, detail="pid=123")
+
+    assert runtime.read_status()["state"] == state
+    assert runtime.read_json(restart_path) == payload
+
+
 def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     runtime.ensure_dirs()
@@ -262,6 +286,79 @@ def test_render_status_keeps_a_recorded_error_when_the_service_is_stopped(tmp_pa
     # A terminal state is why the service is gone; do not overwrite it.
     assert payload["internal_server"]["state"] == "error"
     assert "stale" not in payload["internal_server"]
+
+
+def _age_status_record(seconds: float) -> None:
+    """Backdate the persisted status by `seconds`, leaving everything else alone."""
+
+    path = paths.get_runtime_status_path()
+    status = runtime.read_json(path) or {}
+    status["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+    runtime.write_json(path, status)
+
+
+def test_render_status_keeps_a_recent_starting_record_over_a_stopped_service(tmp_path, monkeypatch):
+    """The window `starting` exists to cover, and it must still be covered.
+
+    Between the spawn and the moment the child takes the instance lock nothing
+    resolves as running. Reporting that window as `stopped` would make every
+    healthy start look like a failure, so a resolved `stopped` does not overwrite
+    a fresh `starting`.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "starting"
+
+
+def test_render_status_stops_believing_a_starting_record_that_outlived_its_start(tmp_path, monkeypatch):
+    """`starting` is a claim about a process expected to arrive, so it expires.
+
+    Unlike `setup` and `error`, which describe a machine deliberately not
+    running, `starting` describes one in flight -- and a release that dies inside
+    its own startup leaves that record behind with nothing coming to replace it.
+    Believing it forever is how an instance with no service reports that it is
+    coming up, for eight days. The deadline is `wait_for_service_ready`'s own:
+    past the point where the waiter gives up, the record no longer describes a
+    machine coming up.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    _age_status_record(runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS + 30)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "stopped"
+    assert payload["running"] is False
+
+
+def test_render_status_treats_an_undatable_starting_record_as_expired(tmp_path, monkeypatch):
+    """An undatable `starting` that is believed lasts forever.
+
+    Every status write stamps `updated_at`, so a record without a readable one
+    cannot be dated at all -- and the whole point of the deadline is that this
+    state must not be permanent. Defaulting the other way would restore the
+    original bug through the one input the deadline cannot measure.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    status_path = paths.get_runtime_status_path()
+    runtime.write_json(status_path, {**(runtime.read_json(status_path) or {}), "updated_at": "not a timestamp"})
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "stopped"
 
 
 def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
@@ -706,7 +803,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
@@ -737,7 +834,6 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 1234)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
@@ -750,6 +846,53 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     assert calls[service_index][1]["memory_ui_secret"] == calls[ui_index][3]["memory_ui_secret"]
     assert ("runtime_status", ("starting", "waiting for service process", 1234, 5678)) in calls
     assert ("runtime_status", ("starting", "service process is still starting", 1234, 5678)) in calls
+
+
+def test_cmd_start_against_a_live_service_neither_resets_its_uptime_nor_skips_the_wait(monkeypatch):
+    """`vibe start` is idempotent, and has to be observably idempotent.
+
+    `write_status` carries `started_at` forward only across consecutive `running`
+    writes, so announcing a `starting` transition for a service this command did
+    not start resets the recorded uptime to now -- every status consumer, the
+    dashboard included, then reads a service that has been up for weeks as one
+    that just began starting.
+
+    The wait is the other half, and it is the half that was broken the other way:
+    the predicate that used to guard it was the service lock, taken before the
+    database is migrated, so it read true for a process that had not finished
+    starting and skipped the wait in exactly the case the wait exists for. So
+    only the provisional write is conditional; the wait is always asked, and a
+    service that is already up answers it on the first probe.
+    """
+
+    calls = []
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    # The live pair: `start_service` hands back the pid that already holds the
+    # lock, which is what makes this a reuse rather than a start.
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "wait_for_service_ready",
+        lambda pid, timeout=None: calls.append(("wait", pid)) or pid,
+    )
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
+
+    assert cli.cmd_start() == 0
+
+    assert ("wait", 1234) in calls, "the readiness wait must be asked even for a service already up"
+    announced = [args[0] for kind, args in calls if kind == "runtime_status"]
+    assert "starting" not in announced, f"a reused service was announced as starting: {announced}"
 
 
 def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
@@ -766,7 +909,6 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
@@ -807,7 +949,7 @@ def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(m
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
 
     assert cli.cmd_start() == 0
@@ -853,7 +995,7 @@ def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
 
     assert cli.cmd_start() == 0
@@ -886,7 +1028,7 @@ def test_cmd_start_keeps_a_reused_pair_untouched(monkeypatch, capsys):
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 5678,
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
 
     assert cli.cmd_start() == 0
@@ -1346,6 +1488,252 @@ def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkey
     assert refreshed == [True]
 
 
+def _restart_status_payload(**overrides) -> dict:
+    """Return the status the restart supervisor writes, defaulted to a failure."""
+
+    payload = {
+        "ok": False,
+        "job_id": "0d1f2e3a4b5c",
+        "supervisor_pid": 4242,
+        "supervisor_started_at": 1.0,
+        "state": "failed",
+        "trigger": "auto-update",
+        "delay_seconds": 0.0,
+        "scope": "all",
+        "old_pid": 111,
+        "new_pid": None,
+        "log_path": "/tmp/vibe-restart-0d1f2e3a4b5c.log",
+        "error": "start runtime failed: Config 'model_hub'\n  contains unknown fields",
+        "created_at": "2026-08-11T04:50:31Z",
+        "stage_durations": {"restart_total_seconds": 1.5},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, payload)
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(restart_path, (stamp, stamp))
+    return restart_path
+
+
+def _stub_service_liveness(
+    monkeypatch,
+    *,
+    owner_pid=None,
+    starting_pid=None,
+    extra_pids=(),
+    lock_held=None,
+    holder_finished_starting=True,
+):
+    """Describe a machine state, and let the real predicates read it.
+
+    Stubbing ``verified_service_running`` itself would only assert which helper
+    doctor calls. These are the sources underneath it and underneath the broader
+    ``service_process_running``, so a test can name a machine state -- a lock
+    owner, a pid that only reserved itself, a stray process -- and assert the
+    verdict the real predicates produce for it.
+
+    ``lock_held`` defaults to whether a lock owner was named, which is the usual
+    case. Pass it True with no ``owner_pid`` for the state where the two come
+    apart: the lock is held but its record answers no pid, either because the
+    service has not written it yet or because it was corrupted.
+
+    ``holder_finished_starting`` is the holder's own report, and it is a separate
+    axis from the lock because the lock is taken before the database is migrated:
+    a holder can occupy the instance for days without ever having finished
+    starting. Describing a lock owner without it would describe only half a
+    machine state.
+    """
+
+    reserved = owner_pid if starting_pid is None else starting_pid
+    holds_lock = owner_pid is not None if lock_held is None else lock_held
+
+    def resolve_owner(*, include_starting=False, **_kwargs):
+        return reserved if include_starting else owner_pid
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda: (not holds_lock, owner_pid))
+    monkeypatch.setattr(
+        cli.runtime,
+        "service_instance_started",
+        lambda pid: holder_finished_starting and pid == owner_pid,
+    )
+
+
+@pytest.mark.parametrize(
+    "age_seconds",
+    [0.0, cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60],
+    ids=["fresh", "past-retention"],
+)
+def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatch, age_seconds):
+    """A restart that failed and left nothing running is a failure at any age.
+
+    Age is what used to decide the verdict, so both sides of the retention
+    boundary are exercised against the same recorded failure: while the instance
+    is down, neither side may call it healthy nor offer to delete the one record
+    of why it is down.
+    """
+
+    _seed_restart_status(_restart_status_payload(), age_seconds=age_seconds)
+    _stub_service_liveness(monkeypatch)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == ["fail"]
+    item = items[0]
+    assert item["code"] == "runtime.restart_failed"
+    assert "model_hub" in item["message"]
+    assert "\n" not in item["message"]
+    assert "vibe-restart-0d1f2e3a4b5c.log" in item["message"]
+    assert not item.get("repairable")
+    assert "stale-restart-state" not in item.get("action", "")
+
+
+def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypatch):
+    """Every command the action names is one the reader can actually run.
+
+    An action is actionable on its own or not at all. An earlier revision of this
+    told the reader to "apply the extra-service-process repair listed in this
+    report", which is a dependency on what else got rendered: that item is behind
+    `--deep`, and the default run is exactly where a reader of this item lands, so
+    the instruction resolved to nothing. Naming the command instead is the fix, and
+    parsing it here is what keeps the name honest -- a renamed or misspelled repair
+    target fails against the real parser rather than against a user who is already
+    down. Extracted rather than asserted literally, so a command added to this text
+    later is checked too.
+    """
+
+    _seed_restart_status(_restart_status_payload())
+    _stub_service_liveness(monkeypatch)
+
+    action = cli._restart_state_items()[0]["action"]
+    commands = [text for text in re.findall(r"`([^`]+)`", action) if text.startswith("vibe ")]
+    assert commands, f"the action names no runnable command: {action}"
+
+    parser = cli.build_parser()
+    for command in commands:
+        parser.parse_args(shlex.split(command)[1:])
+
+    assert "vibe doctor repair duplicate-service-processes" in commands
+
+    # No command twice. `duplicate-service-processes` starts a clean service on
+    # the no-owner path it is prescribed for, so a trailing "then start again"
+    # earns `ServiceAlreadyRunningError` and reads as a recovery that failed --
+    # which is why this asserts the shape rather than that one wording: any
+    # repair that already does what a later step repeats fails here.
+    assert len(commands) == len(set(commands)), f"the action asks for a command twice: {commands}"
+
+
+@pytest.mark.parametrize(
+    ("liveness", "expected"),
+    [
+        ({}, "fail"),
+        ({"starting_pid": 5555}, "fail"),
+        ({"extra_pids": (7777,)}, "fail"),
+        ({"starting_pid": 5555, "extra_pids": (5555,)}, "fail"),
+        ({"owner_pid": 4321, "holder_finished_starting": False}, "fail"),
+        ({"lock_held": True}, "fail"),
+        ({"owner_pid": 4321}, "warn"),
+        ({"owner_pid": 4321, "extra_pids": (7777,)}, "warn"),
+    ],
+    ids=[
+        "nothing-running",
+        "pid-reserved-but-never-locked",
+        "stray-process-holding-no-lock",
+        "half-started-child-both-reserved-and-scanned",
+        "lock-owner-still-starting",
+        "lock-held-but-its-record-answers-no-pid",
+        "lock-owner-that-finished-starting",
+        "that-owner-beside-a-stray-process",
+    ],
+)
+def test_a_restart_failure_is_downtime_until_a_started_service_says_otherwise(monkeypatch, liveness, expected):
+    """One record against every liveness shape: only a service that finished starting ends downtime.
+
+    The shapes that hold no lock are the wreckage a failed restart leaves: a pid
+    that reserved itself and never acquired the lock, a stray process the scan can
+    see, or one child that is both. Reading any of them as a running service would
+    suppress the very failure that produced it.
+
+    The two lock-holding failures are the ones this PR exists for. A holder is not
+    a service by virtue of holding the lock, because the lock is taken before the
+    database is migrated: the fifth shape is a process that took it and hung in a
+    migration, which is #1567's eight-day outage, and the sixth is a holder whose
+    record answers no pid, so nothing it did can be verified at all. Both occupy
+    the instance without serving it, and calling either one recovery is how the
+    outage stayed invisible behind a green health check.
+
+    Only a holder that published its own start ends the failure -- with or without
+    a stray process beside it, which is a separate item's problem.
+    """
+
+    _seed_restart_status(
+        _restart_status_payload(),
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    _stub_service_liveness(monkeypatch, **liveness)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == [expected]
+    if expected == "warn":
+        assert items[0]["repair"]["target"] == "stale-restart-state"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"service_alive": True}, {"service_alive": False}, {"whatever_a_future_writer_adds": True}],
+    ids=["bare", "claims-a-service-survived", "claims-nothing-survived", "an-unknown-field"],
+)
+def test_only_live_facts_decide_downtime_not_what_the_record_claims(monkeypatch, extra):
+    """No field in the record can talk doctor out of a verdict about right now.
+
+    A record is written at failure time and read arbitrarily later, so anything it
+    says about what was alive is a snapshot that may since have been falsified --
+    by a child that took the lock after the supervisor gave up, or by any later
+    start. The rule reads the record for the outcome and the machine for liveness,
+    and nothing else. Seeded with the field a previous revision of this PR wrote,
+    both ways round, so a record produced by any version reaches the same verdict.
+    """
+
+    _seed_restart_status(
+        {**_restart_status_payload(), **extra},
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    _stub_service_liveness(monkeypatch)
+
+    assert [item["status"] for item in cli._restart_state_items()] == ["fail"]
+
+
+def test_restart_state_items_classify_non_failures_without_probing_the_service(monkeypatch):
+    """A record the supervisor did not fail keeps the classification it always had.
+
+    The probes raise instead of returning a pid so this also pins the
+    short-circuit: only a recorded failure may cost doctor a process probe.
+    """
+
+    def fail_probe(*args, **kwargs):
+        raise AssertionError("classifying a non-failure must not probe the service")
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
+    succeeded = _restart_status_payload(ok=True, state="succeeded", error=None, new_pid=222)
+
+    _seed_restart_status(succeeded)
+    assert [item["status"] for item in cli._restart_state_items()] == ["pass"]
+
+    _seed_restart_status(succeeded, age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60)
+    stale = cli._restart_state_items()
+    assert [item["status"] for item in stale] == ["warn"]
+    assert stale[0]["repair"]["target"] == "stale-restart-state"
+
+
 def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     def fail_runtime_probe(*args, **kwargs):
         raise AssertionError("dry-run must not touch runtime probes")
@@ -1383,6 +1771,40 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
 
     assert next(item for item in items if item.get("code") == "show_runtime.not_ready")["repair"]["target"] == "show-runtime"
     assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
+
+
+def test_show_runtime_doctor_reports_skipped_archive_inspection_as_warn(monkeypatch):
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {
+            "name": "vibe-show-runtime-node-linux-x64.tgz",
+            "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.5/vibe-show-runtime-node-linux-x64.tgz",
+        },
+        "installed": True,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: (_ for _ in ()).throw(AssertionError("fast Doctor must not probe network")),
+        archive_cache_status=lambda: {
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "skipped_reason": "runtime_install_already_running",
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    skipped = next(item for item in items if item.get("code") == "show_runtime.archive_cache_skipped")
+    assert skipped["status"] == "warn"
+    clean = [item for item in items if item.get("code") == "show_runtime.archive_cache_clean"]
+    assert not clean  # an uninspected cache must not be reported as clean
 
 
 def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):

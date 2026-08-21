@@ -1,17 +1,25 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { cleanup, render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
+import {
+  APP_SHELL_SCROLL_ID,
+  clearMobileProjectsListSnapshot,
+  holdMobileProjectsListForChatReturn,
+  readMobileProjectsListSnapshot,
+} from '../lib/mobileProjectsListMemory';
 import { AppShell } from './AppShell';
 
-vi.hoisted(() => {
+const viewport = vi.hoisted(() => {
+  const state = { isDesktop: false };
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
-      matches: false,
+      matches: state.isDesktop,
       media: query,
       onchange: null,
       addListener: vi.fn(),
@@ -21,6 +29,7 @@ vi.hoisted(() => {
       dispatchEvent: vi.fn(),
     })),
   );
+  return state;
 });
 
 const api = vi.hoisted(() => ({
@@ -35,6 +44,7 @@ const instanceAuth = vi.hoisted(() => ({
   instanceKind: null as 'personal' | 'organization' | null,
   capabilities: {
     can_manage_instance: true,
+    can_manage_access_members: true,
     can_chat: true,
     can_use_agents: true,
     can_use_skills: true,
@@ -80,7 +90,9 @@ vi.mock('./apps/WindowLayer', () => ({ WindowLayer: () => <div data-testid="wind
 vi.mock('./workbench/NewSessionSheet', () => ({
   NewSessionSheet: () => null,
 }));
-vi.mock('./workbench/WorkbenchSidebar', () => ({ WorkbenchSidebar: () => <div /> }));
+vi.mock('./workbench/WorkbenchSidebar', () => ({
+  WorkbenchSidebar: () => <div data-testid="workbench-sidebar" />,
+}));
 vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -94,6 +106,8 @@ vi.mock('react-i18next', () => ({
 }));
 
 beforeEach(() => {
+  viewport.isDesktop = false;
+  clearMobileProjectsListSnapshot();
   instanceAuth.instanceKind = null;
   instanceAuth.capabilities.can_manage_instance = true;
   instanceAuth.capabilities.can_chat = true;
@@ -108,6 +122,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearMobileProjectsListSnapshot();
   vi.clearAllMocks();
 });
 
@@ -129,12 +144,94 @@ describe('AppShell setup recovery', () => {
   });
 });
 
-describe('AppShell Organization navigation', () => {
+describe('AppShell workbench sidebar', () => {
+  // The sidebar's own container is hidden below md by CSS, which does not
+  // unmount it. Its consumers fetch the inbox feed and the project tree on
+  // mount, so a demand gate keyed on mounting is only true if mounting means
+  // visible — the mount site owns that, not the sidebar's callers.
   it.each([
-    ['personal', 0],
-    [null, 0],
-    ['organization', 2],
-  ] as const)('shows Organization only for %s instances', async (instanceKind, expectedCount) => {
+    [false, 0],
+    [true, 1],
+  ])('mounts only where it is visible (desktop: %s)', async (isDesktop, expectedMounts) => {
+    viewport.isDesktop = isDesktop;
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
+    expect(screen.queryAllByTestId('workbench-sidebar')).toHaveLength(expectedMounts);
+    // The surrounding chrome is unaffected: only the data-reading member of the
+    // desktop-only container is gated, not the container.
+    expect(screen.getAllByText('appShell.title').length).toBeGreaterThan(0);
+  });
+
+  it('exposes the mobile scroll owner for page-level restoration', async () => {
+    render(
+      <MemoryRouter initialEntries={['/projects']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/projects" element={<div data-testid="projects-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('projects-surface')).toBeTruthy();
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)).not.toBeNull();
+  });
+
+  it('forgets the mobile projects list when leaving chat or projects', async () => {
+    const user = userEvent.setup();
+    holdMobileProjectsListForChatReturn({ visibleCounts: { proj_a: 16 }, scrollTop: 180 });
+
+    const ChatProbe = () => {
+      const navigate = useNavigate();
+      return (
+        <div data-testid="chat-surface">
+          <button type="button" onClick={() => navigate('/inbox')}>
+            leave-chat
+          </button>
+        </div>
+      );
+    };
+
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/chat/:sessionId" element={<ChatProbe />} />
+            <Route path="/inbox" element={<div data-testid="inbox-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat-surface')).toBeTruthy();
+    expect(readMobileProjectsListSnapshot()).toEqual({
+      visibleCounts: { proj_a: 16 },
+      scrollTop: 180,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'leave-chat' }));
+    expect(await screen.findByTestId('inbox-surface')).toBeTruthy();
+    expect(readMobileProjectsListSnapshot()).toEqual({ visibleCounts: {}, scrollTop: 0 });
+  });
+});
+
+describe('AppShell Permissions navigation', () => {
+  it.each([
+    'personal',
+    null,
+    'organization',
+  ] as const)('keeps current-instance Permissions in More Settings for %s instances', async (instanceKind) => {
+    const user = userEvent.setup();
     instanceAuth.instanceKind = instanceKind;
 
     render(
@@ -148,12 +245,63 @@ describe('AppShell Organization navigation', () => {
     );
 
     expect(await screen.findByTestId('dashboard')).toBeTruthy();
-    const organizationEntries = screen.queryAllByText('nav.organization');
-    expect(organizationEntries).toHaveLength(expectedCount);
+
+    const moreTab = screen.getByRole('button', { name: 'nav.more' });
+    const bottomNav = moreTab.closest('nav');
+    expect(bottomNav).not.toBeNull();
+    expect(within(bottomNav!).queryByText('nav.permissions')).toBeNull();
+
+    await user.click(moreTab);
+    const moreSettings = screen.getByRole('dialog');
+    expect(within(moreSettings).getByRole('link', { name: 'nav.permissions' }).getAttribute('href')).toBe(
+      '/admin/permissions',
+    );
+
+    const desktopSidebar = document.querySelector('aside');
+    expect(desktopSidebar).not.toBeNull();
+    expect(within(desktopSidebar!).getByRole('link', { name: 'nav.permissions' }).getAttribute('href')).toBe(
+      '/admin/permissions',
+    );
   });
 });
 
 describe('AppShell remote Apps access', () => {
+  it('gives the mobile Show Page app the full viewport without duplicate shell chrome', async () => {
+    render(
+      <MemoryRouter initialEntries={['/apps/show/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/show/:sessionId" element={<div data-testid="show-page-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const surface = await screen.findByTestId('show-page-surface');
+    expect(screen.queryByRole('banner')).toBeNull();
+    expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
+    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).not.toContain('px-4 py-5');
+  });
+
+  it.each(['/apps/files', '/apps/terminal', '/apps/editor'])('gives the mobile built-in app %s the full viewport', async (path) => {
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path={path.slice(1)} element={<div data-testid="builtin-app-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const surface = await screen.findByTestId('builtin-app-surface');
+    expect(screen.queryByRole('banner')).toBeNull();
+    expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
+    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).not.toContain('px-4 py-5');
+  });
+
   it.each([
     ['owner', true],
     ['member', false],

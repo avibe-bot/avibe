@@ -13,6 +13,7 @@ _BOOL_PROPERTIES = {
     "inboxActivity",
     "inboxPreview",
     "inboxSettlesReply",
+    "detachedCompletion",
     "unread",
     "webPush",
 }
@@ -133,6 +134,28 @@ def spec_for(message_type: str) -> Mapping[str, Any]:
     return _TYPE_SPECS.get(message_type, _DEFAULT_SPEC)
 
 
+def is_detached_completion(message_type: str, metadata: Any = None) -> bool:
+    """Whether a row reports completion of work outside the current Turn."""
+
+    values = metadata if isinstance(metadata, Mapping) else {}
+    return bool(
+        values.get("detached") is True
+        and spec_for(message_type)["detachedCompletion"]
+    )
+
+
+def activity_role_for(message_type: str, metadata: Any = None) -> str:
+    """Resolve one row's role in the current Turn's Activity timeline."""
+
+    spec = spec_for(message_type)
+    values = metadata if isinstance(metadata, Mapping) else {}
+    if is_detached_completion(message_type, values):
+        return "none"
+    if values.get("event") in spec["terminalWhenEvents"]:
+        return "terminal"
+    return str(spec["activityRole"])
+
+
 def _sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -169,8 +192,10 @@ def build_partial_index_predicate(index_name: str) -> str:
 
 
 __all__ = [
+    "activity_role_for",
     "build_partial_index_predicate",
     "input_author_type_pairs",
+    "is_detached_completion",
     "spec_for",
     "types_with",
 ]

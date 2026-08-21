@@ -70,6 +70,13 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
     assert api.get_version_info() == {**expected, "build": {"kind": "package"}}
 
 
+def test_local_version_info_never_queries_package_index(monkeypatch) -> None:
+    monkeypatch.setattr("vibe.__version__", "3.0.12", raising=False)
+    monkeypatch.setattr(api, "get_build_identity", lambda: type("Build", (), {"as_dict": lambda self: {"kind": "package"}})())
+
+    assert api.get_local_version_info() == {"current": "3.0.12", "build": {"kind": "package"}}
+
+
 def test_configured_missing_metadata_stays_a_source_build(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("VIBE_BUILD_METADATA_PATH", str(tmp_path / "not-written-yet.json"))
     monkeypatch.setattr("vibe.__version__", "3.0.6rc5", raising=False)

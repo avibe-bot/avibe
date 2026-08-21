@@ -169,78 +169,8 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_web_oauth_cold_launch_retry_is_single_owner
-  - id: AUTH-SETUP-301
-    name: Explicit Organization management sign-in starts an interactive handoff
-    status: covered
-    kind: happy_path
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_explicit_management_sign_in_starts_interactive_handoff
-  - id: AUTH-SETUP-302
-    name: Silent Organization reauthorization is attempted only once
-    status: covered
-    kind: retry
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_silent_reauthorization_stops_after_login_required
-  - id: AUTH-SETUP-303
-    name: Explicit Organization logout suppresses silent reauthorization
-    status: covered
-    kind: teardown
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_logout_suppresses_silent_reauthorization
-  - id: AUTH-SETUP-304
-    name: Organization management subject mismatch is terminal
-    status: covered
-    kind: negative_path
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_is_terminal
-  - id: AUTH-SETUP-305
-    name: Invalid Organization callback state code or token requires manual sign-in
-    status: covered
-    kind: negative_path
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_invalid_callback_token_requires_manual_sign_in
-  - id: AUTH-SETUP-306
-    name: Missing Cloud session or login_required requires explicit sign-in
-    status: covered
-    kind: negative_path
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_silent_reauthorization_stops_after_login_required
-  - id: AUTH-SETUP-307
-    name: Remote Organization callback remains subject-bound and returns failures to its workflow
-    status: covered
-    kind: authorization
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_remote_callback_keeps_the_bound_subject
-  - id: AUTH-SETUP-308
-    name: Trusted loopback Organization login establishes the first subject
-    status: covered
-    kind: happy_path
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_trusted_loopback_flow_can_establish_the_first_subject
-  - id: AUTH-SETUP-309
-    name: Unbound trusted loopback cannot start silent Organization authorization
-    status: covered
-    kind: authorization
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_unbound_loopback_requires_interactive_sign_in
-  - id: AUTH-SETUP-310
-    name: Organization subject mismatch can re-enter explicit authorization and return to the initiating workbench route
-    status: covered
-    kind: retry
-    layer: scenario
-    backend: cloud_management
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::OrganizationManagementAuthScenarioTests::test_subject_mismatch_can_reenter_with_workbench_return_path
   - id: AUTH-SETUP-401
-    name: Exact-email Show Page login stays confined to its signed page
+    name: Exact-email Show Page login stays a /p-only reader and never enters /show
     status: covered
     kind: authorization
     layer: scenario
@@ -261,7 +191,7 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_recovers_and_revokes_without_oauth
   - id: AUTH-SETUP-404
-    name: Verified limited Show Page identity completes local guest admission
+    name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered
     kind: happy_path
     layer: scenario
@@ -324,5 +254,4 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_reuses_persistent_app_server
-next_priority:
-  - AUTH-SETUP-301
+next_priority: []

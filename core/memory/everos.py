@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -64,8 +65,12 @@ PROCESSING_PROBE_MAX_DEADLINE_SECONDS = (
     + PROCESSING_PROBE_DEADLINE_MARGIN_SECONDS
 )
 _PROCESSING_TIMEOUT_SECONDS = PROCESSING_PROBE_REQUEST_TIMEOUT_SECONDS
-_PREFLIGHT_TIMEOUT_SECONDS = 5.0
+_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _PREFLIGHT_RESPONSE_BYTES = _MAX_RESPONSE_BYTES
+_CHAT_PROBE_MAX_TOKENS = 8
+_CHAT_PROBE_TERMINAL_FINISH_REASONS = frozenset(
+    {"stop", "length", "content_filter", "tool_calls", "function_call"}
+)
 _PREFLIGHT_IMAGE_DATA_URI = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAYElEQVR42u3QAQ0AAAwC"
@@ -74,6 +79,10 @@ _PREFLIGHT_IMAGE_DATA_URI = (
 )
 MULTIMODAL_EXPLICIT_ENV = "AVIBE_MEMORY_MULTIMODAL_EXPLICIT"
 _PROFILE_QUERY = "profile"
+MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
+DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
+DASHSCOPE_RERANK_PATH = "api/v1/services/rerank/text-rerank/text-rerank"
+
 _MAX_LIST_PAGE_SIZE = 20
 _EVEROS_EXACT_SORT_WINDOW = 20_000
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
@@ -256,6 +265,7 @@ class EverOSPort:
         rerank_base_url: str | None = None,
         rerank_model: str | None = None,
         rerank_api_key: str | None = None,
+        rerank_provider: str | None = None,
         multimodal_base_url: str | None = None,
         multimodal_model: str | None = None,
         multimodal_api_key: str | None = None,
@@ -276,6 +286,11 @@ class EverOSPort:
         self._rerank_base_url = _normalized_endpoint_url(rerank_base_url)
         self._rerank_model = _optional_string(rerank_model)
         self._rerank_api_key = _optional_string(rerank_api_key)
+        self._rerank_provider = _normalized_rerank_provider(
+            rerank_provider,
+            base_url=rerank_base_url,
+            model=rerank_model,
+        )
         self._multimodal_base_url = _normalized_endpoint_url(multimodal_base_url)
         self._multimodal_model = _optional_string(multimodal_model)
         self._multimodal_api_key = _optional_string(multimodal_api_key)
@@ -629,7 +644,7 @@ class EverOSPort:
                     payload={
                         "model": self._llm_model,
                         "messages": [{"role": "user", "content": "Reply with OK."}],
-                        "max_tokens": 1,
+                        "max_tokens": _CHAT_PROBE_MAX_TOKENS,
                         "temperature": 0,
                     },
                     validator=_valid_chat_probe_response,
@@ -643,15 +658,7 @@ class EverOSPort:
                 ),
             ]
             if self._rerank_configured():
-                probes.append(
-                    _ProcessingProbeSpec(
-                        base_url=self._rerank_base_url,
-                        api_key=self._rerank_api_key,
-                        path=self._rerank_model or "",
-                        payload={"queries": ["OK"], "documents": ["OK"]},
-                        validator=_valid_rerank_probe_response,
-                    )
-                )
+                probes.append(self._rerank_probe_spec())
             if self._multimodal_configured():
                 probes.append(
                     _ProcessingProbeSpec(
@@ -677,22 +684,33 @@ class EverOSPort:
     async def preflight(self) -> MemoryPreflightResult:
         """Run one bounded request for each configured processing endpoint."""
         checks = [
-            ("llm", self._llm_base_url, self._llm_api_key, "chat/completions", {
-                "model": self._llm_model, "messages": [{"role": "user", "content": "OK"}], "max_tokens": 1, "temperature": 0,
-            }, _valid_chat_probe_response),
+            (
+                "llm",
+                self._llm_base_url,
+                self._llm_api_key,
+                "chat/completions",
+                {
+                    "model": self._llm_model,
+                    "messages": [{"role": "user", "content": "OK"}],
+                    "max_tokens": _CHAT_PROBE_MAX_TOKENS,
+                    "temperature": 0,
+                },
+                _valid_chat_probe_response,
+            ),
             ("embedding", self._embedding_base_url, self._embedding_api_key, "embeddings", {
                 "model": self._embedding_model, "input": "OK",
             }, _valid_embedding_probe_response),
         ]
         if self._rerank_configured():
+            probe = self._rerank_probe_spec()
             checks.append(
                 (
                     "rerank",
-                    self._rerank_base_url,
-                    self._rerank_api_key,
-                    self._rerank_model or "",
-                    {"queries": ["OK"], "documents": ["OK"]},
-                    _valid_rerank_probe_response,
+                    probe.base_url,
+                    probe.api_key,
+                    probe.path,
+                    probe.payload,
+                    probe.validator,
                 )
             )
         if self._multimodal_configured():
@@ -758,6 +776,14 @@ class EverOSPort:
 
     def _rerank_configured(self) -> bool:
         return all((self._rerank_base_url, self._rerank_model, self._rerank_api_key))
+
+    def _rerank_probe_spec(self) -> _ProcessingProbeSpec:
+        return _rerank_probe_spec(
+            base_url=self._rerank_base_url,
+            api_key=self._rerank_api_key,
+            model=self._rerank_model,
+            provider=self._rerank_provider,
+        )
 
     def _multimodal_configured(self) -> bool:
         return all(
@@ -1037,7 +1063,10 @@ class EverOSPort:
                 )
                 return None
             code = None
-            message = f"HTTP {status_code}"
+            if 200 <= status_code < 300:
+                message = _probe_response_issue(side, value) or "provider_response_invalid"
+            else:
+                message = f"HTTP {status_code}"
             if isinstance(value, dict) and isinstance(value.get("error"), dict):
                 error = value["error"]
                 code = _bounded_opaque_string(
@@ -1381,6 +1410,7 @@ def _structured_profile(value: Any) -> MemoryProfile | None:
     summary = _safe_text(value.get("summary")) if "summary" in value else None
     explicit_info = _structured_explicit_info(value)
     implicit_traits = _structured_implicit_traits(value)
+    summary = _repair_stale_profile_summary(summary, explicit_info, implicit_traits)
     updated_at = _normalized_profile_timestamp(value.get("profile_timestamp_ms"))
 
     # A provider timestamp is metadata, not readable profile content. Unknown
@@ -1393,6 +1423,32 @@ def _structured_profile(value: Any) -> MemoryProfile | None:
         implicit_traits=implicit_traits,
         updated_at=updated_at,
     )
+
+
+def _repair_stale_profile_summary(
+    summary: str | None,
+    explicit_info: tuple[MemoryProfileExplicitInfo, ...],
+    implicit_traits: tuple[MemoryProfileTrait, ...],
+) -> str | None:
+    """Repair EverAlgo summaries surfaced by EverOS when pinned to item one.
+
+    EverAlgo's profile updater appends new items but rebuilds ``summary`` from
+    the first non-empty explicit description. That makes a transient first
+    message the permanent headline. Only the distinctive stale shape is
+    changed here; provider-authored summaries that differ from the first item
+    remain authoritative, and the raw provider JSON stays untouched.
+    """
+
+    if summary is None:
+        return None
+
+    if len(explicit_info) > 1 and summary == explicit_info[0].description:
+        for info in reversed(explicit_info[1:]):
+            if info.description != summary:
+                return info.description
+        return summary
+
+    return summary
 
 
 def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExplicitInfo, ...]:
@@ -1570,14 +1626,41 @@ def _is_bounded_json_value(value: Any, *, depth: int = 0) -> bool:
 
 
 def _valid_chat_probe_response(value: Any) -> bool:
+    return _chat_probe_response_issue(value) is None
+
+
+def _chat_probe_response_issue(value: Any) -> str | None:
     if not isinstance(value, dict):
-        return False
+        return "provider_response_not_object"
     choices = value.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        return False
+    if not isinstance(choices, list) or not choices:
+        return "provider_response_missing_choices"
+    if not isinstance(choices[0], dict):
+        return "provider_response_invalid_choice"
     message = choices[0].get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    return isinstance(content, str) and bool(content.strip())
+    if not isinstance(message, dict):
+        return "provider_response_missing_message"
+    # Reasoning-model probes may omit content; treat absence like content: null.
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        return "provider_response_invalid_content"
+    if content is None or not content.strip():
+        if message.get("role") != "assistant":
+            return "provider_response_invalid_role"
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is None:
+            return "provider_response_missing_finish_reason"
+        if not isinstance(finish_reason, str):
+            return "provider_response_invalid_finish_reason"
+        if finish_reason not in _CHAT_PROBE_TERMINAL_FINISH_REASONS:
+            return "provider_response_invalid_finish_reason"
+    return None
+
+
+def _probe_response_issue(side: str, value: Any) -> str | None:
+    if side in {"llm", "multimodal"}:
+        return _chat_probe_response_issue(value)
+    return f"provider_{side}_response_invalid"
 
 
 def _valid_embedding_probe_response(value: Any) -> bool:
@@ -1596,6 +1679,10 @@ def _valid_embedding_probe_response(value: Any) -> bool:
 
 
 def _valid_rerank_probe_response(value: Any) -> bool:
+    return _valid_deepinfra_rerank_probe_response(value)
+
+
+def _valid_deepinfra_rerank_probe_response(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     scores = value.get("scores")
@@ -1607,6 +1694,61 @@ def _valid_rerank_probe_response(value: Any) -> bool:
         and isinstance(scores[0][0], (int, float))
         and not isinstance(scores[0][0], bool)
         and math.isfinite(scores[0][0])
+    )
+
+
+def _valid_ranked_results_probe_response(
+    value: Any,
+    *,
+    results_key: tuple[str, ...] = ("results",),
+) -> bool:
+    current: Any = value
+    for key in results_key:
+        if not isinstance(current, dict):
+            return False
+        current = current.get(key)
+    if not isinstance(current, list) or len(current) != 1 or not isinstance(current[0], dict):
+        return False
+    score = current[0].get("relevance_score")
+    return isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+
+
+def _rerank_probe_spec(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    model: str | None,
+    provider: MemoryRerankProvider,
+) -> _ProcessingProbeSpec:
+    if provider == "vllm":
+        return _ProcessingProbeSpec(
+            base_url=base_url,
+            api_key=api_key,
+            path="rerank",
+            payload={"model": model, "query": "OK", "documents": ["OK"]},
+            validator=_valid_ranked_results_probe_response,
+        )
+    if provider == "dashscope":
+        return _ProcessingProbeSpec(
+            base_url=base_url,
+            api_key=api_key,
+            path=DASHSCOPE_RERANK_PATH,
+            payload={
+                "model": model,
+                "input": {"query": "OK", "documents": ["OK"]},
+                "parameters": {"return_documents": False, "top_n": 1},
+            },
+            validator=lambda value: _valid_ranked_results_probe_response(
+                value,
+                results_key=("output", "results"),
+            ),
+        )
+    return _ProcessingProbeSpec(
+        base_url=base_url,
+        api_key=api_key,
+        path=model or "",
+        payload={"queries": ["OK"], "documents": ["OK"]},
+        validator=_valid_deepinfra_rerank_probe_response,
     )
 
 
@@ -1627,7 +1769,7 @@ def _multimodal_preflight_payload(model: str | None) -> dict[str, Any]:
                 ],
             }
         ],
-        "max_tokens": 1,
+        "max_tokens": _CHAT_PROBE_MAX_TOKENS,
         "temperature": 0,
     }
 
@@ -1821,6 +1963,21 @@ def _safe_health_token(value: object, *, max_bytes: int, allow_dot: bool = False
 def _normalized_endpoint_url(value: str | None) -> str | None:
     normalized = _optional_string(value)
     return normalized.rstrip("/") if normalized else None
+
+
+def _normalized_rerank_provider(
+    value: str | None,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> MemoryRerankProvider:
+    provider = _optional_string(value)
+    if provider in {"deepinfra", "vllm", "dashscope"}:
+        return provider
+    hostname = (urlsplit(_normalized_endpoint_url(base_url) or "").hostname or "").lower()
+    if hostname.endswith(".maas.aliyuncs.com"):
+        return "dashscope"
+    return DEFAULT_MEMORY_RERANK_PROVIDER
 
 
 def _positive_timeout(value: object, fallback: float) -> float:
