@@ -63,7 +63,7 @@ _SESSION_AUTHORIZATION_REFERENCE_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 _SESSION_BROWSER_ID_KEY = "browser_session_id"
 _SESSION_BROWSER_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
-_INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "member", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
     {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
 )
@@ -151,7 +151,7 @@ _RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 _RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
 _RESOURCE_ACL_MAX_REVISION = (1 << 53) - 1
 _RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
-_INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "member", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
     {"owner", "public_instance", "email", "email_domain", "organization_group", "show_page_email"}
 )

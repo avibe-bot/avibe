@@ -1728,6 +1728,71 @@ def test_released_migration_marker_shapes_stay_idempotent_and_fail_closed(
                     assert json.loads(stored)["state"] == expected_state
     finally:
         store.close()
+
+
+def test_member_resource_user_context_snapshot_round_trips() -> None:
+    context = resource_access_service.ResourceUserContext(
+        subject="member-1",
+        organization_id="org-1",
+        organization_member_id="organization-member-1",
+        organization_role="member",
+        group_ids=frozenset({"group-engineering"}),
+        membership_version="membership-v2",
+        instance_role="member",
+        instance_access_source="email",
+        claims_issued_at=1_700_000_000,
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+    restored = resource_access_service.resource_user_context_from_metadata(metadata)
+    assert restored is not None
+    assert restored.instance_role == "member"
+    assert restored.can_manage_instance
+    assert not restored.can_manage_access_members
+    assert restored.has_role("editor")
+
+
+def test_pre_member_resource_user_context_snapshot_keeps_editor_role() -> None:
+    context = resource_access_service.ResourceUserContext(
+        subject="editor-1",
+        organization_id="org-1",
+        organization_member_id="organization-member-1",
+        organization_role="member",
+        instance_role="editor",
+        instance_access_source="email",
+        claims_issued_at=1_700_000_000,
+        is_remote=True,
+    )
+    metadata = resource_access_service.metadata_with_resource_user_context({}, context)
+    restored = resource_access_service.resource_user_context_from_metadata(metadata)
+    assert restored is not None
+    assert restored.instance_role == "editor"
+    assert not restored.can_manage_instance
+
+
+def test_organization_member_remains_subject_to_resource_acl_for_use(tmp_path) -> None:
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as connection:
+            _seed_policies(connection)
+            member = _context(
+                "member-2",
+                instance_role="member",
+                group_ids=frozenset({"group-sales"}),
+            )
+            assert member.can_manage_instance
+            assert not resource_access_service.can_use_resource(
+                member, "agent", "private-agent", connection=connection
+            )
+            assert resource_access_service.can_use_resource(
+                member, "agent", "public-agent", connection=connection
+            )
+            assert not resource_access_service.can_use_resource(
+                member, "agent", "scoped-agent", connection=connection
+            )
+    finally:
         engine.dispose()
 
 

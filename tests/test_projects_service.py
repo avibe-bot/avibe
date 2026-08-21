@@ -14,11 +14,17 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
-from core.vibe_agents import VibeAgentStore
-from storage import projects_service
+from core.vibe_agents import VibeAgentAccessError, VibeAgentStore, ensure_session_agent_access
+from storage import (
+    project_access_service,
+    projects_service,
+    resource_access_service,
+    workbench_sessions_service,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import scope_settings, scopes
+from vibe.authorization import AuthorizationContext, InstanceAuthorizationError
 
 
 @pytest.fixture
@@ -38,6 +44,402 @@ def _ensure_agent(name: str, backend: str) -> str:
         return agent.id
     finally:
         store.close()
+
+
+def _remote_context(role: str) -> AuthorizationContext:
+    return AuthorizationContext(
+        instance_role=role,
+        subject=f"{role}-subject",
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+
+def test_project_crud_follows_can_manage_projects(engine, tmp_path):
+    """Every existing role: member/owner mutate; editor/viewer stay denied."""
+
+    created_folder = tmp_path / "member-proj"
+    created_folder.mkdir()
+    rename_folder = tmp_path / "owner-proj"
+    rename_folder.mkdir()
+
+    with engine.begin() as conn:
+        created = projects_service.create_project(
+            conn,
+            str(created_folder),
+            display_name="Member Project",
+            authorization_context=_remote_context("member"),
+        )
+        assert created["display_name"] == "Member Project"
+        renamed = projects_service.update_project(
+            conn,
+            created["id"],
+            display_name="Member Renamed",
+            authorization_context=_remote_context("member"),
+        )
+        assert renamed["display_name"] == "Member Renamed"
+        owner_created = projects_service.create_project(
+            conn,
+            str(rename_folder),
+            display_name="Owner Project",
+            authorization_context=_remote_context("owner"),
+        )
+        projects_service.archive_project(
+            conn,
+            owner_created["id"],
+            authorization_context=_remote_context("member"),
+        )
+
+    with engine.connect() as conn:
+        listed = {project["id"] for project in projects_service.list_projects(conn)}
+        assert created["id"] in listed
+        assert owner_created["id"] not in listed
+
+    for role in ("viewer", "editor"):
+        denied_folder = tmp_path / f"{role}-proj"
+        denied_folder.mkdir()
+        with engine.begin() as conn:
+            with pytest.raises(InstanceAuthorizationError):
+                projects_service.create_project(
+                    conn,
+                    str(denied_folder),
+                    authorization_context=_remote_context(role),
+                )
+            with pytest.raises(InstanceAuthorizationError):
+                projects_service.update_project(
+                    conn,
+                    created["id"],
+                    display_name="Denied",
+                    authorization_context=_remote_context(role),
+                )
+            with pytest.raises(InstanceAuthorizationError):
+                projects_service.archive_project(
+                    conn,
+                    created["id"],
+                    authorization_context=_remote_context(role),
+                )
+
+
+def _acl_context(
+    role: str,
+    *,
+    email: str,
+    instance_kind: str | None = "organization",
+) -> AuthorizationContext:
+    return AuthorizationContext(
+        instance_role=role,
+        subject=email,
+        email=email,
+        instance_access_source="email",
+        is_remote=True,
+        instance_kind=instance_kind,
+    )
+
+
+def _restrict_project_to(conn, project_id: str, email: str, *, access_role: str = "editor") -> None:
+    result = project_access_service.apply_project_access_intent(
+        conn,
+        {
+            "project_id": project_id,
+            "revision": 1,
+            "mode": "restricted",
+            "bindings": [
+                {
+                    "principal_kind": "email",
+                    "principal_value": email,
+                    "access_role": access_role,
+                }
+            ],
+        },
+    )
+    assert result.outcome == "applied"
+
+
+def test_project_mutations_follow_the_acl_that_hides_them(engine, tmp_path):
+    """Whether a member administers Projects and *which* are separate questions.
+
+    ``can_manage_projects`` answers the first; the Project ACL answers the second.
+    Checking only the first is what let a member who knew a Project id PATCH or
+    archive a restricted Project that ``list_projects`` and ``get_project``
+    correctly hide from them -- the read half was ACL-checked and the write half
+    was not, which is the wrong way round for an asymmetry to fall.
+
+    The floor is the ACL's *visibility* floor rather than a second predicate: a
+    member holding an explicit editor binding has an effective Project role of
+    editor, so demanding a "member" Project role would refuse exactly the
+    Projects the list shows them.
+    """
+
+    folder = tmp_path / "restricted"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Restricted",
+            authorization_context=_remote_context("owner"),
+        )
+        _restrict_project_to(conn, project["id"], "insider@example.com")
+
+    excluded = _acl_context("member", email="outsider@example.com")
+    included = _acl_context("member", email="insider@example.com")
+
+    with engine.connect() as conn:
+        visible_to_excluded = {
+            listed["id"] for listed in projects_service.list_projects(conn, authorization_context=excluded)
+        }
+        visible_to_included = {
+            listed["id"] for listed in projects_service.list_projects(conn, authorization_context=included)
+        }
+    assert project["id"] not in visible_to_excluded
+    assert project["id"] in visible_to_included
+
+    # Hidden by the list, hidden by every mutation: LookupError, the same signal
+    # ``get_project`` already raises, so a 404 does not enumerate the Projects a
+    # caller is excluded from.
+    with engine.begin() as conn:
+        with pytest.raises(LookupError):
+            projects_service.get_project(conn, project["id"], authorization_context=excluded)
+        with pytest.raises(LookupError):
+            projects_service.update_project(
+                conn,
+                project["id"],
+                display_name="Stolen",
+                authorization_context=excluded,
+            )
+        with pytest.raises(LookupError):
+            projects_service.archive_project(
+                conn,
+                project["id"],
+                authorization_context=excluded,
+            )
+
+    with engine.connect() as conn:
+        assert projects_service.get_project(conn, project["id"])["display_name"] == "Restricted"
+
+    # A bound member and the Instance Owner are both unaffected.
+    with engine.begin() as conn:
+        assert (
+            projects_service.update_project(
+                conn,
+                project["id"],
+                display_name="Insider Renamed",
+                authorization_context=included,
+            )["display_name"]
+            == "Insider Renamed"
+        )
+        assert (
+            projects_service.update_project(
+                conn,
+                project["id"],
+                display_name="Owner Renamed",
+                authorization_context=_remote_context("owner"),
+            )["display_name"]
+            == "Owner Renamed"
+        )
+        projects_service.archive_project(
+            conn,
+            project["id"],
+            authorization_context=included,
+        )
+
+
+def test_every_project_entry_point_resolves_through_the_visibility_check():
+    """Every way into a Project row goes through the check ``list_projects`` uses.
+
+    The enumeration is taken from the module, not written down here: each round
+    of review found one more entry point that resolved a Project without the
+    ACL -- first mutation by id, then create-or-reuse by folder path -- because
+    each fix named the paths it knew about. Reading the call graph instead means
+    an entry point added later is covered on the day it is added, and one that
+    stops applying the check fails here rather than in a review.
+
+    "Reaching" is transitive on purpose: ``create_project`` never calls the
+    check itself, it calls the resolver that does, which is exactly where the
+    check belongs -- at the lookup rather than at each of its callers.
+    """
+
+    import ast
+    import inspect
+
+    gates = {"_require_visible_project", "can_read_project", "filter_accessible_projects"}
+    tree = ast.parse(inspect.getsource(projects_service))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def _calls(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+        return names
+
+    def _reaches_gate(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        if name in seen or name not in functions:
+            return False
+        called = _calls(functions[name])
+        if called & gates:
+            return True
+        return any(_reaches_gate(callee, seen | {name}) for callee in called)
+
+    # Public + takes a Connection: that is precisely the set of functions that
+    # return or mutate Project rows on behalf of an HTTP caller. ``make_directory``
+    # touches no rows and takes no connection, so it falls out by construction.
+    entry_points = {
+        name
+        for name, node in functions.items()
+        if not name.startswith("_")
+        and any(arg.arg == "conn" for arg in node.args.args)
+    }
+    assert entry_points >= {
+        "list_projects",
+        "get_project",
+        "get_project_workdir",
+        "create_project",
+        "update_project",
+        "archive_project",
+    }
+    ungated = sorted(name for name in entry_points if not _reaches_gate(name))
+    assert ungated == [], f"Project entry points that never reach a visibility check: {ungated}"
+
+
+def test_folder_path_is_not_a_side_door_onto_a_hidden_project(engine, tmp_path):
+    """Create-or-reuse is a Project lookup, so it carries the visibility rule too.
+
+    A folder path is a lookup key exactly as much as a Project id is. Reuse
+    resolved the match without the ACL, so a member who submitted the folder of
+    a restricted Project they are excluded from got its payload back -- and,
+    when the Project was archived, revived it on the way, since reuse is also
+    the unarchive path.
+
+    Applying the *same* check the list applies carries one declared consequence:
+    ``get_effective_project_role`` returns nothing for an inactive Project below
+    the Instance Owner, so restoring an archived Project by re-opening its
+    folder is Owner-only. That is not a new rule, it is the existing one finally
+    reaching this path -- ``list_projects(include_archived=True)``,
+    ``get_project``, ``update_project``, and ``archive_project`` already answer
+    a non-owner with nothing for an archived Project.
+    """
+
+    folder = tmp_path / "hidden"
+    folder.mkdir()
+    owner = _remote_context("owner")
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Hidden",
+            authorization_context=owner,
+        )
+        _restrict_project_to(conn, project["id"], "insider@example.com")
+
+    excluded = _acl_context("member", email="outsider@example.com")
+    included = _acl_context("member", email="insider@example.com")
+
+    with engine.begin() as conn:
+        with pytest.raises(LookupError):
+            projects_service.create_project(
+                conn,
+                str(folder),
+                display_name="Stolen",
+                authorization_context=excluded,
+            )
+
+    # The bound member reaches the same folder normally, so the refusal above is
+    # the ACL talking and not create-or-reuse breaking for everyone.
+    with engine.begin() as conn:
+        reused = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Ignored On Reuse",
+            authorization_context=included,
+        )
+    assert reused["id"] == project["id"]
+    assert reused["display_name"] == "Hidden"
+
+    # Archived: invisible to every non-owner, so reuse cannot revive it either.
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, project["id"], authorization_context=owner)
+        for context in (excluded, included):
+            with pytest.raises(LookupError):
+                projects_service.create_project(
+                    conn,
+                    str(folder),
+                    display_name="Revived",
+                    authorization_context=context,
+                )
+
+    # Refused without side effects: still archived, still named as its owner
+    # left it, and no duplicate scope minted over the same folder.
+    with engine.connect() as conn:
+        owned = projects_service.list_projects(
+            conn,
+            include_archived=True,
+            authorization_context=owner,
+        )
+    assert len(owned) == 1
+    assert owned[0]["id"] == project["id"]
+    assert owned[0]["display_name"] == "Hidden"
+    assert owned[0]["archived"] is True
+
+    # The Owner still restores it the documented way, by re-opening the folder.
+    with engine.begin() as conn:
+        restored = projects_service.create_project(
+            conn,
+            str(folder),
+            authorization_context=owner,
+        )
+    assert restored["id"] == project["id"]
+    assert restored["archived"] is False
+
+
+def test_personal_instance_member_mutates_without_a_project_acl(engine, tmp_path):
+    """A Personal install has no Project ACL, so the instance role stays sufficient.
+
+    ``get_effective_project_role`` short-circuits on Personal, which is why the
+    visibility floor above needs no Personal special case -- even with a
+    restricted policy row present, a Personal member keeps the role they came in
+    with.
+    """
+
+    folder = tmp_path / "personal"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn,
+            str(folder),
+            display_name="Personal",
+            authorization_context=_remote_context("owner"),
+        )
+        _restrict_project_to(conn, project["id"], "someone-else@example.com")
+
+    personal_member = _acl_context("member", email="member@example.com", instance_kind="personal")
+    with engine.connect() as conn:
+        assert project["id"] in {
+            listed["id"]
+            for listed in projects_service.list_projects(conn, authorization_context=personal_member)
+        }
+    with engine.begin() as conn:
+        renamed = projects_service.update_project(
+            conn,
+            project["id"],
+            display_name="Personal Renamed",
+            authorization_context=personal_member,
+        )
+        assert renamed["display_name"] == "Personal Renamed"
+        projects_service.archive_project(
+            conn,
+            project["id"],
+            authorization_context=personal_member,
+        )
 
 
 def test_create_project_is_idempotent_by_path(engine, tmp_path):
@@ -145,7 +547,10 @@ def test_path_lookup_ignores_non_project_scopes(engine, tmp_path):
 
     with engine.begin() as conn:
         # The channel sharing the path is not a project match...
-        assert projects_service._find_project_by_workdir(conn, workdir) is None
+        assert (
+            projects_service._find_project_by_workdir(conn, _remote_context("owner"), workdir)
+            is None
+        )
         # ...so creating a project for it mints a real avibe project scope.
         proj = projects_service.create_project(conn, workdir)
 
@@ -246,7 +651,7 @@ def test_duplicate_path_pick_prefers_active_then_recent(engine, tmp_path):
     _insert_project("avibe::project::proj_active", enabled=1, last_seen="2026-05-01T00:00:00Z")
 
     with engine.begin() as conn:
-        found = projects_service._find_project_by_workdir(conn, workdir)
+        found = projects_service._find_project_by_workdir(conn, _remote_context("owner"), workdir)
 
     # Active wins over the more-recent archived row.
     assert found is not None
@@ -504,3 +909,204 @@ def test_set_default_agent_on_folderless_project_inserts_row(engine):
         )
     assert updated["default_agent"]["agent_backend"] == "opencode"
     assert updated["default_agent"]["model"] == "grok-code"
+
+
+def _organization_context(subject: str, *, instance_role: str) -> AuthorizationContext:
+    return AuthorizationContext(
+        subject=subject,
+        email=f"{subject}@example.com",
+        organization_id="org-1",
+        organization_member_id=f"member-{subject}",
+        organization_role="member",
+        group_ids=frozenset({"group-engineering"}),
+        instance_role=instance_role,
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+
+
+def _agent_with_policy(engine, *, name: str, access_level: str, owner_user_id: str) -> str:
+    """Create an Agent and give it one ACL shape, returning its stable id."""
+
+    store = VibeAgentStore()
+    try:
+        agent = store.create(name=name, backend="codex")
+    finally:
+        store.close()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="agent",
+            resource_id=agent.id,
+            organization_id="org-1",
+            owner_user_id=owner_user_id,
+            access_level=access_level,
+            # Only ``scope`` consumes groups; the value is irrelevant to the rule
+            # under test, because no group set is wide enough to back a default.
+            group_ids=["group-platform"] if access_level == "scope" else None,
+        )
+    return agent.id
+
+
+def _restricted_access_levels() -> list[str]:
+    """Every access level that admits less than the project's whole audience.
+
+    Derived from the source of truth rather than listed, so an access level added
+    later is covered by these tests without editing them.
+    """
+
+    return sorted(resource_access_service.ACCESS_LEVELS - {"public"})
+
+
+def _stored_project_default(engine, scope_id: str) -> str | None:
+    with engine.connect() as conn:
+        return conn.execute(
+            select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
+        ).scalar_one()
+
+
+def test_project_default_agent_is_advisory_and_degrades_at_use_time(engine, tmp_path):
+    """A project default is a hint; the ACL is enforced against whoever resolves it.
+
+    Validating the assignment against the default's policy *shape* was tried and
+    removed: no predicate over {public, scope, private, absent} is both sound and
+    usable (see the note above ``core.vibe_agents.resolve_usable_default_agent``).
+    So a member may point the project at any Agent they can manage, however they
+    name it — by stable id or by public name — including one narrower than the
+    project's audience.
+
+    What that costs is paid at use time instead of at bind time. Another member
+    who cannot use the default still starts a normal unpinned session: the hint
+    degrades and dispatch follows an Agent they can use, rather than one narrow
+    default locking everyone else out of the project. The restricted set is
+    derived, not listed, so a future access level is covered without editing
+    this test.
+    """
+
+    member = _organization_context("member-1", instance_role="member")
+    other = _organization_context("member-2", instance_role="editor")
+    shared_id = _agent_with_policy(
+        engine, name="team-shared", access_level="public", owner_user_id="member-1"
+    )
+    restricted = {
+        level: _agent_with_policy(
+            engine,
+            name=f"member-{level}",
+            access_level=level,
+            owner_user_id="member-1",
+        )
+        for level in _restricted_access_levels()
+    }
+    assert set(restricted) >= {"private", "scope"}
+
+    folder = tmp_path / "shared-proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn, str(folder), authorization_context=member
+        )
+        accepted = projects_service.update_project(
+            conn,
+            project["id"],
+            agent_id=shared_id,
+            authorization_context=member,
+        )
+    assert accepted["default_agent"]["agent_id"] == shared_id
+
+    for level, agent_id in restricted.items():
+        for kwargs in ({"agent_id": agent_id}, {"agent_name": f"member-{level}"}):
+            with engine.begin() as conn:
+                projects_service.update_project(
+                    conn,
+                    project["id"],
+                    agent_name=None,
+                    agent_id=None,
+                    authorization_context=member,
+                )
+                bound = projects_service.update_project(
+                    conn,
+                    project["id"],
+                    authorization_context=member,
+                    **kwargs,
+                )
+            assert bound["default_agent"]["agent_id"] == agent_id
+            assert _stored_project_default(engine, project["scope_id"]) == f"member-{level}"
+
+            # ``member-2`` shares neither the private owner nor the scoped group,
+            # so the default is unusable for them. The session is still created;
+            # it drops the project's hint and falls back to an Agent this caller
+            # may actually use, which is written into the row so dispatch runs it
+            # rather than re-deriving the hint without a principal.
+            with engine.begin() as conn:
+                session = workbench_sessions_service.create_session(
+                    conn,
+                    scope_id=project["scope_id"],
+                    agent_backend="",
+                    user_context=other,
+                )
+            assert session["agent_id"] != agent_id
+            assert session["agent_name"] != f"member-{level}"
+            with engine.connect() as conn:
+                assert (
+                    ensure_session_agent_access(conn, session, user_context=other) is not None
+                )
+
+            # Degrading applies to the advisory hint only. Naming the same Agent
+            # explicitly is a stated intent and still fails closed.
+            with engine.begin() as conn:
+                with pytest.raises(VibeAgentAccessError):
+                    workbench_sessions_service.create_session(
+                        conn,
+                        scope_id=project["scope_id"],
+                        agent_backend="codex",
+                        agent_id=agent_id,
+                        user_context=other,
+                    )
+
+
+def test_owner_project_default_accepts_every_policy_shape(engine, tmp_path):
+    """The Owner is bound by the same advisory rule, and resolves any default.
+
+    Assignment is caller-independent now that it validates nothing about policy
+    shape, and the Instance Owner bypasses ACL checks when *using* a resource, so
+    an Owner's unpinned session adopts even a private default rather than
+    degrading away from it.
+    """
+
+    owner = _organization_context("owner-1", instance_role="owner")
+    restricted = {
+        level: _agent_with_policy(
+            engine,
+            name=f"owner-{level}",
+            access_level=level,
+            owner_user_id="owner-1",
+        )
+        for level in _restricted_access_levels()
+    }
+
+    folder = tmp_path / "owner-proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(
+            conn, str(folder), authorization_context=owner
+        )
+
+    for level, agent_id in restricted.items():
+        with engine.begin() as conn:
+            accepted = projects_service.update_project(
+                conn,
+                project["id"],
+                agent_id=agent_id,
+                authorization_context=owner,
+            )
+        assert accepted["default_agent"]["agent_id"] == agent_id
+        assert _stored_project_default(engine, project["scope_id"]) == f"owner-{level}"
+
+        with engine.begin() as conn:
+            session = workbench_sessions_service.create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="",
+                user_context=owner,
+            )
+        assert session["agent_name"] == f"owner-{level}"

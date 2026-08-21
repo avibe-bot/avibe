@@ -4736,6 +4736,7 @@
     },
     "roles": {
       "owner": "所有者",
+      "member": "Avibe 成员",
       "editor": "编辑者",
       "viewer": "查看者"
     },

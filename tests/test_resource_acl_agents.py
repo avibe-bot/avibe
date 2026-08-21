@@ -13,9 +13,13 @@ from core.vibe_agents import (
     VibeAgentAccessError,
     VibeAgentStore,
     ensure_agent_selection_access,
+    ensure_default_agent_access,
     ensure_session_agent_access,
+    resolve_effective_default_agent,
 )
+from core.session_turns import SessionTurnManager
 from core.watches import ManagedWatchStore
+from modules.im import MessageContext
 from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies
@@ -110,6 +114,37 @@ def _seed_agents_with_policies() -> tuple[VibeAgentStore, dict[str, VibeAgent]]:
             group_ids=["group-engineering"],
         )
     return store, agents
+
+
+def _restricted_agent_keys() -> list[str]:
+    """Seeded Agents whose policy admits less than the whole instance.
+
+    Derived from the access levels themselves rather than listed, so a level
+    added later is covered by the tests below without editing them. The seeder
+    keys are the access levels, and the assertion keeps it that way: a new level
+    must be seeded before these tests can pass.
+    """
+
+    levels = sorted(resource_access_service.ACCESS_LEVELS - {"public"})
+    assert set(levels) >= {"private", "scope"}
+    return levels
+
+
+def _set_default_agent_row(store: VibeAgentStore, agent_name: str) -> None:
+    """Point instance-wide routing at an Agent, bypassing the Owner-only gate.
+
+    Defaults are advisory: the setter accepts any Agent its caller may manage,
+    including one whose policy admits less than the whole instance. Writing the
+    row directly keeps these tests focused on what happens when such a default is
+    *resolved*, without threading an Owner session through every caller.
+    """
+
+    with store.engine.begin() as connection:
+        store._write_default_agent_name(  # noqa: SLF001
+            connection,
+            agent_name,
+            now="2026-07-20T00:00:00Z",
+        )
 
 
 def test_active_org_agent_catalog_includes_every_builtin_and_acl_shape(monkeypatch, tmp_path) -> None:
@@ -224,8 +259,15 @@ def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tm
             store.remove(agents["public"].name, user_context=member)
         updated = store.update(agents["public"].name, description="admin update", user_context=admin)
         assert updated.description == "admin update"
-        store.set_default_agent_name(agents["private"].name, user_context=admin)
-        assert store.get_default_agent_name() == agents["private"].name
+        store.set_default_agent_name(agents["public"].name, user_context=admin)
+        assert store.get_default_agent_name() == agents["public"].name
+        # A default is advisory: an Agent narrower than the whole audience is a
+        # legitimate assignment, because the ACL is enforced per-principal at use
+        # time (see ``resolve_usable_default_agent``) rather than at bind time.
+        for key in _restricted_agent_keys():
+            store.set_default_agent_name(agents[key].name, user_context=admin)
+            assert store.get_default_agent_name() == agents[key].name
+        store.set_default_agent_name(agents["public"].name, user_context=admin)
         assert store.remove(agents["public"].name, user_context=admin) is True
         owner_updated = store.update(
             agents["private"].name,
@@ -289,7 +331,7 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
     try:
-        store.set_default_agent_name(agents["private"].name)
+        _set_default_agent_row(store, agents["private"].name)
         engine = get_cached_sqlite_engine()
         with engine.begin() as connection:
             scope_id = upsert_scope(
@@ -306,16 +348,19 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
                 agent_id=agents["public"].id,
                 user_context=_organization_context("member-1"),
             )
-        with pytest.raises(VibeAgentAccessError):
-            with engine.begin() as connection:
-                workbench_sessions_service.update_session(
-                    connection,
-                    session["id"],
-                    agent_name="",
-                    agent_id="",
-                    agent_backend="",
-                    user_context=_organization_context("member-1"),
-                )
+        # The instance default is another owner's private Agent. Clearing the
+        # selector still succeeds: the default is advisory, so it degrades to an
+        # Agent this caller may use rather than stranding the session.
+        with engine.begin() as connection:
+            degraded = workbench_sessions_service.update_session(
+                connection,
+                session["id"],
+                agent_name="",
+                agent_id="",
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+        assert (degraded["agent_id"], degraded["agent_name"]) == (None, None)
         store.set_default_agent_name(agents["public"].name)
         with engine.begin() as connection:
             cleared = workbench_sessions_service.update_session(
@@ -326,7 +371,10 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
                 agent_backend="",
                 user_context=_organization_context("member-1"),
             )
-        store.set_default_agent_name(agents["scope"].name)
+        # A scoped Agent is a legitimate instance default. The read path must
+        # resolve it for a caller inside the scope rather than degrading away
+        # from a default the caller can in fact use.
+        _set_default_agent_row(store, agents["scope"].name)
         with engine.connect() as connection:
             effective = ensure_session_agent_access(
                 connection,
@@ -359,15 +407,20 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 now="2026-08-13T00:00:00Z",
             )
 
-        store.set_default_agent_name(agents["private"].name)
-        with pytest.raises(VibeAgentAccessError):
-            with engine.begin() as connection:
-                workbench_sessions_service.create_session(
-                    connection,
-                    scope_id=scope_id,
-                    agent_backend="",
-                    user_context=_organization_context("member-1"),
-                )
+        # An unusable instance default degrades on create -- and the substitute is
+        # written into the row, because it exists only in this caller's frame of
+        # reference. See
+        # ``test_unpinned_session_dispatches_the_agent_the_default_degraded_to``.
+        _set_default_agent_row(store, agents["private"].name)
+        with engine.begin() as connection:
+            degraded = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+        assert degraded["agent_id"] not in (None, agents["private"].id)
+        assert degraded["agent_backend"]
 
         store.set_default_agent_name(agents["public"].name)
         with engine.begin() as connection:
@@ -378,7 +431,9 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 user_context=_organization_context("member-1"),
             )
 
-        store.set_default_agent_name(agents["scope"].name)
+        # Same shape as above on the create path: a scoped default resolves for a
+        # caller inside the scope.
+        _set_default_agent_row(store, agents["scope"].name)
         with engine.connect() as connection:
             effective = ensure_session_agent_access(
                 connection,
@@ -395,6 +450,148 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
     )
     assert effective is not None
     assert effective.id == agents["scope"].id
+
+
+def test_unpinned_session_dispatches_the_agent_the_default_degraded_to(monkeypatch, tmp_path) -> None:
+    """Dispatch runs the substitute the default degraded to, not the raw default.
+
+    ``resolve_usable_default_agent`` answers a question about one principal, so
+    its answer only means anything while that principal is in scope. Leaving the
+    Session unpinned threw the answer away: dispatch re-derives the route from
+    ``Controller.resolve_vibe_agent_for_context``, which carries no principal and
+    resolves the *configured* default, pins that inaccessible Agent, and the
+    execution-time recheck in ``_remote_delivery_execution_denial`` then retires
+    the caller's first message. Degrading and not persisting the result is the
+    same as not degrading at all.
+
+    The lock is the real dispatch chokepoint rather than a re-read of the row:
+    ``_delivery_backend_in_transaction`` must satisfy itself from the durable
+    binding and never call the resolver, whose raw answer is still the Agent this
+    caller cannot use.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    engine = get_cached_sqlite_engine()
+    member = _organization_context("member-1", instance_role="member")
+    try:
+        # The configured instance default is another owner's private Agent; the
+        # caller is entitled to others.
+        _set_default_agent_row(store, agents["private"].name)
+        with engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_dispatch_default",
+                now="2026-08-21T00:00:00Z",
+            )
+            session = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=member,
+            )
+        assert session["agent_id"] not in (None, agents["private"].id)
+        assert session["agent_backend"]
+
+        resolver_calls: list[str] = []
+
+        def _resolve_raw_default(context, **kwargs):
+            """Stand in for ``Controller.resolve_vibe_agent_for_context``.
+
+            Same behaviour as the real one for an unpinned avibe Session with no
+            override: the configured default, resolved with no principal at all.
+            """
+
+            resolver_calls.append(str(getattr(context, "channel_id", "")))
+            with store.engine.connect() as connection:
+                return resolve_effective_default_agent(connection)
+
+        manager = SessionTurnManager(
+            controller=SimpleNamespace(resolve_vibe_agent_for_context=_resolve_raw_default)
+        )
+        context = MessageContext(user_id="member-1", channel_id=session["id"], platform="avibe")
+        context.platform_specific = {"agent_session_id": session["id"]}
+        with engine.begin() as connection:
+            backend, _resolved = manager._delivery_backend_in_transaction(  # noqa: SLF001
+                connection,
+                session["id"],
+                context,
+            )
+        assert backend == session["agent_backend"]
+        assert resolver_calls == []
+
+        # The gate that retired the first message: the Agent the Session is bound
+        # to is one this caller may actually use.
+        with engine.connect() as connection:
+            reloaded = workbench_sessions_service.get_session(connection, session["id"])
+            effective = ensure_session_agent_access(connection, reloaded, user_context=member)
+        assert effective is not None
+        assert effective.id == session["agent_id"]
+
+        # The configured default is untouched -- degrading is per caller, not a
+        # rewrite of instance routing.
+        with store.engine.connect() as connection:
+            assert resolve_effective_default_agent(connection).id == agents["private"].id
+
+        # An explicit pick is a stated intent, not an advisory hint, so the same
+        # inaccessible Agent still errors instead of silently substituting.
+        with engine.begin() as connection:
+            with pytest.raises(VibeAgentAccessError):
+                workbench_sessions_service.create_session(
+                    connection,
+                    scope_id=scope_id,
+                    agent_backend="",
+                    agent_id=agents["private"].id,
+                    user_context=member,
+                )
+    finally:
+        store.close()
+
+
+def test_personal_install_default_routing_never_degrades(monkeypatch, tmp_path) -> None:
+    """A personal install resolves whatever default it was given, unchanged.
+
+    No Agent on a personal install carries an ACL row, which is exactly the shape
+    a bind-time audience predicate would have had to reject. Use-time enforcement
+    has no such problem: the local boot path resolves as the Instance Owner, and
+    a remote personal-install principal is evaluated against the Agent-use
+    capability rather than against a policy that was never written. Neither
+    degrades away from the configured Agent, so ``vibe agent default`` keeps
+    meaning what it says.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        builtin = store.ensure_builtin_default_agent(backend="codex")
+        chosen = store.create(name="local-favourite", backend="codex")
+        store.set_default_agent_name(chosen.name)
+        assert store.get_default_agent_name() == chosen.name
+        assert builtin.name != chosen.name
+
+        personal_member = resource_access_service.ResourceUserContext(
+            subject="member-1",
+            email="member-1@example.com",
+            instance_role="member",
+            instance_access_source="email",
+            instance_kind="personal",
+            is_remote=True,
+        )
+        with store.engine.connect() as connection:
+            # The local boot path passes no principal at all and resolves as the
+            # Instance Owner.
+            assert ensure_default_agent_access(connection).id == chosen.id
+            assert (
+                ensure_default_agent_access(
+                    connection,
+                    user_context=personal_member,
+                ).id
+                == chosen.id
+            )
+    finally:
+        store.close()
 
 
 def test_missing_agent_selector_fails_closed_for_editor_only(monkeypatch, tmp_path) -> None:
@@ -473,7 +670,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
-    store.set_default_agent_name(private_agent.name)
+    _set_default_agent_row(store, private_agent.name)
     store.close()
     context = _organization_context("member-1")
 
@@ -530,14 +727,27 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
         environ_base=_remote_peer(),
     )
     assert mutation.status_code == 200
-    default_mutation = client.post(
+    # Instance-wide default routing is Owner-only, but the Agent it points at is
+    # not constrained by policy shape: the default is advisory and the ACL is
+    # enforced per-principal at use time, so a narrower Agent is accepted here
+    # and degrades for whoever cannot use it.
+    for key in _restricted_agent_keys():
+        default_mutation = client.post(
+            "/api/agents/default",
+            json={"name": agents[key].name},
+            headers=csrf_headers(client, "https://alex.avibe.bot"),
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert default_mutation.status_code == 200
+    shared_default = client.post(
         "/api/agents/default",
-        json={"name": private_agent.name},
+        json={"name": agents["public"].name},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert default_mutation.status_code == 200
+    assert shared_default.status_code == 200
 
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:
@@ -631,6 +841,76 @@ def test_only_owner_can_create_or_import_agents(monkeypatch, tmp_path) -> None:
                     is_remote=True,
                 ),
             )
+    finally:
+        store.close()
+
+
+def _create_acl_principal(role: str, *, organization: bool) -> resource_access_service.ResourceUserContext:
+    if organization:
+        return _organization_context(f"{role}-org", instance_role=role)
+    return resource_access_service.ResourceUserContext(
+        subject=f"{role}-personal",
+        email=f"{role}-personal@example.com",
+        instance_role=role,
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+
+def test_agent_create_registers_acl_for_every_creating_subject(monkeypatch, tmp_path) -> None:
+    """Create-path ACL follows the creating subject, not org membership.
+
+    Seed every existing instance role on Personal (email) and Organization so a
+    later create path cannot skip the policy for a newly admitted principal.
+    Organization *use* of another member's private Agent stays denied.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        created: list[tuple[resource_access_service.ResourceUserContext, VibeAgent]] = []
+        for organization in (False, True):
+            for role in ("viewer", "editor", "member", "owner"):
+                context = _create_acl_principal(role, organization=organization)
+                name = f"{role}-{'org' if organization else 'personal'}-agent"
+                if not context.can_manage_agents:
+                    with pytest.raises(VibeAgentAccessError):
+                        store.create(name=name, backend="codex", user_context=context)
+                    continue
+                agent = store.create(name=name, backend="codex", user_context=context)
+                created.append((context, agent))
+                with store.engine.connect() as connection:
+                    policy = resource_access_service.get_resource_policy(
+                        "agent",
+                        agent.id,
+                        connection=connection,
+                    )
+                assert policy is not None
+                assert policy["owner_user_id"] == context.subject
+                assert policy["access_level"] == "private"
+                if organization:
+                    assert policy["organization_id"] == context.organization_id
+                else:
+                    assert not policy["organization_id"]
+                visible = {item.id for item in store.list_agents(user_context=context)}
+                assert agent.id in visible
+
+        org_member = next(ctx for ctx, _agent in created if ctx.instance_role == "member" and ctx.organization_id)
+        personal_member_agent = next(
+            agent for ctx, agent in created if ctx.instance_role == "member" and not ctx.organization_id
+        )
+        org_member_agent = next(
+            agent for ctx, agent in created if ctx.instance_role == "member" and ctx.organization_id
+        )
+        org_editor = _create_acl_principal("editor", organization=True)
+        org_visible = {item.id for item in store.list_agents(user_context=org_editor)}
+        assert org_member_agent.id not in org_visible
+        personal_visible = {
+            item.id
+            for item in store.list_agents(user_context=_create_acl_principal("editor", organization=False))
+        }
+        assert personal_member_agent.id not in personal_visible
+        assert org_member.can_manage_agents
     finally:
         store.close()
 

@@ -2498,6 +2498,23 @@ def _has_runtime_owner_access(context: Any) -> bool:
     return bool(context is not None and context.is_instance_owner)
 
 
+def _access_administration_forbidden(context: Any = None):
+    """Return a 403 response unless the caller may administer instance access.
+
+    The route policy table (``authorization._ACCESS_ADMINISTRATION_HTTP_RULES``)
+    is one layer; this is the one that travels with the handler, so a route
+    re-registered under a different path keeps the gate. Both answer the same
+    question: may this caller change who reaches the instance? The member set is
+    cloud allowlist entries *and* multi-platform IM bound users, so IM bind codes
+    and bound-user mutation are member management.
+    """
+
+    resolved = _request_authorization_context(context)
+    if resolved is not None and resolved.can_manage_access_members:
+        return None
+    return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+
+
 def _runtime_record_session_id(record: Any) -> str | None:
     if not isinstance(record, Mapping):
         return None
@@ -2763,7 +2780,7 @@ async def current_instance_permissions_authorized_users_put(
         from vibe import permissions
 
         authorization_context = getattr(g, "authorization_context", None)
-        if authorization_context is None or not authorization_context.can_manage_instance:
+        if authorization_context is None or not authorization_context.can_manage_access_members:
             return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         try:
             body = await starlette_request.body()
@@ -2933,8 +2950,21 @@ def enforce_project_role_capabilities():
         if minimum_instance_role is not None
         else required_instance_role(request.method, request.path)
     )
-    if minimum_instance_role not in {"viewer", "editor"}:
+    if minimum_instance_role not in {"viewer", "editor", "member"}:
         return None
+    # A ``member`` route is instance-wide Project administration, but it still
+    # names one Project, and the instance role does not say *which* Projects the
+    # caller may touch. Ceiling this at "editor" is what let a member mutate a
+    # restricted Project by id that ``list_projects`` hides from them.
+    #
+    # The floor for those routes is the Project ACL's *visibility* floor, not
+    # "member": a member holding an explicit editor binding on a restricted
+    # Project has an effective Project role of editor, so demanding a "member"
+    # Project role would refuse the very Projects the list shows them. The
+    # instance-role half of the authorization is already enforced by the HTTP
+    # policy before this hook runs; this half only asks whether the Project is
+    # theirs to see.
+    required_project_role = "viewer" if minimum_instance_role == "member" else minimum_instance_role
     resource = _project_access_resource(request.path)
     if resource is None:
         return None
@@ -2954,7 +2984,7 @@ def enforce_project_role_capabilities():
             if kind == "project"
             else project_access_service.get_effective_session_role(conn, context, resource_id)
         )
-    if not project_access_service.role_allows(role, minimum_instance_role):
+    if not project_access_service.role_allows(role, required_project_role):
         return jsonify({"ok": False, "error": "not_found"}), 404
     return None
 
@@ -4990,6 +5020,12 @@ def vibe_agent_onboarding():
 
     try:
         user_context = getattr(g, "authorization_context", None)
+        # Owner identity rather than can_manage_access_members: this is an
+        # instance-wide one-way Agent migration, not member management. The store
+        # repeats the check in ``_require_agent_onboarding_access`` so non-HTTP
+        # callers are gated too; both layers ask the same question.
+        if not _has_runtime_owner_access(user_context):
+            return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
         if request.method == "POST":
             return jsonify(api.onboard_vibe_agents(user_context=user_context))
         return jsonify(api.get_vibe_agent_onboarding(user_context=user_context))
@@ -6594,8 +6630,26 @@ async def config_post():
     # falsy shapes that happen to exist today.
     payload = request.json
     authorization_context = getattr(g, "authorization_context", None)
-    editor_write = authorization_context is not None and not authorization_context.can_manage_instance
-    if editor_write:
+    # Persisting a credential is an Owner act, so the write schema is selected
+    # by ownership and by nothing else. ``can_manage_instance`` used to pick it,
+    # which stopped being an owner test the moment a member acquired that
+    # capability: a member fell past this branch into a filter that removed only
+    # ``remote_access``, and every other section — ``slack.bot_token``,
+    # ``discord.bot_token``, ``lark.app_secret``, gateway secrets — reached the
+    # save path and was reconciled onto the live platform.
+    #
+    # There is one non-owner write schema and it is ``_EDITOR_CONFIG_WRITE_FIELDS``,
+    # a closed allowlist of non-secret preferences. Closed is the whole point:
+    # no credential-bearing section has to be enumerated here, and a secret
+    # added to ``api._PLATFORM_SECRET_FIELDS`` (or to any config section) is
+    # unreachable below Owner by construction rather than by remembering to add
+    # it to a strip list. Pairing identity is covered by the same rule —
+    # ``remote_access`` is not on the allowlist, so it is refused outright
+    # instead of silently dropped.
+    non_owner_write = (
+        authorization_context is not None and not authorization_context.can_manage_access_members
+    )
+    if non_owner_write:
         try:
             payload = api.editor_config_write_payload(payload)
         except ValueError as exc:
@@ -6613,11 +6667,11 @@ async def config_post():
             payload,
         )
     except ValueError as exc:
-        # Same chokepoint as the allowlist rejection above: an Editor write
+        # Same chokepoint as the allowlist rejection above: a non-owner write
         # answers with a stable code whichever layer refused it, including
         # value validation raised deep inside ``V2Config.from_payload``. Owner
         # saves keep the descriptive message the Settings pages already show.
-        if editor_write:
+        if non_owner_write:
             code = api.editor_config_write_error_code(exc)
             return jsonify({"ok": False, "error": {"code": code, "message": code}}), 400
         message = str(exc)
@@ -6735,6 +6789,9 @@ def remote_access_status():
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
 
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is None or not authorization_context.can_manage_access_members:
+        return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
     payload = request.json or {}
     result = remote_access.pair(
         payload.get("pairing_key", ""),
@@ -8128,6 +8185,11 @@ def projects_create():
             )
     except (FileNotFoundError, NotADirectoryError) as err:
         return jsonify({"error": str(err)}), 400
+    except LookupError as err:
+        # The folder is already held by a Project this caller cannot see, so
+        # create-or-reuse answers exactly as the id-keyed routes do rather than
+        # reusing, reviving, or duplicating it.
+        return jsonify({"error": str(err)}), 404
     return jsonify(project), 201
 
 
@@ -12378,6 +12440,9 @@ def users_post():
     from vibe import api
     from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     try:
         return jsonify(api.save_users(payload))
@@ -12391,6 +12456,9 @@ def users_post():
 def users_toggle_admin(user_id):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     return jsonify(api.toggle_admin(user_id, payload.get("is_admin", False), payload.get("platform") or None))
 
@@ -12399,6 +12467,9 @@ def users_toggle_admin(user_id):
 def users_delete(user_id):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     result = api.remove_user(user_id, request.args.get("platform") or None)
     if not result.get("ok"):
         return jsonify(result), 400
@@ -12409,6 +12480,10 @@ def users_delete(user_id):
 def bind_codes_get():
     from vibe import api
 
+    # The listing carries the codes themselves, so reading it mints access.
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     return jsonify(api.get_bind_codes())
 
 
@@ -12416,6 +12491,9 @@ def bind_codes_get():
 def bind_codes_post():
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     payload = request.json or {}
     result = api.create_bind_code(
         code_type=payload.get("type", "one_time"),
@@ -12430,6 +12508,9 @@ def bind_codes_post():
 def bind_codes_delete(code):
     from vibe import api
 
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     result = api.delete_bind_code(code)
     if not result.get("ok"):
         return jsonify(result), 404
@@ -12440,6 +12521,10 @@ def bind_codes_delete(code):
 def setup_first_bind_code():
     from vibe import api
 
+    # Named "setup", but it mints a live bind code rather than reporting state.
+    forbidden = _access_administration_forbidden()
+    if forbidden is not None:
+        return forbidden
     return jsonify(api.get_first_bind_code())
 
 

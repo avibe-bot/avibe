@@ -416,7 +416,9 @@ def create_session(
     # the global default (see ``update_session``). No project default → the
     # fields stay empty and dispatch falls back to the global default Vibe
     # Agent. An explicit caller backend always wins.
+    inherited_project_default = False
     if not agent_name and not agent_backend and scope_row.get("agent_name") and scope_row.get("agent_backend"):
+        inherited_project_default = True
         agent_backend = str(scope_row["agent_backend"])
         if agent_name is None:
             agent_name = scope_row.get("agent_name")
@@ -428,26 +430,67 @@ def create_session(
             reasoning_effort = scope_row.get("reasoning_effort")
 
     from core.vibe_agents import (
+        VibeAgentAccessError,
         ensure_agent_selection_access,
         ensure_default_agent_access,
+        resolve_effective_default_agent,
         resolve_resource_access_context,
     )
 
     resource_context = resolve_resource_access_context(user_context)
+    if inherited_project_default:
+        # The project default is a hint from whoever configured the project, not
+        # a choice by this caller, so an Agent they cannot use degrades rather
+        # than refusing the session -- otherwise one narrow default locks every
+        # other member out of starting a normal session in the project. Drop
+        # back to the unpinned path, which resolves the instance default and
+        # degrades again if needed.
+        try:
+            ensure_agent_selection_access(
+                conn,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                user_context=resource_context,
+            )
+        except VibeAgentAccessError:
+            agent_name = None
+            agent_backend = ""
+            agent_variant = None
+            model = None
+            reasoning_effort = None
     if not agent_name and not agent_id:
         if agent_backend and not resource_context.has_role("editor"):
-            from core.vibe_agents import VibeAgentAccessError
-
             raise VibeAgentAccessError("Agent access is not permitted.")
         if not agent_backend and not resource_context.is_instance_owner:
-            # Validate the effective global default without pinning it into the
-            # Session. An empty selector must keep following the global default
-            # at dispatch time.
-            ensure_default_agent_access(
+            # Resolve the effective global default *for this caller*. An empty
+            # selector normally stays empty, so the Session keeps following the
+            # global default at dispatch time -- but a default that degraded has
+            # to be written down, because the substitute exists only in this
+            # caller's frame of reference.
+            #
+            # Dispatch short-circuits on the durable binding
+            # (``SessionTurnManager._resolve_delivery_backend``). A Session left
+            # unpinned instead reaches
+            # ``Controller.resolve_vibe_agent_for_context``, which carries no
+            # principal, re-resolves the raw configured default, and pins that
+            # inaccessible Agent -- after which the remote execution recheck in
+            # ``_remote_delivery_execution_denial`` sees an explicit binding the
+            # caller cannot use and retires their first message. Persisting the
+            # substitute is what makes the degradation actually execute.
+            usable_default = ensure_default_agent_access(
                 conn,
                 user_context=resource_context,
                 missing_is_error=True,
             )
+            configured_default = resolve_effective_default_agent(conn)
+            if (
+                usable_default is not None
+                and configured_default is not None
+                and usable_default.id != configured_default.id
+            ):
+                agent_id = usable_default.id
+                agent_name = usable_default.name
+                agent_backend = usable_default.backend
 
     if agent_name or agent_id:
         selected_agent = ensure_agent_selection_access(

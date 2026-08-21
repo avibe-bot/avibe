@@ -88,15 +88,24 @@ const response = (overrides: Partial<PermissionsResponse> = {}): PermissionsResp
   ...overrides,
 });
 
-function renderPage(canManage = true) {
+function renderPage(
+  canManage = true,
+  capabilities = canManage
+    ? OWNER_INSTANCE_CAPABILITIES
+    : {
+      ...OWNER_INSTANCE_CAPABILITIES,
+      can_manage_instance: false,
+      can_manage_access_members: false,
+      is_instance_owner: false,
+    },
+  instanceRole: 'owner' | 'member' | 'editor' | 'viewer' = canManage ? 'owner' : 'viewer',
+) {
   return render(
     <InstanceAuthorizationContext.Provider value={{
       remote: true,
       instanceKind: 'organization',
-      instanceRole: canManage ? 'owner' : 'viewer',
-      capabilities: canManage
-        ? OWNER_INSTANCE_CAPABILITIES
-        : { ...OWNER_INSTANCE_CAPABILITIES, can_manage_instance: false, is_instance_owner: false },
+      instanceRole,
+      capabilities,
     }}>
       <PermissionsPage />
     </InstanceAuthorizationContext.Provider>,
@@ -270,6 +279,41 @@ describe('PermissionsPage state model', () => {
     expect(await screen.findByText('permissions.states.readOnlyTitle')).toBeTruthy();
     expect(screen.getByText('owner@example.com')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
+  });
+
+  it('shows an Instance Member both access tabs read-only', async () => {
+    const withMember = response();
+    withMember.projection.access.entries = [{
+      kind: 'email',
+      value: 'member@example.com',
+      role: 'member',
+    }];
+    api.getPermissions.mockResolvedValue(withMember);
+    const user = userEvent.setup();
+    renderPage(false, {
+      ...OWNER_INSTANCE_CAPABILITIES,
+      can_manage_access_members: false,
+      is_instance_owner: false,
+    }, 'member');
+
+    expect(await screen.findByText('permissions.states.readOnlyTitle')).toBeTruthy();
+    expect(screen.getByText('permissions.roles.member')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
+
+    // Project access decides who may reach a project, which is access
+    // administration rather than project management, so it stays Owner-only
+    // and the member sees the same read-only surface on both tabs.
+    await user.click(screen.getByRole('tab', { name: /permissions.tabs.projects/ }));
+    expect(screen.getByText('permissions.states.readOnlyTitle')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'permissions.actions.manage' })).toBeNull();
+  });
+
+  it('offers Instance Member in the access role picker for owners', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'permissions.actions.addAccess' }));
+    expect(screen.getByRole('radio', { name: 'permissions.roles.member' })).toBeTruthy();
   });
 
   it('gates every edit surface on the Backend mutation capability', async () => {
@@ -1190,6 +1234,24 @@ describe('PermissionsPage conflict handling', () => {
       kind: 'email',
       value: 'editor@example.com',
       role: 'editor',
+    })).toBe(false);
+    expect(requiresAccessNarrowing({
+      kind: 'email',
+      value: 'member@example.com',
+      role: 'member',
+    }, {
+      kind: 'email',
+      value: 'member@example.com',
+      role: 'editor',
+    })).toBe(true);
+    expect(requiresAccessNarrowing({
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'editor',
+    }, {
+      kind: 'email',
+      value: 'editor@example.com',
+      role: 'member',
     })).toBe(false);
   });
 
