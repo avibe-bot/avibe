@@ -2,7 +2,7 @@
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -164,6 +164,11 @@ const projectedMessage = (id: string, text: string) => ({
   delivered_at: '2026-08-15T00:00:01Z',
   read_at: null,
 });
+
+const SessionSwitcher = () => {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate('/chat/session-running')}>switch chat</button>;
+};
 
 describe('ChatPage transcript hydration', () => {
   let sessionRow: Deferred<{ id: string }>;
@@ -416,5 +421,74 @@ describe('ChatPage transcript hydration', () => {
     await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalledTimes(1));
     expect(screen.getByText('first active step')).toBeTruthy();
     expect(screen.getByText('second active step')).toBeTruthy();
+  });
+
+  it('does not render an open activity group as interrupted before the switched chat turn state is known', async () => {
+    const openGroup = {
+      id: 'open-turn',
+      anchor_message_id: null,
+      anchor_position: 'after' as const,
+      open: true,
+      status: 'interrupted' as const,
+      steps: 1,
+      duration_ms: null,
+    };
+    const runningBootstrap = deferred<ReturnType<typeof bootstrapPayload>>();
+    const unknownActivity = deferred<{ groups: typeof openGroup[] }>();
+    const runningActivity = deferred<{ groups: typeof openGroup[] }>();
+    mocks.api.getSession.mockResolvedValue({ id: 'session-running' });
+    mocks.api.getSessionBootstrap
+      .mockReset()
+      .mockResolvedValueOnce({
+        ...bootstrapPayload('session-old'),
+        config: { ui: { show_agent_activity: true } },
+      })
+      .mockReturnValueOnce(runningBootstrap.promise);
+    let runningActivityReads = 0;
+    mocks.api.getSessionActivity.mockImplementation((sessionId: string) => {
+      if (sessionId !== 'session-running') return Promise.resolve({ groups: [] });
+      runningActivityReads += 1;
+      return runningActivityReads === 1 ? unknownActivity.promise : runningActivity.promise;
+    });
+    mocks.api.getSessionActivityGroup.mockResolvedValue({
+      ...openGroup,
+      rows: [{
+        id: 'active-step',
+        kind: 'assistant',
+        text: 'still working',
+        created_at: '2026-08-21T00:00:00Z',
+      }],
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-old']}>
+        <SessionSwitcher />
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalledWith('session-old'));
+    act(() => screen.getByRole('button', { name: 'switch chat' }).click());
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(2));
+
+    act(() => mocks.events?.onConnected());
+    await waitFor(() => expect(mocks.api.getSessionActivity).toHaveBeenCalledWith('session-running'));
+
+    await act(async () => runningBootstrap.resolve({
+      ...bootstrapPayload('session-running'),
+      config: { ui: { show_agent_activity: true } },
+      turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+    }));
+
+    await act(async () => unknownActivity.resolve({ groups: [openGroup] }));
+    await waitFor(() => expect(runningActivityReads).toBe(2));
+    expect(screen.queryByText('chat.agentActivity.interrupted')).toBeNull();
+
+    await act(async () => runningActivity.resolve({ groups: [openGroup] }));
+
+    await waitFor(() => expect(screen.getByText('chat.agentActivity.running')).toBeTruthy());
+    expect(screen.queryByText('chat.agentActivity.interrupted')).toBeNull();
   });
 });
