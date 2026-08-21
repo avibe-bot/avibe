@@ -1410,6 +1410,7 @@ def _structured_profile(value: Any) -> MemoryProfile | None:
     summary = _safe_text(value.get("summary")) if "summary" in value else None
     explicit_info = _structured_explicit_info(value)
     implicit_traits = _structured_implicit_traits(value)
+    summary = _repair_stale_profile_summary(summary, explicit_info, implicit_traits)
     updated_at = _normalized_profile_timestamp(value.get("profile_timestamp_ms"))
 
     # A provider timestamp is metadata, not readable profile content. Unknown
@@ -1422,6 +1423,38 @@ def _structured_profile(value: Any) -> MemoryProfile | None:
         implicit_traits=implicit_traits,
         updated_at=updated_at,
     )
+
+
+def _repair_stale_profile_summary(
+    summary: str | None,
+    explicit_info: tuple[MemoryProfileExplicitInfo, ...],
+    implicit_traits: tuple[MemoryProfileTrait, ...],
+) -> str | None:
+    """Repair EverAlgo summaries surfaced by EverOS when pinned to item one.
+
+    EverAlgo's profile updater appends new items but rebuilds ``summary`` from
+    the first non-empty explicit description. That makes a transient first
+    message the permanent headline. Only the distinctive stale shape is
+    changed here; provider-authored summaries that differ from the first item
+    remain authoritative, and the raw provider JSON stays untouched.
+    """
+
+    if summary is None:
+        return None
+
+    if len(explicit_info) > 1 and summary == explicit_info[0].description:
+        for info in reversed(explicit_info[1:]):
+            if info.description != summary:
+                return info.description
+        return summary
+
+    if not explicit_info and len(implicit_traits) > 1 and summary == implicit_traits[0].description:
+        for trait in reversed(implicit_traits[1:]):
+            candidate = trait.description or trait.trait
+            if candidate and candidate != summary:
+                return candidate
+
+    return summary
 
 
 def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExplicitInfo, ...]:

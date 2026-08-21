@@ -1252,6 +1252,63 @@ def test_profile_maps_known_fields_without_collapsing_basis_and_evidence() -> No
     assert json.loads(items[0].text)["implicit_traits"][0]["evidence"] == "Three recent planning discussions."
 
 
+def test_profile_repairs_provider_summary_pinned_to_first_explicit_item() -> None:
+    profile_data = {
+        "summary": "Continue",
+        "explicit_info": [
+            {"category": "conversation", "description": "Continue"},
+            {
+                "category": "engineering",
+                "description": "Prefers evidence-backed engineering decisions.",
+            },
+        ],
+        "implicit_traits": [
+            {
+                "trait": "systematic",
+                "description": "Builds a causal model before choosing scope.",
+            }
+        ],
+        "profile_timestamp_ms": 1_757_000_000_000,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"profiles": [{"user_id": "owner-1", "profile_data": profile_data}]}},
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert items[0].profile is not None
+    assert items[0].profile.summary == "Prefers evidence-backed engineering decisions."
+    # The compatibility correction is read-only; raw provider data remains available.
+    assert json.loads(items[0].text)["summary"] == "Continue"
+
+
+def test_profile_preserves_provider_summary_that_is_not_the_first_item() -> None:
+    profile_data = {
+        "summary": "A concise portrait of the user's stable preferences.",
+        "explicit_info": [
+            {"description": "Uses Python."},
+            {"description": "Prefers written updates."},
+        ],
+        "profile_timestamp_ms": 1_757_000_000_000,
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"profiles": [{"user_id": "owner-1", "profile_data": profile_data}]}},
+        )
+
+    with _sidecar_transport(handler):
+        items = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).profile("owner-1", PROJECT))
+
+    assert items[0].profile is not None
+    assert items[0].profile.summary == profile_data["summary"]
+
+
 def test_profile_timestamp_without_recognized_content_uses_the_raw_fallback() -> None:
     raw_profile = {
         "profile_timestamp_ms": 1_754_012_345_678,
