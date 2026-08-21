@@ -131,12 +131,14 @@ import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
 import { ActivityCard, ActivityChip } from './AgentActivityGroup';
 import {
+  activityGroupsForForeground,
   activityRowFromMessage,
   groupFromWire,
   initialLiveActivity,
   isActivityMessageType,
   liveActivityReducer,
   shouldShowRunningCard,
+  type ActivityForeground,
   type ActivityGroup,
   type ActivityRow,
   type LiveActivityEvent,
@@ -651,11 +653,14 @@ export const ChatPage: React.FC = () => {
   // settle fetch schedules exactly one bounded retry (the next settle also rebuilds).
   const activityRefreshInFlightRef = useRef(false);
   const activityRefreshPendingRef = useRef(false);
-  const activityRunningRef = useRef(false);
+  // The controller-owned state used to interpret an open durable group. This is
+  // deliberately tri-state: a route switch starts unknown, so an early activity
+  // read cannot turn "not hydrated yet" into a visible interrupted result.
+  const activityForegroundRef = useRef<ActivityForeground>('unknown');
   const activityRetryTimerRef = useRef<number | null>(null);
   // Latest ``scheduleActivityRefresh`` (assigned below) so its own async resolution
   // can re-enter for the trailing / retry pass without a definition cycle.
-  const scheduleActivityRefreshRef = useRef<(running: boolean, isRetry?: boolean) => void>(() => {});
+  const scheduleActivityRefreshRef = useRef<(isRetry?: boolean) => void>(() => {});
   // Advance the live-buffer state machine + mirror it into render state. The ref is
   // updated synchronously so same-tick reads (generation, settled) are current.
   const dispatchLive = useCallback((event: LiveActivityEvent) => {
@@ -686,6 +691,7 @@ export const ChatPage: React.FC = () => {
   const markWorking = useCallback(() => {
     turnEpochRef.current += 1;
     workingSetAtRef.current = Date.now();
+    activityForegroundRef.current = 'running';
     workingRef.current = true;
     setWorking(true);
   }, []);
@@ -705,7 +711,7 @@ export const ChatPage: React.FC = () => {
   // is only touched when the resolution is still for the CURRENT generation (a newer
   // turn.start bumped it → a late resolution is a structural no-op).
   const refreshActivity = useCallback(
-    async (running: boolean, issuedGen: number): Promise<boolean> => {
+    async (issuedGen: number): Promise<boolean> => {
       const sid = sessionIdRef.current;
       if (!sid || !showAgentActivityRef.current) return true;
       let res: { groups: TurnActivityGroupWire[] };
@@ -716,12 +722,12 @@ export const ChatPage: React.FC = () => {
       }
       if (sid !== sessionIdRef.current) return true;
       const fetched = (res.groups ?? []).map(groupFromWire);
-      // The last un-terminated turn is the ``open`` group. While a turn is running it
-      // IS that turn — promote it into the live card (re-hydrate) rather than render
-      // it as a chip; otherwise it renders as an interrupted chip after its trigger.
-      const inflightIdx = running ? fetched.findIndex((g) => g.open) : -1;
-      const inflight = inflightIdx >= 0 ? fetched[inflightIdx] : null;
-      const groups = inflight ? fetched.filter((_, i) => i !== inflightIdx) : fetched;
+      // Interpret an open group against the LATEST controller state, not the state
+      // from when this request started. A chat switch can hydrate ``running`` while
+      // an earlier unknown-state request is in flight; committing the stale boolean
+      // is the orange interrupted-chip flash this boundary prevents.
+      const foreground = activityForegroundRef.current;
+      const { settled: groups, inflight } = activityGroupsForForeground(fetched, foreground);
       // Settled groups are always safe to replace (storage is authoritative);
       // preserve already-loaded rows so a resync doesn't force a re-fetch on expand.
       setActivityGroups((prev) => {
@@ -735,6 +741,7 @@ export const ChatPage: React.FC = () => {
           try {
             const wire = await api.getSessionActivityGroup(sid, inflight.id);
             if (sid !== sessionIdRef.current) return true;
+            if (activityForegroundRef.current !== 'running') return true;
             const rows = groupFromWire(wire).rows ?? [];
             if (rows.length > 0) {
               const startMs = Date.parse(rows[0].created_at);
@@ -749,38 +756,37 @@ export const ChatPage: React.FC = () => {
             /* re-hydrate is best-effort; live streaming still fills the card */
           }
         }
-      } else {
-        // No in-flight turn: clear the finished buffer so the card swaps to its chip
-        // — but only if still the same generation (a newer turn's rows are kept).
+      } else if (foreground === 'idle') {
+        // Authoritative idle: clear the finished buffer so the card swaps to its
+        // chip, but only if still the same generation (newer rows are kept).
         dispatchLive({ type: 'clear_for_gen', gen: issuedGen });
       }
       return true;
     },
     [api, dispatchLive],
   );
-  // Coalesce settle-triggered refreshes: one in-flight + at most one trailing (with
-  // the latest ``running`` and the current generation), never N fetches for a settle
-  // burst. On a transient fetch failure schedule exactly one bounded retry (the next
-  // settle also rebuilds). No fetch when the toggle is off (strict no-op).
+  // Coalesce settle-triggered refreshes: one in-flight + at most one trailing for
+  // the current generation, never N fetches for a settle burst. Each response is
+  // interpreted against the latest controller foreground state at commit time. On
+  // a transient failure schedule one bounded retry (the next settle also rebuilds).
   const scheduleActivityRefresh = useCallback(
-    (running: boolean, isRetry = false) => {
+    (isRetry = false) => {
       if (!showAgentActivityRef.current) return;
-      activityRunningRef.current = running;
       if (activityRefreshInFlightRef.current) {
         activityRefreshPendingRef.current = true;
         return;
       }
       activityRefreshInFlightRef.current = true;
       const issuedGen = liveStateRef.current.gen;
-      void refreshActivity(activityRunningRef.current, issuedGen).then((ok) => {
+      void refreshActivity(issuedGen).then((ok) => {
         activityRefreshInFlightRef.current = false;
         if (activityRefreshPendingRef.current) {
           activityRefreshPendingRef.current = false;
-          scheduleActivityRefreshRef.current(activityRunningRef.current, false);
+          scheduleActivityRefreshRef.current(false);
         } else if (ok === false && !isRetry && activityRetryTimerRef.current === null) {
           activityRetryTimerRef.current = window.setTimeout(() => {
             activityRetryTimerRef.current = null;
-            scheduleActivityRefreshRef.current(activityRunningRef.current, true);
+            scheduleActivityRefreshRef.current(true);
           }, 1500);
         }
       });
@@ -1160,7 +1166,7 @@ export const ChatPage: React.FC = () => {
     // Resync activity too: an SSE gap can drop the terminal/turn.end, so rebuild
     // settled groups from storage (a recovered turn gets its chip; a still-running
     // turn keeps/re-hydrates its card). Coalesced + no-op when the toggle is off.
-    scheduleActivityRefresh(workingRef.current);
+    scheduleActivityRefresh();
   }, [api, sessionId, scheduleActivityRefresh, beginTranscriptSnapshotRead]);
 
   // The send-while-busy queue (pending messages shown above the composer).
@@ -1230,7 +1236,7 @@ export const ChatPage: React.FC = () => {
       // Returning to the live tail from a historical window: activity ingestion was
       // suppressed while scrolled away, so resync groups from storage — a turn that
       // finished in history still gets its chip without a full reload.
-      scheduleActivityRefresh(workingRef.current);
+      scheduleActivityRefresh();
       return true;
     } catch {
       return false;
@@ -1292,6 +1298,7 @@ export const ChatPage: React.FC = () => {
         // overlapping sync whose idle response lands AFTER this one can't clear
         // the Stop we just confirmed live — its captured epoch is now stale (P2).
         markWorking();
+        scheduleActivityRefresh();
         return;
       }
       // Idle snapshot — clear the stale indicator, but only when it's safe:
@@ -1304,6 +1311,7 @@ export const ChatPage: React.FC = () => {
       const sinceSet = Date.now() - workingSetAtRef.current;
       if (sinceSet > WORKING_SETTLE_GRACE_MS) {
         const recoveredDroppedTurnEnd = workingRef.current;
+        activityForegroundRef.current = 'idle';
         workingRef.current = false;
         setWorking(false);
         // Agent Activity: the idle poll recovering a dropped terminal/turn.end is a
@@ -1313,7 +1321,7 @@ export const ChatPage: React.FC = () => {
         // The card is already hidden by the working gate; this produces the chip.
         if (showAgentActivityRef.current) {
           dispatchLive({ type: 'settle' });
-          scheduleActivityRefresh(false);
+          scheduleActivityRefresh();
         }
         if (recoveredDroppedTurnEnd) void refreshSessionRow();
       } else if (graceResyncRef.current === null) {
@@ -1401,11 +1409,12 @@ export const ChatPage: React.FC = () => {
       }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
+      activityForegroundRef.current = bootstrap.turn_state.foreground;
       // Chat Activity chips for past turns: resync the per-turn summary (row text
       // lazy-loads on expand). If a turn is in flight, the refresh re-hydrates the
       // running card instead of showing it as interrupted.
       if (activityEnabled) {
-        scheduleActivityRefresh(bootstrap.turn_state.foreground === 'running');
+        scheduleActivityRefresh();
       } else {
         setActivityGroups([]);
       }
@@ -1417,7 +1426,10 @@ export const ChatPage: React.FC = () => {
       // syncTurnState idle response can't clear it; an idle load is authoritative
       // for the fresh page, so clear directly (Codex P2).
       if (bootstrap.turn_state.foreground === 'running') markWorking();
-      else if (bootstrap.turn_state.foreground === 'idle') setWorking(false);
+      else if (bootstrap.turn_state.foreground === 'idle') {
+        workingRef.current = false;
+        setWorking(false);
+      }
     } catch (err) {
       // A superseded failure must not stamp an error onto the newer request's
       // loading state, even when both requests belong to the same route.
@@ -1471,6 +1483,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(highlightTimerRef.current);
       highlightTimerRef.current = null;
     }
+    workingRef.current = false;
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
@@ -1478,6 +1491,7 @@ export const ChatPage: React.FC = () => {
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
+    activityForegroundRef.current = 'unknown';
     liveStateRef.current = initialLiveActivity();
     setLiveRows([]);
     setLiveStartedAt(null);
@@ -1552,7 +1566,7 @@ export const ChatPage: React.FC = () => {
         // detached completion. Only a terminal reply owns this live generation.
         if (showAgentActivityRef.current && shouldRefreshAgentActivityForMessage(msg)) {
           if (isTerminalAgentMessage(msg)) dispatchLive({ type: 'settle' });
-          scheduleActivityRefresh(workingRef.current);
+          scheduleActivityRefresh();
         }
         // Don't clear ``working`` from a result row here: with the queue, a
         // result can belong to an EARLIER turn while a newer queued turn is
@@ -1578,17 +1592,17 @@ export const ChatPage: React.FC = () => {
         // or user cancel) — the authoritative end of the working state. There is
         // no turn-duration timeout, so this only fires on a REAL terminal signal.
         if (data.session_id === sessionIdRef.current) {
+          activityForegroundRef.current = 'idle';
           setRuntimeState((current) => ({ ...current, in_flight: false, foreground: 'idle' }));
           workingRef.current = false;
           setWorking(false);
           // Agent Activity: the turn settled (result / error / interrupt) → mark the
-          // generation settled and rebuild from storage. running=false so a trailing
-          // (no-terminal) turn renders as its interrupted chip and the finished
-          // card's buffer clears — the interrupt case is covered structurally, with
-          // no client-side snapshot or grace timer.
+          // generation settled and rebuild from storage. Authoritative idle makes a
+          // trailing open group render as interrupted and clears the finished card's
+          // buffer — the interrupt case needs no client-side snapshot or grace timer.
           if (showAgentActivityRef.current) {
             dispatchLive({ type: 'settle' });
-            scheduleActivityRefresh(false);
+            scheduleActivityRefresh();
           }
           // Turn start can materialize an inherited route even on an already-
           // bound legacy session. Reload the authoritative row on every settle

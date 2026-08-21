@@ -34,6 +34,30 @@ export type ActivityGroup = {
   rows?: ActivityRow[];
 };
 
+export type ActivityForeground = 'idle' | 'running' | 'unknown';
+
+/** Interpret durable groups only after the controller's foreground state is known.
+ * An open group is not interrupted evidence by itself: while state is unknown it
+ * stays hidden, while running it becomes the live card, and only authoritative
+ * idle lets its stored interrupted status render as a settled chip. */
+export const activityGroupsForForeground = (
+  groups: ActivityGroup[],
+  foreground: ActivityForeground,
+): { settled: ActivityGroup[]; inflight: ActivityGroup | null } => {
+  if (foreground === 'idle') return { settled: groups, inflight: null };
+
+  let inflight: ActivityGroup | null = null;
+  if (foreground === 'running') {
+    for (let i = groups.length - 1; i >= 0; i -= 1) {
+      if (groups[i].open) {
+        inflight = groups[i];
+        break;
+      }
+    }
+  }
+  return { settled: groups.filter((group) => !group.open), inflight };
+};
+
 // Wire shape from GET /api/sessions/<id>/activity (summary group + optional rows).
 export type TurnActivityGroupWire = {
   id: string;

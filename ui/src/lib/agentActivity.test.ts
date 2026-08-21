@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
 import {
+  activityGroupsForForeground,
   activityDurationParts,
   activityRowFromMessage,
   filterActivityRows,
@@ -291,6 +292,48 @@ describe('groupFromWire', () => {
     expect(group.open).toBe(true);
     expect(group.durationMs).toBeNull();
     expect(group.rows).toBeUndefined();
+  });
+});
+
+describe('activityGroupsForForeground', () => {
+  const settled = groupFromWire({
+    id: 'settled',
+    anchor_message_id: 'result',
+    anchor_position: 'before',
+    open: false,
+    status: 'done',
+    steps: 2,
+    duration_ms: 1000,
+  });
+  const open = groupFromWire({
+    id: 'open',
+    anchor_message_id: 'prompt',
+    anchor_position: 'after',
+    open: true,
+    status: 'interrupted',
+    steps: 1,
+    duration_ms: null,
+  });
+
+  it('withholds open groups while foreground state is unknown', () => {
+    expect(activityGroupsForForeground([settled, open], 'unknown')).toEqual({
+      settled: [settled],
+      inflight: null,
+    });
+  });
+
+  it('promotes the latest open group only while the turn is running', () => {
+    expect(activityGroupsForForeground([settled, open], 'running')).toEqual({
+      settled: [settled],
+      inflight: open,
+    });
+  });
+
+  it('renders an open group as settled only after authoritative idle', () => {
+    expect(activityGroupsForForeground([settled, open], 'idle')).toEqual({
+      settled: [settled, open],
+      inflight: null,
+    });
   });
 });
 
