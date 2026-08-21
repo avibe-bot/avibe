@@ -42,12 +42,11 @@ export function shouldBlockPwaLoopbackLink(href: string, currentHref: string): b
  * Resolve a same-origin `_blank` navigation to the target the installed iOS
  * PWA should open in its current browsing context.
  *
- * A private Show Page root uses the in-shell app route so the user keeps Avibe
- * chrome and back navigation. Canonical AppShell routes stay on the SPA path,
- * avoiding a reload and another auth pass. Every other same-origin destination
- * uses a current-context document navigation so WebKit never creates the
- * secondary context that iOS may incorrectly restore after process eviction.
- * Callers exclude download anchors before using this resolver.
+ * Canonical AppShell routes stay on the SPA path, avoiding a reload and another
+ * auth pass. Show Pages and every other same-origin document keep their literal
+ * destination in the current context so WebKit never creates the secondary
+ * context that iOS may incorrectly restore after process eviction. Callers
+ * exclude download anchors before using this resolver.
  */
 export interface InternalPwaLinkTarget {
   path: string;
@@ -62,11 +61,6 @@ export function internalPwaLinkTarget(
     const current = new URL(currentHref);
     const target = new URL(href, current);
     if (target.origin !== current.origin || !['http:', 'https:'].includes(target.protocol)) return null;
-
-    const privateShowRoot = /^\/show\/([^/]+)\/?$/.exec(target.pathname);
-    if (privateShowRoot && !target.search && !target.hash) {
-      return { path: `/apps/show/${privateShowRoot[1]}`, navigation: 'spa' };
-    }
 
     return {
       path: `${target.pathname}${target.search}${target.hash}`,
