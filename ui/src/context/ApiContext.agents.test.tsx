@@ -5,9 +5,10 @@ import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
+const showToast = vi.hoisted(() => vi.fn());
 
 vi.mock('../lib/apiFetch', () => ({ apiFetch }));
-vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('./ToastContext', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
@@ -24,8 +25,8 @@ const CaptureApi = () => {
   return null;
 };
 
-const response = (payload: unknown) => new Response(JSON.stringify(payload), {
-  status: 200,
+const response = (payload: unknown, status = 200) => new Response(JSON.stringify(payload), {
+  status,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -55,6 +56,7 @@ beforeEach(() => {
   capturedApi = null;
   window.localStorage.clear();
   apiFetch.mockReset();
+  showToast.mockReset();
 });
 
 afterEach(() => {
@@ -85,5 +87,32 @@ describe('ApiProvider agent detail transport', () => {
       '/api/agents/agent-a',
       '/api/agents/agent-a',
     ]);
+  });
+
+  it('passes expected disappearance codes through the uncached error boundary', async () => {
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+
+    apiFetch.mockResolvedValueOnce(response({
+      ok: false,
+      code: 'agent_not_found',
+      message: 'agent disappeared',
+    }, 404));
+    await expect(capturedApi!.getVibeAgent('agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found'],
+    })).rejects.toMatchObject({ code: 'agent_not_found' });
+    expect(showToast).not.toHaveBeenCalled();
+
+    apiFetch.mockResolvedValueOnce(response({
+      ok: false,
+      code: 'agent_access_forbidden',
+      message: 'agent forbidden',
+    }, 403));
+    await expect(capturedApi!.getVibeAgent('agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found'],
+    })).rejects.toMatchObject({ code: 'agent_access_forbidden' });
+    expect(showToast).toHaveBeenCalledTimes(1);
   });
 });

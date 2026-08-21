@@ -75,6 +75,34 @@ function isSystemAgent(agent: { source: string }): boolean {
   return agent.source === 'builtin' || agent.source === 'system';
 }
 
+type AgentRequestToken = { version: number; identity: string | null };
+
+type AgentRequestVersion = {
+  begin: (identity?: string | null) => AgentRequestToken;
+  invalidate: () => number;
+  isCurrent: (token: AgentRequestToken) => boolean;
+};
+
+// A tiny per-resource epoch owner. Every asynchronous read captures a token;
+// any committed mutation or identity change advances the epoch and makes older
+// responses inert without relying on timing or a name comparison alone.
+const createAgentRequestVersion = (): AgentRequestVersion => {
+  let version = 0;
+  return {
+    begin: (identity = null) => ({ version: ++version, identity }),
+    invalidate: () => ++version,
+    isCurrent: (token) => token.version === version,
+  };
+};
+
+const SELECTED_DISAPPEARANCE_CODES = ['agent_not_found', 'agent_access_forbidden'] as const;
+
+const errorCodeOf = (error: unknown): string | null => {
+  if (!error || typeof error !== 'object') return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
+};
+
 export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -117,9 +145,13 @@ export const AgentsPage: React.FC = () => {
   const [onboardingInventory, setOnboardingInventory] = useState<VibeAgentOnboardingResult | null>(null);
   const [onboardingExpanded, setOnboardingExpanded] = useState(false);
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
-  const refreshRequestRef = useRef(0);
+  const definitionsVersionRef = useRef(createAgentRequestVersion());
+  const onboardingVersionRef = useRef(createAgentRequestVersion());
   const selectedRef = useRef<VibeAgentFull | null>(null);
-  const selectedRefreshRequestRef = useRef(0);
+  const selectedVersionRef = useRef(createAgentRequestVersion());
+  const selectedIntentRef = useRef(0);
+  const selectedMutationVersionRef = useRef(0);
+  const onboardingMutationRef = useRef(0);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -132,24 +164,42 @@ export const AgentsPage: React.FC = () => {
   // a member's page load into an owner-only GET and surfaced the 403 as a toast.
   const canOnboardAgents = capabilities.is_instance_owner;
 
+  const publishOnboarding = useCallback((result: VibeAgentOnboardingResult | null) => {
+    onboardingVersionRef.current.invalidate();
+    setOnboardingInventory(result?.available ? result : null);
+  }, []);
+
   const refreshOnboarding = useCallback(async () => {
     if (!canOnboardAgents) {
       setOnboardingInventory(null);
       return;
     }
+    const token = onboardingVersionRef.current.begin();
     try {
       const result = await api.getVibeAgentOnboarding();
-      setOnboardingInventory(result.available ? result : null);
+      if (onboardingVersionRef.current.isCurrent(token)) publishOnboarding(result);
     } catch {
-      setOnboardingInventory(null);
+      if (onboardingVersionRef.current.isCurrent(token)) publishOnboarding(null);
     }
-  }, [api, canOnboardAgents]);
+  }, [api, canOnboardAgents, publishOnboarding]);
+
+  const commitSelected = useCallback((agent: VibeAgentFull | null) => {
+    selectedVersionRef.current.invalidate();
+    selectedRef.current = agent;
+    setSelected(agent);
+  }, []);
+
+  const beginSelectedIntent = useCallback((identity: string | null) => {
+    const intent = ++selectedIntentRef.current;
+    return { intent, token: selectedVersionRef.current.begin(identity) };
+  }, []);
+
 
   // Definitions refreshes are explicit reconciliation reads. They must always
   // bypass the five-second client cache so a normal refresh cannot supersede a
   // reconnect snapshot with a stale cached promise.
   const refresh = useCallback(() => {
-    const requestId = ++refreshRequestRef.current;
+    const token = definitionsVersionRef.current.begin();
     const request = (async () => {
       setLoading(true);
       setError(null);
@@ -161,7 +211,7 @@ export const AgentsPage: React.FC = () => {
         // A read issued before a stream gap may finish after the catch-up read.
         // Only the latest request may publish its snapshot, so an older response
         // cannot roll the Definitions list back to pre-gap state.
-        if (requestId !== refreshRequestRef.current) return;
+        if (!definitionsVersionRef.current.isCurrent(token)) return;
         setAgents(result.agents);
         setDefaultName(result.default_agent_name);
         // Keep the currently-selected agent present after edits / refreshes.
@@ -169,18 +219,18 @@ export const AgentsPage: React.FC = () => {
         if (currentSelected) {
           const fresh = result.agents.find((a) => a.name === currentSelected.name);
           if (!fresh) {
-            selectedRef.current = null;
-            setSelected(null);
+            beginSelectedIntent(null);
+            commitSelected(null);
           }
         }
       } catch (err) {
-        if (requestId === refreshRequestRef.current) setError(errorMessage(err) ?? String(err));
+        if (definitionsVersionRef.current.isCurrent(token)) setError(errorMessage(err) ?? String(err));
       } finally {
-        if (requestId === refreshRequestRef.current) setLoading(false);
+        if (definitionsVersionRef.current.isCurrent(token)) setLoading(false);
       }
     })();
     return request;
-  }, [api]);
+  }, [api, beginSelectedIntent, commitSelected]);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
@@ -188,26 +238,31 @@ export const AgentsPage: React.FC = () => {
   const refreshSelected = useCallback(async () => {
     const current = selectedRef.current;
     if (!current) return;
-    const requestId = ++selectedRefreshRequestRef.current;
+    const intent = selectedIntentRef.current;
+    const token = selectedVersionRef.current.begin(current.name);
     try {
-      const result = await api.getVibeAgent(current.name, { cache: false });
+      const result = await api.getVibeAgent(current.name, {
+        cache: false,
+        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+      });
       if (
         result.ok &&
-        requestId === selectedRefreshRequestRef.current &&
-        selectedRef.current?.name === current.name
+        selectedVersionRef.current.isCurrent(token) &&
+        selectedIntentRef.current === intent &&
+        selectedRef.current?.name === token.identity
       ) {
-        selectedRef.current = result.agent;
-        setSelected(result.agent);
+        commitSelected(result.agent);
       }
-    } catch {
-      // The list catch-up remains authoritative even if the selected detail
-      // cannot be re-read during a transient reconnect.
+    } catch (err) {
+      if (!selectedVersionRef.current.isCurrent(token) || selectedIntentRef.current !== intent) return;
+      if (SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(err) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])) {
+        beginSelectedIntent(null);
+        commitSelected(null);
+        return;
+      }
+      setError(errorMessage(err) ?? String(err));
     }
-  }, [api]);
-
-  useEffect(() => {
-    selectedRef.current = selected;
-  }, [selected]);
+  }, [api, beginSelectedIntent, commitSelected]);
 
   useEffect(() => {
     refresh();
@@ -339,20 +394,22 @@ export const AgentsPage: React.FC = () => {
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
+      const { intent, token } = beginSelectedIntent(name);
       try {
         const result = await api.getVibeAgent(name);
-        if (result.ok) {
-          selectedRef.current = result.agent;
-          setSelected(result.agent);
+        if (result.ok && selectedIntentRef.current === intent && selectedVersionRef.current.isCurrent(token)) {
+          commitSelected(result.agent);
           // Enter the mobile drill-down only once the detail has actually loaded —
           // never optimistically, or a failed fetch hides the list with no panel.
           if (openDetail) setDetailOpen(true);
         }
       } catch (err) {
-        setError(errorMessage(err) ?? String(err));
+        if (selectedIntentRef.current === intent && selectedVersionRef.current.isCurrent(token)) {
+          setError(errorMessage(err) ?? String(err));
+        }
       }
     },
-    [api],
+    [api, beginSelectedIntent, commitSelected],
   );
 
   // Apply text search + backend filter; backend grouping is a layout
@@ -380,25 +437,36 @@ export const AgentsPage: React.FC = () => {
   }, [filtered]);
 
   const onCreated = (agent: VibeAgentFull) => {
-    refresh().then(() => {
-      selectedRef.current = agent;
-      setSelected(agent);
-    });
+    beginSelectedIntent(agent.name);
+    commitSelected(agent);
+    void refresh();
     void refreshOnboarding();
   };
 
 
   const updateField = async (patch: VibeAgentUpdatePayload) => {
     if (!selected) return;
+    const name = selected.name;
+    const intent = selectedIntentRef.current;
+    const mutationToken = selectedVersionRef.current.begin(name);
+    selectedMutationVersionRef.current = mutationToken.version;
     try {
-      const result = await api.updateVibeAgent(selected.name, patch);
-      if (result.ok) {
-        selectedRef.current = result.agent;
-        setSelected(result.agent);
+      const result = await api.updateVibeAgent(name, patch);
+      if (
+        result.ok &&
+        selectedIntentRef.current === intent &&
+        selectedRef.current?.name === name &&
+        selectedMutationVersionRef.current === mutationToken.version
+      ) {
+        // Publishing the mutation result advances the same epoch, invalidating
+        // any read that started while the PATCH was in flight.
+        commitSelected(result.agent);
         refresh();
       }
     } catch (err) {
-      setError(errorMessage(err) ?? String(err));
+      if (selectedIntentRef.current === intent && selectedRef.current?.name === name) {
+        setError(errorMessage(err) ?? String(err));
+      }
     }
   };
 
@@ -415,7 +483,8 @@ export const AgentsPage: React.FC = () => {
   // After a rename (clone-then-delete) the list is stale: the old name lingers
   // and the new one is missing. Refresh and re-select the renamed agent.
   const onRenamed = (newName: string) => {
-    refresh().then(() => selectAgent(newName));
+    beginSelectedIntent(newName);
+    void refresh().then(() => selectAgent(newName));
     void refreshOnboarding();
   };
 
@@ -423,11 +492,12 @@ export const AgentsPage: React.FC = () => {
     if (!selected || isSystemAgent(selected)) return;
     const confirmed = window.confirm(t('agents.deleteConfirm', { name: selected.name }));
     if (!confirmed) return;
+    const name = selected.name;
+    beginSelectedIntent(null);
     try {
-      const result = await api.removeVibeAgent(selected.name);
+      const result = await api.removeVibeAgent(name);
       if (result.ok) {
-        selectedRef.current = null;
-        setSelected(null);
+        commitSelected(null);
         refresh();
         void refreshOnboarding();
       } else if (result.message) {
@@ -473,9 +543,11 @@ export const AgentsPage: React.FC = () => {
   const onOnboardAgents = async () => {
     if (onboardingSubmitting) return;
     setOnboardingSubmitting(true);
+    const mutationId = ++onboardingMutationRef.current;
+    onboardingVersionRef.current.begin();
     try {
       const result = await api.onboardVibeAgents();
-      setOnboardingInventory(result);
+      if (mutationId === onboardingMutationRef.current) publishOnboarding(result);
       showToast(
         result.sync?.ok === false
           ? t('agents.onboarding.savedPending')
@@ -685,8 +757,8 @@ export const AgentsPage: React.FC = () => {
               onRenamed={onRenamed}
               onDelete={onDelete}
               onClose={() => {
-                selectedRef.current = null;
-                setSelected(null);
+                beginSelectedIntent(null);
+                commitSelected(null);
                 setDetailOpen(false);
               }}
             />
@@ -1001,19 +1073,48 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   >({});
   const [running, setRunning] = useState(false);
 
+  const serverSnapshotRef = useRef({
+    id: agent.id,
+    name: agent.name,
+    description: agent.description ?? '',
+    model: agent.model ?? '',
+    effort: agent.reasoning_effort ?? 'medium',
+    systemPrompt: agent.system_prompt ?? '',
+  });
+
   const activeModelCatalog = modelCatalogs[agent.backend];
   const modelOptions = activeModelCatalog?.modelOptions ?? [];
   const reasoningOptions = activeModelCatalog?.reasoningOptions ?? {};
 
   useEffect(() => {
-    setName(agent.name);
-    setDescription(agent.description ?? '');
-    setModel(agent.model ?? '');
-    setEffort(agent.reasoning_effort ?? 'medium');
-    setSystemPrompt(agent.system_prompt ?? '');
-    setSystemPromptOpen(false);
-    setEditorOpen(false);
-  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt]);
+    const previous = serverSnapshotRef.current;
+    const next = {
+      id: agent.id,
+      name: agent.name,
+      description: agent.description ?? '',
+      model: agent.model ?? '',
+      effort: agent.reasoning_effort ?? 'medium',
+      systemPrompt: agent.system_prompt ?? '',
+    };
+    if (previous.id !== next.id) {
+      setName(next.name);
+      setDescription(next.description);
+      setModel(next.model);
+      setEffort(next.effort);
+      setSystemPrompt(next.systemPrompt);
+      setSystemPromptOpen(false);
+      setEditorOpen(false);
+    } else {
+      // Same-identity reconciliation updates clean inline fields while leaving
+      // dirty work and the modal's private draft untouched.
+      if (name === previous.name) setName(next.name);
+      if (description === previous.description) setDescription(next.description);
+      if (model === previous.model) setModel(next.model);
+      if (effort === previous.effort) setEffort(next.effort);
+      if (systemPrompt === previous.systemPrompt) setSystemPrompt(next.systemPrompt);
+    }
+    serverSnapshotRef.current = next;
+  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, description, effort, model, name, systemPrompt]);
 
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the

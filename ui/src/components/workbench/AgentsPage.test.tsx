@@ -14,11 +14,14 @@ type FakeApi = {
   listVibeAgents: ReturnType<typeof vi.fn>;
   getVibeAgent: ReturnType<typeof vi.fn>;
   getVibeAgentOnboarding: ReturnType<typeof vi.fn>;
+  onboardVibeAgents: ReturnType<typeof vi.fn>;
+  updateVibeAgent: ReturnType<typeof vi.fn>;
   getRunningAgents: ReturnType<typeof vi.fn>;
   connectWorkbenchEvents: ReturnType<typeof vi.fn>;
 };
 
 const apiRef = vi.hoisted(() => ({ current: null as FakeApi | null }));
+const showToast = vi.hoisted(() => vi.fn());
 let handlers: WorkbenchEventHandlers | null = null;
 
 vi.mock('../../context/ApiContext', async () => {
@@ -26,7 +29,7 @@ vi.mock('../../context/ApiContext', async () => {
   return { ...actual, useApi: () => apiRef.current };
 });
 
-vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('./CapabilityTabs', () => ({ CapabilityTabs: () => null }));
 vi.mock('../../lib/backendModels', async () => ({
   loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: { models: string[] }) => void) => {
@@ -74,15 +77,27 @@ const fullAgent = (briefAgent: VibeAgentBrief, systemPrompt: string) => ({
   },
 });
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+};
+
 function makeApi(
   listVibeAgents: FakeApi['listVibeAgents'],
   getVibeAgent: FakeApi['getVibeAgent'] = vi.fn().mockResolvedValue({ ok: false }),
   getVibeAgentOnboarding: FakeApi['getVibeAgentOnboarding'] = vi.fn().mockResolvedValue({ available: false }),
+  onboardVibeAgents: FakeApi['onboardVibeAgents'] = vi.fn().mockResolvedValue({ available: false }),
+  updateVibeAgent: FakeApi['updateVibeAgent'] = vi.fn().mockResolvedValue({ ok: false }),
 ): FakeApi {
   return {
     listVibeAgents,
     getVibeAgent,
     getVibeAgentOnboarding,
+    onboardVibeAgents,
+    updateVibeAgent,
     getRunningAgents: vi.fn().mockResolvedValue({ ok: true, counts: { total: 2 } }),
     connectWorkbenchEvents: vi.fn((next: WorkbenchEventHandlers) => {
       handlers = next;
@@ -126,6 +141,7 @@ afterEach(() => {
   cleanup();
   apiRef.current = null;
   handlers = null;
+  showToast.mockReset();
 });
 
 describe('AgentsPage load requests follow the rank that can serve them', () => {
@@ -242,7 +258,10 @@ describe('AgentsPage reconnect reconciliation', () => {
 
     act(() => handlers?.onConnected?.());
     await waitFor(() => expect(screen.getByDisplayValue('after gap')).toBeTruthy());
-    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', { cache: false });
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
     expect(api.getRunningAgents).toHaveBeenCalledTimes(2);
 
     const secondRow = screen.getByText('agent-b').closest('button');
@@ -250,6 +269,189 @@ describe('AgentsPage reconnect reconciliation', () => {
     fireEvent.click(secondRow!);
     await waitFor(() => expect(screen.getByDisplayValue('another agent')).toBeTruthy());
     expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a successful PATCH win over a reconnect GET that settles later', async () => {
+    const initial = { ...brief('agent-a', 'before patch'), model: 'old-model' };
+    const server = { ...initial, description: 'server description', model: 'server-model' };
+    const patchResult = fullAgent({ ...initial, description: 'local patch', model: 'patched-model' }, 'patched prompt');
+    const staleRead = deferred<ReturnType<typeof fullAgent>>();
+    const patch = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(initial, 'before prompt'))
+      .mockReturnValueOnce(staleRead.promise);
+    const listVibeAgents = vi.fn().mockResolvedValue(listResult(server));
+    const updateVibeAgent = vi.fn().mockReturnValue(patch.promise);
+    const api = makeApi(listVibeAgents, getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('before patch')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    const description = screen.getByDisplayValue('before patch');
+    fireEvent.change(description, { target: { value: 'local patch' } });
+    fireEvent.blur(description);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { description: 'local patch' }));
+    act(() => patch.resolve(patchResult));
+    await waitFor(() => expect(screen.getByDisplayValue('local patch')).toBeTruthy());
+
+    act(() => staleRead.resolve(fullAgent(initial, 'stale reconnect prompt')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('local patch')).toBeTruthy();
+    expect(screen.queryByDisplayValue('server description')).toBeNull();
+  });
+
+  it('uses operation epochs to suppress an old A -> B -> A selection response', async () => {
+    const agentA = brief('agent-a', 'A before');
+    const agentB = brief('agent-b', 'B');
+    const oldA = deferred<ReturnType<typeof fullAgent>>();
+    const readB = deferred<ReturnType<typeof fullAgent>>();
+    const readAAgain = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+      .mockReturnValueOnce(oldA.promise)
+      .mockReturnValueOnce(readB.promise)
+      .mockReturnValueOnce(readAAgain.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([agentA, agentB])), getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('A before')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByText('agent-b').closest('button')!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    const agentARow = screen.getAllByText('agent-a').find((node) => node.closest('button'))?.closest('button');
+    expect(agentARow).not.toBeNull();
+    fireEvent.click(agentARow!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(4));
+
+    act(() => oldA.resolve(fullAgent(agentA, 'old A response')));
+    act(() => readB.resolve(fullAgent(agentB, 'B response')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('A before')).toBeTruthy();
+
+    act(() => readAAgain.resolve(fullAgent({ ...agentA, description: 'A after ABA' }, 'new A response')));
+    await waitFor(() => expect(screen.getByDisplayValue('A after ABA')).toBeTruthy());
+  });
+
+  it('preserves dirty drafts while clean detail fields adopt a same-agent snapshot', async () => {
+    const initial = { ...brief('agent-a', 'clean description'), model: 'old-model' };
+    const changed = { ...initial, description: 'server description', model: 'new-model' };
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(initial, 'clean prompt'))
+      .mockResolvedValueOnce(fullAgent(changed, 'server prompt'));
+    const api = makeApi(
+      vi.fn()
+        .mockResolvedValueOnce(listResult(initial))
+        .mockResolvedValueOnce(listResult(changed)),
+      getVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('clean description')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('clean description'), { target: { value: 'dirty description' } });
+    const promptToggle = screen.getByText('agents.detail.systemPrompt').closest('button');
+    expect(promptToggle).not.toBeNull();
+    fireEvent.click(promptToggle!);
+    const inlinePrompt = screen.getByPlaceholderText('agents.create.systemPromptPlaceholder');
+    fireEvent.change(inlinePrompt, { target: { value: 'dirty inline prompt' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    const modalPrompt = screen.getAllByPlaceholderText('agents.create.systemPromptPlaceholder').at(-1)!;
+    fireEvent.change(modalPrompt, { target: { value: 'dirty modal prompt' } });
+
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.getByRole('combobox', { hidden: true }).textContent).toContain('new-model'));
+    expect(screen.getByDisplayValue('dirty description')).toBeTruthy();
+    expect(screen.getByDisplayValue('dirty inline prompt')).toBeTruthy();
+    expect(screen.getByDisplayValue('dirty modal prompt')).toBeTruthy();
+    expect(screen.getByText('agents.detail.systemPromptEditorHint')).toBeTruthy();
+  });
+
+  it('orders onboarding reads around a mutation and ignores stale results', async () => {
+    const agent = brief('agent-a', 'agent description');
+    const initial = deferred<ReturnType<typeof onboardingResult>>();
+    const reconnect = deferred<ReturnType<typeof onboardingResult>>();
+    const overlap = deferred<ReturnType<typeof onboardingResult>>();
+    const onboardingResult = (notOnboarded: number, privateCount: number) => ({
+      ok: true,
+      available: true,
+      organization_id: 'org-1',
+      agents: [],
+      counts: { total: 1, system: 0, custom: 1, not_onboarded: notOnboarded, private: privateCount, published: 0, conflicts: 0 },
+    });
+    const mutation = deferred<ReturnType<typeof onboardingResult>>();
+    const getVibeAgentOnboarding = vi.fn()
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(reconnect.promise)
+      .mockReturnValueOnce(overlap.promise);
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn().mockResolvedValue({ ok: false }),
+      getVibeAgentOnboarding,
+      vi.fn().mockReturnValue(mutation.promise),
+    );
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(handlers).not.toBeNull());
+
+    act(() => handlers?.onConnected?.());
+    act(() => reconnect.resolve(onboardingResult(1, 0)));
+    await waitFor(() => expect(screen.getByText('agents.onboarding.privateCount:{"count":0}')).toBeTruthy());
+    act(() => initial.resolve(onboardingResult(1, 1)));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('agents.onboarding.privateCount:{"count":0}')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('agents.onboarding.onboardPrivate'));
+    await waitFor(() => expect(api.onboardVibeAgents).toHaveBeenCalledTimes(1));
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgentOnboarding).toHaveBeenCalledTimes(3));
+    act(() => mutation.resolve(onboardingResult(0, 1)));
+    await waitFor(() => expect(screen.getByText('agents.onboarding.notOnboardedCount:{"count":0}')).toBeTruthy());
+    act(() => overlap.resolve(onboardingResult(1, 0)));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('agents.onboarding.notOnboardedCount:{"count":0}')).toBeTruthy();
+  });
+
+  it('silences expected selected disappearance but surfaces unexpected current failures', async () => {
+    const agent = brief('agent-a', 'agent description');
+    const expectedApi = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn()
+        .mockResolvedValueOnce(fullAgent(agent, 'prompt'))
+        .mockRejectedValueOnce({ code: 'agent_not_found', message: 'gone' }),
+    );
+    renderPage(expectedApi);
+    await waitFor(() => expect(screen.getByDisplayValue('agent description')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.queryByDisplayValue('agent description')).toBeNull());
+    expect(showToast).not.toHaveBeenCalled();
+
+    cleanup();
+    handlers = null;
+    const unexpectedApi = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn()
+        .mockResolvedValueOnce(fullAgent(agent, 'prompt'))
+        .mockRejectedValueOnce({ code: 'agent_backend_unavailable', message: 'backend unavailable' }),
+    );
+    renderPage(unexpectedApi);
+    await waitFor(() => expect(screen.getByDisplayValue('agent description')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.getByText('backend unavailable')).toBeTruthy());
   });
 
   it('reconciles organization onboarding inventory only from the gap owner', async () => {
