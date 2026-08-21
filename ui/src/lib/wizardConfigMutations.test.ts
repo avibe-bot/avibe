@@ -191,4 +191,21 @@ describe('wizard config mutations', () => {
       setup_completed: true,
     });
   });
+
+  it('persists the WeChat duration override from a loaded enabled value', () => {
+    const data = {
+      platforms: { enabled: ['wechat'] },
+      __wizardEnabledBaseline: ['wechat'],
+      __wizardEnabledAdds: [],
+      __wizardEnabledRemoves: [],
+      show_duration: true,
+      wechat: {},
+      update: { auto_update: true },
+    };
+
+    expect(configMutationsToPayload(buildWizardFinishMutations(data, true))).toEqual({
+      show_duration: false,
+      setup_completed: true,
+    });
+  });
 });

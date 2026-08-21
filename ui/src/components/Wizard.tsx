@@ -141,7 +141,13 @@ export const Wizard: React.FC = () => {
     const nextData = {
       ...data,
       ...(platformsChanged ? { channelConfigsByPlatform: {} } : {}),
-      ...(nextPlatforms.includes('wechat') ? { show_duration: false } : {}),
+      // Keep a loaded WeChat value intact until the wizard-owned platform or
+      // Finish mutation persists the required override. Normalizing it on
+      // unrelated steps would erase the baseline and make Finish believe the
+      // persisted value is already false.
+      ...(nextPlatforms.includes('wechat') && !previousPlatforms.includes('wechat')
+        ? { show_duration: false }
+        : {}),
       ...stepData,
     };
     const submittedDelta = await persistStep(steps[currentStep].id, stepData, data, nextData);
