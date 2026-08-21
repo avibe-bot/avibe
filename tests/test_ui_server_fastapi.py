@@ -2019,6 +2019,39 @@ def test_platform_runtime_fields_changed_detects_primary_only_change():
     )
 
 
+def test_platform_runtime_fields_changed_ignores_idempotent_list_operation():
+    from config.v2_config import V2Config
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    previous = V2Config.from_payload(payload)
+    current = V2Config.from_payload(payload)
+
+    assert (
+        ui_server._platform_runtime_fields_changed(
+            previous,
+            current,
+            {"__avibe_list_ops": {"platforms.enabled": {"add": ["discord"]}}},
+        )
+        is False
+    )
+
+    current = V2Config.from_payload(
+        {
+            **payload,
+            "platforms": {"enabled": ["discord", "slack"], "primary": "discord"},
+        }
+    )
+    assert (
+        ui_server._platform_runtime_fields_changed(
+            previous,
+            current,
+            {"__avibe_list_ops": {"platforms.enabled": {"add": ["slack"]}}},
+        )
+        is True
+    )
+
+
 def test_changed_agent_backend_runtimes_uses_backend_runtime_projection():
     from config.v2_config import V2Config
 

@@ -1528,14 +1528,19 @@ def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Confi
         return False
     platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
     # The list-operations verb mutates the enabled list without carrying a
-    # literal ``platforms`` section — treat it as a platforms edit so
-    # enable/disable toggles still trigger the controller IPC
-    # reconciliation.
+    # literal ``platforms`` section. Treat it as a platforms edit so
+    # enable/disable toggles still reach the comparison below, but do not
+    # infer a runtime change from the verb alone: Finish may replay an
+    # already-applied operation.
     from vibe.api import _LIST_OPS_PAYLOAD_KEY
 
-    if _LIST_OPS_PAYLOAD_KEY in payload:
-        return True
-    if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
+    has_list_ops = _LIST_OPS_PAYLOAD_KEY in payload
+    if (
+        not has_list_ops
+        and "platforms" not in payload
+        and "platform" not in payload
+        and not any(key in payload for key in platform_config_keys)
+    ):
         return False
     return (
         set(previous.platforms.enabled) != set(current.platforms.enabled)
