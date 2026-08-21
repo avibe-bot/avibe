@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { SquareTerminal } from 'lucide-react';
 
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
-import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { useIsDesktop } from '../../lib/useIsDesktop';
 import { MobileAppHeader } from '../apps/MobileAppHeader';
 import { TerminalTabs } from './TerminalTabs';
 
@@ -34,7 +34,8 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
   // Still the ROUTE mount, so the first tab keeps its persistent reattachable session (unlike
   // `windowed`, whose tabs are ephemeral).
   const standalone = useStandaloneAppTab();
-  const mobileRoute = !windowed && !standalone && !isDesktopViewport();
+  const isDesktop = useIsDesktop();
+  const mobileRoute = !windowed && !standalone && !isDesktop;
 
   if (windowed) {
     return (

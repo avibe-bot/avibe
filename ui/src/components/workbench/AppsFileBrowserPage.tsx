@@ -34,7 +34,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
-import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { useIsDesktop } from '../../lib/useIsDesktop';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -211,7 +211,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // A single-app browser tab (`?standalone=1`) frames the app exactly like a window body —
   // full-bleed, no page header or card border — since the shell drops its chrome there too.
   const standalone = useStandaloneAppTab();
-  const mobileRoute = !windowed && !standalone && !isDesktopViewport();
+  const isDesktop = useIsDesktop();
+  const mobileRoute = !windowed && !standalone && !isDesktop;
   const fullBleed = windowed || standalone || mobileRoute;
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
@@ -398,26 +399,26 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // routes correctly regardless of where it's called from.
   const openInEditor = useCallback(
     (path: string, filename: string, mtime: number | null) => {
-      if (isDesktopViewport()) {
+      if (isDesktop) {
         wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
       } else {
         routerNavigate('/apps/editor', { state: { path, filename, mtime } });
       }
     },
-    [wm, routerNavigate],
+    [isDesktop, wm, routerNavigate],
   );
 
   // Preview capability is shared across breakpoints; only its presentation differs. The caller
   // supplies resolved metadata when it has already been fetched (content hits / ambiguous names).
   const openPreview = useCallback(
     (item: RowItem, entry: FsEntry = item.entry, editable = isEditableFile(entry), mtime = entry.mtime) => {
-      if (isDesktopViewport()) {
+      if (isDesktop) {
         wm.openApp('preview', { title: entry.name, params: { path: item.full, name: entry.name } });
       } else {
         setPreview({ path: item.full, name: entry.name, mtime, editable });
       }
     },
-    [wm],
+    [isDesktop, wm],
   );
 
   // Open a terminal rooted at a folder ("Open Terminal Here"): desktop opens a Terminal window
@@ -425,13 +426,13 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // route with the dir in router state. Mirrors openInEditor.
   const openTerminalHere = useCallback(
     (dir: string) => {
-      if (isDesktopViewport()) {
+      if (isDesktop) {
         wm.openApp('terminal', { params: { cwd: dir } });
       } else {
         routerNavigate('/apps/terminal', { state: { cwd: dir } });
       }
     },
-    [wm, routerNavigate],
+    [isDesktop, wm, routerNavigate],
   );
 
   // Open: dir → navigate (and leave search); image / PDF / Office / Markdown → the standalone Preview
@@ -530,12 +531,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // hidden, so fall back to the inline create row so a file can still be made.
   const onNewFile = useCallback(() => {
     if (!cwd) return;
-    if (isDesktopViewport()) {
+    if (isDesktop) {
       wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
     } else {
       startNewEntry('file');
     }
-  }, [cwd, wm, t, startNewEntry]);
+  }, [cwd, isDesktop, wm, t, startNewEntry]);
 
   // ---- Rename (inline) + Delete ----------------------------------------------------------------
   const [rename, setRename] = useState<{ full: string } | null>(null);
@@ -1794,7 +1795,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       {/* MOBILE-ONLY quick-look overlay: on mobile there's no window layer, so a previewable file
           opens here in-page instead of the standalone Preview window (desktop uses the window). */}
       {preview && (
-        <div className="absolute inset-0 z-20 flex flex-col bg-surface">
+        <div className={clsx(
+          'absolute inset-x-0 bottom-0 z-20 flex flex-col bg-surface',
+          mobileRoute ? 'top-[calc(3rem+env(safe-area-inset-top))]' : 'top-0',
+        )}>
           <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
             <FileText className="size-4 shrink-0 text-muted" />
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>

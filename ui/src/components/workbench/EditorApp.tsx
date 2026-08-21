@@ -161,6 +161,10 @@ export const EditorApp: React.FC<{
   const [status, setStatus] = useState<Record<string, PaneStatus>>({});
   const [picker, setPicker] = useState<PickerState | null>(null);
   const [view, setView] = useState<'files' | 'search'>('files');
+  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
+  // border). Width persists for the window's lifetime (state, not navigation).
+  const [explorerCollapsed, setExplorerCollapsed] = useState(mobile);
+  const [explorerWidth, setExplorerWidth] = useState(240);
   // A pending Monaco jump (from a cross-file search result), scoped to one tab. The nonce makes a
   // repeat jump to the same spot re-fire even when the tab is already open.
   const [reveal, setReveal] = useState<{ tabId: string; line: number; column: number; endColumn: number; nonce: number } | null>(null);
@@ -238,8 +242,9 @@ export const EditorApp: React.FC<{
       } catch {
         openFile(path, name, null, target);
       }
+      if (mobile) setExplorerCollapsed(true);
     },
-    [openFile],
+    [mobile, openFile],
   );
 
   // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
@@ -252,6 +257,7 @@ export const EditorApp: React.FC<{
       // markdown / code / json / csv stay editable (with a preview toggle inside the pane).
       if (previewOverlayKind(entry)) {
         openPreview(path, entry.name);
+        if (mobile) setExplorerCollapsed(true);
         return;
       }
       // Fetch fresh metadata (also content-sniffs `text`) and decide by CONTENT, not just the
@@ -261,6 +267,7 @@ export const EditorApp: React.FC<{
         const m = await fileMeta(path);
         if (isEditableMeta(m)) {
           openFile(path, entry.name, m.mtime);
+          if (mobile) setExplorerCollapsed(true);
         } else {
           downloadFile(path);
         }
@@ -268,12 +275,13 @@ export const EditorApp: React.FC<{
         // Metadata fetch failed — fall back to the name-only guess so a known text type still opens.
         if (isEditableFile(entry)) {
           openFile(path, entry.name, entry.mtime);
+          if (mobile) setExplorerCollapsed(true);
         } else {
           downloadFile(path);
         }
       }
     },
-    [openFile, openPreview],
+    [mobile, openFile, openPreview],
   );
 
   // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
@@ -621,10 +629,6 @@ export const EditorApp: React.FC<{
     return () => window.removeEventListener('keydown', onKey, true);
   }, [windowId, wm.focusedId]);
 
-  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
-  // border). Width persists for the window's lifetime (state, not navigation).
-  const [explorerCollapsed, setExplorerCollapsed] = useState(mobile);
-  const [explorerWidth, setExplorerWidth] = useState(240);
   // Selecting a file from the mobile explorer returns the editor to the foreground. This keeps
   // the narrow screen useful after every open while leaving the desktop panel behavior unchanged.
   useEffect(() => {
@@ -831,6 +835,7 @@ export const EditorApp: React.FC<{
                             filename={tab.name}
                             mtime={tab.mtime}
                             chromeless={!mobile}
+                            forceDark
                             onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
                             onCursor={(line, col, indent) => setStatus((s) => ({ ...s, [tab.id]: { line, col, insertSpaces: indent.insertSpaces, tabSize: indent.tabSize } }))}
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}
