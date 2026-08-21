@@ -16,7 +16,6 @@ from urllib.parse import quote
 
 
 NOTES_READY_MARKER_PREFIX = "<!-- avibe:release-notes=ready source="
-_TERMINAL_RUN_STATUSES = {"completed"}
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -33,10 +32,12 @@ class ReleaseState:
     url: str
 
 
-def notes_ready_marker(source_sha: str) -> str:
+def notes_ready_marker(source_sha: str, run_id: int) -> str:
     if _SHA_RE.fullmatch(source_sha) is None:
         raise ReleaseError(f"Invalid release source SHA: {source_sha!r}")
-    return f"{NOTES_READY_MARKER_PREFIX}{source_sha} -->"
+    if run_id <= 0:
+        raise ReleaseError(f"Invalid release notes run ID: {run_id!r}")
+    return f"{NOTES_READY_MARKER_PREFIX}{source_sha} run={run_id} -->"
 
 
 def _run_gh(arguments: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -157,38 +158,25 @@ def update_notes(
     return state
 
 
-def _list_workflow_runs(
-    *,
-    repo: str,
-    workflow: str,
-    branch: str,
-    event: str,
-) -> list[dict[str, Any]]:
-    completed = _run_gh(
-        [
-            "run",
-            "list",
-            "--repo",
-            repo,
-            "--workflow",
-            workflow,
-            "--branch",
-            branch,
-            "--event",
-            event,
-            "--limit",
-            "50",
-            "--json",
-            "databaseId,status,conclusion,headSha,url",
-        ]
+def _ready_run_id(body: str, source_sha: str) -> int | None:
+    marker = re.search(
+        re.escape(NOTES_READY_MARKER_PREFIX)
+        + re.escape(source_sha)
+        + r" run=([1-9][0-9]*) -->",
+        body,
     )
+    return int(marker.group(1)) if marker else None
+
+
+def _get_workflow_run(*, repo: str, run_id: int) -> dict[str, Any]:
+    completed = _run_gh(["api", f"repos/{repo}/actions/runs/{run_id}"])
     try:
         payload = json.loads(completed.stdout)
     except ValueError as exc:
         raise ReleaseError("Invalid GitHub Actions run payload") from exc
-    if not isinstance(payload, list):
-        raise ReleaseError("GitHub Actions run payload is not a list")
-    return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        raise ReleaseError("GitHub Actions run payload is not an object")
+    return payload
 
 
 def wait_for_notes(
@@ -205,43 +193,35 @@ def wait_for_notes(
 ) -> ReleaseState:
     deadline = time.monotonic() + timeout
     while True:
-        matching = [
-            run
-            for run in _list_workflow_runs(
-                repo=repo,
-                workflow=workflow,
-                branch=branch,
-                event=event,
-            )
-            if run.get("headSha") == run_sha
-        ]
-        pending = [
-            run for run in matching if run.get("status") not in _TERMINAL_RUN_STATUSES
-        ]
-        if matching and not pending:
-            unsuccessful = [
-                run for run in matching if run.get("conclusion") != "success"
-            ]
-            if unsuccessful:
-                urls = ", ".join(
-                    str(run.get("url") or run.get("databaseId"))
-                    for run in unsuccessful
-                )
+        state = get_release(repo, tag)
+        run_id = _ready_run_id(state.body, source_sha) if state is not None else None
+        if run_id is not None:
+            run = _get_workflow_run(repo=repo, run_id=run_id)
+            run_path = str(run.get("path") or "").split("@", 1)[0]
+            expected_path = f".github/workflows/{workflow}"
+            if run_path != expected_path:
                 raise ReleaseError(
-                    f"Release notes workflow did not succeed for {source_sha}: {urls}"
+                    f"Release notes marker points to unexpected workflow {run_path!r}"
                 )
-            state = get_release(repo, tag)
-            if state is None:
-                raise ReleaseError(f"Release notes succeeded but GitHub Release {tag} is missing")
-            if notes_ready_marker(source_sha) not in state.body:
+            if run.get("head_sha") != run_sha or run.get("head_branch") != branch:
                 raise ReleaseError(
-                    f"Release notes workflow succeeded but {tag} lacks the ready marker"
+                    f"Release notes run {run_id} does not match the expected workflow revision"
                 )
-            return state
+            if run.get("event") != event:
+                raise ReleaseError(
+                    f"Release notes run {run_id} has unexpected event {run.get('event')!r}"
+                )
+            if run.get("status") == "completed":
+                if run.get("conclusion") != "success":
+                    raise ReleaseError(
+                        f"Release notes workflow did not succeed for {source_sha}: "
+                        f"{run.get('html_url') or run_id}"
+                    )
+                return state
 
         if time.monotonic() >= deadline:
             raise ReleaseError(
-                f"Timed out waiting for {workflow} run SHA {run_sha}"
+                f"Timed out waiting for {workflow} notes marker for {tag}"
             )
         time.sleep(interval)
 

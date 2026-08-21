@@ -161,36 +161,43 @@ def test_update_notes_never_changes_publication_flags(
 def test_wait_for_notes_requires_exact_source_success_and_ready_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_payloads = iter(
+    release_states = iter(
         [
-            [{"headSha": SOURCE_SHA, "status": "in_progress", "conclusion": ""}],
-            [
-                {
-                    "databaseId": 42,
-                    "headSha": SOURCE_SHA,
-                    "status": "completed",
-                    "conclusion": "success",
-                    "url": "https://example.test/run/42",
-                }
-            ],
+            github_release.ReleaseState(
+                tag=TAG,
+                draft=True,
+                prerelease=False,
+                body="notes without marker",
+                url="https://example.test/release",
+            ),
+            github_release.ReleaseState(
+                tag=TAG,
+                draft=True,
+                prerelease=False,
+                body=f"notes\n{github_release.notes_ready_marker(SOURCE_SHA, 42)}",
+                url="https://example.test/release",
+            ),
         ]
     )
-
-    def fake_runs(**_kwargs):
-        return next(run_payloads)
-
-    monkeypatch.setattr(github_release, "_list_workflow_runs", fake_runs)
     monkeypatch.setattr(github_release.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         github_release,
         "get_release",
-        lambda _repo, _tag: github_release.ReleaseState(
-            tag=TAG,
-            draft=True,
-            prerelease=False,
-            body=f"notes\n{github_release.notes_ready_marker(SOURCE_SHA)}",
-            url="https://example.test/release",
-        ),
+        lambda _repo, _tag: next(release_states),
+    )
+    monkeypatch.setattr(
+        github_release,
+        "_get_workflow_run",
+        lambda **_kwargs: {
+            "id": 42,
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": SOURCE_SHA,
+            "head_branch": TAG,
+            "event": "push",
+            "path": ".github/workflows/release_ai.yml",
+            "html_url": "https://example.test/run/42",
+        },
     )
 
     state = github_release.wait_for_notes(
@@ -212,19 +219,6 @@ def test_wait_for_notes_rejects_success_without_ready_marker(
 ) -> None:
     monkeypatch.setattr(
         github_release,
-        "_list_workflow_runs",
-        lambda **_kwargs: [
-            {
-                "databaseId": 42,
-                "headSha": SOURCE_SHA,
-                "status": "completed",
-                "conclusion": "success",
-                "url": "https://example.test/run/42",
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        github_release,
         "get_release",
         lambda _repo, _tag: github_release.ReleaseState(
             tag=TAG,
@@ -235,7 +229,7 @@ def test_wait_for_notes_rejects_success_without_ready_marker(
         ),
     )
 
-    with pytest.raises(github_release.ReleaseError, match="lacks the ready marker"):
+    with pytest.raises(github_release.ReleaseError, match="Timed out"):
         github_release.wait_for_notes(
             repo=REPO,
             tag=TAG,
@@ -244,33 +238,38 @@ def test_wait_for_notes_rejects_success_without_ready_marker(
             run_sha=SOURCE_SHA,
             source_sha=SOURCE_SHA,
             event="push",
-            timeout=10,
+            timeout=0,
             interval=0,
         )
 
 
-def test_wait_for_notes_rejects_any_failed_exact_run(
+def test_wait_for_notes_rejects_the_failed_run_named_by_the_tag_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         github_release,
-        "_list_workflow_runs",
-        lambda **_kwargs: [
-            {
-                "databaseId": 42,
-                "headSha": SOURCE_SHA,
-                "status": "completed",
-                "conclusion": "success",
-                "url": "https://example.test/run/42",
-            },
-            {
-                "databaseId": 43,
-                "headSha": SOURCE_SHA,
-                "status": "completed",
-                "conclusion": "failure",
-                "url": "https://example.test/run/43",
-            },
-        ],
+        "get_release",
+        lambda _repo, _tag: github_release.ReleaseState(
+            tag=TAG,
+            draft=True,
+            prerelease=False,
+            body=github_release.notes_ready_marker(SOURCE_SHA, 43),
+            url="https://example.test/release",
+        ),
+    )
+    monkeypatch.setattr(
+        github_release,
+        "_get_workflow_run",
+        lambda **_kwargs: {
+            "id": 43,
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": SOURCE_SHA,
+            "head_branch": TAG,
+            "event": "push",
+            "path": ".github/workflows/release_ai.yml",
+            "html_url": "https://example.test/run/43",
+        },
     )
 
     with pytest.raises(github_release.ReleaseError, match="run/43"):
@@ -289,7 +288,10 @@ def test_wait_for_notes_rejects_any_failed_exact_run(
 
 def test_ready_marker_requires_an_exact_commit_sha() -> None:
     with pytest.raises(github_release.ReleaseError, match="Invalid release source SHA"):
-        github_release.notes_ready_marker("main")
+        github_release.notes_ready_marker("main", 42)
+
+    with pytest.raises(github_release.ReleaseError, match="Invalid release notes run ID"):
+        github_release.notes_ready_marker(SOURCE_SHA, 0)
 
 
 @pytest.mark.parametrize(
@@ -373,18 +375,30 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     publish = (root / ".github/workflows/publish.yml").read_text(encoding="utf-8")
     notes = (root / ".github/workflows/release_ai.yml").read_text(encoding="utf-8")
 
-    assert "python scripts/github_release.py ensure-draft" in publish
+    assert "python release-automation/scripts/github_release.py ensure-draft" in publish
+    assert "path: release-automation" in publish
+    assert "ref: ${{ needs.resolve-tag.outputs.workflow_sha }}" in publish
+    assert publish.index("- name: Build package") < publish.index(
+        "- name: Checkout release automation"
+    )
     assert "finalize-github-release:" in publish
     assert "python scripts/github_release.py wait-notes" in publish
     assert "--run-sha \"${{ needs.resolve-tag.outputs.workflow_sha }}\"" in publish
     assert "--source-sha \"${{ needs.resolve-tag.outputs.source_sha }}\"" in publish
     assert "python scripts/github_release.py finalize" in publish
-    assert publish.index("publish-avibe-os:") < publish.index("finalize-github-release:")
-    assert publish.index("publish-vibe-remote:") < publish.index("finalize-github-release:")
+    avibe_publish = publish.split("  publish-avibe-os:", 1)[1].split(
+        "  publish-vibe-remote:", 1
+    )[0]
+    legacy_publish = publish.split("  publish-vibe-remote:", 1)[1].split(
+        "  finalize-github-release:", 1
+    )[0]
+    assert "- finalize-github-release" in avibe_publish
+    assert "- finalize-github-release" in legacy_publish
 
     official_step = notes.split("- name: Update official release notes", 1)[1]
     assert "python scripts/github_release.py update-notes" in official_step
     assert "python scripts/github_release.py finalize" not in official_step
     assert github_release.NOTES_READY_MARKER_PREFIX in notes
+    assert "run=${GITHUB_RUN_ID}" in notes
     assert "<!-- avibe:update-notification=none -->" in notes
     assert "<!-- vibe-remote:update-notification=none -->" in notes

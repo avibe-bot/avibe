@@ -592,7 +592,7 @@ jobs:
           fi
 
           SOURCE_SHA="$(git rev-parse "${TAG}^{commit}")"
-          READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} -->"
+          READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} run=${GITHUB_RUN_ID} -->"
           if ! grep -qF "$READY_MARKER" release.md; then
             printf '\n\n%s\n' "$READY_MARKER" >> release.md
           fi

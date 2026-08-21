@@ -365,13 +365,21 @@ jobs:
             tests/e2e/test_upgrade_command.py \
             -v
 
+      - name: Checkout release automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
+          path: release-automation
+          sparse-checkout: scripts/github_release.py
+          sparse-checkout-cone-mode: false
+
       - name: Upload GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           TAG="${{ needs.resolve-tag.outputs.tag }}"
-          python scripts/github_release.py ensure-draft \
+          python release-automation/scripts/github_release.py ensure-draft \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
             --title "$TAG" \
@@ -423,7 +431,9 @@ jobs:
           path: dist/
 
   publish-avibe-os:
-    needs: build
+    needs:
+      - build
+      - finalize-github-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -452,6 +462,7 @@ jobs:
     needs:
       - resolve-tag
       - build
+      - finalize-github-release
     if: needs.resolve-tag.outputs.publish_legacy == 'true'
     runs-on: ubuntu-latest
     # PyPI trusted publishers issue project-scoped tokens for the exact OIDC
@@ -485,19 +496,6 @@ jobs:
     needs:
       - resolve-tag
       - build
-      - publish-avibe-os
-      - publish-vibe-remote
-    if: >-
-      ${{
-        always() &&
-        needs.resolve-tag.result == 'success' &&
-        needs.build.result == 'success' &&
-        needs.publish-avibe-os.result == 'success' &&
-        (
-          needs.resolve-tag.outputs.publish_legacy != 'true' ||
-          needs.publish-vibe-remote.result == 'success'
-        )
-      }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -506,7 +504,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          ref: ${{ needs.resolve-tag.outputs.tag }}
+          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
 
       - name: Wait for exact-source release notes
         env:
