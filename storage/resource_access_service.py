@@ -1368,6 +1368,8 @@ def _policy_allows(
 def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
     if context.is_instance_owner:
         return True
+    if context.has_role("member"):
+        return True
     if policy is None:
         return False
     # Skills and Vault ACL rows are retained for compatibility, but MVP runtime
