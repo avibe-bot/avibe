@@ -281,7 +281,7 @@ describe('PermissionsPage state model', () => {
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
   });
 
-  it('lets an Instance Member manage projects but not authorized users', async () => {
+  it('shows an Instance Member both access tabs read-only', async () => {
     const withMember = response();
     withMember.projection.access.entries = [{
       kind: 'email',
@@ -300,9 +300,12 @@ describe('PermissionsPage state model', () => {
     expect(screen.getByText('permissions.roles.member')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /permissions.actions.addAccess/ })).toBeNull();
 
+    // Project access decides who may reach a project, which is access
+    // administration rather than project management, so it stays Owner-only
+    // and the member sees the same read-only surface on both tabs.
     await user.click(screen.getByRole('tab', { name: /permissions.tabs.projects/ }));
-    expect(screen.queryByText('permissions.states.readOnlyTitle')).toBeNull();
-    expect(screen.getByRole('button', { name: 'permissions.actions.manage' })).toBeTruthy();
+    expect(screen.getByText('permissions.states.readOnlyTitle')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'permissions.actions.manage' })).toBeNull();
   });
 
   it('offers Instance Member in the access role picker for owners', async () => {

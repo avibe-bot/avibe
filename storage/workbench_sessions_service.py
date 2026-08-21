@@ -416,7 +416,9 @@ def create_session(
     # the global default (see ``update_session``). No project default → the
     # fields stay empty and dispatch falls back to the global default Vibe
     # Agent. An explicit caller backend always wins.
+    inherited_project_default = False
     if not agent_name and not agent_backend and scope_row.get("agent_name") and scope_row.get("agent_backend"):
+        inherited_project_default = True
         agent_backend = str(scope_row["agent_backend"])
         if agent_name is None:
             agent_name = scope_row.get("agent_name")
@@ -428,16 +430,35 @@ def create_session(
             reasoning_effort = scope_row.get("reasoning_effort")
 
     from core.vibe_agents import (
+        VibeAgentAccessError,
         ensure_agent_selection_access,
         ensure_default_agent_access,
         resolve_resource_access_context,
     )
 
     resource_context = resolve_resource_access_context(user_context)
+    if inherited_project_default:
+        # The project default is a hint from whoever configured the project, not
+        # a choice by this caller, so an Agent they cannot use degrades rather
+        # than refusing the session -- otherwise one narrow default locks every
+        # other member out of starting a normal session in the project. Drop
+        # back to the unpinned path, which resolves the instance default and
+        # degrades again if needed.
+        try:
+            ensure_agent_selection_access(
+                conn,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                user_context=resource_context,
+            )
+        except VibeAgentAccessError:
+            agent_name = None
+            agent_backend = ""
+            agent_variant = None
+            model = None
+            reasoning_effort = None
     if not agent_name and not agent_id:
         if agent_backend and not resource_context.has_role("editor"):
-            from core.vibe_agents import VibeAgentAccessError
-
             raise VibeAgentAccessError("Agent access is not permitted.")
         if not agent_backend and not resource_context.is_instance_owner:
             # Validate the effective global default without pinning it into the

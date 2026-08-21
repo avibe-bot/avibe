@@ -5,9 +5,8 @@ import pytest
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
-    _ACCESS_ADMINISTRATION_HTTP_RULES,
-    _AGENT_MIGRATION_HTTP_RULES,
     _EDITOR_HTTP_NAMESPACES,
+    _MEMBER_HTTP_RULES,
     _REMOTE_ACCESS_HTTP_NAMESPACE,
     _REMOTE_ACCESS_MEMBER_HTTP_RULES,
     _VIEWER_HTTP_NAMESPACES,
@@ -236,7 +235,7 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
         assert http_authorization_policy(method, path).minimum_role == "editor"
 
     for method, path in (("GET", "/api/future-owner-capability"), ("POST", "/api/control")):
-        assert http_authorization_policy(method, path).minimum_role == "member"
+        assert http_authorization_policy(method, path).minimum_role == "owner"
 
     assert (
         http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
@@ -256,9 +255,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
 
     A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
     route must inherit the same Instance role as the rest of that capability.
-    Agent create/import and unknown APIs fail closed to member; allowlist
-    mutation, pairing-identity writes, and instance-wide default-agent
-    routing stay owner-only.
+    The member surface is the opposite shape: an explicit allow-list, so an
+    unknown API fails closed to Owner along with allowlist mutation,
+    pairing-identity writes, and instance-wide default-agent routing.
     """
 
     assert _EDITOR_HTTP_NAMESPACES == (
@@ -336,11 +335,13 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/agents/import"),
         ("PATCH", "/api/agents/demo"),
         ("DELETE", "/api/agents/demo"),
-        ("GET", "/api/future-owner-capability"),
-        ("POST", "/api/browse"),
-        ("POST", "/api/browse/mkdir"),
-        ("PUT", "/api/permissions/projects/project-1/access"),
-        ("PUT", "/api/permissions/resources/agent/agent-1/access"),
+        ("PUT", "/api/models/agents/codex/chain"),
+        ("PUT", "/api/global-prompts"),
+        ("POST", "/api/projects"),
+        ("PATCH", "/api/projects/project-1"),
+        ("PUT", "/api/projects/project-1/agents-md"),
+        ("GET", "/api/settings"),
+        ("GET", "/api/users"),
         ("GET", "/api/remote-access/status"),
         ("GET", "/api/remote-access/network-interfaces"),
         ("POST", "/api/remote-access/optimize-route"),
@@ -349,13 +350,34 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
     for method, path in member_examples:
         assert http_authorization_policy(method, path).minimum_role == "member", path
 
-    assert (
-        http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
-        == "owner"
+    owner_examples = (
+        # Unknown APIs, present and future, keep the role they had before the
+        # member rank existed.
+        ("GET", "/api/future-owner-capability"),
+        ("POST", "/api/control"),
+        ("POST", "/api/upgrade"),
+        ("POST", "/api/logs"),
+        ("POST", "/api/backend/codex/auth"),
+        # Access administration and bearer credentials.
+        ("PUT", "/api/permissions/authorized-users"),
+        ("GET", "/api/users/bind-codes"),
+        ("POST", "/api/users/first-bind-code"),
+        # ACL writes and the IM access boundary.
+        ("PUT", "/api/permissions/projects/project-1/access"),
+        ("PUT", "/api/permissions/resources/agent/agent-1/access"),
+        ("POST", "/api/settings"),
+        ("POST", "/api/settings/thread"),
+        # Host reach.
+        ("POST", "/api/browse"),
+        ("POST", "/api/browse/mkdir"),
+        # Instance-wide Agent routing and bulk migration.
+        ("POST", "/api/agents/default"),
+        ("GET", "/api/agent-onboarding"),
+        ("POST", "/api/agent-onboarding"),
     )
-    assert http_authorization_policy("POST", "/api/agents/default").minimum_role == "owner"
-    assert http_authorization_policy("GET", "/api/agent-onboarding").minimum_role == "owner"
-    assert http_authorization_policy("POST", "/api/agent-onboarding").minimum_role == "owner"
+    for method, path in owner_examples:
+        assert http_authorization_policy(method, path).minimum_role == "owner", path
+
     assert _REMOTE_ACCESS_HTTP_NAMESPACE == "/api/remote-access"
     assert {(method, pattern.pattern) for method, pattern in _REMOTE_ACCESS_MEMBER_HTTP_RULES} == {
         ("GET", r"^/api/remote-access/status$"),
@@ -363,6 +385,64 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", r"^/api/remote-access/optimize-route$"),
         ("POST", r"^/api/remote-access/diagnostics$"),
     }
+
+
+def test_member_reachable_routes_are_bounded_by_declaration() -> None:
+    """Sweep the live router: nothing is member-reachable except by declaration.
+
+    The member rank was first added as the *fallback* for an unclassified
+    ``/api`` route. That inverted default-deny: every management route no other
+    table happened to name was silently widened -- ``POST /api/control``,
+    ``POST /api/upgrade``, the ``/api/backend/*/auth`` routes, the ACL PUTs, and
+    a hundred more. Review could only find them one head at a time, because a
+    list of Owner exceptions is never more complete than the last audit.
+
+    So the fallback is Owner and the member surface is the allow-list, and this
+    is the property that replaces those exceptions: every registered ``/api``
+    route resolves to an explicit tier; a route resolves to member only because
+    ``_MEMBER_HTTP_RULES`` or the remote-access ops quartet says so; and a route
+    the router does not have yet resolves to Owner. A management route added
+    tomorrow therefore keeps exactly the role it would have had before this rank
+    existed.
+    """
+
+    from vibe.ui_server import app
+
+    def _member_declared(method: str, path: str) -> bool:
+        return any(
+            rule_method == method and pattern.fullmatch(path)
+            for rule_method, pattern in (*_MEMBER_HTTP_RULES, *_REMOTE_ACCESS_MEMBER_HTTP_RULES)
+        )
+
+    seen_member = False
+    swept = 0
+    for route in app.routes:
+        raw_path = getattr(route, "path", None) or ""
+        if not raw_path.startswith("/api/") and raw_path != "/api":
+            continue
+        path = _sample_path(raw_path)
+        for method in sorted(getattr(route, "methods", None) or ()):
+            method = method.upper()
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            swept += 1
+            policy = http_authorization_policy(method, path)
+            assert policy is not None, f"{method} {path}"
+            assert policy.minimum_role in {"viewer", "editor", "member", "owner"}, f"{method} {path}"
+            if policy.minimum_role == "member":
+                seen_member = True
+                assert _member_declared(method, path), (
+                    f"{method} {path} is member-reachable without a declared rule"
+                )
+    assert swept > 100, "router sweep found too few /api routes to be meaningful"
+    assert seen_member, "the member surface must be reachable from the live router"
+
+    # A route nobody has classified -- including one that does not exist yet --
+    # is Owner, not member.
+    for method in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        synthetic = http_authorization_policy(method, "/api/route-added-after-the-member-rank")
+        assert synthetic is not None
+        assert synthetic.minimum_role == "owner", method
 
 
 def test_workbench_events_follow_role_boundaries() -> None:
@@ -671,9 +751,11 @@ def test_registered_access_administration_routes_are_owner_only(monkeypatch, tmp
     """Minting or mutating instance access is Owner-only, at policy and handler.
 
     Enumerated from the live router rather than from a list of known routes, so a
-    bind-code, bound-user, or onboarding sibling added later fails this test until
-    it is classified. Editor and viewer stay 403 across the whole set, matching
-    master, where every one of these routes was already above their rank.
+    bind-code, bound-user, or onboarding sibling added later is covered the day it
+    is registered -- it inherits Owner from the unknown-route default and only a
+    deliberate ``_MEMBER_HTTP_RULES`` entry can widen it. Editor and viewer stay
+    403 across the whole set, matching master, where every one of these routes was
+    already above their rank.
     """
 
     from tests.ui_server_test_helpers import (
@@ -691,21 +773,6 @@ def test_registered_access_administration_routes_are_owner_only(monkeypatch, tmp
 
     routes = _registered_access_administration_routes()
     assert routes, "router must expose the access-administration namespaces"
-
-    declared = {
-        (method, pattern)
-        for method, pattern in (*_ACCESS_ADMINISTRATION_HTTP_RULES, *_AGENT_MIGRATION_HTTP_RULES)
-        # The cloud allowlist route lives outside these namespaces; it is
-        # asserted with the other Owner rules above.
-        if not pattern.startswith(r"^/api/permissions/")
-    }
-    matched = {
-        (method, pattern)
-        for method, pattern in declared
-        for route_method, route_path in routes
-        if route_method == method and re.fullmatch(pattern, _sample_path(route_path))
-    }
-    assert matched == declared, "every declared Owner rule must match a live route"
 
     for method, path in routes:
         policy = http_authorization_policy(method, _sample_path(path))
@@ -948,14 +1015,14 @@ def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_pa
 
 
 def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None:
-    """Instance-wide default routing stays owner-only, and audience-wide for all.
+    """Instance-wide default routing is Owner-only, and that is the whole gate.
 
-    Two independent rules guard the same surface: only the Owner may write it,
-    and whatever is written must be usable by its entire audience. A member's
-    private Agent fails the first as a member and the second as the Owner. The
-    audience rule's coverage across every restricted access level lives in
-    ``tests/test_resource_acl_agents.py``; here it is the second gate on the
-    role-gated surface.
+    A member is refused twice over -- by the store's own permission check and by
+    the route policy -- and the Owner may then point routing at any Agent,
+    including one narrower than the instance audience. Nothing about the target's
+    policy shape is validated here: a default is advisory and the ACL is enforced
+    per-principal at use time (``core.vibe_agents.resolve_usable_default_agent``),
+    which is covered in ``tests/test_resource_acl_agents.py``.
     """
 
     from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
@@ -1029,10 +1096,9 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
         domain="alex.avibe.bot",
     )
     owner_headers = csrf_headers(owner_client, base_url="https://alex.avibe.bot")
-    # Owner-only is the role gate; the audience rule is the second, independent
-    # one. Instance-wide default routing serves everyone, so an Agent narrower
-    # than that audience is refused even here — only an audience-wide one is
-    # accepted.
+    # Owner-only is the whole gate. The same Agent the member could not publish
+    # is accepted from the Owner, because the target's audience is a use-time
+    # question rather than a bind-time one.
     owner_response = owner_client.post(
         "/api/agents/default",
         json={"name": "member-private"},
@@ -1040,11 +1106,10 @@ def test_member_cannot_set_instance_default_agent(monkeypatch, tmp_path) -> None
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
     )
-    assert owner_response.status_code == 403
-    assert owner_response.get_json()["code"] == "agent_access_forbidden"
+    assert owner_response.status_code == 200
     store = VibeAgentStore()
     try:
-        assert store.get_default_agent_name() == before
+        assert store.get_default_agent_name() == "member-private"
         store.create(name="team-shared", backend="codex")
     finally:
         store.close()

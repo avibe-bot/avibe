@@ -402,10 +402,8 @@ _VIEWER_HTTP_RULES = tuple(
 
 # Advertised Editor/Viewer surfaces are admitted by namespace so a newly
 # added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push route
-# inherits the same Instance role as the rest of that capability. Routes
-# that stay Owner-only — allowlist member management and pairing identity —
-# are listed below. Remaining unknown APIs fail closed to member, the
-# instance-management floor.
+# inherits the same Instance role as the rest of that capability. Remaining
+# unknown APIs fail closed to Owner; see _MEMBER_HTTP_RULES.
 _EDITOR_HTTP_NAMESPACES = (
     "/api/skills",
     "/api/vault",
@@ -438,47 +436,74 @@ _REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
     )
 )
 
-# Contract amendment (issue #1596): the member set an Instance Owner controls is
-# *cloud allowlist entries AND multi-platform IM bound users*, not the allowlist
-# alone. A principal reaches this instance just as directly by being a bound IM
-# user on any supported platform, an IM admin additionally unlocks protected
-# setup, routing, and update actions, and a bind code is a bearer credential that
-# mints exactly that access. So every route that mints, revokes, or promotes
-# either kind of membership is Owner-only, whichever namespace it lives in.
+# The member surface is an allow-list, and the unknown-route default is Owner.
 #
-# Read-only listing of the member set itself stays at member, matching the cloud
-# allowlist whose GET is member and whose PUT is Owner. Listing bind codes does
-# not: that response carries the codes, so reading it is equivalent to minting.
-_ACCESS_ADMINISTRATION_HTTP_RULES = (
-    ("PUT", r"^/api/permissions/authorized-users$"),
-    ("POST", r"^/api/users$"),
-    ("POST", r"^/api/users/[^/]+/admin$"),
-    ("DELETE", r"^/api/users/[^/]+$"),
-    ("GET", r"^/api/bind-codes$"),
-    ("POST", r"^/api/bind-codes$"),
-    ("DELETE", r"^/api/bind-codes/[^/]+$"),
-    ("GET", r"^/api/setup/first-bind-code$"),
-)
-
-# Bulk Agent onboarding is an instance-wide one-way migration, not member
-# management: the GET discloses every Agent row and the POST claims every
-# policy-less one under the caller's private ACL. Owner-only for blast radius,
-# which is why ``core.vibe_agents._require_agent_onboarding_access`` checks Owner
-# identity rather than ``can_manage_access_members``.
-_AGENT_MIGRATION_HTTP_RULES = (
-    ("GET", r"^/api/agent-onboarding$"),
-    ("POST", r"^/api/agent-onboarding$"),
-)
-
-# Member-management and instance-wide default routing stay Owner-only even
-# though instance management is now rank-member. Unknown APIs inherit member;
-# list Owner exceptions here.
-_OWNER_HTTP_RULES = tuple(
+# Enumerating the Owner exceptions instead was tried and does not converge: with
+# an unknown route defaulting to member, adding the member rank silently widened
+# every `/api/*` route that no other table classified -- 112 of them, including
+# `POST /api/control`, `POST /api/upgrade`, every `/api/backend/*/auth` route,
+# and the resource/project ACL PUTs. Review found members of that set one head at
+# a time because a list of exceptions is only ever as complete as the last audit.
+#
+# Inverting makes the omission safe in the other direction: a route absent from
+# this table keeps exactly the role it had before the member rank existed, so a
+# newly added management route cannot become member-reachable by accident and the
+# blast radius of this capability is bounded by what is written here.
+#
+# What belongs here: the routes backing the capabilities the member rank is
+# defined to grant -- ``can_manage_agents`` (Agent CRUD and the model routing an
+# Agent is configured against) and ``can_manage_projects``, plus read-only
+# instance state. What deliberately does not, and is therefore Owner:
+#   * anything that mints, revokes, or promotes instance access -- the cloud
+#     allowlist, IM bound users, and bind codes. A bind code is a bearer
+#     credential, so *listing* them is equivalent to minting and stays Owner
+#     while ``GET /api/users`` is a member read.
+#   * anything holding or minting a credential -- `/api/backend/*/auth`, model
+#     source credentials and OAuth, and the platform `auth_test`/channel probes
+#     that take a bot token.
+#   * instance lifecycle and host reach -- control, upgrade, ui/reload, logs,
+#     doctor writes, dependency installs, and the filesystem browse routes.
+#   * anything that changes an ACL or the IM access boundary -- the resource and
+#     project access PUTs, and the channel/thread settings writes that carry
+#     ``require_bind``.
+#   * bulk Agent onboarding, a one-way instance-wide migration whose GET
+#     discloses every Agent row and whose POST claims every policy-less one under
+#     the caller's private ACL, and instance-wide default routing.
+_MEMBER_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        *_ACCESS_ADMINISTRATION_HTTP_RULES,
-        *_AGENT_MIGRATION_HTTP_RULES,
-        ("POST", r"^/api/agents/default$"),
+        # can_manage_agents: Agent CRUD. /api/agents/default and
+        # /api/agent-onboarding are instance-wide and stay Owner by default.
+        ("POST", r"^/api/agents$"),
+        ("PATCH", r"^/api/agents/[^/]+$"),
+        ("DELETE", r"^/api/agents/[^/]+$"),
+        ("POST", r"^/api/agents/import$"),
+        ("POST", r"^/api/agent/[^/]+/install$"),
+        ("GET", r"^/api/agent/[^/]+/install/[^/]+$"),
+        # can_manage_agents: selecting among already-authenticated model sources.
+        # Adding or re-authenticating a source is credential work and stays Owner.
+        ("GET", r"^/api/models/agents$"),
+        ("GET", r"^/api/models/agents/[^/]+/chain$"),
+        ("PUT", r"^/api/models/agents/[^/]+/chain$"),
+        ("GET", r"^/api/models/agents/[^/]+/sources$"),
+        ("PUT", r"^/api/models/agents/[^/]+/sources$"),
+        ("PUT", r"^/api/models/agents/opencode/menu$"),
+        ("PATCH", r"^/api/models/agents/[^/]+/mode$"),
+        ("POST", r"^/api/models/agents/[^/]+/chains/reorder$"),
+        ("GET", r"^/api/models/sources$"),
+        # can_manage_agents: instance-wide prompt text, not a credential.
+        ("GET", r"^/api/global-prompts$"),
+        ("PUT", r"^/api/global-prompts$"),
+        # can_manage_projects. Project ACL lives under /api/permissions and is
+        # Owner; agents-md is project content.
+        ("POST", r"^/api/projects$"),
+        ("PATCH", r"^/api/projects/[^/]+$"),
+        ("DELETE", r"^/api/projects/[^/]+$"),
+        ("GET", r"^/api/projects/[^/]+/agents-md$"),
+        ("PUT", r"^/api/projects/[^/]+/agents-md$"),
+        # Read-only instance state. The member set is readable, not writable.
+        ("GET", r"^/api/settings$"),
+        ("GET", r"^/api/users$"),
     )
 )
 
@@ -557,10 +582,12 @@ def http_authorization_policy(
         if _http_rule_matches(normalized_method, path, _REMOTE_ACCESS_MEMBER_HTTP_RULES):
             return HttpAuthorizationPolicy("member")
         return HttpAuthorizationPolicy("owner")
-    if _http_rule_matches(normalized_method, path, _OWNER_HTTP_RULES):
-        return HttpAuthorizationPolicy("owner")
+    if _http_rule_matches(normalized_method, path, _MEMBER_HTTP_RULES):
+        return HttpAuthorizationPolicy("member")
 
-    minimum_role = "member"
+    # Default deny: an unclassified /api route is Owner-only, so adding the
+    # member rank cannot widen a route nobody listed. See _MEMBER_HTTP_RULES.
+    minimum_role = "owner"
     for rule_method, pattern in _EDITOR_HTTP_RULES:
         if normalized_method == rule_method and pattern.fullmatch(path):
             minimum_role = "editor"
@@ -578,14 +605,12 @@ def required_instance_role(method: str, path: str) -> str | None:
     """Return the minimum role for a remote HTTP request.
 
     Non-API page/static reads are handled by the authenticated shell. Unknown
-    API routes deliberately default to member so a newly added management
-    route cannot accidentally become available to editors or viewers, while
-    member inherits today's instance-management surface. Pairing identity,
-    member-set mutation, ownership, bulk Agent migration, and instance-wide
-    default-agent routing stay Owner-only: writes under ``/api/remote-access``
-    default to owner, and ``_OWNER_HTTP_RULES`` covers access administration
-    (cloud allowlist mutation plus the IM bound-user and bind-code routes),
-    ``/api/agent-onboarding``, and ``POST /api/agents/default``.
+    API routes deliberately default to owner, so a newly added management route
+    is never reachable by a role that predates it. The member rank widens only
+    the routes listed in ``_MEMBER_HTTP_RULES`` plus the read/ops quartet under
+    ``/api/remote-access``; access administration, credential and lifecycle
+    routes, ACL writes, bulk Agent migration, and instance-wide default-agent
+    routing are Owner by that default rather than by per-route exception.
     """
 
     return http_authorization_policy(method, path).minimum_role

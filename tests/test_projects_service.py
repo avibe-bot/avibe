@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.exc import OperationalError
 
-from core.vibe_agents import AUDIENCE_WIDE_ACCESS_LEVELS, VibeAgentStore
+from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
 from storage import projects_service, resource_access_service, workbench_sessions_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -619,14 +619,13 @@ def _agent_with_policy(engine, *, name: str, access_level: str, owner_user_id: s
 
 
 def _restricted_access_levels() -> list[str]:
-    """Every access level a default routing surface must refuse.
+    """Every access level that admits less than the project's whole audience.
 
-    Derived from the two sources of truth rather than listed, so an access level
-    added later is covered by these tests without editing them: whatever is not
-    declared audience-wide is, by construction, restricted.
+    Derived from the source of truth rather than listed, so an access level added
+    later is covered by these tests without editing them.
     """
 
-    return sorted(resource_access_service.ACCESS_LEVELS - AUDIENCE_WIDE_ACCESS_LEVELS)
+    return sorted(resource_access_service.ACCESS_LEVELS - {"public"})
 
 
 def _stored_project_default(engine, scope_id: str) -> str | None:
@@ -636,23 +635,26 @@ def _stored_project_default(engine, scope_id: str) -> str | None:
         ).scalar_one()
 
 
-def test_project_default_agent_must_be_audience_wide(engine, tmp_path):
-    """A project default routes for the whole project, so it must be audience-wide.
+def test_project_default_agent_is_advisory_and_degrades_at_use_time(engine, tmp_path):
+    """A project default is a hint; the ACL is enforced against whoever resolves it.
 
-    The invariant both default routing surfaces share: a default must be usable
-    by its entire audience, so only an audience-wide policy qualifies. Every
-    other access level narrows the audience somehow — ``private`` to one subject,
-    ``scope`` to an intersecting group — and is refused however the caller names
-    the Agent, by stable id or by public name, leaving the stored default exactly
-    as it was. The restricted set is derived, not listed, so a future access
-    level is covered here without editing this test.
+    Validating the assignment against the default's policy *shape* was tried and
+    removed: no predicate over {public, scope, private, absent} is both sound and
+    usable (see the note above ``core.vibe_agents.resolve_usable_default_agent``).
+    So a member may point the project at any Agent they can manage, however they
+    name it — by stable id or by public name — including one narrower than the
+    project's audience.
 
-    An audience-wide Agent is accepted, and a different user can still open an
-    unpinned session on the project afterwards, which is the behaviour a
-    restricted default destroys.
+    What that costs is paid at use time instead of at bind time. Another member
+    who cannot use the default still starts a normal unpinned session: the hint
+    degrades and dispatch follows an Agent they can use, rather than one narrow
+    default locking everyone else out of the project. The restricted set is
+    derived, not listed, so a future access level is covered without editing
+    this test.
     """
 
     member = _organization_context("member-1", instance_role="member")
+    other = _organization_context("member-2", instance_role="editor")
     shared_id = _agent_with_policy(
         engine, name="team-shared", access_level="public", owner_user_id="member-1"
     )
@@ -684,41 +686,62 @@ def test_project_default_agent_must_be_audience_wide(engine, tmp_path):
     for level, agent_id in restricted.items():
         for kwargs in ({"agent_id": agent_id}, {"agent_name": f"member-{level}"}):
             with engine.begin() as conn:
-                with pytest.raises(projects_service.ProjectAgentAudienceError) as exc:
-                    projects_service.update_project(
+                projects_service.update_project(
+                    conn,
+                    project["id"],
+                    agent_name=None,
+                    agent_id=None,
+                    authorization_context=member,
+                )
+                bound = projects_service.update_project(
+                    conn,
+                    project["id"],
+                    authorization_context=member,
+                    **kwargs,
+                )
+            assert bound["default_agent"]["agent_id"] == agent_id
+            assert _stored_project_default(engine, project["scope_id"]) == f"member-{level}"
+
+            # ``member-2`` shares neither the private owner nor the scoped group,
+            # so the default is unusable for them. The session is still created;
+            # it simply stays unpinned and follows the effective default at
+            # dispatch instead of adopting the project's hint.
+            with engine.begin() as conn:
+                session = workbench_sessions_service.create_session(
+                    conn,
+                    scope_id=project["scope_id"],
+                    agent_backend="",
+                    user_context=other,
+                )
+            assert (session["agent_id"], session["agent_name"], session["agent_backend"]) == (
+                None,
+                None,
+                "",
+            )
+
+            # Degrading applies to the advisory hint only. Naming the same Agent
+            # explicitly is a stated intent and still fails closed.
+            with engine.begin() as conn:
+                with pytest.raises(VibeAgentAccessError):
+                    workbench_sessions_service.create_session(
                         conn,
-                        project["id"],
-                        authorization_context=member,
-                        **kwargs,
+                        scope_id=project["scope_id"],
+                        agent_backend="codex",
+                        agent_id=agent_id,
+                        user_context=other,
                     )
-            assert exc.value.code == "project_agent_audience_restricted"
-            assert _stored_project_default(engine, project["scope_id"]) == "team-shared"
-
-    # Regression: the project still starts normal sessions for another user on
-    # the unpinned path, which is what a restricted default would have broken.
-    # ``member-2`` shares neither the private owner nor the scoped group.
-    with engine.begin() as conn:
-        session = workbench_sessions_service.create_session(
-            conn,
-            scope_id=project["scope_id"],
-            agent_backend="",
-            user_context=_organization_context("member-2", instance_role="editor"),
-        )
-    assert session["agent_id"] == shared_id
 
 
-def test_owner_project_default_follows_the_same_audience_rule(engine, tmp_path):
-    """Owner behaviour is unchanged for audience-wide Agents and bound by the same rule.
+def test_owner_project_default_accepts_every_policy_shape(engine, tmp_path):
+    """The Owner is bound by the same advisory rule, and resolves any default.
 
-    The Instance Owner bypasses ACL checks when *using* a resource, but that
-    bypass describes the Owner, not the project's audience, so the audience
-    check is caller-independent.
+    Assignment is caller-independent now that it validates nothing about policy
+    shape, and the Instance Owner bypasses ACL checks when *using* a resource, so
+    an Owner's unpinned session adopts even a private default rather than
+    degrading away from it.
     """
 
     owner = _organization_context("owner-1", instance_role="owner")
-    shared_id = _agent_with_policy(
-        engine, name="owner-shared", access_level="public", owner_user_id="owner-1"
-    )
     restricted = {
         level: _agent_with_policy(
             engine,
@@ -735,21 +758,23 @@ def test_owner_project_default_follows_the_same_audience_rule(engine, tmp_path):
         project = projects_service.create_project(
             conn, str(folder), authorization_context=owner
         )
-        accepted = projects_service.update_project(
-            conn,
-            project["id"],
-            agent_id=shared_id,
-            authorization_context=owner,
-        )
-    assert accepted["default_agent"]["agent_id"] == shared_id
 
-    for agent_id in restricted.values():
+    for level, agent_id in restricted.items():
         with engine.begin() as conn:
-            with pytest.raises(projects_service.ProjectAgentAudienceError):
-                projects_service.update_project(
-                    conn,
-                    project["id"],
-                    agent_id=agent_id,
-                    authorization_context=owner,
-                )
-        assert _stored_project_default(engine, project["scope_id"]) == "owner-shared"
+            accepted = projects_service.update_project(
+                conn,
+                project["id"],
+                agent_id=agent_id,
+                authorization_context=owner,
+            )
+        assert accepted["default_agent"]["agent_id"] == agent_id
+        assert _stored_project_default(engine, project["scope_id"]) == f"owner-{level}"
+
+        with engine.begin() as conn:
+            session = workbench_sessions_service.create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="",
+                user_context=owner,
+            )
+        assert session["agent_name"] == f"owner-{level}"

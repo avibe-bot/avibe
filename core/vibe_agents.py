@@ -125,31 +125,6 @@ class VibeAgentAccessError(PermissionError):
     """Raised when the caller is not allowed to use a Vibe Agent."""
 
 
-# Default routing surfaces -- the instance-wide default Agent and a project's
-# default Agent -- are resolved on behalf of whoever starts an unpinned session,
-# never on behalf of whoever configured them. The invariant both surfaces share:
-# a default must be usable by its entire audience, so only an audience-wide
-# resource policy qualifies.
-DEFAULT_ROUTING_AUDIENCE_ERROR_CODE = "agent_default_audience_restricted"
-
-# Access levels that every principal of a routing surface's audience can resolve.
-# Membership is the whole rule: an access level that is not listed here narrows
-# the audience somehow, so it cannot back a default. Listing what qualifies
-# rather than what does not means a future access level is rejected until it is
-# deliberately declared audience-wide.
-AUDIENCE_WIDE_ACCESS_LEVELS = frozenset({"public"})
-
-
-class VibeAgentDefaultAudienceError(VibeAgentAccessError):
-    """A default routing target is not usable by the audience it serves."""
-
-    code = DEFAULT_ROUTING_AUDIENCE_ERROR_CODE
-
-    def __init__(self, *, agent_name: str) -> None:
-        super().__init__(self.code)
-        self.agent_name = str(agent_name)
-
-
 def get_agent_resource_metadata(
     connection: Connection,
     resource_id: str,
@@ -554,69 +529,74 @@ def resolve_effective_default_agent(connection, *, enabled_only: bool = True) ->
     return VibeAgentStore._from_row(row) if row is not None else None
 
 
-def default_routing_audience_error(
+# Default routing surfaces -- the instance-wide default Agent and a project's
+# default Agent -- are resolved on behalf of whoever starts an unpinned session,
+# never on behalf of whoever configured them. Validating the assignment against
+# the resource policy's *shape* was tried and abandoned: no predicate over
+# {public, scope, private, absent} is both sound and usable. `private` and
+# `scope` narrow the audience; `absent` is the normal shape on a personal
+# install, where no Agent carries an ACL row at all, so rejecting it refuses
+# every Agent on the primary local-first deployment; and `public` still admits
+# only active members of the policy's organization, while instance and project
+# access are also granted to email and email-domain principals.
+#
+# So a default is advisory, and the ACL is enforced where it is meaningful: at
+# use time, against the principal actually resolving it. A default that some
+# principal cannot use degrades for that principal instead of being refused for
+# everyone at assignment time.
+def resolve_usable_default_agent(
     connection,
     *,
-    agent_id: str,
-) -> str | None:
-    """Return an error code when an Agent cannot serve as a default route.
+    context,
+    agent: VibeAgent | None,
+) -> VibeAgent | None:
+    """Degrade a resolved default to one this caller may actually use.
 
-    A default must be usable by its entire audience; only audience-wide policies
-    qualify. Group-subset comparison is intentionally NOT implemented -- defaults
-    do not get narrower audiences.
+    A default is configured by one principal and resolved by another, so the
+    configurer can perfectly well name an Agent some of the audience cannot use.
+    Refusing the assignment cannot fix that (see the note above), and refusing
+    the session is worse than it looks: for a project default it means nobody
+    except the configurer can start a normal session there.
 
-    Shared by the instance-wide default and the per-project default so both
-    surfaces enforce one audience rule. Whoever starts an unpinned session
-    resolves the default on their own behalf and then passes through
-    ``ensure_agent_selection_access``, so any policy narrower than the surface's
-    audience locks some of that audience out -- for a project that means it can
-    no longer start normal sessions at all. A ``private`` policy is
-    single-subject by construction; a ``scope`` policy admits only an
-    intersecting group, which is narrower than a project shared with any other
-    group and narrower than an instance-wide default by definition.
+    So fall back instead. Prefer a builtin, then any other enabled Agent the
+    caller can use, so an unpinned session keeps working. Return ``None`` when
+    nothing is usable and let the caller raise the existing machine-readable
+    access error, which is the signal the UI uses to prompt for an explicit
+    choice.
 
-    Comparing a scoped policy's groups against each surface's audience is
-    deliberately out of the model: a project is not an ACL resource
-    (``resource_access_service.RESOURCE_KINDS``) and carries no group binding, so
-    a project audience is not representable, and an instance-wide default has no
-    bounded audience to compare against at all.
-
-    The check is caller-independent. The Instance Owner bypasses ACL checks when
-    *using* a resource, but that bypass describes the Owner, not the audience the
-    default has to serve, so an Owner assignment is validated the same way; an
-    Owner assigning an audience-wide Agent is unaffected.
-
-    An Agent with no ACL row narrows nothing -- it is the local/builtin shape
-    that predates the resource catalog, and its use is fenced elsewhere.
+    This is the *unpinned* path only. An explicit Agent selection is a stated
+    intent, not an advisory hint, so ``ensure_agent_selection_access`` still
+    errors rather than silently substituting a different Agent.
     """
 
     from storage import resource_access_service
 
-    identifier = str(agent_id or "").strip()
-    if not identifier:
-        return None
-    policy = resource_access_service.get_resource_policy(
-        "agent",
-        identifier,
-        connection=connection,
+    def _usable(candidate: VibeAgent | None) -> bool:
+        return candidate is not None and resource_access_service.can_use_resource(
+            context,
+            "agent",
+            candidate.id,
+            connection=connection,
+        )
+
+    if _usable(agent):
+        return agent
+
+    rows = (
+        connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name))
+        .mappings()
+        .all()
     )
-    if policy is None:
-        return None
-    if str(policy.get("access_level") or "") in AUDIENCE_WIDE_ACCESS_LEVELS:
-        return None
-    return DEFAULT_ROUTING_AUDIENCE_ERROR_CODE
-
-
-def ensure_default_routing_audience(
-    connection,
-    *,
-    agent_id: str,
-    agent_name: str,
-) -> None:
-    """Raise when an Agent cannot back a default routing surface."""
-
-    if default_routing_audience_error(connection, agent_id=agent_id) is not None:
-        raise VibeAgentDefaultAudienceError(agent_name=agent_name)
+    candidates = [VibeAgentStore._from_row(row) for row in rows]
+    # Builtins first: they are the shape every install has and the one a caller
+    # is most likely to be entitled to.
+    candidates.sort(key=lambda item: 0 if item.source == "builtin" else 1)
+    for candidate in candidates:
+        if agent is not None and candidate.id == agent.id:
+            continue
+        if _usable(candidate):
+            return candidate
+    return None
 
 
 def ensure_default_agent_access(
@@ -625,9 +605,7 @@ def ensure_default_agent_access(
     user_context: Any = None,
     missing_is_error: bool = False,
 ) -> VibeAgent | None:
-    """Resolve and authorize the effective default Agent for a remote caller."""
-
-    from storage import resource_access_service
+    """Resolve the effective default Agent for a caller, degrading if needed."""
 
     context = resolve_resource_access_context(user_context)
     agent = resolve_effective_default_agent(connection)
@@ -635,14 +613,10 @@ def ensure_default_agent_access(
         if missing_is_error:
             raise LookupError("Default Agent not found")
         return None
-    if not resource_access_service.can_use_resource(
-        context,
-        "agent",
-        agent.id,
-        connection=connection,
-    ):
+    usable = resolve_usable_default_agent(connection, context=context, agent=agent)
+    if usable is None:
         raise VibeAgentAccessError("Agent access is not permitted.")
-    return agent
+    return usable
 
 
 def ensure_session_agent_access(
@@ -1797,11 +1771,9 @@ class VibeAgentStore:
                     agent_name=agent.name,
                     reason="disabled",
                 )
-            ensure_default_routing_audience(
-                conn,
-                agent_id=agent.id,
-                agent_name=agent.name,
-            )
+            # No audience validation here: the default is advisory and the ACL
+            # is enforced per-principal at use time. The Owner-only gate on this
+            # setter is what bounds who may point instance-wide routing.
             self._write_default_agent_name(conn, agent.name, now=now)
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:

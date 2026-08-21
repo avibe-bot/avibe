@@ -2325,9 +2325,11 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
         http_authorization_policy("PUT", "/api/permissions/authorized-users").minimum_role
         == "owner"
     )
+    # An ACL write decides who may reach a resource, so it sits with access
+    # administration rather than with the resource's own management capability.
     assert (
         http_authorization_policy("PUT", "/api/permissions/projects/project-1/access").minimum_role
-        == "member"
+        == "owner"
     )
     assert (
         http_authorization_policy(
@@ -2339,7 +2341,7 @@ def test_permissions_http_policy_allows_viewer_reads_but_owner_only_mutations() 
         http_authorization_policy(
             "PUT", "/api/permissions/resources/agent/agent-1/access"
         ).minimum_role
-        == "member"
+        == "owner"
     )
 
 
@@ -2508,10 +2510,17 @@ def test_permissions_same_origin_route_surfaces_a_changed_pairing(monkeypatch) -
     }
 
 
-def test_member_can_manage_instance_settings_but_not_authorized_users(
+def test_member_cannot_write_either_access_control_list(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """Deciding who may reach a resource is access administration, so Owner-only.
+
+    The member rank grants Agent and project *management*, not the authority to
+    widen who can reach them. Both ACL writes are refused at the route policy, so
+    neither handler is entered; the Owner keeps both.
+    """
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = save_config(tmp_path)
     authorized_users_called = False
@@ -2572,11 +2581,39 @@ def test_member_can_manage_instance_settings_but_not_authorized_users(
         environ_base=remote_peer(),
     )
 
-    assert project_response.status_code == 200
-    assert project_access_called is True
+    assert project_response.status_code == 403
+    assert project_response.get_json()["error"] == "instance_access_forbidden"
+    assert project_access_called is False
     assert users_response.status_code == 403
     assert users_response.get_json()["error"] == "instance_access_forbidden"
     assert authorized_users_called is False
+
+    owner_client = app.test_client()
+    owner_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "owner@example.com",
+            "owner-1",
+            role="owner",
+            access_source="owner",
+        ),
+        domain="alex.avibe.bot",
+    )
+    owner_response = owner_client.put(
+        "/api/permissions/projects/project-1/access",
+        json={
+            "mode": "inherit",
+            "bindings": [],
+            "if_match_revision": 3,
+            "if_match_instance_id": "inst-123",
+        },
+        headers=csrf_headers(owner_client, base_url="https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=remote_peer(),
+    )
+    assert owner_response.status_code == 200
+    assert project_access_called is True
 
 
 def test_owner_can_mutate_authorized_users(monkeypatch, tmp_path) -> None:

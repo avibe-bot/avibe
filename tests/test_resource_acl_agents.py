@@ -8,13 +8,12 @@ from sqlalchemy import select
 
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
 from core.vibe_agents import (
-    AUDIENCE_WIDE_ACCESS_LEVELS,
     AgentImportCandidate,
     VibeAgent,
     VibeAgentAccessError,
-    VibeAgentDefaultAudienceError,
     VibeAgentStore,
     ensure_agent_selection_access,
+    ensure_default_agent_access,
     ensure_session_agent_access,
 )
 from core.watches import ManagedWatchStore
@@ -115,27 +114,26 @@ def _seed_agents_with_policies() -> tuple[VibeAgentStore, dict[str, VibeAgent]]:
 
 
 def _restricted_agent_keys() -> list[str]:
-    """Seeded Agents whose policy is too narrow to back a default route.
+    """Seeded Agents whose policy admits less than the whole instance.
 
-    Derived from the two sources of truth rather than listed, so an access level
+    Derived from the access levels themselves rather than listed, so a level
     added later is covered by the tests below without editing them. The seeder
-    keys are the access levels themselves, and the assertion keeps it that way:
-    a new level must be seeded before these tests can pass.
+    keys are the access levels, and the assertion keeps it that way: a new level
+    must be seeded before these tests can pass.
     """
 
-    levels = sorted(resource_access_service.ACCESS_LEVELS - AUDIENCE_WIDE_ACCESS_LEVELS)
+    levels = sorted(resource_access_service.ACCESS_LEVELS - {"public"})
     assert set(levels) >= {"private", "scope"}
     return levels
 
 
-def _seed_legacy_default_agent(store: VibeAgentStore, agent_name: str) -> None:
-    """Persist an instance default the setter now refuses.
+def _set_default_agent_row(store: VibeAgentStore, agent_name: str) -> None:
+    """Point instance-wide routing at an Agent, bypassing the Owner-only gate.
 
-    ``set_default_agent_name`` rejects any Agent whose policy is narrower than
-    the instance-wide audience (``core.vibe_agents.default_routing_audience_error``),
-    so this state can now only arrive from a database written before that rule.
-    The read-path fences must still fail closed on it, which is what the callers
-    below assert.
+    Defaults are advisory: the setter accepts any Agent its caller may manage,
+    including one whose policy admits less than the whole instance. Writing the
+    row directly keeps these tests focused on what happens when such a default is
+    *resolved*, without threading an Owner session through every caller.
     """
 
     with store.engine.begin() as connection:
@@ -260,12 +258,13 @@ def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tm
         assert updated.description == "admin update"
         store.set_default_agent_name(agents["public"].name, user_context=admin)
         assert store.get_default_agent_name() == agents["public"].name
-        # Management authority does not extend to publishing an Agent narrower
-        # than the audience as the instance-wide default route.
+        # A default is advisory: an Agent narrower than the whole audience is a
+        # legitimate assignment, because the ACL is enforced per-principal at use
+        # time (see ``resolve_usable_default_agent``) rather than at bind time.
         for key in _restricted_agent_keys():
-            with pytest.raises(VibeAgentDefaultAudienceError):
-                store.set_default_agent_name(agents[key].name, user_context=admin)
-            assert store.get_default_agent_name() == agents["public"].name
+            store.set_default_agent_name(agents[key].name, user_context=admin)
+            assert store.get_default_agent_name() == agents[key].name
+        store.set_default_agent_name(agents["public"].name, user_context=admin)
         assert store.remove(agents["public"].name, user_context=admin) is True
         owner_updated = store.update(
             agents["private"].name,
@@ -329,7 +328,7 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
     try:
-        _seed_legacy_default_agent(store, agents["private"].name)
+        _set_default_agent_row(store, agents["private"].name)
         engine = get_cached_sqlite_engine()
         with engine.begin() as connection:
             scope_id = upsert_scope(
@@ -346,16 +345,19 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
                 agent_id=agents["public"].id,
                 user_context=_organization_context("member-1"),
             )
-        with pytest.raises(VibeAgentAccessError):
-            with engine.begin() as connection:
-                workbench_sessions_service.update_session(
-                    connection,
-                    session["id"],
-                    agent_name="",
-                    agent_id="",
-                    agent_backend="",
-                    user_context=_organization_context("member-1"),
-                )
+        # The instance default is another owner's private Agent. Clearing the
+        # selector still succeeds: the default is advisory, so it degrades to an
+        # Agent this caller may use rather than stranding the session.
+        with engine.begin() as connection:
+            degraded = workbench_sessions_service.update_session(
+                connection,
+                session["id"],
+                agent_name="",
+                agent_id="",
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+        assert (degraded["agent_id"], degraded["agent_name"]) == (None, None)
         store.set_default_agent_name(agents["public"].name)
         with engine.begin() as connection:
             cleared = workbench_sessions_service.update_session(
@@ -366,10 +368,10 @@ def test_editor_clearing_session_agent_authorizes_default(monkeypatch, tmp_path)
                 agent_backend="",
                 user_context=_organization_context("member-1"),
             )
-        # A legacy database can still hold a scoped Agent as the instance
-        # default. The read path must keep resolving it for a caller inside the
-        # scope rather than breaking on state the setter no longer produces.
-        _seed_legacy_default_agent(store, agents["scope"].name)
+        # A scoped Agent is a legitimate instance default. The read path must
+        # resolve it for a caller inside the scope rather than degrading away
+        # from a default the caller can in fact use.
+        _set_default_agent_row(store, agents["scope"].name)
         with engine.connect() as connection:
             effective = ensure_session_agent_access(
                 connection,
@@ -402,15 +404,21 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 now="2026-08-13T00:00:00Z",
             )
 
-        _seed_legacy_default_agent(store, agents["private"].name)
-        with pytest.raises(VibeAgentAccessError):
-            with engine.begin() as connection:
-                workbench_sessions_service.create_session(
-                    connection,
-                    scope_id=scope_id,
-                    agent_backend="",
-                    user_context=_organization_context("member-1"),
-                )
+        # An unusable instance default degrades on create too, so an unpinned
+        # session still starts without pinning anything into the row.
+        _set_default_agent_row(store, agents["private"].name)
+        with engine.begin() as connection:
+            degraded = workbench_sessions_service.create_session(
+                connection,
+                scope_id=scope_id,
+                agent_backend="",
+                user_context=_organization_context("member-1"),
+            )
+        assert (degraded["agent_id"], degraded["agent_name"], degraded["agent_backend"]) == (
+            None,
+            None,
+            "",
+        )
 
         store.set_default_agent_name(agents["public"].name)
         with engine.begin() as connection:
@@ -421,9 +429,9 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
                 user_context=_organization_context("member-1"),
             )
 
-        # Same legacy shape as above, on the create path rather than the clear
-        # path: a scoped default written before the audience rule still resolves.
-        _seed_legacy_default_agent(store, agents["scope"].name)
+        # Same shape as above on the create path: a scoped default resolves for a
+        # caller inside the scope.
+        _set_default_agent_row(store, agents["scope"].name)
         with engine.connect() as connection:
             effective = ensure_session_agent_access(
                 connection,
@@ -440,6 +448,50 @@ def test_editor_creating_default_session_validates_without_pinning(monkeypatch, 
     )
     assert effective is not None
     assert effective.id == agents["scope"].id
+
+
+def test_personal_install_default_routing_never_degrades(monkeypatch, tmp_path) -> None:
+    """A personal install resolves whatever default it was given, unchanged.
+
+    No Agent on a personal install carries an ACL row, which is exactly the shape
+    a bind-time audience predicate would have had to reject. Use-time enforcement
+    has no such problem: the local boot path resolves as the Instance Owner, and
+    a remote personal-install principal is evaluated against the Agent-use
+    capability rather than against a policy that was never written. Neither
+    degrades away from the configured Agent, so ``vibe agent default`` keeps
+    meaning what it says.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        builtin = store.ensure_builtin_default_agent(backend="codex")
+        chosen = store.create(name="local-favourite", backend="codex")
+        store.set_default_agent_name(chosen.name)
+        assert store.get_default_agent_name() == chosen.name
+        assert builtin.name != chosen.name
+
+        personal_member = resource_access_service.ResourceUserContext(
+            subject="member-1",
+            email="member-1@example.com",
+            instance_role="member",
+            instance_access_source="email",
+            instance_kind="personal",
+            is_remote=True,
+        )
+        with store.engine.connect() as connection:
+            # The local boot path passes no principal at all and resolves as the
+            # Instance Owner.
+            assert ensure_default_agent_access(connection).id == chosen.id
+            assert (
+                ensure_default_agent_access(
+                    connection,
+                    user_context=personal_member,
+                ).id
+                == chosen.id
+            )
+    finally:
+        store.close()
 
 
 def test_missing_agent_selector_fails_closed_for_editor_only(monkeypatch, tmp_path) -> None:
@@ -518,7 +570,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
-    _seed_legacy_default_agent(store, private_agent.name)
+    _set_default_agent_row(store, private_agent.name)
     store.close()
     context = _organization_context("member-1")
 
@@ -575,10 +627,10 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
         environ_base=_remote_peer(),
     )
     assert mutation.status_code == 200
-    # Instance-wide default routing serves everyone, so even an Owner cannot
-    # point it at an Agent narrower than that audience -- a scoped Agent locks
-    # out every group it does not name, exactly as a private one locks out every
-    # subject. An audience-wide Agent still works.
+    # Instance-wide default routing is Owner-only, but the Agent it points at is
+    # not constrained by policy shape: the default is advisory and the ACL is
+    # enforced per-principal at use time, so a narrower Agent is accepted here
+    # and degrades for whoever cannot use it.
     for key in _restricted_agent_keys():
         default_mutation = client.post(
             "/api/agents/default",
@@ -587,8 +639,7 @@ def test_editor_agent_selection_and_harness_bindings_follow_acl(monkeypatch, tmp
             base_url="https://alex.avibe.bot",
             environ_base=_remote_peer(),
         )
-        assert default_mutation.status_code == 403
-        assert default_mutation.get_json()["code"] == "agent_access_forbidden"
+        assert default_mutation.status_code == 200
     shared_default = client.post(
         "/api/agents/default",
         json={"name": agents["public"].name},

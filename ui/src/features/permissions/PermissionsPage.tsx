@@ -895,7 +895,12 @@ export function PermissionsPage() {
   const { t } = useTranslation();
   const { capabilities } = useInstanceAuthorization();
   const canManageAccessMembers = capabilities.can_manage_access_members;
-  const canManageProjectAccess = capabilities.can_manage_instance;
+  // Deciding who may reach a project is access administration, not project
+  // management, so it follows the same capability as the instance access list
+  // rather than can_manage_projects. The PUT behind it is Owner-only for the
+  // same reason, and a control that is enabled here but refused there is worse
+  // than one that is honestly disabled.
+  const canManageProjectAccess = capabilities.can_manage_access_members;
   const [state, setState] = useState<PageState>({ kind: 'loading' });
   const [tab, setTab] = useState<'access' | 'projects'>('access');
   const [editingAccess, setEditingAccess] = useState<string | null | undefined>(undefined);
