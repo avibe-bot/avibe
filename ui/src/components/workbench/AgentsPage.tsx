@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -117,6 +117,7 @@ export const AgentsPage: React.FC = () => {
   const [onboardingInventory, setOnboardingInventory] = useState<VibeAgentOnboardingResult | null>(null);
   const [onboardingExpanded, setOnboardingExpanded] = useState(false);
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
+  const refreshRequestRef = useRef(0);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -142,11 +143,19 @@ export const AgentsPage: React.FC = () => {
     }
   }, [api, canOnboardAgents]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options?: { cache?: boolean }) => {
+    const requestId = ++refreshRequestRef.current;
     setLoading(true);
     setError(null);
     try {
-      const result = await api.listVibeAgents({ includeDisabled: true });
+      const result = await api.listVibeAgents({
+        includeDisabled: true,
+        ...(options?.cache === undefined ? {} : { cache: options.cache }),
+      });
+      // A read issued before a stream gap may finish after the catch-up read.
+      // Only the latest request may publish its snapshot, so an older response
+      // cannot roll the Definitions list back to pre-gap state.
+      if (requestId !== refreshRequestRef.current) return;
       setAgents(result.agents);
       setDefaultName(result.default_agent_name);
       // Keep the currently-selected agent fresh after edits / refreshes.
@@ -155,9 +164,9 @@ export const AgentsPage: React.FC = () => {
         if (!fresh) setSelected(null);
       }
     } catch (err) {
-      setError(errorMessage(err) ?? String(err));
+      if (requestId === refreshRequestRef.current) setError(errorMessage(err) ?? String(err));
     } finally {
-      setLoading(false);
+      if (requestId === refreshRequestRef.current) setLoading(false);
     }
   }, [api, selected]);
 
@@ -223,7 +232,10 @@ export const AgentsPage: React.FC = () => {
       // Every gap ends here, whichever leg it was on, so this is the catch-up.
       // The bridge report is only the indicator's level: it comes with its own
       // `onConnected`, and refetching from both would pay twice for one gap.
-      onConnected: () => fetchRunningActiveCount(),
+      onConnected: () => {
+        void refresh({ cache: false });
+        void fetchRunningActiveCount();
+      },
       onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => fetchRunningActiveCount(),
