@@ -13,6 +13,7 @@ from core.show_runtime import (
     ShowRuntimeContextCapability,
     ShowRuntimeManager,
     ShowRuntimeProtocolEnvelope,
+    ShowRuntimeRequestTimeoutError,
     ShowRuntimeResult,
 )
 
@@ -201,6 +202,42 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
     assert captured_timeouts[0].read == expected_read_timeout
     assert captured_timeouts[0].write == expected_read_timeout
     assert captured_timeouts[0].pool == expected_read_timeout
+
+
+def test_show_runtime_request_enforces_timeout_as_total_deadline(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    manager._base_url = "http://127.0.0.1:4173"
+
+    async def ensure():
+        return ShowRuntimeResult(True, manager._base_url)
+
+    async def negotiate(_base_url):
+        return None
+
+    class _AppClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, _method, _url, *, headers, content):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "ensure", ensure)
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", negotiate)
+    monkeypatch.setattr(show_runtime.httpx, "AsyncClient", lambda **_kwargs: _AppClient())
+    envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE)
+
+    with pytest.raises(ShowRuntimeRequestTimeoutError, match="exceeded 0.01 seconds"):
+        asyncio.run(
+            manager.request(
+                "GET",
+                "/sessions/ses/app/api/slow",
+                envelope=envelope,
+                timeout_seconds=0.01,
+            )
+        )
 
 
 def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lifetime(

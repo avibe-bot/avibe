@@ -30,11 +30,13 @@ passes it explicitly to `ShowRuntimeManager.request`. The manager keeps 30
 seconds as its default, so every existing caller is unchanged. Config writes
 therefore affect subsequent API requests without restarting Avibe.
 
-The response boundary classifies `httpx.ReadTimeout` before the generic
-Runtime-unavailable path. Connection and other transport failures still mean
-the Runtime is unavailable. This keeps the machine contract stable without
-coupling V2Config into the Runtime manager or adding an environment-only source
-of truth.
+The Runtime manager wraps the HTTP request in an overall cancellation deadline,
+so a response that keeps streaming small chunks cannot run indefinitely. It
+normalizes both deadline expiry and HTTPX read expiry into a dedicated exception.
+The response boundary maps that exception to 504 only for API paths; annotation,
+connection, and other Runtime failures stay on the unavailable path. This keeps
+the machine contract stable without coupling V2Config into the Runtime manager
+or adding an environment-only source of truth.
 
 ## Validation
 

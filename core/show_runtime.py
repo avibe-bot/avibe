@@ -163,6 +163,10 @@ class ShowRuntimeResult:
     reason: str | None = None
 
 
+class ShowRuntimeRequestTimeoutError(TimeoutError):
+    """A proxied Runtime request exceeded its total request deadline."""
+
+
 @dataclass(frozen=True)
 class ShowRuntimeArchive:
     platform: str
@@ -332,15 +336,23 @@ class ShowRuntimeManager:
         }
         if session_part := _show_runtime_app_session_part(path):
             request_headers[SHOW_RUNTIME_BASE_HEADER] = f"/show/{session_part}/"
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_seconds, connect=5.0)
-        ) as client:
-            return await client.request(
-                method,
-                f"{ready.base_url}{path}",
-                headers=request_headers,
-                content=body,
-            )
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout_seconds, connect=5.0)
+            ) as client:
+                return await asyncio.wait_for(
+                    client.request(
+                        method,
+                        f"{ready.base_url}{path}",
+                        headers=request_headers,
+                        content=body,
+                    ),
+                    timeout=timeout_seconds,
+                )
+        except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
+            raise ShowRuntimeRequestTimeoutError(
+                f"Show Runtime request exceeded {timeout_seconds:g} seconds"
+            ) from exc
 
     async def request_global(
         self,

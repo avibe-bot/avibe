@@ -26,7 +26,6 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
-import httpx
 import psutil
 from aiohttp import ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
@@ -12886,6 +12885,17 @@ def _is_show_annotation_asset(asset_path: str) -> bool:
     return (asset_path or "").strip("/") == "__show/annotation.js"
 
 
+def _show_page_runtime_error_response(asset_path: str, exc: Exception):
+    from core.show_runtime import ShowRuntimeRequestTimeoutError
+
+    if _is_show_api_asset(asset_path) and isinstance(
+        exc,
+        ShowRuntimeRequestTimeoutError,
+    ):
+        return _show_page_runtime_timeout_response()
+    return _show_page_runtime_unavailable_response()
+
+
 def _is_show_page_entry_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
     return relative in {"", "index.html"}
@@ -14911,9 +14921,7 @@ async def serve_private_show_page(session_id, asset_path):
                 )
             except Exception as exc:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    if isinstance(exc, httpx.ReadTimeout):
-                        return _show_page_runtime_timeout_response()
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
@@ -15414,9 +15422,7 @@ async def serve_public_show_page(share_id, asset_path):
                 )
             except Exception as exc:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    if isinstance(exc, httpx.ReadTimeout):
-                        return _show_page_runtime_timeout_response()
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,

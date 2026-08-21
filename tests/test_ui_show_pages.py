@@ -36,6 +36,7 @@ from core.show_pages import (
 from core.show_runtime import (
     ShowRuntimeContext,
     ShowRuntimeManager,
+    ShowRuntimeRequestTimeoutError,
     ShowRuntimeWebSocketTarget,
     _runtime_download_error,
     _runtime_platform_tag,
@@ -2649,6 +2650,29 @@ def test_show_annotation_bootstrap_asset_proxies_to_runtime(monkeypatch, tmp_pat
     assert manager.calls[0][1] == "/sessions/ses123/app/__show/annotation.js"
 
 
+@pytest.mark.parametrize("surface", ["private", "public"])
+def test_show_annotation_timeout_remains_runtime_unavailable(monkeypatch, tmp_path, surface):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    if surface == "private":
+        _create_show_page("ses123", "private")
+        path = "/show/ses123/__show/annotation.js"
+    else:
+        share_id = _create_show_page("ses123", "public")
+        path = f"/p/{share_id}/__show/annotation.js"
+    manager = _FakeShowRuntimeManager(
+        error=ShowRuntimeRequestTimeoutError("Show Runtime request exceeded 30 seconds")
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(path, base_url="http://127.0.0.1:5123")
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "show_runtime_unavailable"}
+
+
 def test_private_show_page_does_not_inject_runtime_event_config_into_attachment_html(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -3585,10 +3609,7 @@ def test_show_page_api_timeout_is_distinct_from_runtime_unavailable(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public" if public else "private")
-    timeout = httpx.ReadTimeout(
-        "Show Page API timed out",
-        request=httpx.Request("GET", "http://127.0.0.1/api/slow"),
-    )
+    timeout = ShowRuntimeRequestTimeoutError("Show Runtime request exceeded 90 seconds")
     manager = _FakeShowRuntimeManager(error=timeout)
     set_show_runtime_manager_for_tests(manager)
     try:
