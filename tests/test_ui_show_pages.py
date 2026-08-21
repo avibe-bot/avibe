@@ -359,6 +359,33 @@ def _write_runtime_manifest(
     return manifest_path
 
 
+def _install_remote_manifest_runtime(monkeypatch, tmp_path: Path):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manifest_url = "https://example.test/show-runtime-manifest.json"
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["test-node"] if command == "node" else None,
+    )
+    monkeypatch.setattr("core.show_runtime._node_version", lambda _node: (22, 12, 0))
+    monkeypatch.setattr(
+        "core.show_runtime.fetch_bytes",
+        lambda url, **_kwargs: manifest_path.read_bytes()
+        if url == manifest_url
+        else pytest.fail(f"unexpected fetch: {url}"),
+    )
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+    )
+    result = manager.prepare()
+    assert result["install"]["state"] == "installed"
+    install_dir = Path(result["command"][1]).parents[4]
+    return runtime_dir, manifest_url, install_dir, result["command"]
+
+
 def _write_cached_runtime_install(
     runtime_dir: Path,
     name: str,
@@ -6736,6 +6763,18 @@ def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_prote
     assert stale_install_dir.exists() is False
     assert stale_archive.exists() is False
 
+    restarted_manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_path=manifest_path,
+        auto_install=False,
+    )
+    restarted = restarted_manager.prepare(automatic=True)
+
+    assert restarted["policy"]["state"] == "skipped"
+    assert restarted["install"]["state"] == "installed"
+    assert restarted["command"] == ["/bin/node", str(previous_cli)]
+
 
 def test_show_runtime_clean_prunes_stale_manifest_fingerprints(monkeypatch, tmp_path):
     old_archive_path = _write_runtime_archive(tmp_path / "old", text="old runtime\n")
@@ -7187,12 +7226,33 @@ def test_show_runtime_manager_can_disable_auto_install(tmp_path):
     assert availability.install.value == "absent"
 
 
-def test_show_runtime_manual_prepare_bypasses_only_the_automatic_install_opt_out(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("install_skip", "auto_install", "skip_reason"),
+    (
+        pytest.param(True, True, "VIBE_INSTALL_SKIP_SHOW_RUNTIME", id="install-skip"),
+        pytest.param(False, False, "VIBE_SHOW_RUNTIME_AUTO_INSTALL", id="auto-install-off"),
+        pytest.param(False, True, None, id="allowed"),
+    ),
+)
+@pytest.mark.parametrize("automatic", (True, False), ids=("automatic", "explicit"))
+@pytest.mark.parametrize("force", (False, True), ids=("reuse", "force"))
+def test_show_runtime_prepare_policy_truth_table(
+    monkeypatch,
+    tmp_path,
+    install_skip,
+    auto_install,
+    skip_reason,
+    automatic,
+    force,
+):
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", raising=False)
+    if install_skip:
+        monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "1")
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
         runtime_source="npm",
-        auto_install=False,
+        auto_install=auto_install,
     )
     command = [str(tmp_path / "runtime" / "avibe-show-runtime")]
     calls = []
@@ -7201,45 +7261,19 @@ def test_show_runtime_manual_prepare_bypasses_only_the_automatic_install_opt_out
         "_install_managed_runtime_locked",
         lambda *, force, offline: calls.append((force, offline)) or command,
     )
+    monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
-    automatic = manager.prepare(automatic=True)
-    explicit = manager.prepare(automatic=False)
+    result = manager.prepare(force=force, automatic=automatic)
 
-    assert automatic["policy"] == {
-        "state": "skipped",
-        "reason": "VIBE_SHOW_RUNTIME_AUTO_INSTALL",
-    }
-    assert automatic["install"]["state"] == "absent"
-    assert automatic["runtime"]["state"] == "unchecked"
-    assert automatic["ok"] is False
-    assert explicit["policy"]["state"] == "allowed"
-    assert explicit["install"]["state"] == "installed"
-    assert explicit["runtime"]["state"] == "unchecked"
-    assert explicit["ok"] is True
-    assert calls == [(False, False)]
-
-
-def test_show_runtime_install_skip_blocks_explicit_prepare(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "1")
-    manager = ShowRuntimeManager(
-        workspace_root=tmp_path / "show",
-        runtime_dir=tmp_path / "runtime",
-        runtime_source="npm",
-    )
-    monkeypatch.setattr(
-        manager,
-        "_install_managed_runtime_locked",
-        lambda **_kwargs: pytest.fail("hard install opt-out must own admission"),
-    )
-
-    result = manager.prepare()
-
+    expected_skip = automatic and skip_reason is not None
     assert result["policy"] == {
-        "state": "skipped",
-        "reason": "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
+        "state": "skipped" if expected_skip else "allowed",
+        "reason": skip_reason if expected_skip else None,
     }
-    assert result["install"]["state"] == "absent"
-    assert result["ok"] is False
+    assert result["install"]["state"] == ("absent" if expected_skip else "installed")
+    assert result["runtime"]["state"] == "unchecked"
+    assert result["ok"] is (not expected_skip)
+    assert calls == ([] if expected_skip else [(force, False)])
 
 
 def test_show_runtime_automatic_opt_out_does_not_fetch_remote_manifest(monkeypatch, tmp_path):
@@ -7259,6 +7293,110 @@ def test_show_runtime_automatic_opt_out_does_not_fetch_remote_manifest(monkeypat
 
     assert result["policy"]["state"] == "skipped"
     assert result["install"]["state"] == "absent"
+
+
+def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_unavailable(monkeypatch, tmp_path):
+    runtime_dir, manifest_url, install_dir, command = _install_remote_manifest_runtime(monkeypatch, tmp_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+        auto_install=False,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime.fetch_bytes",
+        lambda *_args, **_kwargs: pytest.fail("policy skip must derive install state from disk"),
+    )
+
+    skipped = manager.prepare(automatic=True)
+
+    assert skipped["policy"] == {
+        "state": "skipped",
+        "reason": "VIBE_SHOW_RUNTIME_AUTO_INSTALL",
+    }
+    assert skipped["install"]["state"] == "installed"
+    assert skipped["runtime"]["state"] == "unchecked"
+    assert skipped["command"] == command
+    assert skipped["status"]["installed"] is True
+    assert skipped["status"]["install_dir"] == str(install_dir)
+
+    def fail_manifest_fetch(*_args, **_kwargs):
+        raise OSError("manifest host unavailable")
+
+    monkeypatch.setattr("core.show_runtime.fetch_bytes", fail_manifest_fetch)
+    status = manager.status()
+
+    assert status["installed"] is True
+    assert status["install"]["state"] == "installed"
+    assert status["runtime"]["state"] == "unchecked"
+    assert status["installed_matches_manifest"] is False
+    assert status["command"] == command
+    assert status["manifest"]["source"] == manifest_url
+    assert status["reason"] == "runtime_manifest_download_failed"
+
+
+def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_path):
+    runtime_dir, manifest_url, _install_dir, _command = _install_remote_manifest_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda _command: None)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+        auto_install=False,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime.fetch_bytes",
+        lambda *_args, **_kwargs: pytest.fail("policy skip must not fetch the manifest"),
+    )
+
+    result = manager.prepare(automatic=True)
+
+    assert result["policy"]["state"] == "skipped"
+    assert result["install"]["state"] == "installed"
+    assert result["install"]["command"] is None
+    assert result["runtime"]["state"] == "unchecked"
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("outside-versions", "source-lineage", "pointer-metadata", "invalid-json"),
+)
+def test_show_runtime_disk_install_pointer_fails_closed(monkeypatch, tmp_path, corruption):
+    runtime_dir, manifest_url, install_dir, _command = _install_remote_manifest_runtime(monkeypatch, tmp_path)
+    pointer_path = runtime_dir / "current.json"
+    metadata_path = install_dir / ".vibe-show-runtime.json"
+    if corruption == "outside-versions":
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer["install_dir"] = str(tmp_path)
+        pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+    elif corruption == "source-lineage":
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["manifest_source"] = "https://other.example/show-runtime-manifest.json"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    elif corruption == "pointer-metadata":
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer["archive_sha256"] = "f" * 64
+        pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+    else:
+        pointer_path.write_text("not-json", encoding="utf-8")
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+        auto_install=False,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime.fetch_bytes",
+        lambda *_args, **_kwargs: pytest.fail("policy skip must not fetch the manifest"),
+    )
+
+    result = manager.prepare(automatic=True)
+
+    assert result["policy"]["state"] == "skipped"
+    assert result["install"]["state"] == "absent"
+    assert result["command"] is None
 
 
 def test_show_runtime_policy_skip_preserves_independent_installed_state(tmp_path):

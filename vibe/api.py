@@ -8604,11 +8604,10 @@ def reconcile_startup_dependencies() -> dict:
         result["avault"] = avault
 
         try:
-            from core.show_runtime import get_show_runtime_manager
+            from core.show_runtime import ShowRuntimeAvailability, get_show_runtime_manager
 
             manager = get_show_runtime_manager()
-            prepared = manager.prepare(force=False, automatic=True)
-            status = prepared.get("status") if isinstance(prepared.get("status"), dict) else {}
+            status = manager.status(offline=True)
             node_available = bool(status.get("node_available"))
             node_supported = status.get("node_supported") is not False
             node_ok = node_available and node_supported
@@ -8620,6 +8619,13 @@ def reconcile_startup_dependencies() -> dict:
                 "status": node_status,
                 "version": status.get("node_version"),
             }
+            if node_ok:
+                prepared = manager.prepare(force=False, automatic=True)
+                status = prepared.get("status") if isinstance(prepared.get("status"), dict) else status
+            else:
+                reason = "runtime_node_unsupported" if node_available else "runtime_node_missing"
+                prepared = ShowRuntimeAvailability.from_install(install_reason=reason).as_payload()
+                prepared["status"] = status
 
             policy = prepared.get("policy") if isinstance(prepared.get("policy"), dict) else {}
             install = prepared.get("install") if isinstance(prepared.get("install"), dict) else {}

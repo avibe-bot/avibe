@@ -1311,6 +1311,14 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
         def __init__(self):
             self.prepared = []
 
+        def status(self, *, offline=False):
+            assert offline is True
+            return {
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
         def prepare(self, *, force=False, automatic=False):
             self.prepared.append((force, automatic))
             return {
@@ -1351,19 +1359,17 @@ def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_
         def __init__(self):
             self.prepared = []
 
+        def status(self, *, offline=False):
+            assert offline is True
+            return {
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
+            }
+
         def prepare(self, *, force=False, automatic=False):
             self.prepared.append((force, automatic))
-            return {
-                "policy": {"state": "allowed", "reason": None},
-                "install": {"state": "failed", "reason": "runtime_node_missing"},
-                "runtime": {"state": "unchecked", "reason": None},
-                "reason": "runtime_node_missing",
-                "status": {
-                    "node_available": False,
-                    "node_supported": None,
-                    "node_version": None,
-                },
-            }
+            pytest.fail("a missing prerequisite must not enter install admission")
 
     manager = _Mgr()
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
@@ -1371,14 +1377,12 @@ def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_
     out = api.reconcile_startup_dependencies()
 
     assert out["ok"] is False
-    assert manager.prepared == [(False, True)]
+    assert manager.prepared == []
     assert out["node"]["status"] == "missing"
     assert out["show_runtime"]["ok"] is False
     assert out["show_runtime"]["status"] == "failed"
-    assert out["show_runtime"]["install"] == {
-        "state": "failed",
-        "reason": "runtime_node_missing",
-    }
+    assert out["show_runtime"]["install"]["state"] == "failed"
+    assert out["show_runtime"]["install"]["reason"] == "runtime_node_missing"
 
 
 def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):
