@@ -61,8 +61,11 @@ provider root.
 ### Guarantees
 
 - Chat, `/new`, and archive do not block on Memory.
-- `offer()` / `capture()` only does bounded local work.
-- The in-memory queue has a hard bound and cannot grow without limit.
+- `offer()` / `capture()` reserves or rejects one process-local slot without
+  waiting on attachment pinning or EverOS.
+- One 256-slot admission window bounds every retained capture/barrier from
+  reservation through pinning, queueing, and the one in-flight provider call.
+  There is no second reservation chain outside that bound.
 - Principal, project, epoch, `scope_key`, and `provider_root_id` are
   byte-identical across the upgrade.
 - Named-project catalog rows survive.
@@ -78,9 +81,9 @@ provider root.
 - An in-progress Rebuild or Repair is not converted to Reset. Queue
   discard is allowed; the provider root is not touched. The writer cannot
   call EverOS concurrently with either maintenance child.
-- Captures that reserve an exact-session admission slot before `/new` or
-  archive reserve their slot are offered before that session's flush barrier,
-  even when attachment pinning completes later.
+- Captures admitted before `/new` or archive reserve their ordered slot are
+  consumed before that session's flush barrier, even when attachment pinning
+  completes later.
 - The existing per-principal limit of 16 named projects remains enforced.
   Reusing an existing named project is still allowed at the limit.
 - Credentials, configured URLs, captured text, and absolute paths stay
@@ -140,16 +143,13 @@ Retained in the same SQLite file:
 CaptureAdmission (unchanged authorize/size/scope checks)
         |
         v
-exact-session FIFO reservation      # registered before deferred pinning
+BestEffortMemoryWriter.offer()
+  # non-blocking reserve in one 256-slot ordered admission window
         |
+        +--> capture slot: bounded deferred pin task -> ready or skipped
+        +--> barrier slot: ready immediately
         v
-optional AttachmentPinStore pin (unchanged, in-process only)
-        |
-        v
-BestEffortMemoryWriter.offer()     # put_nowait, no await on EverOS
-        |
-        v
-bounded asyncio.Queue + one ordered worker
+one ordered worker consumes the ready head slot
         |
         v
 EverOSPort.add / flush
@@ -157,7 +157,8 @@ EverOSPort.add / flush
 
 Suggested starting constants, fixed rather than user settings:
 
-- queue bound: 256 items
+- admission-window bound: 256 total slots across reserved/unready, pinning,
+  ready/queued, and the current in-flight add or barrier
 - max total add attempts: 3, only for outcomes that prove the request
   did not commit (UDS refused before send, sidecar not ready, provider
   error classified uncommitted)
@@ -194,14 +195,21 @@ replayed.
 They never call `final_flush` with a deadline. Existing internal routes
 may remain as adapters that enqueue the barrier; they must not wait.
 
-Keep the current O(1) exact-session FIFO reservation, or an equivalent
-sequencer. A capture registers its reservation synchronously before its first
-deferred step, including attachment pinning. A barrier registers after the
-current tail and schedules its queue offer only after every predecessor has
-either offered its add item or closed as skipped. Registering the barrier is
-non-blocking, so `/new` and archive return without waiting for pins, provider
-I/O, or the worker. Queue saturation may reject the barrier, but a barrier
-that is accepted must never overtake already-started capture work.
+Use one fixed-capacity ordered admission window, not a queue plus an unbounded
+reservation chain. `offer()` synchronously and non-blockingly reserves the next
+sequence slot before any deferred attachment work. That permit remains charged
+while the slot is unready, pinning, ready, queued, or in flight, and is released
+only when the worker consumes or skips the slot. At most 256 slot payloads,
+attachment leases, and owned pin tasks therefore exist in one generation.
+
+A barrier reserves the same kind of slot and is ready immediately. The worker
+consumes only from the head, so an accepted barrier cannot overtake any earlier
+admitted capture even if its pin is slow; a failed pin marks its slot skipped
+and lets the worker advance. When all 256 permits are charged, captures and
+barriers are rejected with the existing queue-full outcome before starting a
+pin, retaining a payload, advancing the watermark/catalog, or creating another
+task. `/new` and archive return without waiting. Generation drop cancels the
+bounded pin tasks, releases their leases, and clears every charged permit.
 
 ### Shutdown
 
@@ -260,16 +268,30 @@ that Processing Record currently reads from `memory_capture_queue` and
 - retain at most 5,000 provenance rows and at most 14 days, matching Provider
   Call Log retention; enforce both bounds after each provenance write and at
   boot with the same policy values
-- for a user-scoped read, authorize a request id only when all of its
-  provenance rows resolve to exactly one principal/project and the memcell
-  contains one of the recorded message ids; ambiguous or missing provenance
-  never broadens visibility
+- for every user-scoped read, require all rows for the request id to resolve to
+  exactly one principal/project; ambiguous or missing provenance never
+  broadens visibility
+- for a call reached through a linked memcell, additionally require that owned
+  memcell to contain one of the recorded message ids
+- for `list_unlinked_calls` and an unlinked request-id detail, unique provenance
+  scope is the authorization fact: requiring memcell membership there would
+  reject the branch precisely because the call is unlinked
 
 A provenance write failure never retries an EverOS add or flush. It marks the
 Processing Record capture-correlation source unavailable for that observation
 and emits content-free diagnostics; ordinary capture remains best-effort.
 Clear's `reset_for_clear` deletes every provenance row with the catalog and
 watermark reset; Factory Reset deletes it with `state/memory`.
+
+The independently maintained Provider Call Log is not an input to identity
+migration or writer admission. Historical migration copies non-null,
+unambiguous add/flush correlations from the released Memory store and applies
+the same 5,000-row / 14-day limits using their capture/settlement observation
+times; it does not open or filter against the call-log database. A malformed
+observer-only correlation or timestamp is skipped with a content-free count.
+An absent, corrupt, incompatible, or unreadable call log therefore makes the
+Processing Record calls section unavailable/warned through its existing
+projection, but cannot block v4 migration or capture startup.
 
 `processing_fault_*` / `processing_alert_*` / `processing_recovery_*`
 stop being written. They may be dropped in the v4 table rebuild or left
@@ -294,13 +316,16 @@ Provider session derivation stays the `origin/dev` formula in
 src--<hmac-sha256(scope_key, "{memory_owner_id}:{project_ref}:{session_id}")>--e{epoch}
 ```
 
-`memory_owner_id` is the user principal `u-<32 hex>` for
-`provenance="user_input"`, or `{principal}-agent` (`u-<32 hex>-agent`)
-for `provenance="agent"` (`derive_assistant_memory_owner_id`, #1633).
-`memory_projects.principal_id` remains the 34-character user principal;
-the catalog is not keyed by the `-agent` owner. Implementation copies
-these helpers. It does not change digest inputs, principal shape, or
-the catalog key. Changing them would orphan existing EverOS sessions.
+For capture writes, `memory_owner_id` remains the 34-character user principal
+`u-<32 hex>` for both `provenance="user_input"` and `provenance="agent"`, exactly
+as current `MemoryStore.enqueue_request()` calls `_provider_session_ref` and
+constructs `ProviderSessionRef.principal_id`. Provenance remains payload-origin
+metadata; this PR does not route agent-origin captures to `{principal}-agent`.
+The owner-scoped helper and `derive_assistant_memory_owner_id` added for #1633
+remain available to the existing read paths but do not change this write path.
+Changing capture ownership requires a separate migration contract because it
+would orphan the current EverOS sessions. `memory_projects.principal_id` also
+remains keyed by the 34-character user principal.
 
 ## Released shapes the migrator must accept
 
@@ -340,7 +365,9 @@ sidecars). After upgrade:
 - `memory_projects` rows are unchanged
 - no capture payload, lease, fence, settlement, or bundle row remains
 - no dropped payload is sent to EverOS
-- the original file is not mutated if the transaction fails
+- a failed recognized-shape migration leaves `user_version`, logical schema,
+  identity, catalog, and delivery rows unchanged; SQLite may create or update
+  its own transaction sidecars while rolling back
 
 A shape added later that the recognizer accepts is covered by the same
 property. A shape the recognizer rejects must remain byte-identical.
@@ -379,27 +406,37 @@ would accept captures:
      `manual_required`) and terminal rows, without logging payload text
    - collect `attachment_bundle` ids
    - copy `memory_meta` identity columns and `memory_projects`
-   - before dropping delivery tables, copy add/flush request correlation into
-     `memory_call_provenance`, bounded to retained Provider Call Log request
-     ids and its 5,000-row / 14-day window; preserve the current fail-closed
+   - before dropping delivery tables, copy non-null add/flush request
+     correlation into `memory_call_provenance`, independently bounded to its
+     5,000-row / 14-day window; do not open the optional Provider Call Log, skip
+     malformed observer-only rows with a count, and preserve the fail-closed
      rule for request ids that resolve to more than one scope
    - drop delivery tables, indexes, and settlement triggers
    - rebuild `memory_meta` without requiring delivery columns if this
      PR drops them
    - `PRAGMA user_version = 4`
    - verify identity tables and required identity columns
-6. Commit, then confined-delete leftover pin bundles whose ids were
-   collected, then confined-delete WAL/SHM only after the main file
-   has the new user_version.
+6. Commit, request `PRAGMA wal_checkpoint(FULL)` on the migration connection,
+   inspect its busy result, and close every store-owned connection before
+   admitting the writer. A concurrent read-only Processing Record connection
+   may keep the checkpoint busy; that is safe because committed pages remain in
+   SQLite's WAL and are recovered on reopen. Never unlink `-wal`, `-shm`, or
+   `-journal` directly. Reopen normally and verify v4, then confined-delete the
+   collected leftover pin bundles.
 7. Emit one content-free structured log: discarded nonterminal count,
    discarded terminal count, discarded bundle count. Never log text,
-   paths, or digests that can recover a message.
+   paths, or digests that can recover a message. Also count skipped malformed
+   provenance rows and a busy post-commit checkpoint without treating either
+   as a capture-startup failure.
 8. Start `BestEffortMemoryWriter` against the preserved watermark and
    catalog.
 
 Crash windows:
 
-- Failure before commit: old file unchanged; next boot retries.
+- Failure before commit: logical schema and rows are unchanged; next boot
+  retries, and SQLite owns any rollback journal/WAL artifacts.
+- Failure after commit, before checkpoint/close: SQLite recovers the committed
+  v4 transaction from its WAL. No cleanup code removes those pages.
 - Failure after commit, before bundle delete: the store is v4; leftover
   files under `memory/attachments/` are unreferenced and deleted on the
   next boot by "no bundle table ⇒ delete pin root if empty-orphan".
@@ -415,6 +452,7 @@ Never:
 - convert a pending rebuild marker into Reset
 - delete the EverOS provider root
 - delete Provider Call Log data
+- unlink SQLite WAL/SHM/journal files outside SQLite's own lifecycle
 
 Downgrade is unsupported. A v4 file opened by an older Avibe that only
 understands v3 is an unrecognized schema and must fail closed without
@@ -422,28 +460,28 @@ writing, same as today's unknown `user_version` rule.
 
 ## Attachments in this PR
 
-Keep `AttachmentPinStore` and IM/Workbench admission. The worker still
-registers the exact-session FIFO reservation before pinning, pins before
-`offer` when the current path pins, and releases the bundle after a terminal
-in-process add (success, definite rejection, or drop). Closing a reservation
-as skipped releases its successor, so one failed pin cannot strand a later
-barrier.
+Keep `AttachmentPinStore` and IM/Workbench admission. `offer()` charges one
+ordered admission-window slot before pinning and starts at most one owned pin
+task inside that permit. The worker does not consume that slot until pinning
+marks it ready or skipped, and releases the bundle after a terminal in-process
+add (success, definite rejection, or drop). Marking a slot skipped lets the
+worker advance, so one failed pin cannot strand a later barrier.
 
 Retain the current single text-only degradation for a valid nonempty caption:
 
 - if pinned-attachment verification fails before provider submission with the
   existing positively classified `AttachmentBundleInvalidError`, release the
-  pin and offer the same capture once without attachments
+  pin and mark the same ordered slot ready once without attachments
 - if EverOS returns an attachment rejection for which
   `attachment_add_rejection_proves_no_write()` is true, release the pin and
-  offer the same capture once without attachments
+  retry the same in-flight slot once without attachments
 
 This is a modality fallback, not replay after ambiguity. It counts toward the
-same three-total-attempt bound and is forbidden for timeouts, unknown/truncated
-responses, generic provider rejection, or any outcome that may have written.
-If the caption is empty, close as skipped instead. Preserve
-`MEMORY-IM-ATTACH-009` and `MEMORY-IM-ATTACH-011` rather than deleting them with
-the durable worker tests.
+same three-total-attempt bound, never reserves a second slot, and is forbidden
+for timeouts, unknown/truncated responses, generic provider rejection, or any
+outcome that may have written. If the caption is empty, mark the slot skipped
+instead. Preserve `MEMORY-IM-ATTACH-009` and `MEMORY-IM-ATTACH-011` rather than
+deleting them with the durable worker tests.
 
 Remove only:
 
@@ -464,7 +502,7 @@ Keep `CaptureRequest` and `CaptureReceipt`. Map writer outcomes:
 
 | Writer | Receipt |
 |---|---|
-| queued | `CaptureAccepted` |
+| ordered slot admitted | `CaptureAccepted` |
 | duplicate in process-local LRU | `CaptureDuplicate` |
 | disabled / not ready / invalid / named-project limit / queue full | `CaptureSkipped` with the existing closed error code |
 
@@ -474,8 +512,8 @@ stays queued, as above.
 
 Processing-fault durable notification and ACK in `MemoryStore` /
 `SessionFlushCoordinator` are deleted. IM already does not receive those
-events. Processing Record may show process-local queue depth labelled
-as volatile; it must not show a durable missed-capture backlog.
+events. Processing Record may show process-local admission-window occupancy
+labelled as volatile; it must not show a durable missed-capture backlog.
 
 Processing Record and Provider Call Log otherwise retain their current
 scope and correlation behavior through `memory_call_provenance`. The reader's
@@ -562,7 +600,12 @@ Do not ship those doc edits in this planning PR.
   shape on the next boot. No test may observe a committed v2/v3 intermediate.
 - Unrecognized nonempty v0 remains unmodified.
 - Unknown `user_version` remains unmodified.
-- WAL/SHM sidecars do not come back as a second database.
+- A committed v4 store reopens correctly from either checkpointed main pages or
+  a retained WAL. A concurrent Processing Record reader may keep WAL/SHM alive;
+  migration closes owned connections and never deletes SQLite sidecars.
+- Missing, corrupt, incompatible, or unreadable Provider Call Log state does
+  not fail identity migration or block writer startup; its observer projection
+  reports unavailable/warned independently.
 - `clear_in_progress` / clear-intent / factory-reset pending skip the
   strip path and follow the existing destructive reconciler.
 - Every unreadable clear-intent shape keeps migration, sidecar startup, and
@@ -577,8 +620,10 @@ Do not ship those doc edits in this planning PR.
 
 ### Writer
 
-- `offer()` does not await provider I/O.
-- Occupancy never exceeds 256.
+- `offer()` does not await attachment pinning or provider I/O.
+- Total occupancy never exceeds 256 across unready reservations, pinning tasks,
+  ready/queued slots, and the in-flight slot; there is no out-of-window
+  predecessor chain.
 - Saturation returns `memory_queue_full` / `CaptureSkipped`.
 - One worker preserves accepted-item order globally.
 - At most three total attempts, and only for uncommitted failures.
@@ -594,6 +639,10 @@ Do not ship those doc edits in this planning PR.
 - Session barrier does not block `/new` or archive, and a capture delayed in
   attachment pinning after reserving admission is still offered before the
   later barrier.
+- With the head pin stalled, filling all 256 permits creates at most 256 slot
+  payloads/tasks/leases; the next capture and barrier are rejected before pin
+  or identity mutation. An already accepted barrier remains ordered after all
+  earlier slots and before every later accepted slot.
 - Watermark persists across writer restart and is monotonic.
 - Named-project upsert still happens on accepted capture; the current
   16-project test still rejects the 17th distinct slug and accepts reuse at
@@ -613,10 +662,13 @@ Do not ship those doc edits in this planning PR.
   empty provider root.
 - Search, profile, list, remember admission, and agent-owner read paths
   keep their `origin/dev` contracts.
+- Agent-provenance capture writes retain the current user-principal
+  `ProviderSessionRef` and provider-session digest; no `-agent` write owner is
+  introduced by this cut.
 - Processing Record authorizes and correlates historical migrated calls and
   new add/flush calls through bounded `memory_call_provenance`, including
-  scoped list/detail, unlinked-call, source-availability, retention, and
-  ambiguous-request-id tests.
+  linked memcell membership, unique-scope unlinked list/detail,
+  source-availability, retention, and ambiguous-request-id tests.
 
 ## Implementation sequence
 
