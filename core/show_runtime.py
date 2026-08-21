@@ -962,6 +962,25 @@ class ShowRuntimeManager:
         self._availability = availability
         return availability
 
+    def _managed_install_operation_command(
+        self,
+        command: list[str] | None,
+        *,
+        replacement_required: bool,
+        replacement_completed: bool,
+    ) -> list[str] | None:
+        """Return a command only when it satisfies the requested operation.
+
+        An ordinary prepare asks only for an available runtime, so a verified
+        existing command is sufficient even when a refresh fails. A forced
+        prepare asks for replacement; reusing the old command must preserve the
+        failure and report that operation as unsuccessful.
+        """
+        if not command or (replacement_required and not replacement_completed):
+            return None
+        self._install_reason = None
+        return command
+
     def _install_managed_runtime_locked(self, *, force: bool, offline: bool) -> list[str] | None:
         command: list[str] | None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
@@ -971,7 +990,7 @@ class ShowRuntimeManager:
         elif self.runtime_source == _RUNTIME_SOURCE_GITHUB:
             command = self._install_github_runtime(force=force)
         elif self.runtime_source == _RUNTIME_SOURCE_NPM:
-            command = self._install_npm_runtime()
+            command = self._install_npm_runtime(force=force)
         else:
             self._install_reason = "runtime_source_unsupported"
             return None
@@ -2264,7 +2283,11 @@ class ShowRuntimeManager:
             if not archive:
                 return None
             command = self._verified_manifest_runtime_command_for_manifest(manifest, archive, node)
-            return self._reuse_existing_archive_runtime(command)
+            return self._managed_install_operation_command(
+                command,
+                replacement_required=False,
+                replacement_completed=False,
+            )
         except Exception:
             return None
 
@@ -2296,11 +2319,18 @@ class ShowRuntimeManager:
                 )
             else:
                 self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
-            self._install_reason = None
-            return verified_existing_command
+            return self._managed_install_operation_command(
+                verified_existing_command,
+                replacement_required=False,
+                replacement_completed=False,
+            )
         archive_path = self._resolve_manifest_archive(archive, offline=offline)
         if not archive_path:
-            return self._reuse_existing_archive_runtime(verified_existing_command)
+            return self._managed_install_operation_command(
+                verified_existing_command,
+                replacement_required=force,
+                replacement_completed=False,
+            )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(prefix="manifest-", dir=self.runtime_dir))
         try:
@@ -2309,19 +2339,33 @@ class ShowRuntimeManager:
             command = self._manifest_runtime_command(tmp_dir, node)
             if not command:
                 self._install_reason = "runtime_install_missing_bin"
-                return self._reuse_existing_archive_runtime(verified_existing_command)
+                return self._managed_install_operation_command(
+                    verified_existing_command,
+                    replacement_required=force,
+                    replacement_completed=False,
+                )
             if install_dir.exists():
                 shutil.rmtree(install_dir)
             install_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp_dir), str(install_dir))
             self._write_manifest_install_metadata(install_dir, manifest, archive)
             self._write_current_manifest_pointer(manifest, archive, install_dir)
-            self._install_reason = None
-            return self._manifest_runtime_command(install_dir, node)
+            installed_command = self._manifest_runtime_command(install_dir, node)
+            if not installed_command:
+                self._install_reason = "runtime_install_missing_bin"
+            return self._managed_install_operation_command(
+                installed_command,
+                replacement_required=force,
+                replacement_completed=installed_command is not None,
+            )
         except Exception:
             logger.exception("Failed to install manifest Show Runtime")
             self._install_reason = "runtime_install_failed"
-            return self._reuse_existing_archive_runtime(verified_existing_command)
+            return self._managed_install_operation_command(
+                verified_existing_command,
+                replacement_required=force,
+                replacement_completed=False,
+            )
         finally:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2595,11 +2639,18 @@ class ShowRuntimeManager:
         existing_command = self._archive_runtime_command(install_dir, node)
         archive = self._resolve_prebuilt_archive(offline=offline)
         if not archive:
-            return self._reuse_existing_archive_runtime(existing_command)
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=force,
+                replacement_completed=False,
+            )
         archive_digest = _file_sha256(archive)
         if not force and existing_command and self._archive_manifest_matches(archive_digest):
-            self._install_reason = None
-            return existing_command
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=False,
+                replacement_completed=False,
+            )
         tmp_dir = Path(tempfile.mkdtemp(prefix="prebuilt-", dir=self.runtime_dir))
         try:
             with tarfile.open(archive, "r:gz") as tar:
@@ -2607,18 +2658,32 @@ class ShowRuntimeManager:
             command = self._archive_runtime_command(tmp_dir, node)
             if not command:
                 self._install_reason = "runtime_install_missing_bin"
-                return self._reuse_existing_archive_runtime(existing_command)
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=force,
+                    replacement_completed=False,
+                )
             if install_dir.exists():
                 shutil.rmtree(install_dir)
             install_dir.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp_dir), str(install_dir))
             self._write_archive_manifest(archive_digest)
-            self._install_reason = None
-            return self._archive_runtime_command(install_dir, node)
+            installed_command = self._archive_runtime_command(install_dir, node)
+            if not installed_command:
+                self._install_reason = "runtime_install_missing_bin"
+            return self._managed_install_operation_command(
+                installed_command,
+                replacement_required=force,
+                replacement_completed=installed_command is not None,
+            )
         except Exception:
             logger.exception("Failed to install prebuilt Show Runtime")
             self._install_reason = "runtime_install_failed"
-            return self._reuse_existing_archive_runtime(existing_command)
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=force,
+                replacement_completed=False,
+            )
         finally:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -2703,12 +2768,6 @@ class ShowRuntimeManager:
             return None
         return [*node, str(cli_path)]
 
-    def _reuse_existing_archive_runtime(self, command: list[str] | None) -> list[str] | None:
-        if command:
-            self._install_reason = None
-            return command
-        return None
-
     def _installed_github_runtime_command(self) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
@@ -2716,6 +2775,7 @@ class ShowRuntimeManager:
         return self._github_runtime_command(self._github_source_dir(), node)
 
     def _install_github_runtime(self, *, force: bool | None = None) -> list[str] | None:
+        replacement_required = self.force_install if force is None else force
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
@@ -2726,27 +2786,37 @@ class ShowRuntimeManager:
         git = _resolve_command("git")
         npm = _resolve_command("npm")
         if not git:
-            if existing_command:
-                self._install_reason = None
-                return existing_command
             self._install_reason = "runtime_git_missing"
-            return None
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         if not npm:
-            if existing_command:
-                self._install_reason = None
-                return existing_command
             self._install_reason = "runtime_npm_missing"
-            return None
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         if not source_dir.exists():
             source_dir.parent.mkdir(parents=True, exist_ok=True)
             if not self._run_install_command([*git, "clone", "--depth", "1", "--branch", self.github_ref, self.github_repo, str(source_dir)]):
-                return None
+                return self._managed_install_operation_command(
+                    None,
+                    replacement_required=replacement_required,
+                    replacement_completed=False,
+                )
         else:
             if not self._run_install_command([*git, "-C", str(source_dir), "fetch", "--depth", "1", "origin", self.github_ref]):
-                return self._reuse_existing_github_runtime(existing_command)
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=replacement_required,
+                    replacement_completed=False,
+                )
             fetched = self._git_revision(git, source_dir, "FETCH_HEAD")
             if (
-                not (self.force_install if force is None else force)
+                not replacement_required
                 and existing_command
                 and fetched
                 and self._read_github_build_marker(source_dir) == fetched
@@ -2754,25 +2824,48 @@ class ShowRuntimeManager:
                 # The runtime already on disk was built from exactly this
                 # commit, so `npm ci` and `npm run build` would spend a minute
                 # reproducing it byte for byte.
-                self._install_reason = None
-                return existing_command
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=False,
+                    replacement_completed=False,
+                )
             if not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
-                return self._reuse_existing_github_runtime(existing_command)
+                return self._managed_install_operation_command(
+                    existing_command,
+                    replacement_required=replacement_required,
+                    replacement_completed=False,
+                )
         # From here on the artifact the marker describes is being replaced:
         # ``npm ci`` empties node_modules and the build writes into dist. Drop
         # the marker first so a failure anywhere below leaves "unknown" rather
         # than a commit that no longer describes what is on disk.
         self._write_github_build_marker(source_dir, None)
         if not self._run_install_command([*npm, "ci"], cwd=source_dir):
-            return self._reuse_existing_github_runtime(existing_command)
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         if not self._run_install_command([*npm, "run", "build"], cwd=source_dir):
-            return self._reuse_existing_github_runtime(existing_command)
+            return self._managed_install_operation_command(
+                existing_command,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         command = self._github_runtime_command(source_dir, node)
         if not command:
             self._install_reason = "runtime_install_missing_bin"
-            return None
+            return self._managed_install_operation_command(
+                None,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         self._write_github_build_marker(source_dir, self._git_revision(git, source_dir, "HEAD"))
-        return command
+        return self._managed_install_operation_command(
+            command,
+            replacement_required=replacement_required,
+            replacement_completed=True,
+        )
 
     def _github_build_marker_path(self, source_dir: Path) -> Path:
         return source_dir / ".avibe-runtime-build"
@@ -2825,17 +2918,16 @@ class ShowRuntimeManager:
             return None
         return [*node, str(cli_path)]
 
-    def _reuse_existing_github_runtime(self, command: list[str] | None) -> list[str] | None:
-        if command:
-            self._install_reason = None
-            return command
-        return None
-
-    def _install_npm_runtime(self) -> list[str] | None:
+    def _install_npm_runtime(self, *, force: bool | None = None) -> list[str] | None:
+        replacement_required = self.force_install if force is None else force
         npm = _resolve_command("npm")
         if not npm:
             self._install_reason = "runtime_npm_missing"
-            return None
+            return self._managed_install_operation_command(
+                None,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         install_root = self.runtime_dir / "package"
         install_root.mkdir(parents=True, exist_ok=True)
@@ -2862,12 +2954,24 @@ class ShowRuntimeManager:
             )
         if result.returncode != 0:
             self._install_reason = "runtime_install_failed"
-            return None
+            return self._managed_install_operation_command(
+                None,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
         resolved = _resolve_executable_path(self._managed_bin_path())
         if not resolved:
             self._install_reason = "runtime_install_missing_bin"
-            return None
-        return [resolved]
+            return self._managed_install_operation_command(
+                None,
+                replacement_required=replacement_required,
+                replacement_completed=False,
+            )
+        return self._managed_install_operation_command(
+            [resolved],
+            replacement_required=replacement_required,
+            replacement_completed=True,
+        )
 
     def _managed_bin_path(self) -> Path:
         suffix = ".cmd" if os.name == "nt" else ""

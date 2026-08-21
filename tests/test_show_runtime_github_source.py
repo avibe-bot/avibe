@@ -135,6 +135,28 @@ def test_force_install_rebuilds_even_when_the_commit_matches(tmp_path: Path) -> 
     assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
 
 
+def test_forced_update_failure_reports_failed_operation_and_installed_state(tmp_path: Path) -> None:
+    upstream = make_upstream(tmp_path)
+    harness = Harness(tmp_path, upstream)
+    installed = harness.manager.prepare()
+    assert installed["ok"] is True
+
+    def fail_update(_command: list[str], *, cwd: Path | None = None) -> bool:
+        del cwd
+        harness.manager._install_reason = "runtime_install_failed"
+        return False
+
+    harness.manager._run_install_command = fail_update  # type: ignore[method-assign]
+
+    result = harness.manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_install_failed"
+    assert result["command"] is None
+    assert result["status"]["installed"] is True
+    assert result["status"]["command"] == installed["command"]
+
+
 def test_a_failed_build_leaves_no_marker_licensing_a_skip(tmp_path: Path) -> None:
     """A marker may only ever describe artifacts that exist right now.
 

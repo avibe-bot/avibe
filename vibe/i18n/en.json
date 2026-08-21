@@ -931,6 +931,7 @@
       "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
       "repairStarted": "Reinstalled and started the manifest-selected Show Runtime.",
       "repairStartFailed": "Show Runtime was reinstalled but could not start: {reason}",
+      "repairVerificationFailed": "Show Runtime startability could not be verified, so no reinstall was attempted: {detail}",
       "repairPrepareFailed": "Show Runtime preparation failed: {detail}",
       "repairLegacyArchiveUnavailable": "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides."
     }

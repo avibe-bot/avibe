@@ -2424,6 +2424,61 @@ def test_repair_show_runtime_reports_runtime_that_still_cannot_start(monkeypatch
     assert verifier_stops == [True, True]
 
 
+def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remains_installed(
+    monkeypatch,
+    tmp_path,
+):
+    prepared = []
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": False,
+            "reason": "runtime_archive_download_failed",
+            "provider": "archive",
+            "platform": "linux-x64",
+            "command": None,
+            "status": {
+                "installed": True,
+                "install_dir": str(tmp_path / "installed"),
+                "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+            },
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "archive",
+            "platform": "linux-x64",
+            "install_dir": str(tmp_path / "installed"),
+            "archive": {"url": str(tmp_path / "runtime.tgz")},
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["installed"] is True
+    assert result["install_dir"] == str(tmp_path / "installed")
+    assert prepared == [True]
+
+
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {
@@ -2515,9 +2570,10 @@ def test_repair_show_runtime_reports_verification_workspace_failures(monkeypatch
     result = cli._repair_show_runtime()
 
     assert result["status"] == "failed"
-    assert result["reason"] == "runtime_start_failed"
+    assert result["reason"] == "runtime_start_verification_failed"
     assert result["start_error"] == "verification workspace failed"
-    assert prepared == [True]
+    assert "no reinstall was attempted" in result["message"]
+    assert prepared == []
 
 
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):

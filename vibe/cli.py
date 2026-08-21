@@ -12295,7 +12295,7 @@ def _repair_git_runtime(*, dry_run: bool = False) -> dict:
 
 
 def _repair_show_runtime(*, dry_run: bool = False) -> dict:
-    from core.show_runtime import ShowRuntimeManager
+    from core.show_runtime import ShowRuntimeManager, ShowRuntimeResult
 
     target = "show-runtime"
     if dry_run:
@@ -12307,7 +12307,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     def verify_startability(command_value: Any) -> tuple[Any | None, str | None]:
         command = command_value if isinstance(command_value, list) else []
         if not command:
-            return None, "runtime_command_missing"
+            return ShowRuntimeResult(False, reason="runtime_command_missing"), None
         try:
             with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
                 verification_root = Path(verification_root_value)
@@ -12326,8 +12326,21 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
     language = _configured_cli_language()
     if before.get("installed"):
-        started, _start_error = verify_startability(before.get("command"))
-        if started is not None and started.available:
+        started, start_error = verify_startability(before.get("command"))
+        if started is None:
+            detail = start_error or "runtime_start_verification_failed"
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairVerificationFailed", language, detail=detail),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before.get("install_dir"),
+                installed=True,
+                reason="runtime_start_verification_failed",
+                start_error=start_error,
+            )
+        if started.available:
             return _doctor_repair_result(
                 target,
                 "skipped",
@@ -12390,6 +12403,8 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail),
         provider=result.get("provider"),
         platform=result.get("platform"),
+        install_dir=status.get("install_dir"),
+        installed=bool(status.get("installed")),
         reason=reason,
         download_error=download_error,
     )

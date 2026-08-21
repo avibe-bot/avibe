@@ -6721,6 +6721,43 @@ def test_show_runtime_manager_reuses_installed_prebuilt_runtime_without_archive(
     assert manager._install_reason is None
 
 
+def test_show_runtime_manager_forced_archive_fallback_reports_failed_operation_and_installed_state(
+    monkeypatch,
+    tmp_path,
+):
+    cli_path = (
+        tmp_path
+        / "runtime"
+        / "prebuilt"
+        / "current"
+        / "node_modules"
+        / "@avibe"
+        / "show-runtime"
+        / "dist"
+        / "cli.js"
+    )
+    cli_path.parent.mkdir(parents=True)
+    cli_path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_path=tmp_path / "missing.tgz",
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_missing"
+    assert result["command"] is None
+    assert result["status"]["installed"] is True
+    assert result["status"]["command"] == ["/bin/node", str(cli_path)]
+
+
 def test_show_runtime_manager_archive_source_honors_offline_mode(monkeypatch, tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
@@ -6820,6 +6857,39 @@ def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path
     status = manager.status()
     assert status["installed"] is True
     assert status["installed_matches_manifest"] is True
+
+
+def test_show_runtime_manager_forced_manifest_fallback_reports_failed_operation_and_installed_state(
+    monkeypatch,
+    tmp_path,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = manager.prepare()
+    assert installed["ok"] is True
+
+    def fail_archive_resolution(*_args, **_kwargs):
+        manager._install_reason = "runtime_archive_download_failed"
+        return None
+
+    monkeypatch.setattr(manager, "_resolve_manifest_archive", fail_archive_resolution)
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["command"] is None
+    assert result["status"]["installed"] is True
+    assert result["status"]["command"] == installed["command"]
 
 
 def test_show_runtime_manager_preserves_structured_http_download_error(monkeypatch, tmp_path):
@@ -8165,10 +8235,14 @@ def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):
         runtime_source="npm",
     )
     called = []
-    monkeypatch.setattr(manager, "_install_npm_runtime", lambda: called.append("npm") or ["/tmp/avibe-show-runtime"])
+    monkeypatch.setattr(
+        manager,
+        "_install_npm_runtime",
+        lambda *, force: called.append(force) or ["/tmp/avibe-show-runtime"],
+    )
 
     assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/tmp/avibe-show-runtime"]
-    assert called == ["npm"]
+    assert called == [False]
 
 
 def test_show_runtime_shutdown_stops_manager():
