@@ -105,6 +105,8 @@ export const FileEditorPane: React.FC<{
    * be a redundant second header. Standalone uses keep the header (default).
    */
   chromeless?: boolean;
+  /** Keep Monaco on the IDE's dark theme even when the pane header is visible on mobile. */
+  forceDark?: boolean;
   /** Live status for the IDE status bar: 1-based cursor position plus the model's resolved
    *  indentation (insertSpaces / tabSize). Forwarded straight to Monaco's onCursorChange. */
   onCursor?: (line: number, column: number, indent: { insertSpaces: boolean; tabSize: number }) => void;
@@ -123,7 +125,7 @@ export const FileEditorPane: React.FC<{
    * window-level ⌘S itself — scoped by this flag so only the foreground tab saves.
    */
   saveHotkey?: boolean;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, headerActions, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, headerActions, onDirtyChange, chromeless = false, forceDark = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -488,10 +490,10 @@ export const FileEditorPane: React.FC<{
               language={language}
               path={monacoPath}
               readOnly={readOnly}
-              // Monaco is JS-themed (it can't read the window's `data-theme="dark"` CSS), so in the
-              // IDE (chromeless = the dark-locked Editor window) force the dark theme; otherwise a
-              // light global theme would leave a white Monaco slab inside the dark window (dnYPx is dark).
-              dark={chromeless || resolvedTheme === 'dark'}
+              // Monaco is JS-themed (it can't read the window's `data-theme="dark"` CSS). The
+              // mobile IDE keeps its file header visible, so the visual-header flag is separate
+              // from the theme policy that keeps the whole IDE dark.
+              dark={forceDark || chromeless || resolvedTheme === 'dark'}
               onChange={(value) => setText(value)}
               onSave={() => void save()}
               onCursorChange={onCursor}
@@ -521,7 +523,7 @@ export const FileEditorPane: React.FC<{
                   original={diskText}
                   modified={text}
                   language={language}
-                  dark={chromeless || resolvedTheme === 'dark'}
+                  dark={forceDark || chromeless || resolvedTheme === 'dark'}
                 />
               </Suspense>
             </div>
