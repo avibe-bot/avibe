@@ -69,4 +69,24 @@ describe('mobile Show Page app route', () => {
     fireEvent.click(screen.getByRole('button', { name: 'chat.showPage.backToChat' }));
     expect(screen.getByTestId('location').textContent).toBe('/chat/session-1?view=chat');
   });
+
+  it('keeps action controls out of the missing-session placeholder', async () => {
+    api.getSession.mockResolvedValue(null);
+
+    render(
+      <MemoryRouter initialEntries={['/apps/show/session-1']}>
+        <Routes>
+          <Route path="/apps/show/:sessionId" element={<ShowPageRoute />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const header = await screen.findByRole('banner');
+    expect(await screen.findByText('apps.showPage.missingTitle')).toBeTruthy();
+    expect(header.querySelectorAll('button')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'common.back' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'chat.showPage.annotate.unavailable' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'chat.showPage.backToChat' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'chat.showPage.share' })).toBeNull();
+  });
 });

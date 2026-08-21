@@ -118,27 +118,29 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           <ArrowLeft className="size-3.5" />
         </Button>
         <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">{label}</span>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <ShowPageAnnotateControl
-            state={annotationState}
-            onEnable={enableAnnotation}
-            onDisable={disableAnnotation}
-            onSetMode={setAnnotationMode}
-            onPopoverOpenChange={setAnnotateOpen}
-          />
-          <ShowPageLaunchControl
-            sessionId={sessionId}
-            title={title || null}
-            showPageMode
-            busy={false}
-            onToggle={() => navigate(sessionChatPath(sessionId, { showChat: true }))}
-            onPrepareLaunch={async () => true}
-          />
-          <ShowPageShareControl
-            sessionId={sessionId}
-            onOpenChange={setShareOpen}
-          />
-        </div>
+        {state === 'ready' && (
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <ShowPageAnnotateControl
+              state={annotationState}
+              onEnable={enableAnnotation}
+              onDisable={disableAnnotation}
+              onSetMode={setAnnotationMode}
+              onPopoverOpenChange={setAnnotateOpen}
+            />
+            <ShowPageLaunchControl
+              sessionId={sessionId}
+              title={title || null}
+              showPageMode
+              busy={false}
+              onToggle={() => navigate(sessionChatPath(sessionId, { showChat: true }))}
+              onPrepareLaunch={async () => true}
+            />
+            <ShowPageShareControl
+              sessionId={sessionId}
+              onOpenChange={setShareOpen}
+            />
+          </div>
+        )}
       </header>
 
       {missing ? (
