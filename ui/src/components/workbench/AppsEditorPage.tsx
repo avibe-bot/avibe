@@ -1,19 +1,18 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { CodeXml, FolderOpen } from 'lucide-react';
+import { CodeXml } from 'lucide-react';
 import clsx from 'clsx';
 
-import { Button } from '../ui/button';
 import { useUnsavedChanges } from '../../context/useUnsavedChanges';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
-import { FileEditorPane } from './FileEditorPane';
-import { EditorFontSizePopover } from './EditorFontSizePopover';
 import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { MobileAppHeader } from '../apps/MobileAppHeader';
 
-// The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). On desktop it
-// mounts the same full Editor IDE the Dock window uses; on phones — where there is no window layer —
-// it renders a slim single-file editor. Design: `dnYPx` (IDE) + `w0qoC` (welcome).
+// The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). The same IDE is
+// used on desktop and phones so explorer, search, tabs, recent files, and save-as do not disappear
+// on the smaller surface. The mobile shell starts with the explorer collapsed to leave the editor
+// readable, and the activity bar can reopen it when needed. Design: `dnYPx` (IDE) + `w0qoC` (welcome).
 const EditorApp = lazy(() => import('./EditorApp').then((m) => ({ default: m.EditorApp })));
 
 // A file handed to the editor when navigating in from the File Browser (mobile) or a direct link.
@@ -79,9 +78,11 @@ export const AppsEditorPage: React.FC = () => {
   // Re-read whenever the router state changes (each navigation carries a fresh state object) so
   // opening another file while already on this route swaps the launch target.
   const launch = useMemo(() => readLaunch(location.state), [location.state]);
-  // A single-app browser tab (`?standalone=1`): the shell drops its chrome, so the editor
-  // fills the whole web area — no page header, no card border, no padding around it.
-  const fullBleed = useStandaloneAppTab();
+  const standalone = useStandaloneAppTab();
+  // The shell drops its chrome for standalone tabs. Ordinary phone routes also
+  // fill the viewport and render a compact app-local header instead.
+  const mobileRoute = !desktop && !standalone;
+  const fullBleed = standalone || !desktop;
   useUnsavedChanges(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
   useUnloadWarning(dirty);
 
@@ -89,34 +90,32 @@ export const AppsEditorPage: React.FC = () => {
     <div
       className={
         fullBleed
-          ? 'flex h-full w-full flex-col bg-surface'
+          ? 'flex h-full w-full flex-col bg-surface pb-[env(safe-area-inset-bottom)]'
           : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'
       }
     >
+      {mobileRoute && <MobileAppHeader title={t('apps.editor.label')} icon={CodeXml} />}
       {!fullBleed && (
         <div>
           <h1 className="text-[18px] font-semibold text-foreground">{t('apps.editor.label')}</h1>
           <p className="text-[12px] text-muted">{t('apps.editor.tagline')}</p>
         </div>
       )}
-      {desktop ? (
-        <DesktopEditor launch={launch} onDirtyChange={setDirty} fullBleed={fullBleed} />
-      ) : (
-        <MobileEditor launch={launch} onDirtyChange={setDirty} fullBleed={fullBleed} />
-      )}
+      <EditorSurface launch={launch} onDirtyChange={setDirty} fullBleed={fullBleed} mobile={!desktop} />
     </div>
   );
 };
 
-// Desktop / tablet: the full Editor IDE, forced dark like its Dock window (data-theme re-cascades the
-// dark token set to this subtree). No windowId, so the window-only niceties (title, close guard,
-// ⌘O/⌘N) stay inert; open/edit/save all work full-page. `useWindowCloseGuard` is a no-op without a
-// window, so the route page owns its navigation and unload guards.
-const DesktopEditor: React.FC<{
+// Full Editor IDE, forced dark like its Dock window (data-theme re-cascades the dark token set to
+// this subtree). No windowId, so the window-only niceties (title, close guard, ⌘O/⌘N) stay inert;
+// open/edit/save all work full-page. `useWindowCloseGuard` is a no-op without a window, so the route
+// page owns its navigation and unload guards.
+const EditorSurface: React.FC<{
   launch: LaunchFile | null;
   onDirtyChange: (dirty: boolean) => void;
   fullBleed?: boolean;
-}> = ({ launch, onDirtyChange, fullBleed = false }) => {
+  mobile?: boolean;
+}> = ({ launch, onDirtyChange, fullBleed = false, mobile = false }) => {
   return (
     <div
       data-theme="dark"
@@ -126,72 +125,9 @@ const DesktopEditor: React.FC<{
         <EditorApp
           onDirtyChange={onDirtyChange}
           params={launch ?? undefined}
+          mobile={mobile}
         />
       </Suspense>
-    </div>
-  );
-};
-
-// Phone single-file editor: one file at a time (no activity bar / explorer). FileEditorPane already
-// renders the filename + dirty dot + Save header and the Monaco touch accessory bar; opening/switching
-// a file reuses the File Browser (the mobile file-picking surface, which owns the editable-vs-download
-// decision). The name-only launch has no live cursor/search — that richness stays on the desktop IDE.
-const MobileEditor: React.FC<{
-  launch: LaunchFile | null;
-  onDirtyChange: (dirty: boolean) => void;
-  fullBleed?: boolean;
-}> = ({ launch, onDirtyChange, fullBleed = false }) => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const [file, setFile] = useState<LaunchFile | null>(launch);
-
-  // A fresh navigation from Files swaps the open file. The router-wide blocker already confirmed
-  // before a dirty editor could leave this page to pick another.
-  useEffect(() => {
-    if (launch) {
-      setFile(launch);
-      onDirtyChange(false);
-    }
-  }, [launch, onDirtyChange]);
-
-  // This imperative navigation uses the same router-level blocker as links and browser Back.
-  const openAnother = () => navigate('/apps/files');
-
-  return (
-    <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden bg-surface', !fullBleed && 'rounded-xl border border-border')}>
-      {file ? (
-        // Key by path so switching to a different file remounts the pane and reads it fresh —
-        // FileEditorPane treats a live path change as a rename and skips the reread otherwise, which
-        // would show the previous file's buffer under the new name.
-        <FileEditorPane
-          key={file.path}
-          path={file.path}
-          filename={file.filename}
-          mtime={file.mtime}
-          onOpenFile={openAnother}
-          headerActions={<EditorFontSizePopover trigger="mobile" />}
-          onDirtyChange={onDirtyChange}
-          reveal={file.line ? {
-            line: file.line,
-            column: file.column ?? 0,
-            endColumn: file.endColumn ?? file.column ?? 0,
-            nonce: 0,
-          } : null}
-        />
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
-          <span className="grid size-12 place-items-center rounded-2xl border border-violet/50 bg-violet/[0.1]">
-            <CodeXml className="size-6 text-violet-ink" />
-          </span>
-          <div className="flex flex-col gap-1">
-            <div className="text-[15px] font-semibold text-foreground">{t('apps.editor.empty')}</div>
-            <p className="max-w-[260px] text-[12.5px] text-muted">{t('apps.editor.emptyHint')}</p>
-          </div>
-          <Button type="button" variant="brand" size="sm" className="gap-1.5" onClick={() => navigate('/apps/files')}>
-            <FolderOpen className="size-4" /> {t('apps.editor.browseFiles')}
-          </Button>
-        </div>
-      )}
     </div>
   );
 };

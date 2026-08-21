@@ -143,10 +143,12 @@ function languageLabel(filename: string | undefined): string | undefined {
 export const EditorApp: React.FC<{
   windowId?: string;
   params?: Record<string, unknown>;
+  /** Start with the explorer collapsed on the phone; the activity bar can reopen it. */
+  mobile?: boolean;
   /** Report whether ANY open tab has unsaved edits — the full-page route uses it for an unload guard
    *  (the window mount relies on useWindowCloseGuard instead). */
   onDirtyChange?: (dirty: boolean) => void;
-}> = ({ windowId, params, onDirtyChange }) => {
+}> = ({ windowId, params, mobile = false, onDirtyChange }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const [root, setRoot] = useState<string | null>(null);
@@ -621,8 +623,13 @@ export const EditorApp: React.FC<{
 
   // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
   // border). Width persists for the window's lifetime (state, not navigation).
-  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
+  const [explorerCollapsed, setExplorerCollapsed] = useState(mobile);
   const [explorerWidth, setExplorerWidth] = useState(240);
+  // Selecting a file from the mobile explorer returns the editor to the foreground. This keeps
+  // the narrow screen useful after every open while leaving the desktop panel behavior unchanged.
+  useEffect(() => {
+    if (mobile && active) setExplorerCollapsed(true);
+  }, [active, mobile]);
   // Holds the in-flight drag's teardown so an unmount mid-drag (window closed while dragging) can
   // still remove the window listeners and restore the body cursor / user-select.
   const resizeTeardown = useRef<(() => void) | null>(null);
@@ -698,7 +705,10 @@ export const EditorApp: React.FC<{
             active activity-bar icon; drag its right border to resize. Explorer is ALWAYS present in
             Files view (design w0qoC keeps it in the welcome state). */}
         {!explorerCollapsed && (
-        <div className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2" style={{ width: explorerWidth }}>
+        <div
+          className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2"
+          style={{ width: mobile ? 'min(240px, 72vw)' : explorerWidth }}
+        >
           {view === 'search' ? (
             <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} onFilesChanged={reloadTabs} />
           ) : (
@@ -794,7 +804,7 @@ export const EditorApp: React.FC<{
                         type="button"
                         onClick={() => closeTab(tab.id)}
                         aria-label={t('common.close')}
-                        className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
+                        className="grid size-4 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground md:opacity-0 md:group-hover/tab:opacity-100"
                       >
                         <X className="size-3" strokeWidth={2.5} />
                       </button>
@@ -820,7 +830,7 @@ export const EditorApp: React.FC<{
                             path={tab.path}
                             filename={tab.name}
                             mtime={tab.mtime}
-                            chromeless
+                            chromeless={!mobile}
                             onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
                             onCursor={(line, col, indent) => setStatus((s) => ({ ...s, [tab.id]: { line, col, insertSpaces: indent.insertSpaces, tabSize: indent.tabSize } }))}
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}
