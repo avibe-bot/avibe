@@ -529,9 +529,13 @@ _EDITOR_HTTP_RULES = tuple(
         # route at a time rather than as a `/api/backend` namespace: the rest of
         # that namespace is credential and host work -- `*/auth*`, custom-provider
         # writes, CLI install, runtime restart -- and stays Owner by default.
+        # OpenCode is admitted through its model-only projection, never through
+        # `/api/backend/opencode/providers`: that one answers how each provider is
+        # set up (base URLs, masked keys, active auth type, permission state) and
+        # stays Owner with the rest of the namespace.
         ("GET", r"^/api/claude/models$"),
         ("GET", r"^/api/codex/models$"),
-        ("GET", r"^/api/backend/opencode/providers$"),
+        ("GET", r"^/api/backend/opencode/models$"),
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
         # Files favorites live under /api/browse, not /api/files. Admit only this

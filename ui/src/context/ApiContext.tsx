@@ -632,6 +632,7 @@ export type ApiContextType = {
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   getOpencodeProviders: () => Promise<OpencodeProviderListResult>;
+  getOpencodeModelCatalog: () => Promise<OpencodeModelCatalogResult>;
   saveOpencodeCustomProvider: (
     payload: OpencodeCustomProviderPayload,
   ) => Promise<OpencodeMutationResult>;
@@ -2534,6 +2535,15 @@ export type OpencodeProviderListResult = {
   permission_allowed?: boolean;
 };
 
+// Model-picker view of the OpenCode catalog: configured providers reduced to
+// their selectable models. Deliberately carries none of the provider setup
+// state above, so it can be served to ranks below Instance Owner.
+export type OpencodeModelCatalogResult = {
+  ok: boolean;
+  message?: string;
+  providers?: { id: string; name?: string; models?: string[] }[];
+};
+
 export type OpencodeMutationResult = {
   ok: boolean;
   message?: string;
@@ -3796,6 +3806,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(options?.model ? { model: options.model } : {}),
       }),
     getOpencodeProviders: () => getJson('/api/backend/opencode/providers'),
+    getOpencodeModelCatalog: () => getJson('/api/backend/opencode/models'),
     saveOpencodeCustomProvider: (payload) =>
       postJson('/api/backend/opencode/custom-provider', payload),
     deleteOpencodeCustomProvider: (providerId) =>

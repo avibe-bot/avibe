@@ -54,8 +54,12 @@ export async function fetchBackendModels(
     };
   }
   if (backend === 'opencode') {
-    const res = await api.getOpencodeProviders();
-    const models = (res.providers ?? []).filter((p) => p.configured).flatMap((p) =>
+    // The model-only catalog, not the Settings provider endpoint: that one
+    // carries provider credentials and setup state and is Owner-only, while
+    // these pickers render for every rank that can configure an Agent. It
+    // already returns configured providers only.
+    const res = await api.getOpencodeModelCatalog();
+    const models = (res.providers ?? []).flatMap((p) =>
       (p.models ?? []).map((m) => `${p.id}/${m}`),
     );
     return { models };

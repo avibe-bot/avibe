@@ -1,7 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiContextType } from '../context/ApiContext';
-import { loadBackendModelsWithRefresh } from './backendModels';
+import { fetchBackendModels, loadBackendModelsWithRefresh } from './backendModels';
+
+describe('fetchBackendModels', () => {
+  it('reads OpenCode models from the picker catalog, not the Settings provider endpoint', async () => {
+    const getOpencodeModelCatalog = vi.fn().mockResolvedValue({
+      ok: true,
+      providers: [{ id: 'openrouter', name: 'OpenRouter', models: ['anthropic/claude-x'] }],
+    });
+    const getOpencodeProviders = vi.fn();
+    const api = { getOpencodeModelCatalog, getOpencodeProviders } as unknown as ApiContextType;
+
+    const result = await fetchBackendModels(api, 'opencode');
+
+    // The Settings endpoint carries provider credentials and is Owner-only, so
+    // touching it here would 403 for every rank below the instance owner.
+    expect(getOpencodeProviders).not.toHaveBeenCalled();
+    expect(result.models).toEqual(['openrouter/anthropic/claude-x']);
+  });
+});
 
 describe('loadBackendModelsWithRefresh', () => {
   afterEach(() => {

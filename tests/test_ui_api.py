@@ -1175,6 +1175,113 @@ def test_opencode_provider_catalog_keeps_custom_provider_without_vibe_meta(
     assert provider["api_key_masked"] == "••••••elay"
 
 
+def test_opencode_model_catalog_projects_away_provider_setup_state(monkeypatch, tmp_path):
+    """The picker catalog may only carry what a picker renders.
+
+    The Settings provider row answers "how is this provider set up" and is
+    Owner-only for that reason. Model and Agent pickers run for lower ranks, so
+    they read this projection instead. The assertion is on the shape rather than
+    on a list of removed fields: whatever the Settings row grows next must not
+    reach the projection unless someone widens it deliberately.
+    """
+
+    class _FakeServer:
+        async def get_providers(self):
+            return {"all": [{"id": "openai", "name": "OpenAI"}], "connected": ["openai"]}
+
+        async def get_provider_auth(self):
+            return {}
+
+        async def get_available_models(self, directory):
+            return {
+                "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
+                "default": {"openai": "gpt-5"},
+            }
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    async def _fake_get_server():
+        return _FakeServer()
+
+    config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "gptg": {
+                        "name": "Gptg",
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {
+                            "baseURL": "https://relay.example/v1",
+                            "apiKey": "sk-relay",
+                        },
+                        "models": {"relay-model": {"name": "relay-model"}},
+                    }
+                }
+            }
+        )
+    )
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+
+    settings_catalog = asyncio.run(api.get_opencode_providers_async())
+    picker_catalog = asyncio.run(api.get_opencode_model_catalog_async())
+
+    assert picker_catalog["ok"] is True
+    assert set(picker_catalog) == {"ok", "providers"}
+    for provider in picker_catalog["providers"]:
+        assert set(provider) == {"id", "name", "models"}
+
+    # The projection still answers the picker's question for a configured
+    # provider, so nothing was dropped that the caller actually needs.
+    projected = next(p for p in picker_catalog["providers"] if p["id"] == "gptg")
+    assert projected["models"] == ["relay-model"]
+
+    # ...and nothing the Settings row disclosed about the setup survives it.
+    settings_row = next(p for p in settings_catalog["providers"] if p["id"] == "gptg")
+    assert settings_row["base_url"] == "https://relay.example/v1"
+    serialized = json.dumps(picker_catalog)
+    assert settings_row["base_url"] not in serialized
+    assert settings_row["api_key_masked"] not in serialized
+
+
+def test_opencode_model_catalog_omits_unconfigured_providers(monkeypatch, tmp_path):
+    """An unconfigured provider is absent, not reported as unconfigured.
+
+    Returning it with ``configured: false`` would leak which providers the owner
+    has set up; the picker has no use for the row either, since it has no
+    selectable models behind it.
+    """
+
+    class _FakeServer:
+        async def get_providers(self):
+            return {"all": [{"id": "openai", "name": "OpenAI"}], "connected": []}
+
+        async def get_provider_auth(self):
+            return {}
+
+        async def get_available_models(self, directory):
+            return {"providers": [{"id": "openai", "models": {"gpt-5": {}}}], "default": {}}
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    async def _fake_get_server():
+        return _FakeServer()
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+
+    settings_catalog = asyncio.run(api.get_opencode_providers_async())
+    picker_catalog = asyncio.run(api.get_opencode_model_catalog_async())
+
+    assert any(p["id"] == "openai" and not p["configured"] for p in settings_catalog["providers"])
+    assert picker_catalog == {"ok": True, "providers": []}
+
+
 def test_normalize_backend_routing_payload_prefers_canonical_claude_overrides() -> None:
     result = api._normalize_backend_routing_payload(
         {

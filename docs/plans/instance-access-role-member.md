@@ -245,6 +245,11 @@ fired two Owner-only GETs. Both are capability/HTTP mismatches, not ACL gaps:
    `GET /api/codex/models`, or `GET /api/backend/opencode/providers`. None was
    named by any policy table, so all three fell to the Owner default-deny.
 
+   For OpenCode the default-deny was also load-bearing. `/api/backend/opencode/
+   providers` is the *Settings* catalog: each row carries the provider's base
+   URL, a masked API-key preview, its active auth type, and the instance's
+   tool-call permission setting. The picker consumed one field of it.
+
 ### Decisions
 
 1. Onboarding UI keys off `is_instance_owner`, not `can_manage_agents`. The
@@ -259,6 +264,21 @@ fired two Owner-only GETs. Both are capability/HTTP mismatches, not ACL gaps:
    namespace: the rest of that namespace is credential and host work —
    `*/auth*`, custom-provider writes, CLI install, runtime restart — and keeps
    Owner by the unknown-route default.
+3. OpenCode is admitted through a new model-only projection,
+   `GET /api/backend/opencode/models`, and the Settings catalog it projects from
+   stays Owner. The projection returns configured providers reduced to
+   `{id, name, models}` — the question a picker asks — and drops the setup state
+   that made the Settings route Owner in the first place. `configured` is
+   filtered server-side rather than by the caller, so which providers an owner
+   has connected is not disclosed either. Claude and Codex need no equivalent:
+   `claude_models()` / `codex_models()` are already snapshots of a shared model
+   catalog and carry no provider configuration.
+
+   The daemon start behind the projection (`_opencode_get_server()` →
+   `ensure_running()`) is left as-is. It is not a privilege escalation for these
+   ranks: editor and member can send chat, and `OpenCodeAgent` ensures the same
+   daemon on the message path, so a rank that may run an OpenCode Agent may
+   already start it.
 
 ### Rule this leaves behind
 
@@ -267,3 +287,9 @@ is what may be *called*. When a rank gains a capability, every request the
 surface issues on load has to be re-checked against the policy tables, including
 the shared read-only lookups a page pulls in indirectly. A UI gate that is
 merely close to the route's tier produces a toast on every page load.
+
+The second half of that rule: when the route a widened surface needs is also a
+management endpoint, classify the *question the surface asks*, not the endpoint
+that happens to answer it. "Which models can I pick" and "how is this provider
+configured" are different questions, and only the first belongs to a rank that
+configures Agents but does not administer the instance.
