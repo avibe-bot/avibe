@@ -108,26 +108,34 @@ is unchanged.
 
 ### 2. Assistant owner ID
 
-Shape: `a-<32 hex>` — 34 characters, mirroring the principal shape so every
-length/charset assumption stays uniform, and satisfying EverOS `PathSafeId`.
+Shape: `<principal>-agent`, i.e. `u-<32 hex>-agent` — 40 characters, a pure
+suffix on the caller principal.
 
-Derivation: a keyed hash (store scope key, same keying discipline as
-`_provider_session_ref`) over `(principal_id, assistant_scope)`.
+Why a suffix instead of a derived hash:
 
-- `assistant_scope` is a single logical value (`"default"`) in this plan's
-  scope: the remember path (`_memory_cli_scope`) has no per-agent identity
-  today, and one private owner per user satisfies every stated requirement,
-  including per-user isolation. The derivation function takes the scope as an
-  explicit argument so a future per-agent split is a plumbing change, not a
-  schema change.
-- Properties: stable per user; contains no user-identifying plaintext; derived
-  server-side only; distinct users can never collide on an owner (principal is
-  in the keyed input).
+- collision-free by construction: principals are exactly 34 characters
+  (`is_principal_id`), so the 40-character suffixed form can never be a real
+  principal, and distinct users trivially get distinct assistant owners;
+- no new information leaves the host: the principal is already sent to EverOS
+  as `sender_id` today, so suffixing it exposes nothing new;
+- no dependency on local store state: a keyed hash would bind the owner ID to
+  the store's scope key, coupling EverOS-side data to Avibe-local state; the
+  suffix form is stable regardless of store lifecycle;
+- debuggable: `users/<principal>/` and `users/<principal>-agent/` sit side by
+  side in the EverOS tree;
+- future per-agent split extends naturally to `u-<hex>-agent-<agent-key>`
+  without a schema change. This plan uses the single `-agent` owner: the
+  remember path (`_memory_cli_scope`) has no per-agent identity today, and one
+  private owner per user satisfies every stated requirement.
 
-A new shape predicate (e.g. `is_memory_owner_id`) accepts both `u-` and `a-`
-forms. It is used only where the *owner* flows (provider payload mapping,
-response validation); the caller-facing gates keep the strict
-`is_principal_id`.
+The form satisfies EverOS `PathSafeId` (`-` is allowed, length ≤ 128). It is
+always constructed server-side from the trusted principal; callers can never
+supply it.
+
+A new shape predicate (e.g. `is_memory_owner_id`) accepts the principal shape
+and the `-agent`-suffixed shape. It is used only where the *owner* flows
+(provider payload mapping, response validation); the caller-facing gates keep
+the strict `is_principal_id`.
 
 ### 3. Owner-scoped provider sessions (Blocker 1)
 
@@ -170,7 +178,7 @@ written by the new version would fail to load in the old one.
 Decision: **keep the four-field shape unchanged.** The `principal_id` field's
 semantics widen to "memory owner ID" (its validation was already only
 non-empty-string). For user rows the value is unchanged; for assistant rows it
-carries the `a-` owner. The queue row's separate `principal_id` column keeps
+carries the `-agent`-suffixed owner. The queue row's separate `principal_id` column keeps
 the caller principal for audit and scope checks, and `provenance` already
 distinguishes the two row classes durably.
 
