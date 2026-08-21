@@ -3963,7 +3963,11 @@ class AgentAuthService:
                     cfg_target.base_url = None
                     cfg_target.oauth_relay_marker = resolved_codex_relay_marker
 
-            update_config_fields(_apply_auth_fields)
+            # The transaction may wait on another process' config lock and do
+            # synchronous file I/O. Keep both the fresh-snapshot decision and
+            # the mutation inside the worker, but do not block the ASGI loop
+            # that services OAuth polling and unrelated UI requests.
+            await asyncio.to_thread(update_config_fields, _apply_auth_fields)
 
             if applied.get("skip"):
                 return

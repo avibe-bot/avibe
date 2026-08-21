@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -1417,6 +1418,42 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(saved.agents.claude.auth_mode, "oauth")
         self.assertTrue(saved.agents.claude.auth_mode_set)
         self.assertTrue(controller.config.claude.auth_mode_set)
+
+    async def test_persist_backend_auth_mode_runs_config_transaction_off_event_loop(self):
+        controller = _StubController()
+        controller.config.agents.claude = SimpleNamespace(
+            auth_mode="api_key",
+            auth_mode_set=False,
+        )
+        service = AgentAuthService(controller)
+        service._clear_claude_settings_env_for_oauth = AsyncMock()
+
+        fresh_config = SimpleNamespace(
+            agents=SimpleNamespace(
+                claude=SimpleNamespace(auth_mode="api_key", auth_mode_set=False),
+            ),
+        )
+        transaction_thread = None
+
+        def fake_update_config_fields(mutator):
+            nonlocal transaction_thread
+            transaction_thread = threading.current_thread()
+            mutator(fresh_config)
+            return fresh_config
+
+        with patch(
+            "config.v2_config.update_config_fields",
+            side_effect=fake_update_config_fields,
+        ):
+            caller_thread = threading.current_thread()
+            await service._persist_backend_auth_mode("claude", "oauth")
+
+        self.assertIsNotNone(transaction_thread)
+        self.assertIsNot(transaction_thread, caller_thread)
+        self.assertEqual(fresh_config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(fresh_config.agents.claude.auth_mode_set)
+        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(controller.config.agents.claude.auth_mode_set)
 
     async def test_wait_for_claude_completion_reports_settings_cleanup_failure(self):
         controller = _StubController()
