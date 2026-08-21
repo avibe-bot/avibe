@@ -133,9 +133,19 @@ always constructed server-side from the trusted principal; callers can never
 supply it.
 
 A new shape predicate (e.g. `is_memory_owner_id`) accepts the principal shape
-and the `-agent`-suffixed shape. It is used only where the *owner* flows
-(provider payload mapping, response validation); the caller-facing gates keep
-the strict `is_principal_id`.
+and the `-agent`-suffixed shape. It is used only where the *owner* flows;
+caller-facing access-control gates keep the strict `is_principal_id`.
+
+**Gate-closure property** (stated once, not maintained as a site list): every
+shape validator on the owner flow — from module through store minting,
+the sidecar boundary (`_valid_principal` at `_validate_add` /
+`_validate_search` / `_validate_get`), provider payload mapping, response
+validation, and insight matching — accepts memory owner IDs. The closure is
+proven behaviorally, not by enumeration: PR A adds a contract test that
+drives an assistant-owner value through each public provider operation
+(add, search, get/profile) end-to-end against the stubbed sidecar and
+asserts acceptance, so a validator missed today or added later fails the
+test instead of costing a review round.
 
 ### 3. Owner-scoped provider sessions (Blocker 1)
 
