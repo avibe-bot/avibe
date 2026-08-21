@@ -5,6 +5,7 @@ import { ArrowLeft, MonitorX, PinOff } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { sessionChatPath, showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
@@ -60,6 +61,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const api = useApi();
   const navigate = useNavigate();
   const { unpin } = useDock();
+  const { capabilities } = useInstanceAuthorization();
 
   const [state, setState] = useState<'loading' | 'ready' | 'missing'>(sessionId ? 'loading' : 'missing');
   const [title, setTitle] = useState('');
@@ -137,6 +139,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
             />
             <ShowPageShareControl
               sessionId={sessionId}
+              canManageInstance={capabilities.can_manage_instance}
               onOpenChange={setShareOpen}
             />
           </div>

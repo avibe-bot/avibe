@@ -11,9 +11,13 @@ const api = vi.hoisted(() => ({
   getShowPages: vi.fn(),
   connectWorkbenchEvents: vi.fn(),
 }));
+const shareControl = vi.hoisted(() => ({ canManageInstance: undefined as boolean | undefined }));
 
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../context/DockContext', () => ({ useDock: () => ({ unpin: vi.fn() }) }));
+vi.mock('../../context/InstanceAuthorizationContext', () => ({
+  useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }),
+}));
 vi.mock('../../context/WindowManagerContext', () => ({
   useWindowManager: () => ({ windows: [], openApp: vi.fn(), focus: vi.fn(), restore: vi.fn() }),
 }));
@@ -22,6 +26,12 @@ vi.mock('../../context/showPageDrag', () => ({
 }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => false }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('../workbench/ShowPageShareControl', () => ({
+  ShowPageShareControl: ({ canManageInstance }: { canManageInstance?: boolean }) => {
+    shareControl.canManageInstance = canManageInstance;
+    return <button type="button" aria-label="chat.showPage.share" />;
+  },
+}));
 
 const LocationProbe = () => {
   const location = useLocation();
@@ -31,6 +41,7 @@ const LocationProbe = () => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  shareControl.canManageInstance = undefined;
 });
 
 describe('mobile Show Page app route', () => {
@@ -57,6 +68,7 @@ describe('mobile Show Page app route', () => {
     expect(screen.getByRole('button', { name: 'chat.showPage.annotate.unavailable' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'chat.showPage.backToChat' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'chat.showPage.share' })).toBeTruthy();
+    expect(shareControl.canManageInstance).toBe(true);
 
     const surface = header.parentElement;
     expect(surface?.className).toContain('h-full');
