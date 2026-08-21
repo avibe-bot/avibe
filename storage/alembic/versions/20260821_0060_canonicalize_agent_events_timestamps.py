@@ -21,6 +21,7 @@ depends_on = None
 # message timestamps at 20260801_0044) may carry offset or fractional forms.
 # Fixed-width UTC microseconds make lexical comparison chronological without
 # throwing away the sub-second ordering used by activity reconstruction.
+_CANONICALIZE_BATCH_ROWS = 1000
 
 
 def _canonical_timestamp(value: object) -> str | None:
@@ -53,19 +54,24 @@ def _canonicalize(bind, column: str) -> None:
               and visibility = 'trace'
               and {column} is not null
               and {column} != ''
+            order by id
             """
         )
-    ).fetchall()
-    updates = []
-    for event_id, value in rows:
-        canonical = _canonical_timestamp(value)
-        if canonical is not None and canonical != value:
-            updates.append({"id": event_id, "value": canonical})
-    if updates:
-        bind.execute(
-            sa.text(f"update agent_events set {column} = :value where id = :id"),
-            updates,
-        )
+    )
+    try:
+        while batch := rows.fetchmany(_CANONICALIZE_BATCH_ROWS):
+            updates = []
+            for event_id, value in batch:
+                canonical = _canonical_timestamp(value)
+                if canonical is not None and canonical != value:
+                    updates.append({"id": event_id, "value": canonical})
+            if updates:
+                bind.execute(
+                    sa.text(f"update agent_events set {column} = :value where id = :id"),
+                    updates,
+                )
+    finally:
+        rows.close()
 
 
 def upgrade() -> None:

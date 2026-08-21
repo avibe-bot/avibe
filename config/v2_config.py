@@ -1027,6 +1027,16 @@ def _refuse_values_naming_nothing(section: str, instance: object) -> None:
 # ``_reset_recoverable_config_section``.
 _FIELD_SCOPED_RECOVERY_SECTIONS = ("ui", "audio_asr")
 
+# Retention is optional and destructive: a malformed field must disable only
+# that policy while preserving the rest of the runtime settings (cwd, logging,
+# resource governance, and Harness timeouts).
+_RUNTIME_RETENTION_FIELDS = frozenset(
+    {
+        "agent_events_trace_retention_enabled",
+        "agent_events_trace_retention_days",
+    }
+)
+
 # The switch that decides whether an optional feature runs at all. Named once
 # because recovery has to tell it apart from every other switch in a section:
 # the rest describe how a feature behaves, this one decides whether it happens.
@@ -1108,6 +1118,16 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
         if not path.startswith(prefix):
             return None
         return path[len(prefix) :].split(".", 1)[0]
+    if section == "runtime":
+        match = re.search(r"Config '([^']+)'", str(error))
+        if not match:
+            return None
+        path = match.group(1)
+        prefix = "runtime."
+        if not path.startswith(prefix):
+            return None
+        field_name = path[len(prefix) :].split(".", 1)[0]
+        return field_name if field_name in _RUNTIME_RETENTION_FIELDS else None
     if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return None
     match = re.search(r"Config '([^']+)'", str(error))
@@ -1259,6 +1279,25 @@ def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> b
     return True
 
 
+def _recover_runtime_field(payload: dict, field_name: Optional[str]) -> bool:
+    """Repair one retention field without discarding the runtime section."""
+
+    if field_name not in _RUNTIME_RETENTION_FIELDS:
+        return False
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        return False
+    # A recovered policy is disabled even if the other retention field looked
+    # valid. The warning attached by ``V2Config.load`` keeps all automatic and
+    # status consumers fail-closed until the operator repairs the file.
+    runtime["agent_events_trace_retention_enabled"] = False
+    if field_name == "agent_events_trace_retention_days":
+        runtime[field_name] = 30
+    else:
+        runtime[field_name] = False
+    return True
+
+
 def _reset_recoverable_config_section(
     payload: dict, section: str, field_name: Optional[str] = None
 ) -> bool:
@@ -1269,6 +1308,9 @@ def _reset_recoverable_config_section(
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "runtime" and field_name is not None:
+        if _recover_runtime_field(payload, field_name):
+            return True
     if section in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return _recover_switch_section_field(payload, section, field_name)
     if section == "memory.rerank":

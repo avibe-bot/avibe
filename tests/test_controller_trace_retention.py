@@ -9,6 +9,7 @@ shutdown joins the worker executor.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 import time
@@ -137,6 +138,35 @@ def test_runtime_config_rejects_malformed_retention_values(field, value) -> None
     kwargs = {"default_cwd": "/tmp", field: value}
     with pytest.raises(ValueError, match="Config 'runtime\\."):
         RuntimeConfig(**kwargs)
+
+
+def test_runtime_recovery_preserves_siblings_and_disables_retention(monkeypatch, tmp_path) -> None:
+    from config.v2_config import V2Config
+
+    home = tmp_path / "avibe-home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    config_path = home / "config.json"
+    V2Config.default().save(config_path=config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["runtime"].update(
+        {
+            "default_cwd": "/custom/work",
+            "log_level": "DEBUG",
+            "harness_run_queued_ttl_seconds": 321,
+            "agent_events_trace_retention_days": "90",
+        }
+    )
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path, persist_migrations=False)
+
+    assert loaded.runtime.default_cwd == "/custom/work"
+    assert loaded.runtime.log_level == "DEBUG"
+    assert loaded.runtime.harness_run_queued_ttl_seconds == 321
+    assert loaded.runtime.agent_events_trace_retention_enabled is False
+    assert loaded.runtime.agent_events_trace_retention_days == 30
+    assert any("runtime.agent_events_trace_retention_days" in warning for warning in loaded.load_warnings)
+    assert real_module.resolve_policy(loaded).recovered is True
 
 
 def test_retention_pass_never_vacuums(monkeypatch) -> None:

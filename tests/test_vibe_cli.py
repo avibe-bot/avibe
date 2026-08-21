@@ -80,6 +80,7 @@ def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatc
 
     monkeypatch.setattr(cli.V2Config, "load", _load_should_not_run)
     assert cli._configured_trace_retention_days("en") == 90
+    cli.build_parser()
 
 
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):

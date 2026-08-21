@@ -179,6 +179,28 @@ def test_run_retention_stops_at_batch_boundary_when_cancelled(state) -> None:
         assert conn.execute(select(agent_events.c.id)).fetchall()
 
 
+def test_run_once_forwards_cancellation_to_retention(state, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run_retention(engine, **kwargs):
+        captured.update(kwargs)
+        return {"cutoff": _iso(_NOW), "deleted_rows": 0, "batches": 0, "cancelled": True}
+
+    monkeypatch.setattr(agent_events_retention, "run_retention", _fake_run_retention)
+    cancel_event = threading.Event()
+    result = agent_events_retention.run_once(
+        state,
+        retention_days=30,
+        force=True,
+        compact=False,
+        now=_NOW,
+        cancel_event=cancel_event,
+    )
+
+    assert captured["cancel_event"] is cancel_event
+    assert result["status"] == "cancelled"
+
+
 def test_plan_reports_counts_and_logical_bytes(state) -> None:
     engine = state
     payload = "y" * 50
@@ -404,6 +426,43 @@ def test_migration_0060_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypa
     conn.close()
     assert stamp == "2026-07-18T12:00:00.500000Z"
     assert version == "20260821_0060"
+
+
+def test_migration_0060_canonicalizes_in_bounded_batches(tmp_path, monkeypatch) -> None:
+    """Large legacy tables are processed without an unbounded fetchall."""
+    import importlib
+    import sqlite3
+
+    from alembic import command
+    from storage import migrations
+
+    migration = importlib.import_module(
+        "storage.alembic.versions.20260821_0060_canonicalize_agent_events_timestamps"
+    )
+    monkeypatch.setattr(migration, "_CANONICALIZE_BATCH_ROWS", 2)
+    db_path = tmp_path / "state.sqlite"
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    command.upgrade(migrations.alembic_config(db_path), "20260821_0059")
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        "insert into agent_events (id, platform, event_type, visibility, content_json, "
+        "metadata_json, created_at, updated_at) values (?, 'web', 'tool_call', 'trace', '{}', '{}', ?, ?)",
+        [
+            (f"legacy-{index}", "2026-07-18T12:00:00.500000+00:00", "2026-07-18T12:00:00.500000+00:00")
+            for index in range(5)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    command.upgrade(migrations.alembic_config(db_path), "20260821_0060")
+
+    conn = sqlite3.connect(db_path)
+    stamps = conn.execute("select created_at from agent_events order by id").fetchall()
+    conn.close()
+    assert stamps == [("2026-07-18T12:00:00.500000Z",)] * 5
+
+
 def test_plan_measures_utf8_bytes_not_characters(state) -> None:
     engine = state
     chinese = "测" * 100  # 300 UTF-8 bytes, 100 characters

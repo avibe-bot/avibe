@@ -554,7 +554,13 @@ def run_once(
 
     started = time.monotonic()
     try:
-        result = run_retention(engine, retention_days=retention_days, now=moment, lease_token=token)
+        result = run_retention(
+            engine,
+            retention_days=retention_days,
+            now=moment,
+            lease_token=token,
+            cancel_event=cancel_event,
+        )
         if result.get("lease_lost"):
             # Ownership was lost mid-run: skip the marker write and compaction
             # so this runner never reports success or VACUUMs beside the
