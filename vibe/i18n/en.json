@@ -929,6 +929,7 @@
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
       "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed.",
       "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
+      "repairExplicitCommandFailed": "The Show Runtime command from VIBE_SHOW_RUNTIME_BIN could not start: {reason}. Fix or remove the override, then rerun Doctor.",
       "repairInstalled": "Installed and started Show Runtime.",
       "repairReinstalled": "Reinstalled and started Show Runtime.",
       "repairInstallStartFailed": "Show Runtime was installed but could not start: {reason}",

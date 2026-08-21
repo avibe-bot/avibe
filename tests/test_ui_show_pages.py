@@ -7,6 +7,7 @@ import os
 import socket
 import ssl
 import struct
+import subprocess
 import tarfile
 import threading
 import urllib.error
@@ -7522,6 +7523,35 @@ def test_show_runtime_prepare_with_explicit_command_does_not_clean_managed_insta
     assert local_bin.exists() is True
 
 
+def test_show_runtime_forced_prepare_refuses_explicit_command_replacement(monkeypatch, tmp_path):
+    local_bin = tmp_path / "development" / "show-runtime"
+    local_bin.parent.mkdir()
+    local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        command=str(local_bin),
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr(
+        manager,
+        "_install_managed_runtime_locked",
+        lambda **_kwargs: pytest.fail("an explicit command must not enter managed replacement"),
+    )
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "VIBE_SHOW_RUNTIME_BIN"
+    assert result["policy"] == {
+        "state": "skipped",
+        "reason": "VIBE_SHOW_RUNTIME_BIN",
+    }
+    assert result["install"]["state"] == "installed"
+    assert result["install"]["command"] == [str(local_bin)]
+    assert result["status"]["installed"] is True
+
+
 def test_show_runtime_failed_prepare_does_not_clean_managed_installs(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     install_dirs = [
@@ -7879,7 +7909,8 @@ def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_p
     assert result["install"]["state"] == "installed"
     assert result["install"]["command"] is None
     assert result["runtime"]["state"] == "unchecked"
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert result["reason"] == "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
 
 
 @pytest.mark.parametrize(
@@ -8327,6 +8358,48 @@ def test_show_runtime_manager_forced_npm_replacement_removes_old_tree_before_ins
 
     assert result["ok"] is True
     assert managed_bin.read_text(encoding="utf-8") == "new runtime\n"
+
+
+@pytest.mark.parametrize(
+    "install_error",
+    (
+        OSError("npm spawn failed"),
+        subprocess.TimeoutExpired(cmd=["npm", "install"], timeout=180),
+    ),
+)
+def test_show_runtime_manager_forced_npm_replacement_reports_delegate_exception(
+    monkeypatch,
+    tmp_path,
+    install_error,
+):
+    runtime_dir = tmp_path / "runtime"
+    managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    managed_bin.chmod(0o755)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/npm"] if command == "npm" else None,
+    )
+
+    def fail_install(*_args, **_kwargs):
+        assert not managed_bin.parent.parent.exists()
+        raise install_error
+
+    monkeypatch.setattr("core.show_runtime.subprocess.run", fail_install)
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_install_failed"
+    assert result["install"]["state"] == "failed"
+    assert result["status"]["installed"] is False
+    assert managed_bin.exists() is False
 
 
 def test_show_runtime_shutdown_stops_manager():

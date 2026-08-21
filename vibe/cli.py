@@ -12389,6 +12389,20 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             )
         if startability.state is not _ShowRuntimeStartabilityState.NOT_STARTABLE:
             raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
+        if before.get("explicit_command"):
+            reason = startability.reason or "runtime_start_failed"
+            return _doctor_repair_result(
+                target,
+                "failed",
+                i18n_t("runtime.doctor.repairExplicitCommandFailed", language, reason=reason),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before.get("install_dir"),
+                installed=True,
+                reason=reason,
+                policy_reason="VIBE_SHOW_RUNTIME_BIN",
+                explicit_command=before.get("explicit_command"),
+            )
 
     archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
     archive_url = str(archive.get("url") or "")
@@ -14464,7 +14478,7 @@ def cmd_runtime(args) -> int:
         payload["git"] = git
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
-        runtime_prepared = install.get("state") == "installed"
+        runtime_prepared = bool(payload.get("ok"))
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -14488,7 +14502,7 @@ def cmd_runtime(args) -> int:
                     i18n_t(
                         "runtime.prepare.failed",
                         language,
-                        reason=install.get("reason") or "unknown",
+                        reason=payload.get("reason") or install.get("reason") or "unknown",
                     ),
                     file=sys.stderr,
                 )

@@ -8556,8 +8556,8 @@ def _prepare_show_runtime_job() -> dict:
 
         payload = get_show_runtime_manager().prepare(force=True)
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
-        ok = install.get("state") == "installed"
-        reason = install.get("reason") or payload.get("reason")
+        ok = bool(payload.get("ok"))
+        reason = payload.get("reason") or install.get("reason")
         result = {
             "ok": ok,
             "message": (

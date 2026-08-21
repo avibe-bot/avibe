@@ -190,6 +190,28 @@ class ShowRuntimeServingState(str, Enum):
     START_FAILED = "start_failed"
 
 
+class _ShowRuntimeOperationState(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True)
+class _ShowRuntimeOperationOutcome:
+    state: _ShowRuntimeOperationState
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if self.state is _ShowRuntimeOperationState.COMPLETED and self.reason:
+            raise ValueError("completed operation cannot carry a failure reason")
+        if self.state is not _ShowRuntimeOperationState.COMPLETED and not self.reason:
+            raise ValueError("incomplete operation requires a reason")
+
+    @property
+    def ok(self) -> bool:
+        return self.state is _ShowRuntimeOperationState.COMPLETED
+
+
 @dataclass(frozen=True)
 class ShowRuntimeArchive:
     platform: str
@@ -785,7 +807,7 @@ class ShowRuntimeManager:
             )
             if command:
                 return self._publish_install_availability(command=command)
-            admission = await asyncio.to_thread(
+            admission, _operation = await asyncio.to_thread(
                 self._attempt_managed_install,
                 force=self.force_install,
                 offline=self.offline,
@@ -807,7 +829,7 @@ class ShowRuntimeManager:
                 )
             return admission
         if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
-            admission = await asyncio.to_thread(
+            admission, _operation = await asyncio.to_thread(
                 self._attempt_managed_install,
                 force=self.force_install,
                 offline=self.offline,
@@ -837,7 +859,7 @@ class ShowRuntimeManager:
             command = self._installed_github_runtime_command()
             if command:
                 return self._publish_install_availability(command=command)
-        admission = await asyncio.to_thread(
+        admission, _operation = await asyncio.to_thread(
             self._attempt_managed_install,
             force=self.force_install,
             offline=self.offline,
@@ -855,48 +877,106 @@ class ShowRuntimeManager:
         force: bool,
         offline: bool,
         automatic: bool = False,
-    ) -> ShowRuntimeAvailability:
+    ) -> tuple[ShowRuntimeAvailability, _ShowRuntimeOperationOutcome]:
         if self._command_explicit:
             command = _resolve_command(self.command)
-            return self._publish_install_availability(
+            availability = self._publish_install_availability(
                 command=command,
+                policy_reason="VIBE_SHOW_RUNTIME_BIN" if force else None,
                 install_reason=None if command else "runtime_command_missing",
             )
+            if force:
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.NOT_APPLICABLE,
+                    "VIBE_SHOW_RUNTIME_BIN",
+                )
+            elif command:
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.COMPLETED,
+                    None,
+                )
+            else:
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.FAILED,
+                    "runtime_command_missing",
+                )
+            return availability, operation
         skipped_reason = self._managed_install_opt_out_reason(automatic=automatic)
         if skipped_reason:
-            return self._publish_policy_skip(skipped_reason)
-        if self._managed_command and not force:
-            return self._publish_install_availability(command=self._managed_command)
-        if automatic and not force and self._install_attempted:
-            return self._publish_install_availability(
-                install_reason=self._install_reason or "runtime_install_failed"
+            return self._publish_policy_skip(skipped_reason), _ShowRuntimeOperationOutcome(
+                _ShowRuntimeOperationState.NOT_APPLICABLE,
+                skipped_reason,
             )
+        if self._managed_command and not force:
+            availability = self._publish_install_availability(command=self._managed_command)
+            operation = _ShowRuntimeOperationOutcome(_ShowRuntimeOperationState.COMPLETED, None)
+            return availability, operation
+        if automatic and not force and self._install_attempted:
+            reason = self._install_reason or "runtime_install_failed"
+            availability = self._publish_install_availability(install_reason=reason)
+            operation = _ShowRuntimeOperationOutcome(
+                _ShowRuntimeOperationState.FAILED,
+                reason,
+            )
+            return availability, operation
 
         with self._install_guard_locked() as (acquired, guard_reason):
             if not acquired:
                 command = None if force else self._installed_managed_runtime_command(offline=offline)
                 if command:
-                    return self._publish_install_availability(command=command)
-                return self._publish_install_availability(install_reason=guard_reason)
+                    availability = self._publish_install_availability(command=command)
+                    operation = _ShowRuntimeOperationOutcome(
+                        _ShowRuntimeOperationState.COMPLETED,
+                        None,
+                    )
+                    return availability, operation
+                reason = guard_reason or "runtime_install_guard_unavailable"
+                availability = self._publish_install_availability(install_reason=reason)
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.FAILED,
+                    reason,
+                )
+                return availability, operation
 
             skipped_reason = self._managed_install_opt_out_reason(automatic=automatic)
             if skipped_reason:
-                return self._publish_policy_skip(skipped_reason)
-            if self._managed_command and not force:
-                return self._publish_install_availability(command=self._managed_command)
-            if automatic and not force and self._install_attempted:
-                return self._publish_install_availability(
-                    install_reason=self._install_reason or "runtime_install_failed"
+                return self._publish_policy_skip(skipped_reason), _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.NOT_APPLICABLE,
+                    skipped_reason,
                 )
+            if self._managed_command and not force:
+                availability = self._publish_install_availability(command=self._managed_command)
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.COMPLETED,
+                    None,
+                )
+                return availability, operation
+            if automatic and not force and self._install_attempted:
+                reason = self._install_reason or "runtime_install_failed"
+                availability = self._publish_install_availability(install_reason=reason)
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.FAILED,
+                    reason,
+                )
+                return availability, operation
 
             if automatic:
                 self._install_attempted = True
             command = self._install_managed_runtime_locked(force=force, offline=offline)
             if command:
-                return self._publish_install_availability(command=command)
-            return self._publish_install_availability(
-                install_reason=self._install_reason or "runtime_install_failed"
+                availability = self._publish_install_availability(command=command)
+                operation = _ShowRuntimeOperationOutcome(
+                    _ShowRuntimeOperationState.COMPLETED,
+                    None,
+                )
+                return availability, operation
+            reason = self._install_reason or "runtime_install_failed"
+            availability = self._publish_install_availability(install_reason=reason)
+            operation = _ShowRuntimeOperationOutcome(
+                _ShowRuntimeOperationState.FAILED,
+                reason,
             )
+            return availability, operation
 
     def _managed_install_opt_out_reason(self, *, automatic: bool) -> str | None:
         if automatic and _env_flag_enabled("VIBE_INSTALL_SKIP_SHOW_RUNTIME", default=False):
@@ -2006,12 +2086,15 @@ class ShowRuntimeManager:
     ) -> dict[str, Any]:
         effective_force = self.force_install if force is None else force
         effective_offline = self.offline if offline is None else offline
-        admission = self._attempt_managed_install(
+        admission, operation = self._attempt_managed_install(
             force=effective_force,
             offline=effective_offline,
             automatic=automatic,
         )
         payload = admission.as_payload()
+        payload["ok"] = operation.ok
+        if not operation.ok:
+            payload["reason"] = operation.reason
         status_offline = True if admission.policy is ShowRuntimePolicyState.SKIPPED else effective_offline
         payload.update(
             {
@@ -2955,23 +3038,31 @@ class ShowRuntimeManager:
                     None,
                     replacement_required=True,
                 )
-        with self.install_log_path.open("w", encoding="utf-8") as log:
-            result = subprocess.run(
-                [
-                    *npm,
-                    "install",
-                    "--prefix",
-                    str(install_root),
-                    "--no-audit",
-                    "--no-fund",
-                    self.package_spec,
-                ],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=180,
-                check=False,
-                **isolated_subprocess_kwargs(),
+        try:
+            with self.install_log_path.open("w", encoding="utf-8") as log:
+                result = subprocess.run(
+                    [
+                        *npm,
+                        "install",
+                        "--prefix",
+                        str(install_root),
+                        "--no-audit",
+                        "--no-fund",
+                        self.package_spec,
+                    ],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=180,
+                    check=False,
+                    **isolated_subprocess_kwargs(),
+                )
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("Failed to install the npm Show Runtime", exc_info=True)
+            self._install_reason = "runtime_install_failed"
+            return self._managed_install_operation_command(
+                None,
+                replacement_required=replacement_required,
             )
         if result.returncode != 0:
             self._install_reason = "runtime_install_failed"

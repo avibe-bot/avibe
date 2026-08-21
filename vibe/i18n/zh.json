@@ -929,6 +929,7 @@
       "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
       "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002",
       "repairHealthy": "Show Runtime \u53ef\u4ee5\u6b63\u5e38\u542f\u52a8\uff0c\u65e0\u9700\u4fee\u590d\u3002",
+      "repairExplicitCommandFailed": "VIBE_SHOW_RUNTIME_BIN \u6307\u5b9a\u7684 Show Runtime \u547d\u4ee4\u65e0\u6cd5\u542f\u52a8\uff1a{reason}\u3002\u8bf7\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6\u540e\u91cd\u65b0\u8fd0\u884c Doctor\u3002",
       "repairInstalled": "\u5df2\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
       "repairReinstalled": "\u5df2\u91cd\u65b0\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
       "repairInstallStartFailed": "Show Runtime \u5df2\u5b89\u88c5\uff0c\u4f46\u65e0\u6cd5\u542f\u52a8\uff1a{reason}",
