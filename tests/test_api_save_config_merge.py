@@ -1000,6 +1000,27 @@ def test_wizard_platform_selection_submits_only_edited_credential_drafts():
     assert "...credentialDraft," not in source
 
 
+def test_ui_config_writes_have_one_mutation_boundary():
+    """Every browser config write must pass through ApiContext's mutation serializer."""
+
+    ui_root = Path("ui/src")
+    raw_save_callers = []
+    direct_config_posts = []
+    for path in (*ui_root.rglob("*.ts"), *ui_root.rglob("*.tsx")):
+        if ".test." in path.name:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "saveConfig" in text:
+            raw_save_callers.append(str(path))
+        if path.name != "ApiContext.tsx" and re.search(
+            r"\b(?:postJson|apiFetch)\(\s*['\"]\/api\/config", text
+        ):
+            direct_config_posts.append(str(path))
+
+    assert raw_save_callers == []
+    assert direct_config_posts == []
+
+
 # ---------------------------------------------------------------------------
 # Config field-completeness (guards the "partial save silently drops a field"
 # class of bug). ``save_config`` deep-merges the incoming payload onto
