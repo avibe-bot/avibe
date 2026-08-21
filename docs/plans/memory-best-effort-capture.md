@@ -72,8 +72,17 @@ provider root.
 - An in-progress Clear or Factory Reset is completed by the existing
   destructive path. The capture migrator does not strip or rewrite a store
   that those markers still own.
+- A Clear marker that exists but cannot be read is still an open destructive
+  fence. Migration and all Memory writes stay blocked until the existing
+  Clear retry replaces or completes that marker.
 - An in-progress Rebuild or Repair is not converted to Reset. Queue
-  discard is allowed; the provider root is not touched.
+  discard is allowed; the provider root is not touched. The writer cannot
+  call EverOS concurrently with either maintenance child.
+- Captures that reserve an exact-session admission slot before `/new` or
+  archive reserve their slot are offered before that session's flush barrier,
+  even when attachment pinning completes later.
+- The existing per-principal limit of 16 named projects remains enforced.
+  Reusing an existing named project is still allowed at the limit.
 - Credentials, configured URLs, captured text, and absolute paths stay
   out of service logs.
 
@@ -131,6 +140,9 @@ Retained in the same SQLite file:
 CaptureAdmission (unchanged authorize/size/scope checks)
         |
         v
+exact-session FIFO reservation      # registered before deferred pinning
+        |
+        v
 optional AttachmentPinStore pin (unchanged, in-process only)
         |
         v
@@ -162,8 +174,10 @@ required for this cut.
 
 `extracted` drops pending flush state for that provider session.
 `accumulated` refreshes one in-memory `PendingFlush(session_ref,
-first_accumulated_at, last_accumulated_at)`. The pending table does not
-survive process restart; EverOS still holds the buffer until a later
+first_accumulated_at, last_accumulated_at, message_ids)`. `message_ids` is
+bounded by the 100-message flush limit and exists only to correlate a
+successful flush with the retained Provider Call Log. The pending table does
+not survive process restart; EverOS still holds the buffer until a later
 same-session add, Repair, or provider extraction.
 
 Worker generation increments on disable, shutdown, Reset/Clear, and
@@ -177,19 +191,30 @@ replayed.
 They never call `final_flush` with a deadline. Existing internal routes
 may remain as adapters that enqueue the barrier; they must not wait.
 
+Keep the current O(1) exact-session FIFO reservation, or an equivalent
+sequencer. A capture registers its reservation synchronously before its first
+deferred step, including attachment pinning. A barrier registers after the
+current tail and schedules its queue offer only after every predecessor has
+either offered its add item or closed as skipped. Registering the barrier is
+non-blocking, so `/new` and archive return without waiting for pins, provider
+I/O, or the worker. Queue saturation may reject the barrier, but a barrier
+that is accepted must never overtake already-started capture work.
+
 ### Shutdown
 
 Stop intake, increment generation, cancel the worker, drop volatile
 state, then continue the existing sidecar stop. No queue drain.
 
-## Persistent identity (compatibility core)
+## Persistent identity and display provenance
 
 Do **not** introduce a JSON identity file in this PR. Clear, Factory
 Reset, Rebuild fencing, and `reset_for_clear(target_epoch=...)` already
 own `memory_meta.epoch`. A second identity format would add crash windows
 without removing the outbox.
 
-After migration, `state/memory/memory.sqlite` contains only identity:
+After migration, `state/memory/memory.sqlite` contains identity plus one
+bounded, content-free display-provenance table. It contains no delivery work,
+retry state, flush schedule, captured text, or attachment path:
 
 ```text
 memory_meta
@@ -210,7 +235,38 @@ memory_projects
   project_id
   created_at
   last_written_at
+
+memory_call_provenance
+  request_id
+  operation_kind       # add | flush
+  principal_id
+  project_id
+  session_id
+  message_ids_json     # exact EverOS message ids, at most 100
+  recorded_at_ms
 ```
+
+`memory_call_provenance` replaces the correlation and authorization facts
+that Processing Record currently reads from `memory_capture_queue` and
+`memory_flush_settlements`. It is observer metadata, not an outbox:
+
+- after an acknowledged add, write the returned request id with its one exact
+  `m_<session>_<provider timestamp>_000` message id
+- after an acknowledged flush, write the returned request id with the bounded
+  message-id list from that session's `PendingFlush`
+- retain at most 5,000 provenance rows and at most 14 days, matching Provider
+  Call Log retention; enforce both bounds after each provenance write and at
+  boot with the same policy values
+- for a user-scoped read, authorize a request id only when all of its
+  provenance rows resolve to exactly one principal/project and the memcell
+  contains one of the recorded message ids; ambiguous or missing provenance
+  never broadens visibility
+
+A provenance write failure never retries an EverOS add or flush. It marks the
+Processing Record capture-correlation source unavailable for that observation
+and emits content-free diagnostics; ordinary capture remains best-effort.
+Clear's `reset_for_clear` deletes every provenance row with the catalog and
+watermark reset; Factory Reset deletes it with `state/memory`.
 
 `processing_fault_*` / `processing_alert_*` / `processing_recovery_*`
 stop being written. They may be dropped in the v4 table rebuild or left
@@ -220,6 +276,13 @@ unused; they are not an input to retry, Repair, or IM notification.
 `max(occurred_at_ms, last_provider_timestamp_ms + 1)` and persists the
 new watermark in the same identity transaction as the catalog upsert for
 named projects. That is a small identity write, not an outbox.
+
+That identity transaction preserves `MAX_NAMED_MEMORY_PROJECTS`: an existing
+named-project row may be updated at the limit, but inserting a 17th distinct
+named project for one principal returns the existing `project_limit` outcome,
+mapped to `memory_invalid_input`. The rejected capture does not advance the
+watermark, enter the writer queue, or leave a pin. The default project does not
+count toward the cap.
 
 Provider session derivation stays the `origin/dev` formula in
 `core/memory/store.py::_provider_session_ref`:
@@ -240,8 +303,9 @@ the catalog key. Changing them would orphan existing EverOS sessions.
 
 On-disk Memory SQLite is a shipped surface. v3.0.10 (2026-08-11) released
 the #1217 foundation. `dev` already migrates those files up to schema v3
-(`5a1a8ff3` and follow-ups). This PR adds one more step: v3 → identity-only
-v4, and must still enter from every earlier released shape.
+(`5a1a8ff3` and follow-ups). This PR adds one more step: v3 →
+identity-and-provenance v4, and must still enter from every earlier released
+shape.
 
 Checked-in fixtures to drive, not a closed list of "interesting" rows:
 
@@ -287,12 +351,17 @@ would accept captures:
    factory-reset pending flag): run the existing Factory Reset path.
    Do not read or rewrite `memory.sqlite` as an identity source; Reset
    deletes `memory` and `state/memory`.
-2. If `state/memory/clear-intent.json` is present and readable, or
-   `memory_meta.clear_in_progress` is set: run the existing Clear
-   reconcile. Clear already deletes queue tables and bumps epoch.
-   After it finishes, the store is empty identity at `target_epoch`.
-   Then open it as v4, creating identity tables if Clear's reset still
-   used the old schema for one boot.
+2. Read `state/memory/clear-intent.json` through `ClearIntentStore.load()`.
+   If it is present and readable, or `memory_meta.clear_in_progress` is set,
+   run the existing Clear reconcile. Clear already deletes queue tables and
+   bumps epoch. After it finishes, the store is empty identity at
+   `target_epoch`. Then open it as v4, creating identity tables if Clear's
+   reset still used the old schema for one boot. If the marker exists but is
+   truncated, malformed, inaccessible, oversized, symlinked, or otherwise
+   raises `ClearIntentUnreadable`, preserve `MemoryMaintenance.is_open()`
+   semantics: do not migrate, do not start the sidecar/writer, and project the
+   existing `memory_clear_marker_unreadable` retry state. Only an explicit
+   Clear re-run may replace that marker.
 3. Otherwise open `state/memory/memory.sqlite` through the existing
    confined path.
 4. Reuse the current v0→v2→v3 chain so the in-memory connection is a
@@ -303,6 +372,10 @@ would accept captures:
      `manual_required`) and terminal rows, without logging payload text
    - collect `attachment_bundle` ids
    - copy `memory_meta` identity columns and `memory_projects`
+   - before dropping delivery tables, copy add/flush request correlation into
+     `memory_call_provenance`, bounded to retained Provider Call Log request
+     ids and its 5,000-row / 14-day window; preserve the current fail-closed
+     rule for request ids that resolve to more than one scope
    - drop delivery tables, indexes, and settlement triggers
    - rebuild `memory_meta` without requiring delivery columns if this
      PR drops them
@@ -320,7 +393,7 @@ would accept captures:
 Crash windows:
 
 - Failure before commit: old file unchanged; next boot retries.
-- Failure after commit, before bundle delete: identity is v4; leftover
+- Failure after commit, before bundle delete: the store is v4; leftover
   files under `memory/attachments/` are unreferenced and deleted on the
   next boot by "no bundle table ⇒ delete pin root if empty-orphan".
 - Failure during Clear/Reset: existing markers remain authoritative.
@@ -343,8 +416,11 @@ writing, same as today's unknown `user_version` rule.
 ## Attachments in this PR
 
 Keep `AttachmentPinStore` and IM/Workbench admission. The worker still
-pins before `offer` when the current path pins, and releases the bundle
-after a terminal in-process add (success, definite rejection, or drop).
+registers the exact-session FIFO reservation before pinning, pins before
+`offer` when the current path pins, and releases the bundle after a terminal
+in-process add (success, definite rejection, or drop). Closing a reservation
+as skipped releases its successor, so one failed pin cannot strand a later
+barrier.
 
 Remove only:
 
@@ -367,7 +443,7 @@ Keep `CaptureRequest` and `CaptureReceipt`. Map writer outcomes:
 |---|---|
 | queued | `CaptureAccepted` |
 | duplicate in process-local LRU | `CaptureDuplicate` |
-| disabled / not ready / invalid / queue full | `CaptureSkipped` with the existing closed error code |
+| disabled / not ready / invalid / named-project limit / queue full | `CaptureSkipped` with the existing closed error code |
 
 Automatic capture still ignores the receipt after a content-free log.
 `/internal/memory/remember` still returns `receipt.status`. CLI copy
@@ -378,10 +454,17 @@ Processing-fault durable notification and ACK in `MemoryStore` /
 events. Processing Record may show process-local queue depth labelled
 as volatile; it must not show a durable missed-capture backlog.
 
+Processing Record and Provider Call Log otherwise retain their current
+scope and correlation behavior through `memory_call_provenance`. The reader's
+capture-source availability probe and request-id joins move to that table;
+they do not silently omit request-id call branches merely because the
+delivery tables are gone.
+
 ## Control plane that stays
 
-Unchanged except for dropping claim-quiesce that existed only to freeze
-the outbox:
+The claim API goes away with the outbox, but its provider-maintenance
+exclusion does not. `BestEffortMemoryWriter` exposes pause/quiesce/resume for
+the existing control plane:
 
 - artifact install, sidecar ownership, provider-root confinement
 - `MemoryOperationLease`
@@ -390,12 +473,24 @@ the outbox:
 - Clear durable intent and Factory Reset
 - `ProviderRoot` recreation on Clear/Reset
 
-Clear's queue primitive becomes: identity `reset_for_clear` (epoch bump,
-catalog wipe, watermark zero) with no capture-queue DELETE. The other
-three surfaces (provider root, call log, attachments) stay.
+Before Rebuild or Repair launches `cascade rebuild` / `cascade sync`, it
+synchronously closes writer intake, increments the writer generation, drops
+unsubmitted queue and pending-flush state, and waits until no add/flush RPC is
+in flight. New captures during that interval return
+`memory_operation_in_progress`. If quiescence cannot be proved, maintenance
+fails before launching its child and keeps the writer fail-closed; it never
+runs concurrently with a provider call. Repair opens a fresh writer generation
+only after its child exits and the existing sidecar is still authoritative.
+Rebuild keeps the writer paused through sidecar/root replacement and resumes
+only after the replacement is admitted. This is the replacement for
+`quiesce_claims()`, not an outbox drain.
 
-Factory Reset still deletes `memory` and `state/memory`. A v4 identity
-file is just another file under `state/memory`.
+Clear's queue primitive becomes: identity `reset_for_clear` (epoch bump,
+catalog wipe, watermark zero, call-provenance wipe) with no capture-queue
+DELETE. The other three surfaces (provider root, call log, attachments) stay.
+
+Factory Reset still deletes `memory` and `state/memory`. The v4 store is just
+another file under `state/memory`.
 
 ## Module shape after this PR
 
@@ -403,7 +498,7 @@ Likely:
 
 ```text
 core/memory/ingest.py      # BestEffortMemoryWriter
-core/memory/identity.py    # narrow store: meta + projects + watermark
+core/memory/identity.py    # meta + projects + watermark + bounded call provenance
                            # or store.py reduced to that surface
 core/memory/migrate_store.py  # v0..v3 recognition + v3→v4 strip
 ```
@@ -432,7 +527,8 @@ Do not ship those doc edits in this planning PR.
 
 ### Identity and migration
 
-- Every checked-in released fixture opens and becomes v4 identity.
+- Every checked-in released fixture opens and becomes a v4
+  identity-and-provenance store.
 - Property test: seed every persistable production row shape the current
   schema allows, migrate, assert identity bytes and catalog equality,
   assert zero remaining delivery tables, assert the fake provider received
@@ -442,6 +538,11 @@ Do not ship those doc edits in this planning PR.
 - WAL/SHM sidecars do not come back as a second database.
 - `clear_in_progress` / clear-intent / factory-reset pending skip the
   strip path and follow the existing destructive reconciler.
+- Every unreadable clear-intent shape keeps migration, sidecar startup, and
+  writer startup blocked without modifying the marker or SQLite identity.
+- Retained add/flush request ids migrate to bounded call provenance before
+  delivery tables are dropped; ambiguous cross-scope request ids remain
+  unauthorized.
 - Interrupted strip (kill before commit) retries and still preserves
   identity.
 - v4 file is refused by a v3-only opener without writes (contract test
@@ -460,25 +561,33 @@ Do not ship those doc edits in this planning PR.
 - `extracted` removes pending flush.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
-- Session barrier does not block `/new` or archive.
+- Session barrier does not block `/new` or archive, and a capture delayed in
+  attachment pinning after reserving admission is still offered before the
+  later barrier.
 - Watermark persists across writer restart and is monotonic.
-- Named-project upsert still happens on accepted capture.
+- Named-project upsert still happens on accepted capture; the current
+  16-project test still rejects the 17th distinct slug and accepts reuse at
+  the limit without advancing rejected-capture state.
 - Logs never include captured text, credentials, or absolute paths.
 
 ### Compatibility with retained surfaces
 
 - Restart Engine still replaces only the sidecar.
-- Rebuild/Repair still take the operation lease and do not start a second
-  outbox drain.
+- Rebuild/Repair still take the operation lease, prove the writer has no
+  in-flight provider RPC before launching a child, keep intake closed for the
+  operation, and resume only an admitted fresh generation.
 - Clear still resumes from `clear-intent.json` and still recreates an
   empty provider root.
 - Search, profile, list, remember admission, and agent-owner read paths
   keep their `origin/dev` contracts.
-- Processing Record no longer requires queue settlement rows.
+- Processing Record authorizes and correlates historical migrated calls and
+  new add/flush calls through bounded `memory_call_provenance`, including
+  scoped list/detail, unlinked-call, source-availability, retention, and
+  ambiguous-request-id tests.
 
 ## Implementation sequence
 
-1. Identity-only v4 schema + migrator + fixture property tests. No
+1. Identity-and-provenance v4 schema + migrator + fixture property tests. No
    behavior change yet if the writer still reads v4 as empty outbox —
    prefer not to land a half-migrated store. Land migrator and writer
    together.
@@ -498,7 +607,10 @@ after adding migrator and writer tests. Line count is not acceptance.
 
 - [ ] Implement v4 identity schema and released-shape migrator.
 - [ ] Implement `BestEffortMemoryWriter` and switch capture to `offer()`.
+- [ ] Replace capture-table Processing Record joins with bounded call
+      provenance and migrate retained correlations before dropping the tables.
 - [ ] Replace session final-flush waits with a best-effort barrier.
+- [ ] Replace claim quiescence with writer pause/quiesce around Rebuild/Repair.
 - [ ] Stop writing processing-fault ACK / `manual_required` / settlements.
 - [ ] Delete leftover pin bundles after migration; keep in-process pins.
 - [ ] Keep `memory.cli.remembered` as queued; rewrite Memory user docs.
