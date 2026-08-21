@@ -7544,8 +7544,8 @@ def test_show_runtime_forced_prepare_refuses_explicit_command_replacement(monkey
     assert result["ok"] is False
     assert result["reason"] == "VIBE_SHOW_RUNTIME_BIN"
     assert result["policy"] == {
-        "state": "skipped",
-        "reason": "VIBE_SHOW_RUNTIME_BIN",
+        "state": "allowed",
+        "reason": None,
     }
     assert result["install"]["state"] == "installed"
     assert result["install"]["command"] == [str(local_bin)]

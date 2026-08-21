@@ -882,7 +882,6 @@ class ShowRuntimeManager:
             command = _resolve_command(self.command)
             availability = self._publish_install_availability(
                 command=command,
-                policy_reason="VIBE_SHOW_RUNTIME_BIN" if force else None,
                 install_reason=None if command else "runtime_command_missing",
             )
             if force:

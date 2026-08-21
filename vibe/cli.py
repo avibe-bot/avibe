@@ -12400,7 +12400,6 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                 install_dir=before.get("install_dir"),
                 installed=True,
                 reason=reason,
-                policy_reason="VIBE_SHOW_RUNTIME_BIN",
                 explicit_command=before.get("explicit_command"),
             )
 

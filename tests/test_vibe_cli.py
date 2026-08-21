@@ -2360,7 +2360,6 @@ def test_repair_show_runtime_refuses_to_replace_unstartable_explicit_command(mon
 
     assert result["status"] == "failed"
     assert result["reason"] == "runtime_start_health_timeout"
-    assert result["policy_reason"] == "VIBE_SHOW_RUNTIME_BIN"
     assert result["explicit_command"] == str(explicit_command)
     assert "VIBE_SHOW_RUNTIME_BIN" in result["message"]
 
