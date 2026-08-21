@@ -250,7 +250,7 @@ export const TerminalTabs: React.FC<{
                 type="button"
                 onClick={() => closeTab(tab.key)}
                 aria-label={t('common.close')}
-                className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
+                className="grid size-4 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground md:opacity-0 md:group-hover/tab:opacity-100"
               >
                 <X className="size-3" strokeWidth={2.5} />
               </button>
