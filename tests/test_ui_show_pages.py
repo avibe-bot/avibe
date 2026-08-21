@@ -118,7 +118,7 @@ class _FakeShowRuntimeManager:
         envelope,
         headers=None,
         body=None,
-        timeout_seconds=30.0,
+        timeout_seconds=None,
     ):
         import httpx
 
@@ -2651,15 +2651,21 @@ def test_show_annotation_bootstrap_asset_proxies_to_runtime(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("surface", ["private", "public"])
-def test_show_annotation_timeout_remains_runtime_unavailable(monkeypatch, tmp_path, surface):
+@pytest.mark.parametrize("runtime_path", ["__show/annotation.js", "__show/runtime-probe"])
+def test_show_protocol_timeout_remains_runtime_unavailable(
+    monkeypatch,
+    tmp_path,
+    surface,
+    runtime_path,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     if surface == "private":
         _create_show_page("ses123", "private")
-        path = "/show/ses123/__show/annotation.js"
+        path = f"/show/ses123/{runtime_path}"
     else:
         share_id = _create_show_page("ses123", "public")
-        path = f"/p/{share_id}/__show/annotation.js"
+        path = f"/p/{share_id}/{runtime_path}"
     manager = _FakeShowRuntimeManager(
         error=ShowRuntimeRequestTimeoutError("Show Runtime request exceeded 30 seconds")
     )
@@ -2671,6 +2677,7 @@ def test_show_annotation_timeout_remains_runtime_unavailable(monkeypatch, tmp_pa
 
     assert response.status_code == 503
     assert response.get_json() == {"error": "show_runtime_unavailable"}
+    assert manager.calls[0][4] is None
 
 
 def test_private_show_page_does_not_inject_runtime_event_config_into_attachment_html(monkeypatch, tmp_path):

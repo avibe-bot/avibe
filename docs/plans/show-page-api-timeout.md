@@ -7,10 +7,10 @@ transport timeout. That is appropriate for page assets, but it turns a healthy,
 slow synchronous Show Page API handler into the same 503 response used when the
 Runtime itself is unavailable.
 
-PR #1634 changes Show Runtime availability and recovery reporting in the same
-core and UI proxy files. This change remains based on `origin/master` and adds a
-narrow per-call timeout contract so the two changes can be reconciled without
-adopting #1634's uncommitted worktree state.
+PR #1634 separately changes the Show Runtime admission-outcome contract in the
+same core and UI proxy files. This change remains based on `origin/master` and
+adds a narrow per-call timeout contract so either merge order can preserve both
+owners without making one PR depend on the other.
 
 ## Goal
 
@@ -25,15 +25,18 @@ adopting #1634's uncommitted worktree state.
 
 ## Solution
 
-The UI proxy resolves the V2Config value when it forwards a `/api` request and
-passes it explicitly to `ShowRuntimeManager.request`. The manager keeps 30
-seconds as its default, so every existing caller is unchanged. Config writes
-therefore affect subsequent API requests without restarting Avibe.
+The UI proxy resolves the V2Config value when it forwards a page-authored
+`/api` request and passes it explicitly to `ShowRuntimeManager.request`. An
+omitted timeout preserves the manager's existing 30-second HTTPX phase timeout
+without adding a total deadline, so ordinary assets, prewarming, and Runtime
+protocol paths remain unchanged. Config writes affect subsequent page API
+requests without restarting Avibe.
 
 The Runtime manager wraps the HTTP request in an overall cancellation deadline,
 so a response that keeps streaming small chunks cannot run indefinitely. It
 normalizes both deadline expiry and HTTPX read expiry into a dedicated exception.
-The response boundary maps that exception to 504 only for API paths; annotation,
+The response boundary maps that exception to 504 only for page-authored `api`
+and `api/*` paths. The broader `__show/*` Runtime protocol space, annotation,
 connection, and other Runtime failures stay on the unavailable path. This keeps
 the machine contract stable without coupling V2Config into the Runtime manager
 or adding an environment-only source of truth.

@@ -12874,11 +12874,18 @@ def _show_page_runtime_timeout_response():
     return jsonify({"error": "show_runtime_request_timeout"}), 504
 
 
+def _is_show_page_api_handler_path(asset_path: str) -> bool:
+    relative = (asset_path or "").strip("/")
+    return relative == "api" or relative.startswith("api/")
+
+
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
+    if _is_show_page_api_handler_path(asset_path):
+        return True
     if relative == "__show/annotation.js":
         return False
-    return relative == "api" or relative.startswith("api/") or relative == "__show" or relative.startswith("__show/")
+    return relative == "__show" or relative.startswith("__show/")
 
 
 def _is_show_annotation_asset(asset_path: str) -> bool:
@@ -12888,7 +12895,7 @@ def _is_show_annotation_asset(asset_path: str) -> bool:
 def _show_page_runtime_error_response(asset_path: str, exc: Exception):
     from core.show_runtime import ShowRuntimeRequestTimeoutError
 
-    if _is_show_api_asset(asset_path) and isinstance(
+    if _is_show_page_api_handler_path(asset_path) and isinstance(
         exc,
         ShowRuntimeRequestTimeoutError,
     ):
@@ -14266,7 +14273,7 @@ async def _show_page_runtime_response(
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
     request_options: dict[str, float] = {}
-    if _is_show_api_asset(asset_path):
+    if _is_show_page_api_handler_path(asset_path):
         from core.services import settings as settings_service
 
         config = await asyncio.to_thread(settings_service.load_config_or_default)

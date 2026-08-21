@@ -168,6 +168,8 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
     manager = _manager(tmp_path)
     manager._base_url = "http://127.0.0.1:4173"
     captured_timeouts = []
+    captured_deadlines = []
+    original_wait_for = asyncio.wait_for
 
     async def ensure():
         return ShowRuntimeResult(True, manager._base_url)
@@ -189,9 +191,14 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
         captured_timeouts.append(timeout)
         return _AppClient()
 
+    async def wait_for(awaitable, *, timeout):
+        captured_deadlines.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
     monkeypatch.setattr(manager, "ensure", ensure)
     monkeypatch.setattr(manager, "_negotiate_context_key_capability", negotiate)
     monkeypatch.setattr(show_runtime.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(show_runtime.asyncio, "wait_for", wait_for)
     envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE)
 
     kwargs = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
@@ -202,6 +209,88 @@ def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_
     assert captured_timeouts[0].read == expected_read_timeout
     assert captured_timeouts[0].write == expected_read_timeout
     assert captured_timeouts[0].pool == expected_read_timeout
+    assert captured_deadlines == ([] if timeout_seconds is None else [timeout_seconds])
+
+
+def test_show_runtime_default_read_timeout_is_not_converted(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    manager._base_url = "http://127.0.0.1:4173"
+    read_timeout = httpx.ReadTimeout(
+        "Runtime response stalled",
+        request=httpx.Request("GET", manager._base_url),
+    )
+
+    async def ensure():
+        return ShowRuntimeResult(True, manager._base_url)
+
+    async def negotiate(_base_url):
+        return None
+
+    class _AppClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, _method, _url, *, headers, content):
+            raise read_timeout
+
+    async def unexpected_wait_for(*_args, **_kwargs):
+        raise AssertionError("default Runtime requests must not use a total deadline")
+
+    monkeypatch.setattr(manager, "ensure", ensure)
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", negotiate)
+    monkeypatch.setattr(show_runtime.httpx, "AsyncClient", lambda **_kwargs: _AppClient())
+    monkeypatch.setattr(show_runtime.asyncio, "wait_for", unexpected_wait_for)
+    envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE)
+
+    with pytest.raises(httpx.ReadTimeout) as raised:
+        asyncio.run(manager.request("GET", "/sessions/ses/app/src/main.tsx", envelope=envelope))
+
+    assert raised.value is read_timeout
+
+
+def test_show_runtime_explicit_read_timeout_is_converted(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    manager._base_url = "http://127.0.0.1:4173"
+    read_timeout = httpx.ReadTimeout(
+        "API response stalled",
+        request=httpx.Request("GET", manager._base_url),
+    )
+
+    async def ensure():
+        return ShowRuntimeResult(True, manager._base_url)
+
+    async def negotiate(_base_url):
+        return None
+
+    class _AppClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, _method, _url, *, headers, content):
+            raise read_timeout
+
+    monkeypatch.setattr(manager, "ensure", ensure)
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", negotiate)
+    monkeypatch.setattr(show_runtime.httpx, "AsyncClient", lambda **_kwargs: _AppClient())
+    envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE)
+
+    with pytest.raises(ShowRuntimeRequestTimeoutError) as raised:
+        asyncio.run(
+            manager.request(
+                "GET",
+                "/sessions/ses/app/api/slow",
+                envelope=envelope,
+                timeout_seconds=90,
+            )
+        )
+
+    assert raised.value.__cause__ is read_timeout
 
 
 def test_show_runtime_request_enforces_timeout_as_total_deadline(monkeypatch, tmp_path):
