@@ -289,10 +289,10 @@ def ensure_agent_name_access(
         try:
             store.require_accessible(str(agent_name), user_context=context)
         except ValueError:
-            # Legacy local/Member task definitions may refer to a backend name
-            # that predates the Vibe Agent catalog. This is Agent entitlement;
-            # an Editor or Viewer must still resolve a real ACL row.
-            if context.has_role("member"):
+            # Existing local/Owner definitions may predate the Agent catalog.
+            # A Member binding is new data and must resolve a real Agent row,
+            # matching the execution-time catalog requirement.
+            if context.is_instance_owner:
                 return
             raise
     finally:

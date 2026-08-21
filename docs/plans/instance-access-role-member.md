@@ -217,9 +217,11 @@ The initial implementation left three authorization layers inconsistent. The cap
 | Site | Decision | Rationale |
 |---|---|---|
 | `ensure_agent_selection_access` missing-row fallback | Include `member` via `has_role("member")` | A historical backend-name selector is Agent entitlement compatibility, not Owner identity. |
-| `ensure_agent_name_access` legacy task/watch binding fallback | Include `member` via `has_role("member")` | Binding a pre-catalog backend name follows the same Agent entitlement as current catalog selection. |
+| `ensure_agent_name_access` legacy task/watch binding fallback | Keep `is_instance_owner` | The fallback preserves executable pre-catalog definitions; a member-created binding is new data and must reference a real catalog Agent because execution deliberately requires that row. |
 | `ensure_session_agent_access` backend-only session fallback | Include `member` via `has_role("member")` | Dispatching a persisted pre-catalog session is compatibility for Agent use/management, not ownership or migration control. |
 | `_require_agent_onboarding_access` | Keep `is_instance_owner` | Onboarding inventories and claims every policy-less Agent in one one-way migration; its instance-wide migration authority is distinct from per-Agent management. |
+
+The remote-Owner task/watch write fallback can still admit a missing legacy name while `ScheduledTaskService._require_execution_agent_access` requires a catalog row at execution. That divergence predates this change and is a known latent issue outside this alignment's scope; it does not justify admitting new member-created bindings. New routing must reference a real Vibe Agent catalog row.
 
 ### Current-master default semantics
 

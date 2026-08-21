@@ -631,7 +631,7 @@ def test_personal_install_default_routing_never_degrades(monkeypatch, tmp_path) 
         store.close()
 
 
-def test_legacy_agent_fallbacks_follow_management_entitlement(monkeypatch, tmp_path) -> None:
+def test_legacy_runtime_fallbacks_follow_management_entitlement(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = VibeAgentStore()
     try:
@@ -642,14 +642,10 @@ def test_legacy_agent_fallbacks_follow_management_entitlement(monkeypatch, tmp_p
                     assert (
                         ensure_agent_selection_access(
                             connection,
-                            agent_name="deleted-legacy-agent",
+                            agent_name="codex",
                             user_context=context,
                         )
                         is None
-                    )
-                    ensure_agent_name_access(
-                        "deleted-legacy-agent",
-                        user_context=context,
                     )
                     assert (
                         ensure_session_agent_access(
@@ -663,12 +659,7 @@ def test_legacy_agent_fallbacks_follow_management_entitlement(monkeypatch, tmp_p
                     with pytest.raises(VibeAgentAccessError):
                         ensure_agent_selection_access(
                             connection,
-                            agent_name="deleted-legacy-agent",
-                            user_context=context,
-                        )
-                    with pytest.raises(ValueError):
-                        ensure_agent_name_access(
-                            "deleted-legacy-agent",
+                            agent_name="codex",
                             user_context=context,
                         )
                     with pytest.raises(VibeAgentAccessError):
@@ -679,6 +670,45 @@ def test_legacy_agent_fallbacks_follow_management_entitlement(monkeypatch, tmp_p
                         )
     finally:
         store.close()
+
+
+def test_member_cannot_save_non_catalog_task_or_watch_bindings(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    context = _organization_context("member-1", instance_role="member")
+    task_store = ScheduledTaskStore(tmp_path / "tasks.json")
+    watch_store = ManagedWatchStore(tmp_path / "watches.json")
+
+    with pytest.raises(ValueError):
+        task_store.add_task(
+            session_key="slack::channel::C123",
+            prompt="run task",
+            schedule_type="cron",
+            agent_name="deleted-legacy-agent",
+            cron="0 * * * *",
+            timezone_name="UTC",
+            user_context=context,
+        )
+    with pytest.raises(ValueError):
+        watch_store.add_watch(
+            name="legacy watch",
+            session_key="slack::channel::C123",
+            command=["true"],
+            shell_command=None,
+            prefix=None,
+            cwd=str(tmp_path),
+            mode="once",
+            timeout_seconds=1,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=1,
+            post_to=None,
+            deliver_key=None,
+            agent_name="deleted-legacy-agent",
+            user_context=context,
+        )
+
+    assert task_store.list_tasks() == []
+    assert watch_store.list_watches() == []
 
 
 def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
