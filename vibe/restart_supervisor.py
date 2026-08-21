@@ -120,12 +120,8 @@ def _running_ui_version() -> str | None:
         try:
             with urllib.request.urlopen(f"{base_url}{endpoint}", timeout=2.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                continue
-            return None
         except (OSError, ValueError, TypeError, urllib.error.URLError):
-            return None
+            continue
         version = payload.get("current") if isinstance(payload, dict) else None
         if isinstance(version, str) and _names_a_published_release(version):
             return version
