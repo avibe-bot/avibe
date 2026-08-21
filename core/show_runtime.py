@@ -422,7 +422,14 @@ class ShowRuntimeManager:
                     **isolated_subprocess_kwargs(),
                 )
             base_url = await self._read_startup_url()
-            if not base_url:
+            process = self._process
+            if (
+                not base_url
+                or process is None
+                or process.poll() is not None
+                or not await self._healthy(base_url)
+                or process.poll() is not None
+            ):
                 self.stop()
                 return self._publish_runtime_availability(
                     ShowRuntimeServingState.START_FAILED,

@@ -12303,8 +12303,38 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
     manager = ShowRuntimeManager()
     before = manager.status()
+
+    def verify_startability(command_value: Any) -> tuple[Any | None, str | None]:
+        command = command_value if isinstance(command_value, list) else []
+        if not command:
+            return None, "runtime_command_missing"
+        with tempfile.TemporaryDirectory(prefix="avibe-show-runtime-doctor-") as verification_root_value:
+            verification_root = Path(verification_root_value)
+            verifier = ShowRuntimeManager(
+                command=shlex.join(str(part) for part in command),
+                workspace_root=verification_root / "show",
+                runtime_dir=verification_root / "runtime",
+                auto_install=False,
+            )
+            try:
+                return asyncio.run(verifier.ensure()), None
+            except Exception as exc:  # noqa: BLE001
+                return None, str(exc)
+            finally:
+                verifier.stop()
+
+    language = _configured_cli_language()
     if before.get("installed"):
-        return _doctor_repair_result(target, "skipped", "Show Runtime is already ready.")
+        started, _start_error = verify_startability(before.get("command"))
+        if started is not None and started.available:
+            return _doctor_repair_result(
+                target,
+                "skipped",
+                i18n_t("runtime.doctor.repairHealthy", language),
+                provider=before.get("provider"),
+                platform=before.get("platform"),
+                install_dir=before.get("install_dir"),
+            )
 
     archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
     archive_url = str(archive.get("url") or "")
@@ -12315,22 +12345,34 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. "
-            "Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides.",
+            i18n_t("runtime.doctor.repairLegacyArchiveUnavailable", language),
             provider=before.get("provider"),
             archive_url=archive_url,
         )
 
-    result = manager.prepare(force=False)
+    result = manager.prepare(force=bool(before.get("installed")))
     status = result.get("status") if isinstance(result.get("status"), dict) else {}
     if result.get("ok"):
+        started, start_error = verify_startability(result.get("command"))
+        if started is not None and started.available:
+            return _doctor_repair_result(
+                target,
+                "repaired",
+                i18n_t("runtime.doctor.repairStarted", language),
+                provider=result.get("provider"),
+                platform=result.get("platform"),
+                install_dir=status.get("install_dir"),
+            )
+        reason = (started.reason if started is not None else None) or "runtime_start_failed"
         return _doctor_repair_result(
             target,
-            "repaired",
-            "Prepared the manifest-selected Show Runtime.",
+            "failed",
+            i18n_t("runtime.doctor.repairStartFailed", language, reason=reason),
             provider=result.get("provider"),
             platform=result.get("platform"),
             install_dir=status.get("install_dir"),
+            reason=reason,
+            start_error=start_error,
         )
 
     reason = str(result.get("reason") or "runtime_prepare_failed")
@@ -12344,7 +12386,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     return _doctor_repair_result(
         target,
         "failed",
-        f"Show Runtime preparation failed: {detail}",
+        i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail),
         provider=result.get("provider"),
         platform=result.get("platform"),
         reason=reason,
