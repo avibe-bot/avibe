@@ -110,7 +110,7 @@ class MemoryPreflightDiagnostic:
 
 @dataclass(frozen=True)
 class ProviderSessionRef:
-    """Canonical provider identity persisted by Avibe's Memory outbox."""
+    """Canonical provider identity; ``principal_id`` carries the Memory owner."""
 
     principal_id: str
     epoch: int
@@ -322,6 +322,19 @@ class MemoryItem:
     date: str | None = None
     profile: MemoryProfile | None = None
     project: str | None = None
+    origin: Literal["user", "agent", "both"] | None = None
+
+
+@dataclass(frozen=True)
+class ProviderSearchItem:
+    """Provider-only search metadata used to merge owner-scoped legs."""
+
+    item: MemoryItem
+    score: float | None
+    episode_id: str | None
+    timestamp: str | None
+    provider_rank: int
+    queried_owner: str
 
 
 def memory_profile_payload(profile: MemoryProfile) -> dict[str, Any]:
@@ -362,6 +375,8 @@ def memory_item_payload(item: MemoryItem) -> dict[str, Any]:
         payload["profile"] = memory_profile_payload(item.profile)
     if item.project is not None:
         payload["project"] = item.project
+    if item.origin is not None:
+        payload["origin"] = item.origin
     return payload
 
 

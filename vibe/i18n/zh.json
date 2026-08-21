@@ -774,6 +774,12 @@
         "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
       },
       "empty": "未找到记忆条目。",
+      "originPrefix": "[{origin}] ",
+      "origin": {
+        "user": "用户记忆",
+        "agent": "Agent 记忆",
+        "both": "用户 + Agent"
+      },
       "remembered": "记忆已加入队列。",
       "listWarning": {
         "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"

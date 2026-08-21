@@ -380,6 +380,29 @@ describe('MemorySearchPanel browse and search modes', () => {
     expect(api.searchMemory).toHaveBeenCalledWith('release plan', 20, 'all');
   });
 
+  it('[MEMORY-SEARCH-009] labels owner origins and still renders legacy search items', async () => {
+    api.searchMemory.mockResolvedValue({
+      status: 'ok',
+      items: [
+        { kind: 'fact', text: 'User result', date: null, origin: 'user' },
+        { kind: 'fact', text: 'Agent result', date: null, origin: 'agent' },
+        { kind: 'fact', text: 'Shared result', date: null, origin: 'both' },
+        { kind: 'fact', text: 'Legacy result', date: null },
+      ],
+      warnings: [],
+    });
+    const user = userEvent.setup();
+
+    render(<MemorySearchPanel enabled />);
+    await user.type(screen.getByPlaceholderText('memory.search.placeholder'), 'owner labels');
+    await user.click(screen.getByRole('button', { name: 'memory.search.button' }));
+
+    expect(await screen.findByText('memory.origin.user')).toBeTruthy();
+    expect(screen.getByText('memory.origin.agent')).toBeTruthy();
+    expect(screen.getByText('memory.origin.both')).toBeTruthy();
+    expect(screen.getByText('Legacy result')).toBeTruthy();
+  });
+
   it('shows the Memory-closed state without issuing list calls', () => {
     render(<MemorySearchPanel enabled={false} />);
 

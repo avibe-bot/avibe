@@ -774,6 +774,12 @@
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
       },
       "empty": "No memory items found.",
+      "originPrefix": "[{origin}] ",
+      "origin": {
+        "user": "User memory",
+        "agent": "Agent memory",
+        "both": "User + Agent"
+      },
       "remembered": "Memory queued.",
       "listWarning": {
         "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."

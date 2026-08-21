@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import type { MemoryProfile } from '../../../context/ApiContext';
-import { StructuredMemoryProfile } from './MemoryProfilePanel';
+import { MemoryProfileItemBlock, StructuredMemoryProfile } from './MemoryProfilePanel';
 import { structuredProfileFromItems } from './memoryProfile';
 
 const t = (key: string) => key;
@@ -62,5 +62,19 @@ describe('MemoryProfilePanel structured text', () => {
 
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img src=x');
+  });
+
+  it('labels user and Agent profile blocks while legacy blocks still render', () => {
+    const html = renderToStaticMarkup(
+      <>
+        <MemoryProfileItemBlock item={{ kind: 'profile', text: 'User profile', date: null, origin: 'user' }} t={t} />
+        <MemoryProfileItemBlock item={{ kind: 'profile', text: 'Agent profile', date: null, origin: 'agent' }} t={t} />
+        <MemoryProfileItemBlock item={{ kind: 'profile', text: 'Legacy profile', date: null }} t={t} />
+      </>,
+    );
+
+    expect(html).toContain('memory.origin.user');
+    expect(html).toContain('memory.origin.agent');
+    expect(html).toContain('Legacy profile');
   });
 });

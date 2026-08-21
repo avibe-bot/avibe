@@ -738,11 +738,85 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
             },
         )
     ]
-    assert items[0].kind == "episode"
-    assert items[0].text == "Preferred language\nThe owner uses Python."
-    assert items[0].date == "2026-07-22"
-    assert items[1].kind == "fact"
-    assert items[1].text == "Uses Python for automation."
+    assert items[0].item.kind == "episode"
+    assert items[0].item.text == "Preferred language\nThe owner uses Python."
+    assert items[0].item.date == "2026-07-22"
+    assert items[0].score is None
+    assert items[0].episode_id is None
+    assert items[0].provider_rank == 0
+    assert items[0].queried_owner == PRINCIPAL
+    assert items[1].item.kind == "fact"
+    assert items[1].item.text == "Uses Python for automation."
+
+
+def test_assistant_owner_crosses_add_search_and_profile_provider_contract() -> None:
+    assistant_owner = "u-11111111111111111111111111111111-agent"
+    session_ref = ProviderSessionRef(
+        principal_id=assistant_owner,
+        epoch=0,
+        project_ref=PROJECT,
+        session_id="src--assistant-owner--e0",
+    )
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append((request.url.path, payload))
+        if request.url.path.endswith("/add"):
+            return httpx.Response(
+                200,
+                json={"request_id": "add-assistant", "data": {"status": "accumulated"}},
+            )
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "episodes": [
+                            {
+                                "id": "episode-agent",
+                                "user_id": assistant_owner,
+                                "summary": "Agent-owned memory",
+                                "score": 0.75,
+                                "timestamp": "2026-08-21T10:00:00Z",
+                            },
+                            {"id": "wrong-owner", "user_id": PRINCIPAL, "summary": "must not leak"},
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "profiles": [
+                        {"user_id": assistant_owner, "profile_data": {"summary": "Agent profile"}},
+                        {"user_id": PRINCIPAL, "profile_data": {"summary": "must not leak"}},
+                    ]
+                }
+            },
+        )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        added = await provider.add(ProviderCapture(session_ref, "记住发布计划", 1_725_000_001_234))
+        searched = await provider.search(assistant_owner, PROJECT, "发布", 5)
+        profile = await provider.profile(assistant_owner, PROJECT)
+        return added, searched, profile
+
+    with _sidecar_transport(handler):
+        added, searched, profile = asyncio.run(run())
+
+    assert added == AddAck(request_id="add-assistant", status="accumulated")
+    assert requests[0][1]["messages"][0]["sender_id"] == assistant_owner
+    assert requests[1][1]["user_id"] == assistant_owner
+    assert requests[2][1]["user_id"] == assistant_owner
+    assert len(searched) == 1
+    assert searched[0].queried_owner == assistant_owner
+    assert searched[0].score == 0.75
+    assert searched[0].episode_id == "episode-agent"
+    assert searched[0].timestamp == "2026-08-21T10:00:00Z"
+    assert [item.text for item in profile] == ['{"summary":"Agent profile"}']
 
 
 def test_agentic_search_retains_allowlisted_round_metadata() -> None:

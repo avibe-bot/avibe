@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shutil
@@ -39,6 +40,8 @@ from core.memory.project_ids import (
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryStore,
+    derive_assistant_memory_owner_id,
+    is_memory_owner_id,
     is_principal_id,
 )
 from core.memory.types import (
@@ -60,6 +63,7 @@ from core.memory.types import (
     MemoryProfileTrait,
     MemoryResult,
     OperationFailed,
+    ProviderSearchItem,
     RecallItems,
     RecallPolicy,
     RecallResult,
@@ -140,6 +144,7 @@ class _CaptureReservation:
 
 logger = logging.getLogger(__name__)
 _SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
+_ProviderReadResult = TypeVar("_ProviderReadResult")
 
 
 _ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -898,7 +903,7 @@ class MemoryModule:
         project_id: str,
         limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> MemoryResult:
-        """Compatibility wrapper for the default one-run hybrid recall policy."""
+        """Compatibility wrapper for the default hybrid recall policy."""
 
         try:
             policy = RecallPolicy(mode="hybrid", max_results=limit)
@@ -924,7 +929,7 @@ class MemoryModule:
         current_session_id: str | None = None,
         effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] | None = None,
     ) -> RecallResult:
-        """Execute one capability-gated recall decision and at most one search."""
+        """Execute one capability-gated, dual-owner recall decision."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
@@ -1018,16 +1023,28 @@ class MemoryModule:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
-            session_ref = None
+            owner_ids = (
+                principal_id,
+                derive_assistant_memory_owner_id(principal_id),
+            )
+            session_refs = [None, None]
             if policy.include_current_session:
                 if not isinstance(current_session_id, str) or not current_session_id.strip():
                     return OperationFailed(error="memory_invalid_input")
                 try:
-                    session_ref = await self._store_call(
-                        self._store.provider_session_ref,
-                        principal_id=principal_id,
-                        project_ref=project_id,
-                        session_id=current_session_id.strip(),
+                    session_refs = list(
+                        await asyncio.gather(
+                            *(
+                                self._store_call(
+                                    self._store.provider_session_ref,
+                                    principal_id=principal_id,
+                                    project_ref=project_id,
+                                    session_id=current_session_id.strip(),
+                                    memory_owner_id=owner_id,
+                                )
+                                for owner_id in owner_ids
+                            )
+                        )
                     )
                 except ValueError:
                     return OperationFailed(error="memory_access_denied")
@@ -1062,30 +1079,69 @@ class MemoryModule:
                 provider_timeout = _remaining_timeout(agentic_deadline)
             else:
                 provider_timeout = None
-            result = await self._provider_read(
-                lambda: self._provider.search(
-                    principal_id,
-                    project_id,
-                    normalized_query,
-                    policy.max_results,
-                    method=effective_mode,
-                    include_profile=policy.include_profile,
-                    session_ref=session_ref,
-                    timeout_seconds=provider_timeout,
-                    agentic_telemetry=agentic_telemetry,
-                ),
-                timeout_seconds=provider_timeout,
+            leg_methods = (
+                effective_mode,
+                "hybrid" if effective_mode == "agentic" else effective_mode,
             )
-        if isinstance(result, OperationFailed):
-            return result
-        bounded = self._bounded_items(result, limit=policy.max_results)
-        if isinstance(bounded, OperationFailed):
-            return bounded
+            results = await asyncio.gather(
+                *(
+                    self._provider_read(
+                        lambda owner_id=owner_id, method=method, session_ref=session_ref, index=index: self._provider.search(
+                            owner_id,
+                            project_id,
+                            normalized_query,
+                            policy.max_results,
+                            method=method,
+                            include_profile=policy.include_profile,
+                            session_ref=session_ref,
+                            timeout_seconds=provider_timeout if index == 0 else None,
+                            agentic_telemetry=agentic_telemetry if index == 0 else None,
+                        ),
+                        timeout_seconds=provider_timeout,
+                    )
+                    for index, (owner_id, method, session_ref) in enumerate(
+                        zip(owner_ids, leg_methods, session_refs)
+                    )
+                )
+            )
+        successful: list[tuple[ProviderSearchItem, ...]] = []
+        leg_succeeded: list[bool] = []
+        first_failure: OperationFailed | None = None
+        for owner_id, result in zip(owner_ids, results):
+            if isinstance(result, OperationFailed):
+                if first_failure is None:
+                    first_failure = result
+                successful.append(())
+                leg_succeeded.append(False)
+                continue
+            bounded = self._bounded_provider_search_items(
+                result,
+                owner_id=owner_id,
+                limit=policy.max_results,
+            )
+            if isinstance(bounded, OperationFailed):
+                if first_failure is None:
+                    first_failure = bounded
+                successful.append(())
+                leg_succeeded.append(False)
+                continue
+            successful.append(bounded)
+            leg_succeeded.append(True)
+        succeeded_count = sum(leg_succeeded)
+        if succeeded_count == 0:
+            return first_failure or OperationFailed(error="memory_processing_failed")
+        merged = _merge_owner_search_items(
+            user_items=successful[0],
+            assistant_items=successful[1],
+            same_method=leg_methods[0] == leg_methods[1],
+            limit=policy.max_results,
+        )
         return RecallItems(
-            items=bounded.items,
+            items=merged,
             requested_mode=requested_mode,
             effective_mode=effective_mode,
-            current_session_overlay=session_ref is not None,
+            current_session_overlay=any(ref is not None for ref in session_refs),
+            warnings=("memory_search_partial",) if succeeded_count == 1 else (),
         )
 
     async def resolve_recall_mode(
@@ -1158,10 +1214,36 @@ class MemoryModule:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
-            result = await self._provider_read(lambda: self._provider.profile(principal_id, project_id))
-        return result if isinstance(result, OperationFailed) else self._bounded_items(
-            result,
-            limit=MAX_PROVIDER_RESULT_ITEMS,
+            owner_ids = (
+                principal_id,
+                derive_assistant_memory_owner_id(principal_id),
+            )
+            results = await asyncio.gather(
+                *(
+                    self._provider_read(lambda owner_id=owner_id: self._provider.profile(owner_id, project_id))
+                    for owner_id in owner_ids
+                )
+            )
+        items: list[MemoryItem] = []
+        first_failure: OperationFailed | None = None
+        succeeded = 0
+        for origin, result in zip(("user", "agent"), results):
+            if isinstance(result, OperationFailed):
+                if first_failure is None:
+                    first_failure = result
+                continue
+            bounded = self._bounded_items(result, limit=MAX_PROVIDER_RESULT_ITEMS)
+            if isinstance(bounded, OperationFailed):
+                if first_failure is None:
+                    first_failure = bounded
+                continue
+            succeeded += 1
+            items.extend(replace(item, origin=origin) for item in bounded.items)
+        if succeeded == 0:
+            return first_failure or OperationFailed(error="memory_processing_failed")
+        return MemoryItems(
+            items=tuple(items),
+            warnings=("memory_search_partial",) if succeeded == 1 else (),
         )
 
     async def list_episodes(
@@ -1349,10 +1431,10 @@ class MemoryModule:
 
     async def _provider_read(
         self,
-        operation: Callable[[], Awaitable[tuple[MemoryItem, ...]]],
+        operation: Callable[[], Awaitable[tuple[_ProviderReadResult, ...]]],
         *,
         timeout_seconds: float | None = None,
-    ) -> tuple[MemoryItem, ...] | OperationFailed:
+    ) -> tuple[_ProviderReadResult, ...] | OperationFailed:
         try:
             return await asyncio.wait_for(
                 operation(),
@@ -1364,6 +1446,49 @@ class MemoryModule:
             return OperationFailed(error=_provider_error_code(failure, "memory_processing_failed"))
         except Exception:
             return OperationFailed(error="memory_processing_failed")
+
+    def _bounded_provider_search_items(
+        self,
+        items: tuple[ProviderSearchItem, ...],
+        *,
+        owner_id: str,
+        limit: int,
+    ) -> tuple[ProviderSearchItem, ...] | OperationFailed:
+        if not isinstance(items, tuple) or len(items) > limit or not is_memory_owner_id(owner_id):
+            return OperationFailed(error="memory_provider_response_invalid")
+        bounded = self._bounded_items(tuple(item.item for item in items), limit=limit) if all(
+            isinstance(item, ProviderSearchItem) for item in items
+        ) else OperationFailed(error="memory_provider_response_invalid")
+        if isinstance(bounded, OperationFailed):
+            return bounded
+        for item in items:
+            if (
+                item.queried_owner != owner_id
+                or item.item.origin is not None
+                or isinstance(item.provider_rank, bool)
+                or not isinstance(item.provider_rank, int)
+                or item.provider_rank < 0
+                or (
+                    item.score is not None
+                    and (
+                        isinstance(item.score, bool)
+                        or not isinstance(item.score, (int, float))
+                        or not math.isfinite(item.score)
+                    )
+                )
+                or (
+                    item.episode_id is not None
+                    and (
+                        not isinstance(item.episode_id, str)
+                        or not item.episode_id
+                        or (episode_id_bytes := _utf8_bytes(item.episode_id)) is None
+                        or len(episode_id_bytes) > 256
+                    )
+                )
+                or (item.timestamp is not None and _list_timestamp_instant(item.timestamp) is None)
+            ):
+                return OperationFailed(error="memory_provider_response_invalid")
+        return items
 
     async def _provider_list_read(
         self,
@@ -1482,6 +1607,8 @@ class MemoryModule:
                 if profile_bytes is None:
                     return OperationFailed(error="memory_provider_response_invalid")
                 total_bytes += profile_bytes
+            if item.origin not in {None, "user", "agent", "both"}:
+                return OperationFailed(error="memory_provider_response_invalid")
             if total_bytes > MAX_PROVIDER_RESULT_BYTES:
                 return OperationFailed(error="memory_provider_response_invalid")
         return MemoryItems(items=items)
@@ -1614,6 +1741,81 @@ class MemoryModule:
     def _valid_identifier(value: str) -> bool:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
+
+
+def _merge_owner_search_items(
+    *,
+    user_items: tuple[ProviderSearchItem, ...],
+    assistant_items: tuple[ProviderSearchItem, ...],
+    same_method: bool,
+    limit: int,
+) -> tuple[MemoryItem, ...]:
+    if same_method:
+        ranked: list[tuple[ProviderSearchItem, Literal["user", "agent"]]] = [
+            *((item, "user") for item in user_items),
+            *((item, "agent") for item in assistant_items),
+        ]
+        ranked.sort(key=lambda value: _same_method_rank_key(value[0]))
+    else:
+        user_ranked = sorted(user_items, key=_per_leg_rank_key)
+        assistant_ranked = sorted(assistant_items, key=_per_leg_rank_key)
+        ranked = []
+        for index in range(max(len(user_ranked), len(assistant_ranked))):
+            if index < len(user_ranked):
+                ranked.append((user_ranked[index], "user"))
+            if index < len(assistant_ranked):
+                ranked.append((assistant_ranked[index], "agent"))
+
+    merged: list[MemoryItem] = []
+    seen: dict[str, int] = {}
+    for provider_item, origin in ranked:
+        item = replace(provider_item.item, origin=origin)
+        normalized_text = MemoryModule._normalize_text(item.text)
+        existing_index = seen.get(normalized_text)
+        if existing_index is not None:
+            existing = merged[existing_index]
+            if existing.origin != origin:
+                merged[existing_index] = replace(existing, origin="both")
+            continue
+        if len(merged) >= limit:
+            continue
+        seen[normalized_text] = len(merged)
+        merged.append(item)
+    return tuple(merged)
+
+
+def _same_method_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:
+    timestamp = _list_timestamp_instant(item.timestamp)
+    timestamp_value = timestamp.timestamp() if timestamp is not None else float("-inf")
+    normalized_text = MemoryModule._normalize_text(item.item.text)
+    if item.score is not None:
+        return (
+            0,
+            -float(item.score),
+            -timestamp_value,
+            item.episode_id or normalized_text,
+            item.provider_rank,
+            normalized_text,
+        )
+    return (
+        1,
+        item.provider_rank,
+        -timestamp_value,
+        item.episode_id or normalized_text,
+        normalized_text,
+    )
+
+
+def _per_leg_rank_key(item: ProviderSearchItem) -> tuple[object, ...]:
+    timestamp = _list_timestamp_instant(item.timestamp)
+    timestamp_value = timestamp.timestamp() if timestamp is not None else float("-inf")
+    normalized_text = MemoryModule._normalize_text(item.item.text)
+    return (
+        item.provider_rank,
+        -timestamp_value,
+        item.episode_id or normalized_text,
+        normalized_text,
+    )
 
 
 def _profile_text_bytes(value: object) -> bytes | None:

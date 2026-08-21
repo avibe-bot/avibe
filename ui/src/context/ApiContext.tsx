@@ -2078,6 +2078,7 @@ export type MemoryItem = {
   date: string | null;
   profile?: MemoryProfile;
   project?: string;
+  origin?: 'user' | 'agent' | 'both';
 };
 
 export type MemoryItemsResult =

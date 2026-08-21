@@ -434,9 +434,10 @@ _MEMORY_CLI_PROMPT = """\
 Avibe Memory is enabled for this conversation. Read Memory through the scoped CLI when durable personal context would materially improve the answer, and write to it whenever the conversation produces something worth carrying forward.
 
 - `vibe memory search "<query>" --json` searches this user's default Memory project.
+- Search results label `origin` as `user`, `agent`, or `both`. Treat `user` as directly captured user context, `agent` as the Agent's own recorded memory, and `both` as an exact text match found under both owners; do not present Agent-origin text as a direct user statement.
 - `vibe memory search "<query>" --project <slug> --json` searches one named project. Slugs are lowercase `^[a-z][a-z0-9_-]{0,62}$` and cannot be `all`, `personal`, mixed case, empty, or start with `p-` / `u-`. Never use `--project all`.
 - Agentic mode is for complex, multi-hop recall only: `vibe memory search "<query>" --mode agentic --json`.
-- `vibe memory profile --json` reads the current distilled profile.
+- `vibe memory profile --json` reads separately labeled user and Agent profile blocks; never merge them into one attributed profile.
 - `vibe memory status --json` is for diagnosing Memory availability and processing state.
 - `vibe memory remember "<text>" --json` queues one durable fact in `default`.
 - `vibe memory remember "<text>" --project <slug> --json` stores the fact in that named project only when the user explicitly wants it there. The same slug rules apply.

@@ -4114,6 +4114,11 @@
     "title": "记忆",
     "betaTitle": "记忆 · Beta",
     "subtitle": "Avibe 会从你的对话和 Agent 的工作记录中提炼记忆，让它越来越懂你。你可以在这里查看、搜索或清除这些记忆。",
+    "origin": {
+      "user": "用户记忆",
+      "agent": "Agent 记忆",
+      "both": "用户 + Agent"
+    },
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
       "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"

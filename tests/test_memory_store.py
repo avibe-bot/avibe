@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import stat
@@ -26,7 +27,9 @@ from core.memory.store import (
     SystemOutage,
     TERMINAL_TOMBSTONE_RETENTION,
     derive_project_id,
+    derive_assistant_memory_owner_id,
     derive_principal_id,
+    is_memory_owner_id,
     _keyed_digest,
 )
 from core.memory.types import ProviderSessionRef
@@ -1208,6 +1211,52 @@ def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     assert first != derive_principal_id(bytes.fromhex("22" * 32), "slack:U123")
     assert first.startswith("u-") and len(first) == 34
     assert "U123" not in first
+
+
+def test_assistant_owner_derivation_and_read_session_refs_are_stable_and_disjoint(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-SEARCH-008."""
+
+    principal = "u-11111111111111111111111111111111"
+    other_principal = "u-22222222222222222222222222222222"
+    assistant_owner = derive_assistant_memory_owner_id(principal)
+
+    assert assistant_owner == f"{principal}-agent"
+    assert assistant_owner == derive_assistant_memory_owner_id(principal)
+    assert assistant_owner != derive_assistant_memory_owner_id(other_principal)
+    assert is_memory_owner_id(principal)
+    assert is_memory_owner_id(assistant_owner)
+    assert not is_memory_owner_id(f"{principal}-agent-agent")
+
+    store = MemoryStore(_store_path(tmp_path))
+    user_ref = store.provider_session_ref(
+        principal_id=principal,
+        project_ref=PROJECT,
+        session_id="owner-split-session",
+    )
+    explicit_user_ref = store.provider_session_ref(
+        principal_id=principal,
+        memory_owner_id=principal,
+        project_ref=PROJECT,
+        session_id="owner-split-session",
+    )
+    assistant_ref = store.provider_session_ref(
+        principal_id=principal,
+        memory_owner_id=assistant_owner,
+        project_ref=PROJECT,
+        session_id="owner-split-session",
+    )
+
+    assert explicit_user_ref == user_ref
+    assert assistant_ref.principal_id == assistant_owner
+    assert assistant_ref.session_id != user_ref.session_id
+    assert set(json.loads(assistant_ref.serialize())) == {
+        "principal_id",
+        "epoch",
+        "project_ref",
+        "session_id",
+    }
 
 
 def test_project_derivation_is_stable_opaque_and_workdir_scoped() -> None:

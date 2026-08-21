@@ -2127,6 +2127,7 @@ class MemoryRuntime:
                 continue
             succeeded = True
             effective_mode = result.effective_mode
+            warnings.extend(result.warnings)
             collected.extend(
                 replace(item, project=project_id) for item in result.items
             )

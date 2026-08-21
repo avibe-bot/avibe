@@ -417,6 +417,33 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
     ]
 
 
+def test_memory_cli_human_labels_origins_and_preserves_legacy_items(capsys) -> None:
+    cli._print_memory_cli_human(
+        "search",
+        {
+            "items": [
+                {"kind": "fact", "text": "Direct", "date": "2026-08-21", "origin": "user"},
+                {"kind": "fact", "text": "Recorded", "date": None, "origin": "agent"},
+                {"kind": "fact", "text": "Shared", "date": None, "origin": "both"},
+                {"kind": "fact", "text": "Legacy", "date": None},
+            ]
+        },
+        language="en",
+    )
+
+    assert capsys.readouterr().out.splitlines() == [
+        "[User memory] 2026-08-21 Direct",
+        "[Agent memory] Recorded",
+        "[User + Agent] Shared",
+        "Legacy",
+    ]
+
+
+def test_memory_prompt_explains_owner_labels_and_profile_separation() -> None:
+    assert "label `origin` as `user`, `agent`, or `both`" in _MEMORY_CLI_PROMPT
+    assert "never merge them into one attributed profile" in _MEMORY_CLI_PROMPT
+
+
 def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
     monkeypatch,
     capsys,

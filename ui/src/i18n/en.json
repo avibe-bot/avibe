@@ -4114,6 +4114,11 @@
     "title": "Memory",
     "betaTitle": "Memory · Beta",
     "subtitle": "Avibe builds a personal memory from your conversations and your Agent's work, so it understands you better over time. Review, search, or clear it here.",
+    "origin": {
+      "user": "User memory",
+      "agent": "Agent memory",
+      "both": "User + Agent"
+    },
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
       "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."

@@ -558,7 +558,16 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         if not isinstance(text, str):
             continue
         date = item.get("date")
-        prefix = f"{date} " if isinstance(date, str) and date else ""
+        origin = item.get("origin")
+        origin_prefix = ""
+        if operation in {"search", "profile"} and origin in {"user", "agent", "both"}:
+            origin_prefix = i18n_t(
+                "memory.cli.originPrefix",
+                language,
+                origin=i18n_t(f"memory.cli.origin.{origin}", language),
+            )
+        date_prefix = f"{date} " if isinstance(date, str) and date else ""
+        prefix = f"{origin_prefix}{date_prefix}"
         print(f"{prefix}{text}")
 
 

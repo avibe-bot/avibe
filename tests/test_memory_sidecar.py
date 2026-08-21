@@ -484,7 +484,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     ).encode()
     get = json.dumps(
         {
-            "user_id": "u-22222222222222222222222222222222",
+            "user_id": principal,
             "app_id": "avibe",
             "project_id": "default",
             "memory_type": "profile",
@@ -497,6 +497,22 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/api/v2/memory/add", payload) is None
     assert _request_rejection("POST", "/api/v2/memory/search", search) is None
     assert _request_rejection("POST", "/api/v2/memory/get", get) is None
+    assistant_owner = f"{principal}-agent".encode()
+    assert _request_rejection(
+        "POST",
+        "/api/v2/memory/add",
+        payload.replace(principal.encode(), assistant_owner),
+    ) is None
+    assert _request_rejection(
+        "POST",
+        "/api/v2/memory/search",
+        search.replace(principal.encode(), assistant_owner),
+    ) is None
+    assert _request_rejection(
+        "POST",
+        "/api/v2/memory/get",
+        get.replace(principal.encode(), assistant_owner),
+    ) is None
     assert _request_rejection("POST", "/api/v2/memory/add", payload.replace(principal.encode(), b"owner-1")) == "add"
     assert _request_rejection("POST", "/api/v2/memory/add", payload.replace(PROJECT.encode(), b"personal")) == "add"
     assert _request_rejection("POST", "/api/v1/memory/add", payload) == "route"
