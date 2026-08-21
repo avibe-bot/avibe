@@ -981,6 +981,22 @@ describe('agent-authored local file links', () => {
     expect(routeMarkup).toContain('target="_blank"');
   });
 
+  it('opens Workbench chat routes in the current document', () => {
+    const props = {
+      session: session({ workdir: '/workspace/project' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const chatMessage = {
+      ...linkedMessage('agent'),
+      text: '[open chat](/chat/session-456)',
+    } as WorkbenchMessage;
+    const markup = render(<MessageRow {...props} message={chatMessage} />);
+    expect(markup).toContain('href="/chat/session-456"');
+    expect(markup).not.toContain('target="_blank"');
+    expect(markup).not.toContain('data-local-file-link');
+  });
+
   it('lets the outer local link own clicks for a linked local image', () => {
     const linkedImageMessage = {
       ...linkedMessage('agent'),
