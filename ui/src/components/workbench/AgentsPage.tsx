@@ -114,9 +114,6 @@ type SelectedReadOutcome =
   | { kind: 'stale' }
   | { kind: 'expected-retired'; resumedIdentity: string; intentGeneration: number };
 
-const canonicalFieldValue = (field: 'name' | 'description' | 'model' | 'effort' | 'systemPrompt', value: string) =>
-  field === 'name' || field === 'description' || field === 'systemPrompt' ? value.trim() : value;
-
 type SelectedCoordinator = {
   desiredName: string | null;
   intentGeneration: number;
@@ -1611,16 +1608,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       editorDirtyRef.current = false;
       setEditorSeedRevision((revision) => revision + 1);
     } else {
-      // Same-identity reconciliation compares the current canonical value to
-      // the accepted baseline. A field that returned to that baseline is clean
-      // even if it has an older edit revision; a field with an active submission
-      // remains local until its authoritative drain settles.
+      // Same-identity reconciliation compares raw text drafts to the raw
+      // accepted baseline. Submit-time trimming belongs only to the blur/save
+      // boundary, so an active leading/trailing-space draft remains visible.
       const pending = pendingRevisionRef.current;
-      if (pending.name === null && canonicalFieldValue('name', name) === canonicalFieldValue('name', previous.name)) setName(next.name);
-      if (pending.description === null && canonicalFieldValue('description', description) === canonicalFieldValue('description', previous.description)) setDescription(next.description);
-      if (pending.model === null && canonicalFieldValue('model', model) === canonicalFieldValue('model', previous.model)) setModel(next.model);
-      if (pending.effort === null && canonicalFieldValue('effort', effort) === canonicalFieldValue('effort', previous.effort)) setEffort(next.effort);
-      if (pending.systemPrompt === null && canonicalFieldValue('systemPrompt', systemPrompt) === canonicalFieldValue('systemPrompt', previous.systemPrompt)) setSystemPrompt(next.systemPrompt);
+      if (pending.name === null && name === previous.name) setName(next.name);
+      if (pending.description === null && description === previous.description) setDescription(next.description);
+      if (pending.model === null && model === previous.model) setModel(next.model);
+      if (pending.effort === null && effort === previous.effort) setEffort(next.effort);
+      if (pending.systemPrompt === null && systemPrompt === previous.systemPrompt) setSystemPrompt(next.systemPrompt);
       if (!editorDirtyRef.current && editorOpen) {
         editorDraftRef.current = next.systemPrompt;
         editorBaselineRef.current = next.systemPrompt;
@@ -1809,7 +1805,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         </div>
         <Switch
           checked={agent.enabled}
-          onCheckedChange={(next) => onChange({ enabled: next })}
+          onCheckedChange={(next) => {
+            void onChange({ enabled: next }).catch(() => undefined);
+          }}
           disabled={!canEdit}
           title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
           label={t('agents.detail.enabled')}

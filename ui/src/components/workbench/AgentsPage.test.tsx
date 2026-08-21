@@ -709,6 +709,50 @@ describe('AgentsPage reconnect reconciliation', () => {
   });
 
   it.each([
+    { field: 'name', initial: 'agent-a', draft: 'agent-a ', submitted: 'agent-a continued', patch: { name: 'agent-a continued' } },
+    { field: 'description', initial: 'description', draft: 'description ', submitted: 'description continued', patch: { description: 'description continued' } },
+    { field: 'systemPrompt', initial: 'system prompt', draft: 'system prompt ', submitted: 'system prompt continued', patch: { system_prompt: 'system prompt continued' } },
+  ] as const)('preserves an active raw $field draft across same-agent reconciliation', async ({ field, initial, draft, submitted, patch }) => {
+    const initialAgent = brief('agent-a', field === 'description' ? initial : 'description');
+    const changedAgent = { ...initialAgent, model: 'reconciled-model' };
+    const finalAgent = {
+      ...changedAgent,
+      ...(field === 'name' ? { name: submitted, display_name: submitted } : {}),
+      ...(field === 'description' ? { description: submitted } : {}),
+    };
+    let readCount = 0;
+    const getVibeAgent = vi.fn((requestedName: string) => {
+      readCount += 1;
+      if (readCount === 1) return Promise.resolve(fullAgent(initialAgent, field === 'systemPrompt' ? initial : 'prompt'));
+      if (readCount === 2) return Promise.resolve(fullAgent(changedAgent, field === 'systemPrompt' ? initial : 'prompt'));
+      return Promise.resolve(fullAgent({ ...finalAgent, name: field === 'name' ? requestedName : finalAgent.name }, submitted));
+    });
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initialAgent)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    let editedInput: HTMLInputElement | HTMLTextAreaElement;
+    if (field === 'systemPrompt') {
+      await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+      fireEvent.click(screen.getByText('agents.detail.systemPrompt').closest('button')!);
+      editedInput = screen.getByPlaceholderText('agents.create.systemPromptPlaceholder');
+      fireEvent.change(editedInput, { target: { value: draft } });
+    } else {
+      await waitFor(() => expect(screen.getByDisplayValue(initial)).toBeTruthy());
+      editedInput = screen.getByDisplayValue(initial);
+      fireEvent.change(editedInput, { target: { value: draft } });
+    }
+
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    expect(editedInput.value).toBe(draft);
+
+    fireEvent.change(editedInput, { target: { value: submitted } });
+    fireEvent.blur(editedInput);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', patch));
+  });
+
+  it.each([
     { field: 'description', label: 'description' },
     { field: 'systemPrompt', label: 'inline system prompt' },
   ] as const)('adopts a newer server snapshot after a $label edit is restored to baseline', async ({ field }) => {
@@ -833,6 +877,36 @@ describe('AgentsPage reconnect reconciliation', () => {
       await waitFor(() => expect(screen.getByRole('button', { name: 'medium', exact: true }).className).toContain('bg-mint-soft'));
     }
     expect(screen.queryByText(`${field} failed`)).toBeTruthy();
+  });
+
+  it.each([
+    { label: 'transport rejection', update: 'reject' as const, message: 'enabled transport failed' },
+    { label: 'HTTP ok false', update: 'okfalse' as const, message: 'enabled server rejected' },
+    { label: 'authoritative drain failure', update: 'drain' as const, message: 'enabled drain failed' },
+  ])('consumes enabled background failures ($label)', async ({ update, message }) => {
+    const agent = brief('agent-a', 'description');
+    const getVibeAgent = vi.fn().mockResolvedValueOnce(fullAgent(agent, 'prompt'));
+    const updateVibeAgent = vi.fn();
+    if (update === 'reject') {
+      updateVibeAgent.mockRejectedValueOnce({ message });
+      getVibeAgent.mockResolvedValue(fullAgent(agent, 'prompt'));
+    } else if (update === 'okfalse') {
+      updateVibeAgent.mockResolvedValueOnce({ ok: false, message });
+      getVibeAgent.mockResolvedValue(fullAgent(agent, 'prompt'));
+    } else {
+      updateVibeAgent.mockResolvedValueOnce({ ok: true });
+      getVibeAgent.mockRejectedValueOnce({ message });
+      getVibeAgent.mockResolvedValue(fullAgent(agent, 'prompt'));
+    }
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    const toggle = screen.getByRole('switch', { name: 'agents.detail.enabled' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { enabled: false }));
+    await waitFor(() => expect(screen.getByText(message)).toBeTruthy());
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
   });
 
   it('preserves a newer model edit when an older mutation drain settles', async () => {
