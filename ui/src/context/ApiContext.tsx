@@ -632,6 +632,7 @@ export type ApiContextType = {
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   getOpencodeProviders: () => Promise<OpencodeProviderListResult>;
+  readOpencodeProvidersForModelPicker: () => Promise<OpencodeProviderListResult>;
   saveOpencodeCustomProvider: (
     payload: OpencodeCustomProviderPayload,
   ) => Promise<OpencodeMutationResult>;
@@ -3796,6 +3797,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(options?.model ? { model: options.model } : {}),
       }),
     getOpencodeProviders: () => getJson('/api/backend/opencode/providers'),
+    // The same endpoint, read by the model pickers instead of by Settings, where
+    // a refusal is an answer rather than an incident. OpenCode's only catalog is
+    // this Settings one — it carries provider base URLs, masked keys, and auth
+    // state, and reaching it starts the daemon — so it stays Owner-only while the
+    // pickers render for every rank that may configure an Agent. Those ranks get
+    // no OpenCode suggestions and type the model id, which is what they already
+    // did before the member rank existed; announcing that as an error would put a
+    // toast on a page load the user did nothing wrong on. Declared here rather
+    // than at the three call sites so one of them cannot forget it, and kept off
+    // ``getOpencodeProviders`` so Settings still reports its own 403 loudly.
+    readOpencodeProvidersForModelPicker: () =>
+      getJson('/api/backend/opencode/providers', {
+        expectedCodes: ['instance_access_forbidden'],
+      }),
     saveOpencodeCustomProvider: (payload) =>
       postJson('/api/backend/opencode/custom-provider', payload),
     deleteOpencodeCustomProvider: (providerId) =>

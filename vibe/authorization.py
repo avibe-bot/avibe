@@ -523,6 +523,22 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/agents/[^/]+$"),
         ("GET", r"^/api/agents-graph$"),
         ("GET", r"^/api/agent-backends$"),
+        # Read-only model catalogs. Chat's route picker is an editor surface and
+        # the Agents detail panel is a member one, so the catalog they share is
+        # editor-tier and member inherits it. Both routes are snapshot reads of a
+        # shared model catalog: no provider configuration, no backend contact.
+        # Listed one route at a time rather than as a namespace, so neither
+        # `/api/claude/*` nor `/api/codex/*` grows an editor-visible mutation by
+        # accident.
+        #
+        # OpenCode has no editor-visible catalog. Its only one is
+        # `/api/backend/opencode/providers`, which is the Settings surface --
+        # base URLs, masked API keys, active auth type, tool-call permission
+        # state -- and reaching it runs `ensure_running()`, which can install a
+        # plugin, restart, or launch the daemon. Both stay Owner; the model
+        # picker treats the refusal as "no catalog" instead.
+        ("GET", r"^/api/claude/models$"),
+        ("GET", r"^/api/codex/models$"),
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
         # Files favorites live under /api/browse, not /api/files. Admit only this

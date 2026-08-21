@@ -226,3 +226,72 @@ The remote-Owner task/watch write fallback can still admit a missing legacy name
 ### Current-master default semantics
 
 The original follow-up brief referenced the pre-PR-#1606 audience-wide assignment predicate. PR #1606 had already replaced that model on `master`: an instance default is advisory, and ACL enforcement occurs per principal when the default is resolved. This alignment deliberately preserves #1606. A member may assign a private or scope-policy Agent as the default; a principal who cannot use it degrades to another usable Agent without changing the configured default or widening the target ACL.
+
+## Addendum: Agents page load 403s (2026-08-21, post-#1621)
+
+### Divergence found
+
+After #1621 aligned the Agent ACL layer, a remote member opening `/agents` still
+got two `instance_access_forbidden` toasts. Mutation worked; the *page load*
+fired two Owner-only GETs. Both are capability/HTTP mismatches, not ACL gaps:
+
+1. `AgentsPage.refreshOnboarding` was gated on `can_manage_agents`. #1621 made
+   that bit true for `member`, so the page began requesting
+   `GET /api/agent-onboarding` — a route deliberately kept Owner-only because
+   bulk onboarding is a one-way instance-wide migration. The handler's `catch`
+   swallowed the throw, but `ApiContext.handleApiError` had already toasted.
+2. The Agents detail panel auto-selects the default Agent on first load and
+   loads that backend's model catalog: `GET /api/claude/models`,
+   `GET /api/codex/models`, or `GET /api/backend/opencode/providers`. None was
+   named by any policy table, so all three fell to the Owner default-deny.
+
+### Decisions
+
+1. Onboarding UI keys off `is_instance_owner`, not `can_manage_agents`. The
+   route stays Owner (addendum above, `_require_agent_onboarding_access`); the
+   UI now matches it, so the banner simply never loads for a member and cannot
+   403. The member keeps New Agent, Import, Global prompts, edit, and default —
+   all already member-tier.
+2. The Claude and Codex model catalogs are editor-tier, added to
+   `_EDITOR_HTTP_RULES` as exact GET rules. Editor rather than member because
+   Chat's `AgentRoutePicker` shares the same loader and is an editor surface;
+   member inherits editor by rank. Deliberately **not** an `/api/backend`
+   namespace: the rest of that namespace is credential and host work —
+   `*/auth*`, custom-provider writes, CLI install, runtime restart — and keeps
+   Owner by the unknown-route default. Both are `backend_model_snapshot` reads
+   of a shared catalog: no provider configuration in the body, no backend
+   contact on the request.
+3. **OpenCode gets no editor-tier catalog, and the picker degrades instead.**
+   `GET /api/backend/opencode/providers` stays Owner. It is not separable from
+   the Settings surface in either direction: its rows carry provider base URLs,
+   masked API-key previews, the active auth type, and the instance tool-call
+   permission setting, and serving it runs `_opencode_get_server()` →
+   `ensure_running()`, which installs the caller-context plugin, may restart or
+   terminate the running daemon, and starts one if none is up.
+
+   Two alternatives were tried and rejected. A `{id, name, models}` projection
+   over the same call removes the disclosure but keeps the host-lifecycle
+   effect. Probing health first does not help either: `get_providers()` and its
+   siblings each call `ensure_running()` themselves.
+
+   So the model picker reads the Owner-only endpoint best-effort, through
+   `readOpencodeProvidersForModelPicker`, which declares
+   `instance_access_forbidden` an expected code. A lower rank gets no OpenCode
+   suggestions and types the model id — what it already did before the member
+   rank existed, minus the toast. `getOpencodeProviders` keeps its loud 403 for
+   Settings, where a refusal is a genuine incident.
+
+   **Follow-up (not this change):** give OpenCode a daemon-free catalog snapshot
+   the way Claude and Codex have one. `vibe/backend_model_catalog.py` supports
+   only those two today, and `vibe/data/backend_models.json` carries no OpenCode
+   entries, so there is nothing to serve without the daemon. Once a snapshot
+   exists, the picker reads it at editor tier and the degradation above goes
+   away.
+
+### Rule this leaves behind
+
+A capability bit is the UI's permission to *render* a surface; the HTTP policy
+is what may be *called*. When a rank gains a capability, every request the
+surface issues on load has to be re-checked against the policy tables, including
+the shared read-only lookups a page pulls in indirectly. A UI gate that is
+merely close to the route's tier produces a toast on every page load.

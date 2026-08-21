@@ -123,9 +123,14 @@ export const AgentsPage: React.FC = () => {
   const visibleTabs = capabilities.can_use_agents ? AGENTS_TAB_ORDER : (['definitions'] as const);
   const activeTab = capabilities.can_use_agents ? agentsTab : 'definitions';
   const canEditAgents = capabilities.can_manage_agents;
+  // Bulk Agent onboarding is a one-way instance-wide migration and stays Owner
+  // on the HTTP policy, so it follows owner identity rather than the Agent-CRUD
+  // capability a member also has: keying the fetch off `can_manage_agents` sent
+  // a member's page load into an owner-only GET and surfaced the 403 as a toast.
+  const canOnboardAgents = capabilities.is_instance_owner;
 
   const refreshOnboarding = useCallback(async () => {
-    if (!capabilities.can_manage_agents) {
+    if (!canOnboardAgents) {
       setOnboardingInventory(null);
       return;
     }
@@ -135,7 +140,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setOnboardingInventory(null);
     }
-  }, [api, capabilities.can_manage_agents]);
+  }, [api, canOnboardAgents]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -492,7 +497,7 @@ export const AgentsPage: React.FC = () => {
       {/* The run graph follows the Agent capability. */}
       {capabilities.can_use_agents && activeTab === 'running' && <AgentGraphTab />}
 
-      {activeTab === 'definitions' && onboardingInventory && (
+      {activeTab === 'definitions' && canOnboardAgents && onboardingInventory && (
         <OrganizationAgentOnboarding
           inventory={onboardingInventory}
           expanded={onboardingExpanded}
