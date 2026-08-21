@@ -1040,6 +1040,126 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(updateVibeAgent).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the selected catch-up barrier alive when a manual list refresh supersedes it', async () => {
+    const agent = brief('agent-a', 'before');
+    const gapList = deferred<ReturnType<typeof listResult>>();
+    const manualList = deferred<ReturnType<typeof listResult>>();
+    const detail = deferred<ReturnType<typeof fullAgent>>();
+    const refreshed = { ...agent, description: 'after gap' };
+    const listVibeAgents = vi.fn()
+      .mockResolvedValueOnce(listResult(agent))
+      .mockReturnValueOnce(gapList.promise)
+      .mockReturnValueOnce(manualList.promise);
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial'))
+      .mockReturnValueOnce(detail.promise);
+    const api = makeApi(listVibeAgents, getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('before')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(listVibeAgents).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'common.refresh' }));
+    await waitFor(() => expect(listVibeAgents).toHaveBeenCalledTimes(3));
+
+    act(() => manualList.resolve(listResult(refreshed)));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
+    act(() => detail.resolve(fullAgent(refreshed, 'reconciled')));
+    await waitFor(() => expect(screen.getByDisplayValue('after gap')).toBeTruthy());
+
+    act(() => gapList.resolve(listResult(agent)));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('after gap')).toBeTruthy();
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('publishes the Definitions list only after the authoritative mutation detail drain', async () => {
+    const agent = brief('agent-a', 'before');
+    const preMutationList = deferred<ReturnType<typeof listResult>>();
+    const postDrainList = deferred<ReturnType<typeof listResult>>();
+    const drain = deferred<ReturnType<typeof fullAgent>>();
+    const finalAgent = { ...agent, description: 'after mutation' };
+    const listVibeAgents = vi.fn()
+      .mockResolvedValueOnce(listResult(agent))
+      .mockReturnValueOnce(preMutationList.promise)
+      .mockReturnValueOnce(postDrainList.promise);
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial'))
+      .mockReturnValueOnce(drain.promise)
+      .mockResolvedValue(fullAgent(finalAgent, 'final'));
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(listVibeAgents, getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('before')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(listVibeAgents).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByDisplayValue('before'), { target: { value: 'local' } });
+    fireEvent.blur(screen.getByDisplayValue('local'));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    act(() => drain.resolve(fullAgent(finalAgent, 'final')));
+    await waitFor(() => expect(listVibeAgents).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    expect(screen.getByDisplayValue('final')).toBeTruthy();
+    act(() => postDrainList.resolve(listResult(finalAgent)));
+    await waitFor(() => expect(screen.getAllByText('after mutation').length).toBeGreaterThan(0));
+
+    act(() => preMutationList.resolve(listResult(agent)));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getAllByText('after mutation').length).toBeGreaterThan(0);
+  });
+
+  it('keeps per-operation mutation outcomes independent within one detail barrier', async () => {
+    const agent = brief('agent-a', 'before');
+    const descriptionPatch = deferred<unknown>();
+    const promptPatch = deferred<unknown>();
+    const drain = deferred<ReturnType<typeof fullAgent>>();
+    const finalAgent = { ...agent, description: 'server description' };
+    const updateVibeAgent = vi.fn()
+      .mockReturnValueOnce(descriptionPatch.promise)
+      .mockReturnValueOnce(promptPatch.promise);
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial prompt'))
+      .mockReturnValueOnce(drain.promise);
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(finalAgent)),
+      getVibeAgent,
+      undefined,
+      undefined,
+      updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('before')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('before'), { target: { value: 'local description' } });
+    fireEvent.blur(screen.getByDisplayValue('local description'));
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.systemPromptPlaceholder'), {
+      target: { value: 'saved prompt' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'common.save' }));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledTimes(2));
+
+    act(() => promptPatch.resolve({ ok: true }));
+    act(() => descriptionPatch.reject({ message: 'description failed' }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    act(() => drain.resolve(fullAgent(finalAgent, 'saved prompt')));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByText('description failed')).toBeTruthy();
+    expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { system_prompt: 'saved prompt' });
+  });
+
   it.each(['model', 'effort'] as const)('restores the authoritative value after a failed %s mutation', async (field) => {
     const initial = {
       ...brief('agent-a', 'description'),
@@ -1729,6 +1849,30 @@ describe('AgentsPage reconnect reconciliation', () => {
     fireEvent.blur(screen.getByDisplayValue('agent-lost'));
     await waitFor(() => expect(screen.getByDisplayValue('agent-new')).toBeTruthy());
   });
+
+  it.each(['agent_not_found', 'agent_access_forbidden'] as const)(
+    'localizes rename retirement errors without manufacturing English (%s)',
+    async (code) => {
+      const oldAgent = brief('agent-old', 'description');
+      const renamedAgent = { ...oldAgent, name: 'agent-new', display_name: 'agent-new' };
+      const getVibeAgent = vi.fn()
+        .mockResolvedValueOnce(fullAgent(oldAgent, 'prompt'))
+        .mockRejectedValueOnce({ code });
+      const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+      const listVibeAgents = vi.fn()
+        .mockResolvedValueOnce(listResult(oldAgent))
+        .mockResolvedValue(listResult(renamedAgent));
+      const api = makeApi(listVibeAgents, getVibeAgent, undefined, undefined, updateVibeAgent);
+      renderPage(api, { canManageAgents: true });
+
+      await waitFor(() => expect(screen.getByDisplayValue('agent-old')).toBeTruthy());
+      fireEvent.change(screen.getByDisplayValue('agent-old'), { target: { value: 'agent-new' } });
+      fireEvent.blur(screen.getByDisplayValue('agent-new'));
+      await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-old', { name: 'agent-new' }));
+      await waitFor(() => expect(screen.getByText('errorBoundary.title')).toBeTruthy());
+      expect(screen.queryByText('Agent is no longer available')).toBeNull();
+    },
+  );
 
   it('lets a newer new-name read satisfy a superseded rename drain', async () => {
     const oldAgent = brief('agent-old', 'description');

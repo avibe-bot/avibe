@@ -88,17 +88,22 @@ type SelectedMutationBatch = {
   identity: string;
   pending: number;
   version: number;
-  errorGeneration: number;
-  failures: unknown[];
-  waiters: Array<(result: SelectedMutationResult) => void>;
+  operations: SelectedMutationOperation[];
 };
 
 type SelectedMutationResult = { ok: true } | { ok: false; error: unknown };
 
+type SelectedMutationOperation = {
+  id: number;
+  batchId: number;
+  identity: string;
+  sequence: number;
+  failure?: unknown;
+  resolve?: (result: SelectedMutationResult) => void;
+};
+
 type SelectedReconciliationWaiter = {
   resolve: (result: SelectedMutationResult) => void;
-  mutationFailure?: unknown;
-  errorGeneration?: number;
 };
 
 type SelectedReconciliationDebt = {
@@ -132,12 +137,23 @@ type SelectedCoordinator = {
   accepted: VibeAgentFull | null;
   acceptedGeneration: number;
   nextBatchId: number;
+  nextOperationId: number;
   nextMutationVersion: number;
   mutations: Map<string, SelectedMutationBatch>;
   reconciliationDebt: Map<string, SelectedReconciliationDebt>;
   retired: Set<string>;
   autoSelectReason: AutoSelectReason | null;
   autoSelectDismissed: boolean;
+};
+
+type DefinitionsBarrierWaiter = {
+  watermark: number;
+  resolve: (published: boolean) => void;
+};
+
+type DefinitionsBarrierState = {
+  publishedVersion: number;
+  waiters: DefinitionsBarrierWaiter[];
 };
 
 const createSelectedCoordinator = (): SelectedCoordinator => ({
@@ -149,6 +165,7 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
   accepted: null,
   acceptedGeneration: 0,
   nextBatchId: 0,
+  nextOperationId: 0,
   nextMutationVersion: 0,
   mutations: new Map(),
   reconciliationDebt: new Map(),
@@ -178,7 +195,7 @@ const releaseSelectedDebtWaiters = (coordinator: SelectedCoordinator, identity: 
   debt.scheduled = false;
   const waiters = debt.waiters.splice(0);
   for (const waiter of waiters) {
-    waiter.resolve(waiter.mutationFailure ? { ok: false, error: waiter.mutationFailure } : { ok: true });
+    waiter.resolve({ ok: true });
   }
 };
 
@@ -252,6 +269,7 @@ export const AgentsPage: React.FC = () => {
     selection: 0,
     mutation: 0,
   });
+  const mutationErrorSequenceRef = useRef(0);
   const [search, setSearch] = useState('');
   const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
   const [importing, setImporting] = useState<Backend | null>(null);
@@ -260,6 +278,7 @@ export const AgentsPage: React.FC = () => {
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
   const onboardingSettlementRef = useRef<Promise<boolean> | null>(null);
   const definitionsVersionRef = useRef(createAgentRequestVersion());
+  const definitionsBarrierRef = useRef<DefinitionsBarrierState>({ publishedVersion: 0, waiters: [] });
   const onboardingVersionRef = useRef(createAgentRequestVersion());
   const selectedCoordinatorRef = useRef(createSelectedCoordinator());
   const selectedMountedRef = useRef(true);
@@ -287,6 +306,15 @@ export const AgentsPage: React.FC = () => {
     if (generation !== undefined && resourceErrorGenerationRef.current[owner] !== generation) return;
     setResourceErrors((current) => ({ ...current, [owner]: message }));
   }, []);
+
+  const publishMutationError = useCallback(
+    (value: unknown, sequence: number) => {
+      if (mutationErrorSequenceRef.current > sequence) return;
+      mutationErrorSequenceRef.current = sequence;
+      setResourceError('mutation', errorMessage(value) || t('errorBoundary.title'));
+    },
+    [setResourceError, t],
+  );
 
   const clearResourceError = useCallback((owner: ResourceErrorOwner, generation?: number) => {
     if (generation !== undefined && resourceErrorGenerationRef.current[owner] !== generation) return;
@@ -330,11 +358,14 @@ export const AgentsPage: React.FC = () => {
     return () => {
       selectedMountedRef.current = false;
       definitionsVersionRef.current.invalidate();
+      for (const waiter of definitionsBarrierRef.current.waiters.splice(0)) waiter.resolve(false);
       onboardingVersionRef.current.invalidate();
       const coordinator = selectedCoordinatorRef.current;
       for (const identity of coordinator.readGenerations.keys()) advanceSelectedRead(coordinator, identity);
       for (const batch of coordinator.mutations.values()) {
-        for (const resolve of batch.waiters.splice(0)) resolve({ ok: false, error: new Error('Agent page unmounted') });
+        for (const operation of batch.operations.splice(0)) {
+          operation.resolve?.({ ok: false, error: new Error('Agent page unmounted') });
+        }
       }
       for (const debt of coordinator.reconciliationDebt.values()) {
         for (const waiter of debt.waiters.splice(0)) waiter.resolve({ ok: false, error: new Error('Agent page unmounted') });
@@ -414,7 +445,25 @@ export const AgentsPage: React.FC = () => {
   // reconnect snapshot with a stale cached promise.
   const refresh = useCallback(() => {
     const token = definitionsVersionRef.current.begin();
-    const request = (async (): Promise<boolean> => {
+    const barrier = new Promise<boolean>((resolve) => {
+      const state = definitionsBarrierRef.current;
+      if (state.publishedVersion >= token.version) {
+        resolve(true);
+      } else {
+        state.waiters.push({ watermark: token.version, resolve });
+      }
+    });
+    const settleBarrier = (published: boolean) => {
+      const state = definitionsBarrierRef.current;
+      if (published) state.publishedVersion = Math.max(state.publishedVersion, token.version);
+      const remaining: DefinitionsBarrierWaiter[] = [];
+      for (const waiter of state.waiters) {
+        if (waiter.watermark <= token.version) waiter.resolve(published);
+        else remaining.push(waiter);
+      }
+      state.waiters = remaining;
+    };
+    void (async (): Promise<void> => {
       setLoading(true);
       clearResourceError('definitions');
       try {
@@ -425,7 +474,7 @@ export const AgentsPage: React.FC = () => {
         // A read issued before a stream gap may finish after the catch-up read.
         // Only the latest request may publish its snapshot, so an older response
         // cannot roll the Definitions list back to pre-gap state.
-        if (!definitionsVersionRef.current.isCurrent(token)) return false;
+        if (!definitionsVersionRef.current.isCurrent(token)) return;
         setAgents(result.agents);
         setDefaultName(result.default_agent_name);
         // List omission is authoritative retirement evidence. The coordinator
@@ -444,17 +493,17 @@ export const AgentsPage: React.FC = () => {
             retireSelectedIdentityRef.current?.(identity, { refreshDefinitions: false });
           }
         }
-        return true;
+        settleBarrier(true);
       } catch (err) {
         if (definitionsVersionRef.current.isCurrent(token)) {
           setResourceError('definitions', errorMessage(err) ?? String(err));
+          settleBarrier(false);
         }
-        return false;
       } finally {
         if (definitionsVersionRef.current.isCurrent(token)) setLoading(false);
       }
     })();
-    return request;
+    return barrier;
   }, [api, clearResourceError, setResourceError]);
 
   const refreshRef = useRef(refresh);
@@ -479,7 +528,7 @@ export const AgentsPage: React.FC = () => {
       const debt = coordinator.reconciliationDebt.get(identity);
       coordinator.reconciliationDebt.delete(identity);
       for (const waiter of debt?.waiters.splice(0) ?? []) {
-        waiter.resolve({ ok: false, error: { code: 'agent_not_found', message: 'Agent is no longer available' } });
+        waiter.resolve({ ok: false, error: { code: 'agent_not_found' } });
       }
       if (pendingIdentity) {
         coordinator.intentGeneration += 1;
@@ -579,18 +628,14 @@ export const AgentsPage: React.FC = () => {
           debt.scheduled = false;
           const waiters = debt.waiters.splice(0);
           for (const waiter of waiters) {
-            waiter.resolve({ ok: false, error: waiter.mutationFailure ?? error });
+            waiter.resolve({ ok: false, error });
           }
           return;
         }
         coordinator.reconciliationDebt.delete(options.identity);
         const waiters = debt.waiters.splice(0);
         for (const waiter of waiters) {
-          if (waiter.mutationFailure) {
-            waiter.resolve({ ok: false, error: waiter.mutationFailure });
-          } else {
-            waiter.resolve({ ok: true });
-          }
+          waiter.resolve({ ok: true });
         }
       };
       const continuationFor = () => {
@@ -707,41 +752,48 @@ export const AgentsPage: React.FC = () => {
         identity,
         pending: 0,
         version: ++coordinator.nextMutationVersion,
-        errorGeneration: 0,
-        failures: [],
-        waiters: [],
+        operations: [],
       };
       coordinator.mutations.set(identity, batch);
     }
-    const errorGeneration = beginResourceError('mutation');
-    batch.errorGeneration = errorGeneration;
+    beginResourceError('mutation');
+    if (!batch.operations.length) mutationErrorSequenceRef.current = 0;
     batch.pending += 1;
     batch.version = ++coordinator.nextMutationVersion;
+    // A pre-mutation Definitions snapshot cannot publish after the detail
+    // barrier. The settled transaction starts the next list publication.
+    definitionsVersionRef.current.invalidate();
     const debt = coordinator.reconciliationDebt.get(identity);
     if (debt) debt.scheduled = false;
     advanceSelectedRead(coordinator, identity);
-    return { id: batch.id, identity, errorGeneration };
+    const operation = { id: ++coordinator.nextOperationId, batchId: batch.id, identity, sequence: batch.version };
+    batch.operations.push(operation);
+    return operation;
   }, [beginResourceError]);
 
   const settleSelectedMutation = useCallback(
-    (operation: { id: number; identity: string }, failure?: unknown): Promise<SelectedMutationResult> => {
+    (operation: SelectedMutationOperation, failure?: unknown): Promise<SelectedMutationResult> => {
       if (!selectedMountedRef.current) return Promise.resolve({ ok: false, error: new Error('Agent page unmounted') });
       const coordinator = selectedCoordinatorRef.current;
-      const batch = [...coordinator.mutations.values()].find((candidate) => candidate.id === operation.id);
+      const batch = [...coordinator.mutations.values()].find((candidate) => candidate.id === operation.batchId);
       if (!batch) return Promise.resolve({ ok: false, error: new Error('Agent mutation is no longer current') });
-      if (failure) batch.failures.push(failure);
+      if (failure) operation.failure = failure;
       batch.pending = Math.max(0, batch.pending - 1);
       if (batch.pending !== 0) {
-        return new Promise<SelectedMutationResult>((resolve) => batch.waiters.push(resolve));
+        return new Promise<SelectedMutationResult>((resolve) => {
+          operation.resolve = resolve;
+        });
       }
 
       const identity = batch.identity;
       const version = batch.version;
-      const failures = [...batch.failures];
-      const errorGeneration = batch.errorGeneration;
       coordinator.mutations.delete(identity);
-      if (failures.length > 0) {
-        setResourceError('mutation', errorMessage(failures[0]) || t('errorBoundary.title'), errorGeneration);
+      const operations = [...batch.operations];
+      const firstFailure = operations.find((candidate) => candidate.failure)?.failure;
+      for (const candidate of operations) {
+        if (candidate.failure !== undefined) {
+          publishMutationError(candidate.failure, candidate.sequence);
+        }
       }
       const priorDebt = coordinator.reconciliationDebt.get(identity);
       if (!coordinator.retired.has(identity)) {
@@ -751,50 +803,52 @@ export const AgentsPage: React.FC = () => {
           waiters: priorDebt?.waiters ?? [],
         });
       }
-      void refreshRef.current();
-      const baseResult = failures.length > 0
-        ? ({ ok: false, error: failures[0] } as const)
-        : ({ ok: true } as const);
+      const baseResult: SelectedMutationResult = firstFailure
+        ? { ok: false, error: firstFailure }
+        : { ok: true };
       const currentDebt = coordinator.reconciliationDebt.get(identity);
       const shouldDrain = Boolean(
         currentDebt &&
           coordinator.desiredName === identity &&
           !coordinator.retired.has(identity),
       );
-      let resultPromise: Promise<SelectedMutationResult>;
-      if (!shouldDrain || !currentDebt) {
-        resultPromise = Promise.resolve(baseResult);
-      } else {
-        const completion = new Promise<SelectedMutationResult>((resolve) => {
-          currentDebt.waiters.push({
-            mutationFailure: failures[0],
-            errorGeneration,
-            resolve: (result) => {
-              if (!result.ok && !failures.length) {
-                setResourceError('mutation', errorMessage(result.error) || t('errorBoundary.title'), errorGeneration);
-              }
-              resolve(result);
-            },
+      const transaction = (async (): Promise<SelectedMutationResult> => {
+        let detailResult: SelectedMutationResult = baseResult;
+        if (shouldDrain && currentDebt) {
+          const completion = new Promise<SelectedMutationResult>((resolve) => {
+            currentDebt.waiters.push({ resolve });
           });
-        });
-        const drain = scheduleSelectedReadRef.current?.(identity, {
-          debtOnly: true,
-          expectedCodes: SELECTED_DISAPPEARANCE_CODES,
-          rollbackOnFailure: false,
-        });
-        if (!drain) {
-          const waiters = currentDebt.waiters.splice(0);
-          for (const waiter of waiters) waiter.resolve(baseResult);
-          resultPromise = Promise.resolve(baseResult);
-        } else {
-          resultPromise = completion;
+          const drain = scheduleSelectedReadRef.current?.(identity, {
+            debtOnly: true,
+            expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+            rollbackOnFailure: false,
+          });
+          if (!drain && !currentDebt.scheduled) {
+            const waiters = currentDebt.waiters.splice(0);
+            for (const waiter of waiters) waiter.resolve(baseResult);
+          }
+          detailResult = await completion;
         }
+        // A brief list captured before the authoritative detail drain must not
+        // publish after that detail. The barrier joins any newer list request.
+        await refreshRef.current();
+        return detailResult;
+      })();
+      const resultFor = (candidate: SelectedMutationOperation): Promise<SelectedMutationResult> => transaction.then((detailResult) => {
+        if (candidate.failure !== undefined) {
+          return { ok: false, error: candidate.failure };
+        }
+        if (!detailResult.ok) {
+          publishMutationError(detailResult.error, candidate.sequence);
+        }
+        return detailResult;
+      });
+      for (const candidate of operations) {
+        if (candidate.resolve) void resultFor(candidate).then(candidate.resolve);
       }
-      const waiters = batch.waiters.splice(0);
-      for (const resolve of waiters) void resultPromise.then(resolve);
-      return resultPromise;
+      return resultFor(operation);
     },
-    [setResourceError, t],
+    [publishMutationError],
   );
 
   const reconcileSelected = useCallback(async (edgeEpoch?: number) => {
@@ -1186,7 +1240,6 @@ export const AgentsPage: React.FC = () => {
               void refresh();
               void refreshOnboarding();
             }}
-            disabled={loading}
           >
             <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
             {t('common.refresh')}
@@ -1898,7 +1951,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       if (fieldRevisionRef.current.name === revision) setName(trimmed);
       showToast(t('agents.renameSuccess'), 'success');
     } catch (err) {
-      showToast(errorMessage(err) ?? String(err), 'error');
+      showToast(errorMessage(err) ?? t('errorBoundary.title'), 'error');
       cancelFieldEdit('name', serverSnapshotRef.current.name);
     } finally {
       setRenaming(false);
