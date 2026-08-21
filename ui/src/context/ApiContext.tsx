@@ -33,9 +33,14 @@ import {
 } from '../lib/sessionDraftPersistence';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
+import {
+  configMutationsToPayload,
+  type ConfigMutation,
+} from '../lib/configMutations';
 
 export type { InstanceCapabilities, SessionInfo };
 export type { ShowPageAccess };
+export type { ConfigMutation };
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -498,7 +503,7 @@ export type TunnelConnectivityDiagnostics = {
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
-  saveConfig: (payload: any) => Promise<any>;
+  mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
   saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
@@ -3258,7 +3263,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const value: ApiContextType = useMemo(() => ({
     getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
     getPlatformCatalog: () => getJson('/api/platforms'),
-    saveConfig: (payload) => postJson('/api/config', payload),
+    mutateConfig: (mutations) => postJson('/api/config', configMutationsToPayload(mutations)),
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),
     saveSettings: (payload, platform) => postJson('/api/settings', platform ? { ...payload, platform } : payload),
     saveThreadSettings: (platform, channelId, threadId, settings) => postJson('/api/settings/thread', {

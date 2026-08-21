@@ -20,17 +20,17 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/Wizard.tsx": {
-      "@typescript-eslint/no-explicit-any": 9
+      "@typescript-eslint/no-explicit-any": 8
     },
     "src/components/settings/SettingsBackendsPage.tsx": {
       "@typescript-eslint/no-explicit-any": 1
     },
     "src/components/settings/SettingsMessagingPage.tsx": {
-      "@typescript-eslint/no-explicit-any": 3,
+      "@typescript-eslint/no-explicit-any": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/SettingsPlatformsPage.tsx": {
-      "@typescript-eslint/no-explicit-any": 10
+      "@typescript-eslint/no-explicit-any": 9
     },
     "src/components/settings/SettingsServicePage.tsx": {
       "@typescript-eslint/no-explicit-any": 4
@@ -76,7 +76,7 @@
       "@typescript-eslint/no-explicit-any": 4
     },
     "src/components/steps/Summary.tsx": {
-      "@typescript-eslint/no-explicit-any": 9
+      "@typescript-eslint/no-explicit-any": 8
     },
     "src/components/steps/TelegramConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4
@@ -123,7 +123,7 @@
       "@typescript-eslint/no-explicit-any": 5
     },
     "src/context/ApiContext.tsx": {
-      "@typescript-eslint/no-explicit-any": 50,
+      "@typescript-eslint/no-explicit-any": 49,
       "react-refresh/only-export-components": 1
     },
     "src/context/DockProvider.tsx": {

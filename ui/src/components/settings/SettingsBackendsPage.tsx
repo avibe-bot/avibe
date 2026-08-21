@@ -10,6 +10,7 @@ import { SettingsPageShell } from './SettingsPageShell';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { AGENT_BACKENDS, DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
 // Mirrors design.pen qVHh4 (VR/CM/Backends): three horizontal cards
@@ -113,9 +114,7 @@ export const SettingsBackendsPage: React.FC = () => {
   // updating another backend's cli_path) inside the locked merge.
   const persistBackendField = async (name: string, patch: Partial<AgentState>) => {
     try {
-      await api.saveConfig({
-        agents: { [name]: patch },
-      });
+      await api.mutateConfig(configChanges({}, patch, ['agents', name]));
       showToast(t('common.saved'), 'success');
     } catch (e) {
       showToast(errorMessage(e) || t('common.saveFailed'), 'error');

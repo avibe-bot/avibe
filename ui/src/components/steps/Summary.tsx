@@ -18,7 +18,7 @@ import { useStatus } from '../../context/StatusContext';
 import { useToast } from '../../context/ToastContext';
 import { copyTextToClipboard } from '../../lib/utils';
 import { getEnabledPlatforms } from '../../lib/platforms';
-import { withoutConfiguredSecretMarker, withSecretDraft, withSecretDrafts } from '../../lib/secretFields';
+import { buildWizardFinishMutations } from '../../lib/wizardConfigMutations';
 import { EyebrowBadge, WizardCard } from '../visual';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
@@ -49,25 +49,6 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     : Array.isArray(data.discord?.guild_allowlist)
       ? data.discord.guild_allowlist
       : [];
-  // ``require_mention`` is no longer toggled on the summary (it's configured in
-  // Settings); keep the data-derived defaults so buildConfigPayload still
-  // persists them. No setter — the value is read-only here.
-  const [requireMentionByPlatform] = useState<Record<string, boolean>>(
-    Object.fromEntries(
-      enabledPlatforms.map((platform) => [
-        platform,
-        platform === 'discord'
-          ? (data.discord?.require_mention || false)
-          : platform === 'telegram'
-            ? (data.telegram?.require_mention ?? true)
-            : platform === 'lark'
-              ? (data.lark?.require_mention || false)
-              : platform === 'wechat'
-                ? (data.wechat?.require_mention || false)
-                : (data.slack?.require_mention || false),
-      ])
-    )
-  );
   const [autoUpdate, setAutoUpdate] = useState(data.update?.auto_update ?? true);
   const navigate = useNavigate();
 
@@ -86,41 +67,8 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     setSaving(true);
     setError(null);
     try {
-      const updatedData = {
-        ...data,
-        // No user-facing primary platform: the backend derives its internal
-        // default from ``platforms.enabled``.
-        platforms: {
-          enabled: enabledPlatforms,
-        },
-        slack: {
-          ...data.slack,
-          require_mention: requireMentionByPlatform.slack ?? data.slack?.require_mention,
-        },
-        discord: {
-          ...data.discord,
-          require_mention: requireMentionByPlatform.discord ?? data.discord?.require_mention,
-        },
-        telegram: {
-          ...data.telegram,
-          require_mention: requireMentionByPlatform.telegram ?? data.telegram?.require_mention,
-        },
-        lark: {
-          ...data.lark,
-          require_mention: requireMentionByPlatform.lark ?? data.lark?.require_mention,
-        },
-        wechat: {
-          ...data.wechat,
-          require_mention: requireMentionByPlatform.wechat ?? data.wechat?.require_mention,
-        },
-        update: {
-          ...data.update,
-          auto_update: autoUpdate,
-        },
-      };
-      const configPayload = buildConfigPayload(updatedData);
-      await api.saveConfig(configPayload);
-      const settingsByPlatform = buildSettingsPayload(updatedData);
+      await api.mutateConfig(buildWizardFinishMutations(data, autoUpdate));
+      const settingsByPlatform = buildSettingsPayload(data);
       await Promise.all(
         Object.entries(settingsByPlatform).map(([platform, payload]) => api.saveSettings(payload, platform))
       );
@@ -382,121 +330,6 @@ const countConfiguredChannels = (channelConfigsByPlatform: Record<string, Record
     (count, channels) => count + Object.values(channels || {}).filter((config: any) => config?.enabled).length,
     0
   );
-
-const buildConfigPayload = (data: any) => {
-  const agents = data.agents || {};
-  const enabledPlatforms = getEnabledPlatforms(data);
-  // Platform sections the user actually configured during THIS wizard
-  // run — untouched sections are left to their owners so a concurrent
-  // update (e.g. a WeChat QR token) is never overwritten by the
-  // wizard's mount-time snapshot.
-  const editedSections: string[] = Array.isArray(data.__wizardEditedSections)
-    ? data.__wizardEditedSections
-    : [];
-  const sectionFilter = (key: string): boolean => editedSections.includes(key);
-  // Deselection encoding — see Wizard.tsx: baseline platforms the wizard
-  // no longer selects become remove operations; concurrent additions by
-  // other processes are preserved by construction.
-  const baseline: string[] = Array.isArray(data.__wizardEnabledBaseline)
-    ? data.__wizardEnabledBaseline
-    : [];
-  const deselected = baseline.filter((p) => !enabledPlatforms.includes(p));
-  return {
-    // Patch-write shape (#1458 stage ③): enablement as add/remove
-    // operations against the persisted list; sections the wizard
-    // doesn't own are left to their owners (see Wizard.tsx).
-    __avibe_list_ops: {
-      'platforms.enabled': { add: enabledPlatforms, remove: deselected },
-    },
-    mode: data.mode || 'self_host',
-    version: 'v2',
-    ...(sectionFilter('slack')
-      ? {
-          slack: {
-            ...withSecretDrafts(data.slack, {
-              bot_token: data.slack?.bot_token,
-              app_token: data.slack?.app_token,
-            }),
-            require_mention: data.slack?.require_mention || false,
-          },
-        }
-      : {}),
-    ...(sectionFilter('discord')
-      ? {
-          discord: {
-            ...withSecretDraft(data.discord, 'bot_token', data.discord?.bot_token),
-            require_mention: data.discord?.require_mention || false,
-          },
-        }
-      : {}),
-    ...(sectionFilter('telegram')
-      ? {
-          telegram: {
-            ...withSecretDraft(data.telegram, 'bot_token', data.telegram?.bot_token),
-            require_mention: data.telegram?.require_mention ?? true,
-            forum_auto_topic: data.telegram?.forum_auto_topic ?? true,
-            use_webhook: data.telegram?.use_webhook ?? false,
-          },
-        }
-      : {}),
-    ...(sectionFilter('lark')
-      ? {
-          lark: (() => {
-            const lark = data.lark || {};
-            const appId = lark.app_id || '';
-            const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
-            const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
-            return {
-              ...withSecretDraft(base, 'app_secret', lark.app_secret),
-              app_id: appId,
-              domain: lark.domain || 'feishu',
-              require_mention: lark.require_mention || false,
-            };
-          })(),
-        }
-      : {}),
-    ...(sectionFilter('wechat')
-      ? {
-          wechat: {
-            ...withSecretDraft(data.wechat, 'bot_token', data.wechat?.bot_token),
-            base_url: data.wechat?.base_url || '',
-            require_mention: data.wechat?.require_mention || false,
-          },
-        }
-      : {}),
-    runtime: {
-      default_cwd: data.default_cwd || data.runtime?.default_cwd || '_tmp',
-    },
-    agents: {
-      opencode: {
-        enabled: agents.opencode?.enabled ?? true,
-        cli_path: agents.opencode?.cli_path || 'opencode',
-        default_agent: data.opencode_default_agent ?? agents.opencode?.default_agent ?? null,
-        default_reasoning_effort:
-          data.opencode_default_reasoning_effort ?? agents.opencode?.default_reasoning_effort ?? null,
-      },
-      claude: {
-        enabled: agents.claude?.enabled ?? true,
-        cli_path: agents.claude?.cli_path || 'claude',
-      },
-      codex: {
-        enabled: agents.codex?.enabled ?? false,
-        cli_path: agents.codex?.cli_path || 'codex',
-      },
-    },
-    update: data.update
-      ? {
-          auto_update: data.update.auto_update,
-        }
-      : undefined,
-    // Finishing the wizard is the explicit signal that setup is complete. Set
-    // here (Summary's own payload, the one saved on Finish) rather than in
-    // Wizard.tsx's intermediate-step payload so the flag is only persisted once
-    // the user actually reaches and completes the final step (including the
-    // Skip → Summary → Finish path).
-    setup_completed: true,
-  };
-};
 
 const buildSettingsPayload = (data: any) => {
   const channelConfigsByPlatform = data.channelConfigsByPlatform || {};

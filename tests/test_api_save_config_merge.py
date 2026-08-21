@@ -987,14 +987,17 @@ def test_platform_runnable_config_keeps_wechat_token_optional():
     assert "return Boolean(data?.wechat);" in source
 
 
-def test_wizard_platform_selection_preserves_credential_drafts_on_continue():
+def test_wizard_platform_selection_submits_only_edited_credential_drafts():
     source = Path("ui/src/components/steps/PlatformSelection.tsx").read_text(encoding="utf-8")
 
     assert "const nextData = {" in source
-    assert "...credentialDraft," in source
+    assert "const dirtySections" in source
+    assert "dirtyPayload[key] = credentialDraft[key]" in source
+    assert "...dirtyPayload," in source
     assert "await onSave(nextData);" in source
     assert "onNext(nextData);" in source
     assert "onNext(selectionData);" not in source
+    assert "...credentialDraft," not in source
 
 
 # ---------------------------------------------------------------------------

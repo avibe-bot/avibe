@@ -6,6 +6,11 @@ import { Check, ChevronUp, Loader2, Pencil } from 'lucide-react';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import {
+  configChanges,
+  updateEnabledPlatforms,
+  type ConfigMutation,
+} from '@/lib/configMutations';
+import {
   getEnabledPlatforms,
   getImPlatforms,
   getPlatformCatalog,
@@ -81,8 +86,9 @@ export const SettingsPlatformsPage: React.FC = () => {
     return togglablePlatforms.filter((p) => shown.has(p.id)).map((p) => p.id);
   }, [togglablePlatforms, enabledPlatforms, revealed]);
 
-  const saveConfig = async (nextData: any) => {
-    const savedConfig = await api.saveConfig(nextData);
+  const saveMutations = async (mutations: readonly ConfigMutation[]) => {
+    if (mutations.length === 0) return config;
+    const savedConfig = await api.mutateConfig(mutations);
     setConfig(savedConfig);
     return savedConfig;
   };
@@ -135,9 +141,9 @@ export const SettingsPlatformsPage: React.FC = () => {
     setRestartPhase('saving');
     try {
       try {
-        const savedConfig = await saveConfig({
-          __avibe_list_ops: { 'platforms.enabled': { [op]: [platform] } },
-        });
+        const savedConfig = await saveMutations([
+          updateEnabledPlatforms({ [op]: [platform] }),
+        ]);
         showApplyResult(savedConfig);
       } catch {
         showToast(t('common.saveFailed'), 'error');
@@ -207,7 +213,9 @@ export const SettingsPlatformsPage: React.FC = () => {
         // enabled (e.g. WeChat QR confirmation). Enablement changes go
         // through the list-operation verb below, which mutates the
         // lock-fresh persisted list.
-        savedConfig = await saveConfig(nextData);
+        savedConfig = await saveMutations(
+          configChanges(config?.[platform], nextData?.[platform], [platform]),
+        );
       } catch {
         showToast(t('common.saveFailed'), 'error');
         return;
@@ -228,9 +236,9 @@ export const SettingsPlatformsPage: React.FC = () => {
         return;
       }
       try {
-        savedConfig = await saveConfig({
-          __avibe_list_ops: { 'platforms.enabled': { add: [platform] } },
-        });
+        savedConfig = await saveMutations([
+          updateEnabledPlatforms({ add: [platform] }),
+        ]);
       } catch {
         showToast(t('platform.restartFailed'), 'error');
         return;

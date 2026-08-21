@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { setConfigField } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
 export type CliStatus = 'unknown' | 'ok' | 'missing';
@@ -202,14 +203,10 @@ export function useBackendRuntime({
       // another backend's cli_path) inside the locked merge, and the
       // subsequent rolling refresh could switch the live backend to the
       // obsolete path.
-      const saved = await api.saveConfig({
-        agents: {
-          [backend]: {
-            enabled,
-            cli_path: cliPath || defaultCli,
-          },
-        },
-      });
+      const saved = await api.mutateConfig([
+        setConfigField(['agents', backend, 'enabled'], enabled),
+        setConfigField(['agents', backend, 'cli_path'], cliPath || defaultCli),
+      ]);
       // The config boundary owns both persistence and live runtime
       // reconciliation. A second route-level restart would refresh the backend
       // twice and could interrupt a transport that was just rebuilt.
@@ -234,9 +231,9 @@ export function useBackendRuntime({
       let saved = false;
       try {
         // Patch-write shape: only this backend's enabled flag.
-        const savedConfig = await api.saveConfig({
-          agents: { [backend]: { enabled: next } },
-        });
+        const savedConfig = await api.mutateConfig([
+          setConfigField(['agents', backend, 'enabled'], next),
+        ]);
         saved = true;
         assertBackendRuntimeApplied(savedConfig, t('common.saveFailed'));
       } catch (e) {
