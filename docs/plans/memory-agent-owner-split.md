@@ -158,6 +158,11 @@ Every derivation and re-derivation site must move together, or assistant rows
 get quarantined on recovery:
 
 - `store.provider_session_ref` (minting; gains owner parameters);
+- `store.enqueue_request` (mints its own ref inline via
+  `_provider_session_ref` when persisting a capture row — it never goes
+  through `provider_session_ref`, so it must take the derived owner
+  explicitly while continuing to persist the separate caller-principal
+  column);
 - `store.resolve_current_session_scopes` (recomputes expected digests to trust
   recovery — must try both owner derivations per scope);
 - `_legacy_provider_ref` (v0 migration re-derivation — v0 rows are all
@@ -170,13 +175,21 @@ session gets its own retry/flush lifecycle once its rows exist.
 **Terminal flush is not free and is in scope.** The session-end path
 (`MemoryModule._final_flush_under_admission`) mints exactly one session ref
 from the caller principal today. It must fan out: on a terminal boundary,
-resolve both owner-scoped refs for the raw session and final-flush each one
-that has capture state, so an agent capture followed immediately by session
-end is distilled rather than left in the assistant session's buffer.
-Lifecycle validation on these paths switches from `is_principal_id` to the
-owner-aware predicate wherever an owner (not a caller) flows; scope
-resolution (`resolve_current_session_scopes`) returns owner-qualified scopes
-so recovery and terminal flush can address both sessions.
+final-flush every owner-scoped session that has capture state, so an agent
+capture followed immediately by session end is distilled rather than left in
+the assistant session's buffer.
+
+**The admission fence stays caller-keyed.** `MemoryModule.capture` keys its
+admission lock by the caller principal's scope; if lifecycle resolution
+returned owner-qualified scopes, the terminal path would acquire an
+assistant-owner lock that does not exclude a racing capture holding the
+caller-keyed lock, and the final flush could complete before the capture
+commits. Therefore the lifecycle fence (scope resolution and admission
+locking) remains keyed by the caller principal exactly as today, and the
+owner fan-out happens *beneath* that fence: inside the held admission, the
+terminal path derives both owner session refs for the caller's scope and
+flushes each. Owner-aware validation applies only where an owner (not a
+caller) flows — fence keys and access-control gates keep `is_principal_id`.
 
 ### 4. `ProviderSessionRef` compatibility (Blocker 3)
 
@@ -271,14 +284,17 @@ this plan (documented limitation; fan-out is a follow-up).
 
 Cost: recall goes from one provider search to two concurrent ones with
 bounded per-leg `top_k`. For `mode="agentic"` the budgets do **not** cover
-the fan-out for free: the provider request carries only a wall-clock timeout,
-so two independent agentic legs would double model calls and token cost.
-The fan-out therefore partitions the caller's `RecallPolicy` budgets — the
-wall-clock timeout is shared across the concurrent pair (one deadline, not
-two), and `max_model_calls` / `cost_budget_tokens` are split between the legs
-(floor at the provider minimum) so the fan-out's total stays within what the
-caller granted. The invariant is total-cost-bounded-by-policy, not
-per-leg-bounded-by-policy.
+the fan-out for free, and a split cannot be enforced provider-side: only a
+wall-clock timeout crosses the provider boundary, and splitting
+`max_model_calls=1` across two legs with per-leg floors is arithmetically
+impossible. The design is therefore **at most one agentic leg per recall**:
+the user-owner leg runs the caller's agentic policy with the caller's
+budgets, and the assistant-owner leg always runs `hybrid` (no agentic LLM
+loop, rerank off per the current port defaults). Both legs share one
+wall-clock deadline. This makes the budget enforceable by construction — the
+caller's model-call and token budgets fund exactly one agentic run, exactly
+as today — at the cost of slightly weaker retrieval on the assistant leg,
+which is acceptable for short factual records.
 
 ### 6a. Diagnostics (Settings Memory log)
 
@@ -296,8 +312,11 @@ have a window where accepted captures are invisible to diagnostics.
 
 Wherever recalled memory or profile text is injected into agent context or
 shown to users, the two origins stay visibly separated (user-direct memory vs
-agent-recorded memory). All display strings go through `vibe/i18n/` (backend)
-and `ui/src/i18n/*.json` (frontend); no hardcoded labels. The system-prompt
+agent-recorded memory). This covers every user-visible surface: injected
+agent context, Web UI panels, and the human-readable CLI output
+(`vibe memory search` / `profile` without `--json`). All display strings go
+through `vibe/i18n/` (backend) and `ui/src/i18n/*.json` (frontend); no
+hardcoded labels. The system-prompt
 guidance in `core/system_prompt_injection.py` is updated in the same PR that
 changes recall output, since its CLI examples are live contract surface.
 
@@ -340,9 +359,9 @@ changes recall output, since its CLI examples are live contract surface.
    a single-leg provider failure yields the other leg's results plus a
    partial warning; profiles render as two labeled blocks and never
    interleave.
-5. **Budget closure.** For agentic recall, the fan-out's total wall-clock,
-   model-call, and token cost stays within the caller's single
-   `RecallPolicy`; no leg can spend the whole budget twice.
+5. **Budget closure.** A recall executes at most one agentic provider run
+   regardless of fan-out; the fan-out's total wall-clock, model-call, and
+   token cost stays within the caller's single `RecallPolicy`.
 6. **Terminal flush closure.** A session reaching a terminal boundary
    final-flushes every owner session that holds capture state for it; an
    agent capture immediately before session end is distilled and searchable
@@ -381,21 +400,30 @@ recall, search, and profile; shipping the reader first is a safe no-op (the
 assistant owner is empty until the writer lands, and the empty leg returns
 nothing).
 
-1. **PR A — read fan-out + labeled surfaces.** Dual-owner
-   recall/search/profile in `MemoryModule`, the internal scored result type
-   at the port boundary, origin tags (including `both`), merge/dedupe/partial
-   semantics, agentic budget partitioning, per-leg session filters,
-   queried-owner response validation, backend i18n labels, Web UI labeled
-   rendering (`MemorySearchPanel` / `MemoryProfilePanel`), frontend i18n,
+1. **PR A — read fan-out + labeled surfaces.** Owner-ID derivation and the
+   owner-aware shape predicate, plus read-side owner-aware session-ref
+   support (`_provider_session_ref` owner parameter and a
+   `provider_session_ref` entry point that accepts the derived owner —
+   without it the assistant leg's `include_current_session` filter cannot be
+   minted past the `is_principal_id` gate). Dual-owner recall/search/profile
+   in `MemoryModule`, the internal scored result type at the port boundary,
+   origin tags (including `both`), merge/dedupe/partial semantics,
+   single-agentic-leg budget rule, per-leg session filters, queried-owner
+   response validation, backend i18n labels, Web UI labeled rendering
+   (`MemorySearchPanel` / `MemoryProfilePanel`), frontend i18n, localized
+   origin labels in the human-readable CLI output
+   (`vibe/cli.py::_print_memory_cli_human` for `search` / `profile`),
    system-prompt guidance update, scenario catalog entries. Deploys dark by
-   data (assistant owner empty) but complete by capability — no intermediate
-   surface where dual-owner data renders unlabeled.
-2. **PR B — owner model + write path.** Owner kinds/IDs, owner-aware
-   `_provider_session_ref` and all re-derivation sites, terminal-flush
-   fan-out (§3), `ProviderSessionRef` semantics per §4, `EverOSPort.add`
-   sender change, everos_insight owner expansion (§6a), fixtures and unit +
-   contract + scenario tests. The moment this lands, new agent captures are
-   immediately searchable and labeled through PR A's reader.
+   data (assistant owner empty) but complete by capability — no user-visible
+   surface renders dual-owner data unlabeled.
+2. **PR B — write path.** Write routing to the assistant owner:
+   `store.enqueue_request` owner-aware minting, remaining re-derivation
+   sites (`resolve_current_session_scopes`, `_legacy_provider_ref`),
+   terminal-flush fan-out beneath the caller-keyed fence (§3),
+   `ProviderSessionRef` semantics per §4, `EverOSPort.add` sender change,
+   everos_insight owner expansion (§6a), fixtures and unit + contract +
+   scenario tests. The moment this lands, new agent captures are immediately
+   searchable and labeled through PR A's reader.
 3. **PR C — docs + regression close-out.** User documentation, the Incus
    regression checklist, and any residual scenario catalog updates.
 
