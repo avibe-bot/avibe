@@ -1219,6 +1219,7 @@ def config_to_payload(
         "runtime": {
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
+            "show_page_api_timeout_seconds": config.runtime.show_page_api_timeout_seconds,
             "resource_governance": config.runtime.resource_governance,
             # The config-only Harness knobs have no UI, but this payload IS the
             # deep-merge base every ``/api/config`` save builds on: a key omitted here

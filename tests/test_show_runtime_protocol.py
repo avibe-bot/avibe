@@ -154,6 +154,55 @@ def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
     assert all("X-Vibe-Show-Base" not in call[2] for call in requests)
 
 
+@pytest.mark.parametrize(
+    ("timeout_seconds", "expected_read_timeout"),
+    [(None, 30.0), (90.0, 90.0)],
+)
+def test_show_runtime_request_accepts_per_call_timeout_without_changing_connect_timeout(
+    monkeypatch,
+    tmp_path,
+    timeout_seconds,
+    expected_read_timeout,
+):
+    manager = _manager(tmp_path)
+    manager._base_url = "http://127.0.0.1:4173"
+    captured_timeouts = []
+
+    async def ensure():
+        return ShowRuntimeResult(True, manager._base_url)
+
+    async def negotiate(_base_url):
+        return None
+
+    class _AppClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, _method, _url, *, headers, content):
+            return httpx.Response(200, content=b"ready")
+
+    def client_factory(*, timeout):
+        captured_timeouts.append(timeout)
+        return _AppClient()
+
+    monkeypatch.setattr(manager, "ensure", ensure)
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", negotiate)
+    monkeypatch.setattr(show_runtime.httpx, "AsyncClient", client_factory)
+    envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE)
+
+    kwargs = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
+    asyncio.run(manager.request("GET", "/sessions/ses/app/api/slow", envelope=envelope, **kwargs))
+
+    assert len(captured_timeouts) == 1
+    assert captured_timeouts[0].connect == 5.0
+    assert captured_timeouts[0].read == expected_read_timeout
+    assert captured_timeouts[0].write == expected_read_timeout
+    assert captured_timeouts[0].pool == expected_read_timeout
+
+
 def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lifetime(
     monkeypatch,
     tmp_path,

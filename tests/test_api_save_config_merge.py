@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.v2_config import (
     _FIELD_SCOPED_RECOVERY_SECTIONS,
     AudioAsrConfig,
+    RuntimeConfig,
     UiConfig,
     V2Config,
     VibeCloudRemoteAccessConfig,
@@ -536,6 +537,38 @@ def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch
     assert updated.runtime.harness_run_queued_ttl_seconds == 4242
     assert payload["runtime"]["harness_prompt_echo"] is False
     assert payload["runtime"]["harness_run_queued_ttl_seconds"] == 4242
+
+
+def test_show_page_api_timeout_defaults_round_trips_and_survives_partial_save(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    defaulted = V2Config.from_payload(_full_config_payload())
+    assert defaulted.runtime.show_page_api_timeout_seconds == 90.0
+
+    full = _full_config_payload()
+    full["runtime"]["show_page_api_timeout_seconds"] = 135
+    created = api.save_config(full)
+    assert created.runtime.show_page_api_timeout_seconds == 135.0
+
+    updated = api.save_config({"show_duration": False})
+    payload = api.config_to_payload(updated)
+    assert updated.runtime.show_page_api_timeout_seconds == 135.0
+    assert payload["runtime"]["show_page_api_timeout_seconds"] == 135.0
+
+
+@pytest.mark.parametrize("value", [0, -1, True, float("inf"), float("nan")])
+def test_show_page_api_timeout_rejects_values_that_do_not_name_a_deadline(value):
+    payload = _full_config_payload()
+    payload["runtime"]["show_page_api_timeout_seconds"] = value
+
+    with pytest.raises(
+        ValueError,
+        match="Config 'runtime.show_page_api_timeout_seconds'",
+    ):
+        V2Config.from_payload(payload)
 
 
 def test_config_load_defaults_missing_show_pages_prompt_to_enabled():
@@ -1069,6 +1102,7 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
     config = api.save_config(_full_config_payload())
 
     ui_field_names = {f.name for f in fields(UiConfig)}
+    runtime_field_names = {f.name for f in fields(RuntimeConfig)}
     # ``platform_configs`` is the internal per-platform aggregate; it is emitted
     # under each platform's own key, not as a top-level ``platform_configs`` key.
     top_level = {f.name for f in fields(V2Config)} - {"platform_configs"}
@@ -1077,6 +1111,9 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
     def _assert_complete(label: str, payload: dict) -> None:
         assert top_level <= set(payload), f"{label} top-level missing: {top_level - set(payload)}"
         assert ui_field_names <= set(payload["ui"]), f"{label} ui missing: {ui_field_names - set(payload['ui'])}"
+        assert runtime_field_names <= set(payload["runtime"]), (
+            f"{label} runtime missing: {runtime_field_names - set(payload['runtime'])}"
+        )
         assert agents <= set(payload["agents"]), f"{label} agents missing: {agents - set(payload['agents'])}"
         assert payload["agents"]["opencode"]["active_turn_timeout_seconds"] == 7200
 

@@ -112,6 +112,7 @@ SHOW_RUNTIME_PROTOCOL_HEADER = "X-Avibe-Show-Protocol"
 SHOW_RUNTIME_CONTEXT_HEADER = "X-Avibe-Show-Context"
 SHOW_RUNTIME_BASE_HEADER = "x-vibe-show-base"
 SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
+SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS = 30.0
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
 _CAPABILITY_RETRYABLE_STATUS_CODES = {408, 429}
@@ -318,6 +319,7 @@ class ShowRuntimeManager:
         envelope: ShowRuntimeProtocolEnvelope,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
+        timeout_seconds: float = SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS,
     ) -> httpx.Response:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
@@ -330,7 +332,9 @@ class ShowRuntimeManager:
         }
         if session_part := _show_runtime_app_session_part(path):
             request_headers[SHOW_RUNTIME_BASE_HEADER] = f"/show/{session_part}/"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds, connect=5.0)
+        ) as client:
             return await client.request(
                 method,
                 f"{ready.base_url}{path}",
