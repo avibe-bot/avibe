@@ -176,9 +176,12 @@ required for this cut.
 `accumulated` refreshes one in-memory `PendingFlush(session_ref,
 first_accumulated_at, last_accumulated_at, message_ids)`. `message_ids` is
 bounded by the 100-message flush limit and exists only to correlate a
-successful flush with the retained Provider Call Log. The pending table does
-not survive process restart; EverOS still holds the buffer until a later
-same-session add, Repair, or provider extraction.
+successful flush with the retained Provider Call Log. Its length is the
+volatile `unflushed_count`: every `accumulated` acknowledgement appends exactly
+one message id, and reaching 100 makes that provider session immediately due
+without waiting for either timer. The pending table does not survive process
+restart; EverOS still holds the buffer until a later same-session add, Repair,
+or provider extraction.
 
 Worker generation increments on disable, shutdown, Reset/Clear, and
 runtime-affecting configuration replacement. The old worker is cancelled,
@@ -362,12 +365,16 @@ would accept captures:
    semantics: do not migrate, do not start the sidecar/writer, and project the
    existing `memory_clear_marker_unreadable` retry state. Only an explicit
    Clear re-run may replace that marker.
-3. Otherwise open `state/memory/memory.sqlite` through the existing
-   confined path.
-4. Reuse the current v0→v2→v3 chain so the in-memory connection is a
-   recognized v3 (or empty). Do not skip that chain; v0/v1/v2 installs
-   must not have to know about v4.
-5. In one immediate transaction:
+3. Otherwise open `state/memory/memory.sqlite` through the existing confined
+   path and detect its released shape without writing.
+4. Start one outer `BEGIN IMMEDIATE`. Refactor the v0→v2, v1→v2, and v2→v3
+   transforms into composable helpers that accept this transaction and never
+   issue their current inner `BEGIN` / `COMMIT` / `ROLLBACK`. Standalone v3
+   migration may keep a wrapper that owns a transaction, but the v4 boot path
+   runs every required released-shape transform under this one owner. There is
+   no committed v2 or v3 intermediate.
+5. In that same outer transaction, once the connection is recognized v3 (or
+   the detected v0 file was empty):
    - count nonterminal queue rows (`pending`, `processing`,
      `manual_required`) and terminal rows, without logging payload text
    - collect `attachment_bundle` ids
@@ -421,6 +428,22 @@ registers the exact-session FIFO reservation before pinning, pins before
 in-process add (success, definite rejection, or drop). Closing a reservation
 as skipped releases its successor, so one failed pin cannot strand a later
 barrier.
+
+Retain the current single text-only degradation for a valid nonempty caption:
+
+- if pinned-attachment verification fails before provider submission with the
+  existing positively classified `AttachmentBundleInvalidError`, release the
+  pin and offer the same capture once without attachments
+- if EverOS returns an attachment rejection for which
+  `attachment_add_rejection_proves_no_write()` is true, release the pin and
+  offer the same capture once without attachments
+
+This is a modality fallback, not replay after ambiguity. It counts toward the
+same three-total-attempt bound and is forbidden for timeouts, unknown/truncated
+responses, generic provider rejection, or any outcome that may have written.
+If the caption is empty, close as skipped instead. Preserve
+`MEMORY-IM-ATTACH-009` and `MEMORY-IM-ATTACH-011` rather than deleting them with
+the durable worker tests.
 
 Remove only:
 
@@ -533,6 +556,10 @@ Do not ship those doc edits in this planning PR.
   schema allows, migrate, assert identity bytes and catalog equality,
   assert zero remaining delivery tables, assert the fake provider received
   no add/flush from discarded rows.
+- Inject a failure after every composed v0/v1/v2/v3 transform and during the
+  v4 strip; every case rolls back the one outer transaction, preserves the
+  original `user_version`, schema, and rows, and retries from the same released
+  shape on the next boot. No test may observe a committed v2/v3 intermediate.
 - Unrecognized nonempty v0 remains unmodified.
 - Unknown `user_version` remains unmodified.
 - WAL/SHM sidecars do not come back as a second database.
@@ -558,6 +585,9 @@ Do not ship those doc edits in this planning PR.
 - Timeout / unknown / truncated success is not retried.
 - `accumulated` schedules idle (5m), max-age (30m), and
   message-count (100) flush in memory, matching today's coordinator.
+- 99 accumulated acknowledgements do not satisfy the count boundary; the
+  100th makes the session immediately due, and extraction/generation drop
+  clears both the bounded message-id list and its count.
 - `extracted` removes pending flush.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
@@ -568,6 +598,9 @@ Do not ship those doc edits in this planning PR.
 - Named-project upsert still happens on accepted capture; the current
   16-project test still rejects the 17th distinct slug and accepts reuse at
   the limit without advancing rejected-capture state.
+- `MEMORY-IM-ATTACH-009` and `MEMORY-IM-ATTACH-011` still perform exactly one
+  safe text-only degradation, while ambiguous or unclassified attachment
+  failures never resubmit the caption.
 - Logs never include captured text, credentials, or absolute paths.
 
 ### Compatibility with retained surfaces
