@@ -6,10 +6,12 @@ import { ArrowLeft, MonitorX, PinOff } from 'lucide-react';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
+import { sessionChatPath, showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { Button } from '../ui/button';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
+import { ShowPageLaunchControl } from '../workbench/ShowPageLaunchControl';
+import { ShowPageShareControl } from '../workbench/ShowPageShareControl';
 import { useShowPageAnnotation } from '../workbench/useShowPageAnnotation';
 
 // The `/apps/show/:sessionId` route — a pinned Show Page opened as an app on the
@@ -62,6 +64,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const [state, setState] = useState<'loading' | 'ready' | 'missing'>(sessionId ? 'loading' : 'missing');
   const [title, setTitle] = useState('');
   const [annotateOpen, setAnnotateOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   // Read the session once (error-suppressed — a gone session must NOT toast) to
   // upgrade the header to the LIVE title and to detect missing/archived, exactly
@@ -115,13 +118,27 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           <ArrowLeft className="size-3.5" />
         </Button>
         <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">{label}</span>
-        <ShowPageAnnotateControl
-          state={annotationState}
-          onEnable={enableAnnotation}
-          onDisable={disableAnnotation}
-          onSetMode={setAnnotationMode}
-          onPopoverOpenChange={setAnnotateOpen}
-        />
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <ShowPageAnnotateControl
+            state={annotationState}
+            onEnable={enableAnnotation}
+            onDisable={disableAnnotation}
+            onSetMode={setAnnotationMode}
+            onPopoverOpenChange={setAnnotateOpen}
+          />
+          <ShowPageLaunchControl
+            sessionId={sessionId}
+            title={title || null}
+            showPageMode
+            busy={false}
+            onToggle={() => navigate(sessionChatPath(sessionId, { showChat: true }))}
+            onPrepareLaunch={async () => true}
+          />
+          <ShowPageShareControl
+            sessionId={sessionId}
+            onOpenChange={setShareOpen}
+          />
+        </div>
       </header>
 
       {missing ? (
@@ -159,7 +176,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           src={src ?? undefined}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
-          className={`min-h-0 w-full flex-1 border-0 bg-background${annotateOpen ? ' pointer-events-none' : ''}`}
+          className={`min-h-0 w-full flex-1 border-0 bg-background${annotateOpen || shareOpen ? ' pointer-events-none' : ''}`}
         />
       )}
     </div>
