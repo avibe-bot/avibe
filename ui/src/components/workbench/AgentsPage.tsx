@@ -118,6 +118,8 @@ export const AgentsPage: React.FC = () => {
   const [onboardingExpanded, setOnboardingExpanded] = useState(false);
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
   const refreshRequestRef = useRef(0);
+  const selectedRef = useRef<VibeAgentFull | null>(null);
+  const selectedRefreshRequestRef = useRef(0);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -143,32 +145,69 @@ export const AgentsPage: React.FC = () => {
     }
   }, [api, canOnboardAgents]);
 
-  const refresh = useCallback(async (options?: { cache?: boolean }) => {
+  // Definitions refreshes are explicit reconciliation reads. They must always
+  // bypass the five-second client cache so a normal refresh cannot supersede a
+  // reconnect snapshot with a stale cached promise.
+  const refresh = useCallback(() => {
     const requestId = ++refreshRequestRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await api.listVibeAgents({
-        includeDisabled: true,
-        ...(options?.cache === undefined ? {} : { cache: options.cache }),
-      });
-      // A read issued before a stream gap may finish after the catch-up read.
-      // Only the latest request may publish its snapshot, so an older response
-      // cannot roll the Definitions list back to pre-gap state.
-      if (requestId !== refreshRequestRef.current) return;
-      setAgents(result.agents);
-      setDefaultName(result.default_agent_name);
-      // Keep the currently-selected agent fresh after edits / refreshes.
-      if (selected) {
-        const fresh = result.agents.find((a) => a.name === selected.name);
-        if (!fresh) setSelected(null);
+    const request = (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await api.listVibeAgents({
+          includeDisabled: true,
+          cache: false,
+        });
+        // A read issued before a stream gap may finish after the catch-up read.
+        // Only the latest request may publish its snapshot, so an older response
+        // cannot roll the Definitions list back to pre-gap state.
+        if (requestId !== refreshRequestRef.current) return;
+        setAgents(result.agents);
+        setDefaultName(result.default_agent_name);
+        // Keep the currently-selected agent present after edits / refreshes.
+        const currentSelected = selectedRef.current;
+        if (currentSelected) {
+          const fresh = result.agents.find((a) => a.name === currentSelected.name);
+          if (!fresh) {
+            selectedRef.current = null;
+            setSelected(null);
+          }
+        }
+      } catch (err) {
+        if (requestId === refreshRequestRef.current) setError(errorMessage(err) ?? String(err));
+      } finally {
+        if (requestId === refreshRequestRef.current) setLoading(false);
       }
-    } catch (err) {
-      if (requestId === refreshRequestRef.current) setError(errorMessage(err) ?? String(err));
-    } finally {
-      if (requestId === refreshRequestRef.current) setLoading(false);
+    })();
+    return request;
+  }, [api]);
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  const refreshSelected = useCallback(async () => {
+    const current = selectedRef.current;
+    if (!current) return;
+    const requestId = ++selectedRefreshRequestRef.current;
+    try {
+      const result = await api.getVibeAgent(current.name, { cache: false });
+      if (
+        result.ok &&
+        requestId === selectedRefreshRequestRef.current &&
+        selectedRef.current?.name === current.name
+      ) {
+        selectedRef.current = result.agent;
+        setSelected(result.agent);
+      }
+    } catch {
+      // The list catch-up remains authoritative even if the selected detail
+      // cannot be re-read during a transient reconnect.
     }
-  }, [api, selected]);
+  }, [api]);
+
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
 
   useEffect(() => {
     refresh();
@@ -233,7 +272,9 @@ export const AgentsPage: React.FC = () => {
       // The bridge report is only the indicator's level: it comes with its own
       // `onConnected`, and refetching from both would pay twice for one gap.
       onConnected: () => {
-        void refresh({ cache: false });
+        void refreshRef.current();
+        void refreshSelected();
+        void refreshOnboarding();
         void fetchRunningActiveCount();
       },
       onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
@@ -242,9 +283,12 @@ export const AgentsPage: React.FC = () => {
       onTurnStart: () => fetchRunningActiveCount(),
       onTurnEnd: () => fetchRunningActiveCount(),
       onSessionStatus: () => fetchRunningActiveCount(),
-      onAuthorizationChanged: () => void refresh(),
+      onAuthorizationChanged: () => {
+        void refreshRef.current();
+        void refreshSelected();
+      },
     });
-  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, refresh]);
+  }, [api, capabilities.can_use_agents, fetchRunningActiveCount, refreshOnboarding, refreshSelected]);
 
   useEffect(() => {
     if (!capabilities.can_use_agents) return;
@@ -298,6 +342,7 @@ export const AgentsPage: React.FC = () => {
       try {
         const result = await api.getVibeAgent(name);
         if (result.ok) {
+          selectedRef.current = result.agent;
           setSelected(result.agent);
           // Enter the mobile drill-down only once the detail has actually loaded —
           // never optimistically, or a failed fetch hides the list with no panel.
@@ -335,7 +380,10 @@ export const AgentsPage: React.FC = () => {
   }, [filtered]);
 
   const onCreated = (agent: VibeAgentFull) => {
-    refresh().then(() => setSelected(agent));
+    refresh().then(() => {
+      selectedRef.current = agent;
+      setSelected(agent);
+    });
     void refreshOnboarding();
   };
 
@@ -345,6 +393,7 @@ export const AgentsPage: React.FC = () => {
     try {
       const result = await api.updateVibeAgent(selected.name, patch);
       if (result.ok) {
+        selectedRef.current = result.agent;
         setSelected(result.agent);
         refresh();
       }
@@ -377,6 +426,7 @@ export const AgentsPage: React.FC = () => {
     try {
       const result = await api.removeVibeAgent(selected.name);
       if (result.ok) {
+        selectedRef.current = null;
         setSelected(null);
         refresh();
         void refreshOnboarding();
@@ -634,7 +684,11 @@ export const AgentsPage: React.FC = () => {
               onSetDefault={onSetDefault}
               onRenamed={onRenamed}
               onDelete={onDelete}
-              onClose={() => { setSelected(null); setDetailOpen(false); }}
+              onClose={() => {
+                selectedRef.current = null;
+                setSelected(null);
+                setDetailOpen(false);
+              }}
             />
           </div>
         )}
@@ -959,7 +1013,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
     setSystemPrompt(agent.system_prompt ?? '');
     setSystemPromptOpen(false);
     setEditorOpen(false);
-  }, [agent.id]);
+  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt]);
 
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the

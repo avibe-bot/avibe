@@ -55,17 +55,34 @@ const brief = (name: string, description: string): VibeAgentBrief => ({
   updated_at: '2026-08-21T00:00:00Z',
 });
 
-const listResult = (agent: VibeAgentBrief) => ({
+const listResult = (agents: VibeAgentBrief | VibeAgentBrief[]) => ({
   ok: true,
-  agents: [agent],
-  default_agent_name: agent.name,
+  agents: Array.isArray(agents) ? agents : [agents],
+  default_agent_name: Array.isArray(agents) ? agents[0]?.name ?? null : agents.name,
 });
 
-function makeApi(listVibeAgents: FakeApi['listVibeAgents']): FakeApi {
+const fullAgent = (briefAgent: VibeAgentBrief, systemPrompt: string) => ({
+  ok: true,
+  default_agent_name: briefAgent.name,
+  agent: {
+    ...briefAgent,
+    model: briefAgent.model ?? 'gpt-5',
+    reasoning_effort: briefAgent.reasoning_effort ?? 'medium',
+    system_prompt: systemPrompt,
+    created_at: '2026-08-21T00:00:00Z',
+    metadata: {},
+  },
+});
+
+function makeApi(
+  listVibeAgents: FakeApi['listVibeAgents'],
+  getVibeAgent: FakeApi['getVibeAgent'] = vi.fn().mockResolvedValue({ ok: false }),
+  getVibeAgentOnboarding: FakeApi['getVibeAgentOnboarding'] = vi.fn().mockResolvedValue({ available: false }),
+): FakeApi {
   return {
     listVibeAgents,
-    getVibeAgent: vi.fn().mockResolvedValue({ ok: false }),
-    getVibeAgentOnboarding: vi.fn().mockResolvedValue({ available: false }),
+    getVibeAgent,
+    getVibeAgentOnboarding,
     getRunningAgents: vi.fn().mockResolvedValue({ ok: true, counts: { total: 2 } }),
     connectWorkbenchEvents: vi.fn((next: WorkbenchEventHandlers) => {
       handlers = next;
@@ -159,7 +176,7 @@ describe('AgentsPage reconnect reconciliation', () => {
     act(() => handlers?.onConnected?.());
     await waitFor(() => expect(screen.getByText('fresh-agent')).toBeTruthy());
 
-    expect(listVibeAgents).toHaveBeenNthCalledWith(1, { includeDisabled: true });
+    expect(listVibeAgents).toHaveBeenNthCalledWith(1, { includeDisabled: true, cache: false });
     expect(listVibeAgents).toHaveBeenNthCalledWith(2, { includeDisabled: true, cache: false });
     expect(api.getRunningAgents).toHaveBeenCalledTimes(2);
 
@@ -204,5 +221,64 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.queryByText('stale-agent')).toBeNull();
     expect(listVibeAgents).toHaveBeenNthCalledWith(3, { includeDisabled: true, cache: false });
     expect(api.getRunningAgents).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes the selected full definition and keeps one stable subscription', async () => {
+    const first = brief('agent-a', 'before gap');
+    const second = brief('agent-b', 'another agent');
+    const changed = { ...first, description: 'after gap' };
+    const listVibeAgents = vi.fn()
+      .mockResolvedValueOnce(listResult([first, second]))
+      .mockResolvedValueOnce(listResult([changed, second]));
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(first, 'before prompt'))
+      .mockResolvedValueOnce(fullAgent(changed, 'after prompt'))
+      .mockResolvedValueOnce(fullAgent(second, 'second prompt'));
+    const api = makeApi(listVibeAgents, getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('before gap')).toBeTruthy());
+    expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
+
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.getByDisplayValue('after gap')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-a', { cache: false });
+    expect(api.getRunningAgents).toHaveBeenCalledTimes(2);
+
+    const secondRow = screen.getByText('agent-b').closest('button');
+    expect(secondRow).not.toBeNull();
+    fireEvent.click(secondRow!);
+    await waitFor(() => expect(screen.getByDisplayValue('another agent')).toBeTruthy());
+    expect(api.connectWorkbenchEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles organization onboarding inventory only from the gap owner', async () => {
+    const agent = brief('agent-a', 'agent');
+    const onboarding = (notOnboarded: number) => ({
+      ok: true,
+      available: true,
+      organization_id: 'org-1',
+      agents: [],
+      counts: { total: 1, system: 0, custom: 1, not_onboarded: notOnboarded, private: 1 - notOnboarded, published: 0, conflicts: 0 },
+    });
+    const getVibeAgentOnboarding = vi.fn()
+      .mockResolvedValueOnce(onboarding(1))
+      .mockResolvedValueOnce(onboarding(0));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), vi.fn().mockResolvedValue({ ok: false }), getVibeAgentOnboarding);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByText('agents.onboarding.notOnboardedCount:{"count":1}')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.getByText('agents.onboarding.notOnboardedCount:{"count":0}')).toBeTruthy());
+
+    expect(getVibeAgentOnboarding).toHaveBeenCalledTimes(2);
+    act(() => {
+      handlers?.onEventBridgeStatus?.({ connected: false });
+      handlers?.onEventBridgeStatus?.({ connected: true });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getVibeAgentOnboarding).toHaveBeenCalledTimes(2);
   });
 });
