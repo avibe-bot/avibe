@@ -967,7 +967,7 @@ class ShowRuntimeManager:
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
             command = self._install_manifest_runtime_locked(force=force, offline=offline)
         elif self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
-            command = self._install_archive_runtime(offline=offline)
+            command = self._install_archive_runtime(force=force, offline=offline)
         elif self.runtime_source == _RUNTIME_SOURCE_GITHUB:
             command = self._install_github_runtime(force=force)
         elif self.runtime_source == _RUNTIME_SOURCE_NPM:
@@ -2585,7 +2585,7 @@ class ShowRuntimeManager:
             return None
         return self._archive_runtime_command(self._archive_install_dir(), node)
 
-    def _install_archive_runtime(self, *, offline: bool | None = None) -> list[str] | None:
+    def _install_archive_runtime(self, *, force: bool, offline: bool | None = None) -> list[str] | None:
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
@@ -2597,7 +2597,7 @@ class ShowRuntimeManager:
         if not archive:
             return self._reuse_existing_archive_runtime(existing_command)
         archive_digest = _file_sha256(archive)
-        if not self.force_install and existing_command and self._archive_manifest_matches(archive_digest):
+        if not force and existing_command and self._archive_manifest_matches(archive_digest):
             self._install_reason = None
             return existing_command
         tmp_dir = Path(tempfile.mkdtemp(prefix="prebuilt-", dir=self.runtime_dir))
