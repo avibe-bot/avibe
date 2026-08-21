@@ -6,7 +6,7 @@ import clsx from 'clsx';
 
 import { useUnsavedChanges } from '../../context/useUnsavedChanges';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
-import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { useIsDesktop } from '../../lib/useIsDesktop';
 import { MobileAppHeader } from '../apps/MobileAppHeader';
 
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). The same IDE is
@@ -44,13 +44,6 @@ function readLaunch(state: unknown): LaunchFile | null {
   };
 }
 
-// Pick the surface ONCE at mount, deliberately NOT reactive: swapping between the mobile pane and the
-// desktop IDE on a mid-edit resize/rotate would unmount whichever holds the buffer and silently drop
-// unsaved edits. A phone that rotates keeps the surface it opened with.
-function useDesktopAtMount(): boolean {
-  return useState(isDesktopViewport)[0];
-}
-
 // Warn before a hard unload (refresh / tab close / leaving the SPA) while there are unsaved edits.
 // React Router's blocker handles in-app navigation separately.
 function useUnloadWarning(active: boolean): void {
@@ -73,7 +66,7 @@ const PaneLoading: React.FC = () => {
 export const AppsEditorPage: React.FC = () => {
   const { t } = useTranslation();
   const location = useLocation();
-  const desktop = useDesktopAtMount();
+  const desktop = useIsDesktop();
   const [dirty, setDirty] = useState(false);
   // Re-read whenever the router state changes (each navigation carries a fresh state object) so
   // opening another file while already on this route swaps the launch target.

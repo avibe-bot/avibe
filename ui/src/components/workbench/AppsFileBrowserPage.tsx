@@ -34,7 +34,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
-import { useIsDesktop } from '../../lib/useIsDesktop';
+import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -399,26 +399,26 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // routes correctly regardless of where it's called from.
   const openInEditor = useCallback(
     (path: string, filename: string, mtime: number | null) => {
-      if (isDesktop) {
+      if (isDesktopViewport()) {
         wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
       } else {
         routerNavigate('/apps/editor', { state: { path, filename, mtime } });
       }
     },
-    [isDesktop, wm, routerNavigate],
+    [wm, routerNavigate],
   );
 
   // Preview capability is shared across breakpoints; only its presentation differs. The caller
   // supplies resolved metadata when it has already been fetched (content hits / ambiguous names).
   const openPreview = useCallback(
     (item: RowItem, entry: FsEntry = item.entry, editable = isEditableFile(entry), mtime = entry.mtime) => {
-      if (isDesktop) {
+      if (isDesktopViewport()) {
         wm.openApp('preview', { title: entry.name, params: { path: item.full, name: entry.name } });
       } else {
         setPreview({ path: item.full, name: entry.name, mtime, editable });
       }
     },
-    [isDesktop, wm],
+    [wm],
   );
 
   // Open a terminal rooted at a folder ("Open Terminal Here"): desktop opens a Terminal window
@@ -426,13 +426,13 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // route with the dir in router state. Mirrors openInEditor.
   const openTerminalHere = useCallback(
     (dir: string) => {
-      if (isDesktop) {
+      if (isDesktopViewport()) {
         wm.openApp('terminal', { params: { cwd: dir } });
       } else {
         routerNavigate('/apps/terminal', { state: { cwd: dir } });
       }
     },
-    [isDesktop, wm, routerNavigate],
+    [wm, routerNavigate],
   );
 
   // Open: dir → navigate (and leave search); image / PDF / Office / Markdown → the standalone Preview
@@ -531,12 +531,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // hidden, so fall back to the inline create row so a file can still be made.
   const onNewFile = useCallback(() => {
     if (!cwd) return;
-    if (isDesktop) {
+    if (isDesktopViewport()) {
       wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
     } else {
       startNewEntry('file');
     }
-  }, [cwd, isDesktop, wm, t, startNewEntry]);
+  }, [cwd, wm, t, startNewEntry]);
 
   // ---- Rename (inline) + Delete ----------------------------------------------------------------
   const [rename, setRename] = useState<{ full: string } | null>(null);
