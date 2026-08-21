@@ -192,15 +192,6 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     config, ids = _setup_state(tmp_path)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id=ids["session_a"],
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
-    with engine.begin() as conn:
         conn.execute(
             scopes.update()
             .where(scopes.c.native_id == ids["project_a"])
@@ -300,6 +291,115 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     # the endpoint rather than being stopped by the remote execution gate.
     assert allowed_action.status_code != 403 or allowed_action.get_json().get("code") != "remote_execution_disabled"
     assert hidden_action.status_code != 403 or hidden_action.get_json().get("code") != "remote_execution_disabled"
+
+
+def test_member_project_mutations_are_bounded_by_the_acl_that_hides_them(monkeypatch, tmp_path) -> None:
+    """Instance role admits the route; the Project ACL still picks the Project.
+
+    ``can_manage_projects`` is instance-wide Project administration, but every
+    one of these routes names a single Project, and the instance role says
+    nothing about which. The middleware used to skip member-tier routes
+    entirely, so a member who knew an id could PATCH or archive a Project that
+    ``GET /api/projects`` and ``GET /api/projects/<id>`` already hid from them.
+
+    404 on every hidden Project, matching the read path: a 403/404 split would
+    let a caller enumerate the restricted Projects they are excluded from.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+
+    def _patch(client, project_id, headers, name):
+        return client.patch(
+            f"/api/projects/{project_id}",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+            json={"display_name": name},
+        )
+
+    def _archive(client, project_id, headers):
+        return client.delete(
+            f"/api/projects/{project_id}",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+        )
+
+    # Bound to neither Project: the list is empty, and so is what they can touch.
+    excluded = _remote_client(config, role="member", email="carol@example.com")
+    excluded_headers = csrf_headers(excluded, REMOTE_ORIGIN)
+    assert _get(excluded, "/api/projects").get_json()["projects"] == []
+    for project_id in (ids["project_a"], ids["project_b"]):
+        assert _get(excluded, f"/api/projects/{project_id}").status_code == 404
+        assert _patch(excluded, project_id, excluded_headers, "Stolen").status_code == 404
+        assert _archive(excluded, project_id, excluded_headers).status_code == 404
+
+    # An explicit editor binding is below "member", and that is the point: the
+    # floor for these routes is the ACL's visibility floor, so the Projects the
+    # list shows are exactly the Projects that can be mutated.
+    included = _remote_client(config, role="member", email="alice@example.com")
+    included_headers = csrf_headers(included, REMOTE_ORIGIN)
+    assert {row["id"] for row in _get(included, "/api/projects").get_json()["projects"]} == {
+        ids["project_a"]
+    }
+    renamed = _patch(included, ids["project_a"], included_headers, "Alice Renamed")
+    assert renamed.status_code == 200
+    assert renamed.get_json()["display_name"] == "Alice Renamed"
+    assert _patch(included, ids["project_b"], included_headers, "Stolen").status_code == 404
+    assert _archive(included, ids["project_b"], included_headers).status_code == 404
+    assert _archive(included, ids["project_a"], included_headers).status_code == 200
+
+
+def test_member_cannot_reach_a_hidden_project_through_its_folder(monkeypatch, tmp_path) -> None:
+    """``POST /api/projects`` is create-or-reuse, so it is also a Project lookup.
+
+    The middleware only sees routes that name a Project id, and this one names a
+    folder, so the whole visibility rule for it lives in the service. A member
+    excluded from the Project gets the same 404 the id-keyed routes answer with
+    -- not its payload, and not a revived copy of it.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    project_b_dir = str((tmp_path / "project-b").resolve())
+
+    # ``alice`` is bound to project_a only; project_b is restricted to a group
+    # she is not in, so it is hidden from her exactly as the list shows.
+    alice = _remote_client(config, role="member", email="alice@example.com")
+    headers = csrf_headers(alice, REMOTE_ORIGIN)
+    assert {row["id"] for row in _get(alice, "/api/projects").get_json()["projects"]} == {
+        ids["project_a"]
+    }
+
+    hidden = alice.post(
+        "/api/projects",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={"folder_path": project_b_dir, "display_name": "Stolen"},
+    )
+    assert hidden.status_code == 404
+    assert "project_b" not in json.dumps(hidden.get_json())
+
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    owner_view = {
+        row["id"]: row for row in _get(owner, "/api/projects").get_json()["projects"]
+    }
+    assert owner_view[ids["project_b"]]["display_name"] == "B"
+
+    # Reuse still works for a folder the caller can see, so the refusal above is
+    # the ACL and not create-or-reuse breaking.
+    project_a_dir = str((tmp_path / "project-a").resolve())
+    visible = alice.post(
+        "/api/projects",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=headers,
+        json={"folder_path": project_a_dir, "display_name": "Ignored On Reuse"},
+    )
+    assert visible.status_code == 201
+    assert visible.get_json()["id"] == ids["project_a"]
 
 
 def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_path) -> None:
@@ -467,6 +567,85 @@ def test_editor_config_write_always_answers_with_a_renderable_code(monkeypatch, 
     assert accepted.status_code == 200
     assert V2Config.load().ack_mode == "reaction"
     assert V2Config.load().runtime.default_cwd == "."
+
+
+def test_no_non_owner_can_persist_a_credential_through_the_config_write(monkeypatch, tmp_path) -> None:
+    """Persisting a secret is an Owner act, and the allowlist closes that by shape.
+
+    The write schema used to be selected with ``can_manage_instance``, which
+    stopped being an owner test once a member held that capability: the member
+    fell past the Editor allowlist into a filter that removed only
+    ``remote_access``, so platform bot tokens and gateway secrets reached the
+    save path and were reconciled onto the live platform.
+
+    The enumeration comes from ``api._PLATFORM_SECRET_FIELDS`` and
+    ``api._GATEWAY_SECRET_FIELDS`` rather than from the four fields a review
+    happened to name, and the assertion is over the allowlist rather than over
+    those tables: a secret added to either table -- or a credential-bearing
+    section nobody has written down yet -- is unreachable below Owner because
+    it is absent from ``_EDITOR_CONFIG_WRITE_FIELDS``, not because someone
+    remembered to strip it. ``remote_access`` rides the same rule, which is why
+    the pairing-specific filter it used to need is gone.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, _ids = _setup_state(tmp_path)
+
+    secret_sections = {
+        section: fields for section, fields in api._PLATFORM_SECRET_FIELDS.items()
+    }
+    secret_sections["remote_access"] = ("provider",)
+    secret_sections["gateway"] = api._GATEWAY_SECRET_FIELDS
+    assert set(secret_sections) & api._EDITOR_CONFIG_WRITE_FIELDS == set()
+
+    def _stored_secrets() -> dict:
+        loaded = V2Config.load()
+        state = {
+            f"{section}.{field}": getattr(getattr(loaded, section, None), field, None)
+            for section, fields in secret_sections.items()
+            if section != "remote_access"
+            for field in fields
+        }
+        cloud = loaded.remote_access.vibe_cloud
+        state["remote_access.instance_id"] = cloud.instance_id
+        state["remote_access.client_id"] = cloud.client_id
+        state["remote_access.session_secret"] = cloud.session_secret
+        return state
+
+    baseline = _stored_secrets()
+    assert baseline["slack.bot_token"] == ""
+    assert baseline["remote_access.instance_id"] == "inst_123"
+
+    for role in ("member", "editor"):
+        client = _remote_client(config, role=role, email=f"{role}@example.com")
+        headers = csrf_headers(client, REMOTE_ORIGIN)
+        for section, fields in secret_sections.items():
+            for field in fields:
+                response = client.post(
+                    "/api/config",
+                    base_url=REMOTE_ORIGIN,
+                    environ_base=REMOTE_PEER,
+                    headers=headers,
+                    json={section: {field: "stolen-credential"}},
+                )
+                assert response.status_code == 400, (role, section, field)
+                assert response.get_json()["error"] == {
+                    "code": "editor_config_write_forbidden",
+                    "message": "editor_config_write_forbidden",
+                }, (role, section, field)
+
+        # Refused, not merely unpersisted: the allowlisted preference still
+        # saves, so the refusals above are the schema and not a dead endpoint.
+        accepted = client.post(
+            "/api/config",
+            base_url=REMOTE_ORIGIN,
+            environ_base=REMOTE_PEER,
+            headers=headers,
+            json={"ack_mode": "reaction"},
+        )
+        assert accepted.status_code == 200, role
+
+    assert _stored_secrets() == baseline
+    assert V2Config.load().ack_mode == "reaction"
 
 
 def test_config_write_requires_an_object_body_whatever_the_role(monkeypatch, tmp_path) -> None:
@@ -984,7 +1163,7 @@ def test_show_page_payload_preserves_path_for_non_project_page_owner(monkeypatch
     assert payload["path"] == "/private/page"
 
 
-def test_show_page_payload_does_not_bypass_project_viewer_with_resource_manager(monkeypatch) -> None:
+def test_show_page_payload_project_viewer_downgrade_wins_over_instance_editor(monkeypatch) -> None:
     context = AuthorizationContext(
         instance_role="editor",
         email="alice@example.com",
@@ -1015,11 +1194,6 @@ def test_show_page_payload_does_not_bypass_project_viewer_with_resource_manager(
         lambda _conn, _session_id: "project-1",
     )
     monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
-    monkeypatch.setattr(
-        resource_access_service,
-        "can_manage_resource_acl",
-        lambda _context, _kind, _resource_id, *, connection: True,
-    )
 
     payload = ui_server._show_page_response_for_request(
         {"ok": True, "session_id": "project-session", "path": "/private/page"},
@@ -1060,11 +1234,6 @@ def test_show_page_payload_does_not_treat_inaccessible_project_as_unscoped(monke
         lambda _conn, _session_id: "project-removed-binding",
     )
     monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: True)
-    monkeypatch.setattr(
-        resource_access_service,
-        "can_manage_resource_acl",
-        lambda _context, _kind, _resource_id, *, connection: True,
-    )
 
     payload = ui_server._show_page_response_for_request(
         {"ok": True, "session_id": "project-session", "path": "/private/page"},
@@ -1095,11 +1264,6 @@ def test_show_page_payload_redacts_path_when_session_is_missing(monkeypatch) -> 
 
     monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
     monkeypatch.setattr(project_access_service, "session_exists", lambda _conn, _session_id: False)
-    monkeypatch.setattr(
-        resource_access_service,
-        "can_manage_resource_acl",
-        lambda _context, _kind, _resource_id, *, connection: True,
-    )
 
     payload = ui_server._show_page_response_for_request(
         {"ok": True, "session_id": "deleted-session", "path": "/private/page"},
@@ -1122,16 +1286,6 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         organization_role="member",
         is_remote=True,
     )
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        resource_access_service.ensure_resource_policy(
-            conn,
-            resource_kind="show_page",
-            resource_id=ids["session_a"],
-            organization_id="org-1",
-            owner_user_id="owner-1",
-            access_level="public",
-        )
     visible_payload = json.dumps({"type": "session.status", "data": {"session_id": ids["session_a"]}})
     hidden_payload = json.dumps({"type": "session.status", "data": {"session_id": ids["session_b"]}})
     assert ui_server._workbench_event_visible_to_context(context, "session.status", visible_payload) is True
@@ -1164,11 +1318,14 @@ def test_project_access_filters_sse_and_show_websocket(monkeypatch, tmp_path) ->
         minimum_role="viewer",
         project_session_id=ids["session_a"],
     ) is True
+    # §3.2: /show admission follows the Instance role alone, independent of the
+    # Project ACL, so the show websocket authorizes a page outside the caller's
+    # Project access exactly like an in-Project one (a Viewer enters every page).
     assert ui_server._show_runtime_websocket_authorized(
         websocket,
         minimum_role="viewer",
         project_session_id=ids["session_b"],
-    ) is False
+    ) is True
 
 
 def test_terminal_websocket_requires_editor_role_without_a_project(monkeypatch, tmp_path) -> None:

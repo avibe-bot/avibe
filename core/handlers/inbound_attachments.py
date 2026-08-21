@@ -9,96 +9,24 @@ import os
 import re
 import secrets
 import stat
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from config import paths
 from core.audio_asr import AUDIO_SIGNATURE_SAMPLE_BYTES, detect_audio_mime_from_sample
+from core.inbound_attachment_lease import (
+    InboundAttachmentLease,
+    LeasedAttachmentRecord,
+    leased_attachment_records,
+    open_leased_attachment_record,
+)
 from modules.im.base import FileAttachment, FileDownloadResult, MessageContext
 from vibe.i18n import t as i18n_t
 
 
 _MAX_FILENAME_BYTES = 200
 _SAFE_FILENAME = re.compile(r"[^\w.\-]", re.UNICODE)
-_LEASE_ID = re.compile(r"[0-9a-f]{32}")
-
-
-@dataclass(frozen=True, slots=True)
-class _LeasedAttachmentRecord:
-    name: str
-    mimetype: str
-    declared_size: int | None
-    size: int
-    path: Path
-    device: int
-    inode: int
-    sha256: str
-
-
-class _LeaseState:
-    def __init__(
-        self,
-        root: Path,
-        directory: Path,
-        root_fd: int,
-        directory_fd: int,
-    ) -> None:
-        self.root = root
-        self.directory = directory
-        self.root_fd = root_fd
-        self.directory_fd = directory_fd
-        self.records: tuple[_LeasedAttachmentRecord, ...] = ()
-        self.references = 1
-        self.adopted = False
-        self.lock = threading.Lock()
-
-
-class InboundAttachmentLease:
-    """Opaque reference to one private set of materialized native files."""
-
-    __slots__ = ("__state", "__released")
-
-    def __init__(self, state: _LeaseState) -> None:
-        self.__state = state
-        self.__released = False
-
-    def retain(self) -> "InboundAttachmentLease":
-        """Return an independent reference to the same immutable file set."""
-
-        state = self.__state
-        with state.lock:
-            if self.__released or state.references <= 0:
-                raise RuntimeError("attachment lease is no longer active")
-            state.references += 1
-        return InboundAttachmentLease(state)
-
-    def adopt(self) -> None:
-        """Transfer final-file ownership to the ordinary Agent attachment path."""
-
-        state = self.__state
-        with state.lock:
-            if self.__released or state.references <= 0:
-                raise RuntimeError("attachment lease is no longer active")
-            state.adopted = True
-
-    def release(self) -> None:
-        """Release this reference and remove unadopted files after the last user."""
-
-        state = self.__state
-        with state.lock:
-            if self.__released:
-                return
-            self.__released = True
-            state.references -= 1
-            last_reference = state.references == 0
-            remove = last_reference and (not state.adopted or not state.records)
-        if remove:
-            _remove_lease_directory(state)
-        elif last_reference:
-            os.close(state.directory_fd)
-            os.close(state.root_fd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,11 +56,30 @@ class InboundAttachmentMaterializer:
     ) -> None:
         home = paths.get_vibe_remote_dir() if effective_home is None else effective_home
         self._home = Path(os.path.abspath(os.path.expanduser(os.fspath(home))))
-        self._root = (
-            self._home / "attachments" / "im"
-            if attachments_root is None
-            else Path(attachments_root) / "im"
-        )
+        # The anchor is trusted and resolved once; every component below it is
+        # Avibe-owned and stays under a per-component no-follow walk.
+        anchor = paths.physical_home(self._home)
+        if attachments_root is None:
+            owned_parts: tuple[str, ...] = ("attachments", "im")
+        else:
+            declared_root = Path(os.path.abspath(os.path.expanduser(os.fspath(attachments_root))))
+            relative_parts = _owned_parts_below(anchor, self._home, declared_root)
+            if relative_parts is None:
+                # A declared root outside the home is its own anchor, on the same
+                # rule as the home: the path reaching it is operator config, and
+                # Avibe only owns what it creates underneath.
+                anchor = paths.physical_home(declared_root)
+                owned_parts = ("im",)
+            else:
+                # Every component between the home and a declared root inside it
+                # is Avibe-owned space, so all of them stay in the no-follow walk
+                # instead of being resolved: a symlink planted at an intermediate
+                # component such as ``<home>/custom`` must not redirect leases out
+                # of the tree.
+                owned_parts = (*relative_parts, "im")
+        self._anchor = anchor
+        self._owned_parts = owned_parts
+        self._root = anchor.joinpath(*owned_parts)
 
     async def materialize(
         self,
@@ -144,7 +91,7 @@ class InboundAttachmentMaterializer:
         max_concurrency: int = 1,
         language: str = "en",
     ) -> MaterializedAttachmentBatch:
-        root_fd = _open_or_create_private_directory(self._root)
+        root_fd = _open_or_create_private_directory(self._anchor, self._owned_parts)
         lease_id = secrets.token_hex(16)
         lease_dir = self._root / lease_id
         lease_fd: int | None = None
@@ -157,8 +104,12 @@ class InboundAttachmentMaterializer:
                 os.close(lease_fd)
             os.close(root_fd)
             raise
-        state = _LeaseState(self._root, lease_dir, root_fd, lease_fd)
-        lease = InboundAttachmentLease(state)
+        lease = InboundAttachmentLease.create(
+            root=self._root,
+            directory=lease_dir,
+            root_fd=root_fd,
+            directory_fd=lease_fd,
+        )
 
         candidates = tuple(
             attachment
@@ -185,13 +136,13 @@ class InboundAttachmentMaterializer:
             outcomes = await asyncio.gather(
                 *(acquire(index, attachment) for index, attachment in enumerate(candidates))
             )
-            _verify_lease_directory_entry(state)
+            lease.verify_directory()
         except BaseException:
             lease.release()
             raise
 
         attachments: list[FileAttachment] = []
-        records: list[_LeasedAttachmentRecord] = []
+        records: list[LeasedAttachmentRecord] = []
         errors: list[str] = []
         display_errors: list[str] = []
         for outcome in outcomes:
@@ -203,7 +154,7 @@ class InboundAttachmentMaterializer:
             attachments.append(attachment)
             if record is not None:
                 records.append(record)
-        state.records = tuple(records)
+        lease.publish_records(tuple(records))
         return MaterializedAttachmentBatch(
             tuple(attachments),
             tuple(errors),
@@ -223,7 +174,7 @@ class InboundAttachmentMaterializer:
         max_bytes: int | None,
         timeout_seconds: int,
         language: str,
-    ) -> tuple[FileAttachment, _LeasedAttachmentRecord | None] | _MaterializationFailure:
+    ) -> tuple[FileAttachment, LeasedAttachmentRecord | None] | _MaterializationFailure:
         if attachment.local_path and Path(attachment.local_path).is_file():
             size = attachment.size
             if size is None:
@@ -320,7 +271,7 @@ class InboundAttachmentMaterializer:
                 local_path=str(final_path),
                 size=size,
             )
-            outcome = snapshot, _LeasedAttachmentRecord(
+            outcome = snapshot, LeasedAttachmentRecord(
                 name=name,
                 mimetype=mimetype,
                 declared_size=declared_size,
@@ -346,59 +297,6 @@ class InboundAttachmentMaterializer:
                     os.close(partial_fd)
                 except OSError:
                     pass
-
-
-def leased_attachment_records(
-    lease: InboundAttachmentLease,
-) -> tuple[Path, int, tuple[_LeasedAttachmentRecord, ...]]:
-    """Snapshot an active lease and duplicate its anchored directory descriptor."""
-
-    if type(lease) is not InboundAttachmentLease:
-        raise ValueError("invalid attachment lease")
-    state = lease._InboundAttachmentLease__state
-    released = lease._InboundAttachmentLease__released
-    with state.lock:
-        if released or state.references <= 0 or _LEASE_ID.fullmatch(state.directory.name) is None:
-            raise ValueError("attachment lease is no longer active")
-        records = state.records
-        try:
-            directory_fd = os.dup(state.directory_fd)
-        except OSError as error:
-            raise ValueError("attachment lease is no longer active") from error
-    return state.root, directory_fd, records
-
-
-def open_leased_attachment_record(
-    directory_fd: int,
-    record: _LeasedAttachmentRecord,
-) -> tuple[int, os.stat_result]:
-    """Open the exact materialized inode relative to its retained lease directory."""
-
-    if type(record) is not _LeasedAttachmentRecord:
-        raise ValueError("invalid leased attachment record")
-    filename = record.path.name
-    if not filename or Path(filename).name != filename:
-        raise ValueError("invalid leased attachment record")
-    try:
-        descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
-    except OSError as error:
-        raise ValueError("leased attachment is unavailable") from error
-    try:
-        info = os.fstat(descriptor)
-        getuid = getattr(os, "getuid", None)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or (callable(getuid) and info.st_uid != getuid())
-            or info.st_dev != record.device
-            or info.st_ino != record.inode
-            or info.st_size != record.size
-        ):
-            raise ValueError("leased attachment no longer matches its materialized inode")
-        return descriptor, info
-    except BaseException:
-        os.close(descriptor)
-        raise
 
 
 def _download_info(context: MessageContext, attachment: FileAttachment) -> dict[str, Any]:
@@ -490,18 +388,6 @@ def _file_create_flags() -> int:
     )
 
 
-def _file_read_flags() -> int:
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    if no_follow is None:
-        raise RuntimeError("attachment leases require no-follow filesystem support")
-    return (
-        os.O_RDONLY
-        | int(no_follow)
-        | int(getattr(os, "O_NONBLOCK", 0))
-        | int(getattr(os, "O_CLOEXEC", 0))
-    )
-
-
 def _descriptor_path(descriptor: int) -> str:
     root = "/dev/fd" if Path("/dev/fd").is_dir() else "/proc/self/fd"
     return f"{root}/{descriptor}"
@@ -535,50 +421,47 @@ def _unlink_at_quietly(parent_fd: int, name: str) -> None:
         pass
 
 
-def _verify_lease_directory_entry(state: _LeaseState) -> None:
-    expected = os.fstat(state.directory_fd)
-    observed = os.stat(
-        state.directory.name,
-        dir_fd=state.root_fd,
-        follow_symlinks=False,
-    )
-    if (
-        not stat.S_ISDIR(observed.st_mode)
-        or observed.st_dev != expected.st_dev
-        or observed.st_ino != expected.st_ino
-    ):
-        raise OSError("attachment lease directory changed during materialization")
+def _owned_parts_below(
+    anchor: Path,
+    home: Path,
+    declared_root: Path,
+) -> tuple[str, ...] | None:
+    """Components from the home down to ``declared_root``, or ``None`` if outside.
+
+    A declared root under the home is accepted in either spelling: as written
+    against the logical home, or already resolved against the physical one. The
+    returned components are relative to the anchor either way, so the caller can
+    keep every one of them inside the ``O_NOFOLLOW`` walk.
+    """
+
+    for base in (home, anchor):
+        if declared_root.is_relative_to(base):
+            return declared_root.relative_to(base).parts
+    return None
 
 
-def _remove_lease_directory(state: _LeaseState) -> None:
-    try:
-        try:
-            names = os.listdir(state.directory_fd)
-        except OSError:
-            names = []
-        for name in names:
-            try:
-                os.unlink(name, dir_fd=state.directory_fd)
-            except OSError:
-                pass
-        try:
-            _verify_lease_directory_entry(state)
-            os.rmdir(state.directory.name, dir_fd=state.root_fd)
-        except OSError:
-            pass
-    finally:
-        os.close(state.directory_fd)
-        os.close(state.root_fd)
+def _open_or_create_private_directory(anchor: Path, owned_parts: tuple[str, ...]) -> int:
+    """Create a private root while refusing symlinks in every owned component.
 
+    ``anchor`` is the already-resolved trust anchor -- the Avibe home, or a
+    declared root the operator put outside it: the operator owns the path that
+    reaches it, so it is opened in one step and its own symlinked parents stay
+    legal. ``owned_parts`` are every component Avibe creates underneath, and
+    each one is opened with ``O_NOFOLLOW`` so a planted symlink cannot redirect
+    a lease outside Avibe-owned storage.
+    """
 
-def _open_or_create_private_directory(directory: Path) -> int:
-    """Create a private root while refusing symlinks in every path component."""
-
-    if not directory.is_absolute():
+    if not anchor.is_absolute():
         raise RuntimeError("attachment lease root must be absolute")
-    descriptor = os.open(directory.anchor, _directory_open_flags())
+    if not owned_parts or any(part in {"", ".", ".."} for part in owned_parts):
+        raise RuntimeError("attachment lease root must name owned components")
     try:
-        for component in directory.parts[1:]:
+        descriptor = os.open(anchor, _directory_open_flags())
+    except FileNotFoundError:
+        os.makedirs(anchor, mode=0o700, exist_ok=True)
+        descriptor = os.open(anchor, _directory_open_flags())
+    try:
+        for component in owned_parts:
             try:
                 next_descriptor = os.open(
                     component,

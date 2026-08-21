@@ -13,10 +13,22 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union, get_args
+from typing import (
+    Callable,
+    ClassVar,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    TypeVar,
+    Union,
+    get_args,
+)
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.platform_registry import (
     WORKBENCH_PLATFORM_ID,
     get_platform_descriptor,
@@ -33,91 +45,27 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
-_memory_config_tx_state = threading.local()
+
+#: How long a config write waits for a peer process before giving up. Config
+#: writes are small and bounded, so a wait this long says the holder is stuck
+#: rather than busy, and a settings save that fails is better than one that
+#: never returns.
+CONFIG_FILE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
-def _acquire_memory_config_file_lock(descriptor: int) -> None:
-    """Acquire a cross-process exclusive lock with a platform-supported API."""
+def _path_file_lock(lock_path: Path, *, timeout_seconds: float | None):
+    """The shared cross-process lock for one path.
 
-    if os.name == "nt":
-        import msvcrt
+    Nesting is safe, and that is why this file no longer keeps a lock of its
+    own: ``MigrationFileLock`` is re-entrant per path and thread, which both
+    transactions here used to hand-roll as a thread-local depth counter beside
+    a private descriptor and a private copy of the platform lock calls.
+    """
 
-        # Lock one byte of the file; Windows keeps the range until unlocked.
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        try:
-            os.write(descriptor, b"\0")
-        except OSError:
-            pass
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
-        return
-    import fcntl
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
 
-    fcntl.flock(descriptor, fcntl.LOCK_EX)
-
-
-def _release_memory_config_file_lock(descriptor: int) -> None:
-    """Release the cross-process exclusive lock acquired by the helper above."""
-
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-    except Exception:
-        pass
-
-
-def _fsync_directory(path: Path) -> None:
-    """Best-effort durability for a replaced directory entry."""
-
-    flags = getattr(os, "O_DIRECTORY", None)
-    if flags is None:
-        return
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Replace one text file durably without retaining a failed temp file."""
-
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-        text=True,
-    )
-    temporary: Path | None = Path(temp_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            descriptor = -1
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        _fsync_directory(path.parent)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+    return MigrationFileLock(lock_path, timeout_seconds=timeout_seconds)
 
 
 @contextmanager
@@ -130,36 +78,21 @@ def _memory_config_transaction(config_path: Path) -> Iterator[None]:
 
     Lock order is always ``CONFIG_LOCK`` then the file lock, matching existing
     callers that already hold ``CONFIG_LOCK`` when they enter ``save_config``.
-    Nested acquisitions only re-enter the process lock.
+    Nesting re-enters both: ``MigrationFileLock`` is re-entrant per path and
+    thread, which is what this used to hand-roll as a thread-local depth counter
+    beside its own descriptor and its own platform lock calls.
     """
 
-    depth = getattr(_memory_config_tx_state, "depth", 0)
-    if depth > 0:
-        with CONFIG_LOCK:
-            yield
-        return
-
     lock_path = config_path.parent / "memory-config.tx.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        lock_path,
-        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
-    _memory_config_tx_state.depth = 1
     # CONFIG_LOCK first so threads that already hold it (remote_access/settings
     # helpers) never wait on the file lock while another waiter holds the file
     # lock and waits for CONFIG_LOCK.
     with CONFIG_LOCK:
-        try:
-            _acquire_memory_config_file_lock(descriptor)
-            try:
-                yield
-            finally:
-                _release_memory_config_file_lock(descriptor)
-        finally:
-            _memory_config_tx_state.depth = 0
-            os.close(descriptor)
+        # Unbounded, as this always was: the section holds a config read-modify-
+        # write, so the only way to wait forever is for a live peer to still be
+        # inside one.
+        with _path_file_lock(lock_path, timeout_seconds=None):
+            yield
 
 
 @contextmanager
@@ -172,8 +105,8 @@ def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2
     fields (the stale-snapshot race ``CONFIG_LOCK`` cannot fix because it
     is process-local while the UI API and controller are separate
     processes). Lock order and re-entrancy match the Memory transaction:
-    ``CONFIG_LOCK`` first, then the file lock; nested acquisitions
-    re-enter the process lock only.
+    ``CONFIG_LOCK`` first, then the file lock; both are re-entrant, so a
+    nested transaction on the same config takes the same pair.
 
     Yields a freshly loaded ``V2Config``; mutate it in place and it is
     saved on clean context exit. Mutator exceptions abort with no write.
@@ -287,11 +220,18 @@ DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
-# A provider runtime can keep an accepted OpenCode prompt in retry forever without
-# surfacing a terminal message. Bound that lifecycle independently of per-request
-# HTTP timeouts; 90 minutes matches the watchdog threshold reported in #1190 and
-# remains adjustable for workloads that legitimately need longer turns.
-DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
+# OpenCode >= 1.18.x bounds its own provider retries (RETRY_MAX_RETRIES = 5) and
+# writes the exhausted error onto the assistant message, which the poll loop's
+# error-driven settlement already turns into a failed terminal result. The
+# historical wall-clock cap from #1197 therefore default-offs here: a positive
+# value is an explicit opt-in for operators who still want a hard bound.
+DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 0
+# The shipped default before the opt-in change. A settings save materializes the
+# whole ``agents.opencode`` section, so a persisted value equal to this constant
+# is the old default's echo rather than an operator's choice; load-time
+# migration neutralizes exactly that value. Any other value is an explicit
+# choice and survives the migration.
+LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS = 90 * 60
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
@@ -892,9 +832,48 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     return migrated_payload, True, tuple(warnings)
 
 
+def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
+    """Neutralize the legacy wall-clock default echo on reload, once.
+
+    Configs saved while the cap shipped carry
+    ``agents.opencode.active_turn_timeout_seconds: 5400`` because a settings
+    save materializes the whole section. That value names the old default, not
+    an operator's choice, so exactly that value rewrites to the disabled
+    default. ``legacy_turn_timeout_neutralized`` is the provenance marker: a
+    config written under the opt-in semantics carries it, so a deliberate
+    5400-second choice saved afterwards survives every later load. Idempotent:
+    once rewritten (or never eligible) the pattern never matches again.
+    """
+
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return payload
+    opencode = agents.get("opencode")
+    if not isinstance(opencode, dict):
+        return payload
+    if "legacy_turn_timeout_neutralized" in opencode:
+        return payload
+    if (
+        opencode.get("active_turn_timeout_seconds")
+        != LEGACY_DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    ):
+        return payload
+    migrated = dict(payload)
+    migrated_agents = dict(agents)
+    migrated_opencode = dict(opencode)
+    migrated_opencode["active_turn_timeout_seconds"] = (
+        DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    )
+    migrated_opencode["legacy_turn_timeout_neutralized"] = True
+    migrated_agents["opencode"] = migrated_opencode
+    migrated["agents"] = migrated_agents
+    return migrated
+
+
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated = _migrate_fixed_menu_routes_on_load(migrated)
+    migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
     return migrated, changed, warnings
 
 
@@ -1059,6 +1038,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     match = re.search(r"Config '([^']+)'", message)
     if match:
         path = match.group(1)
+        if path == "memory.cloud" or path.startswith("memory.cloud."):
+            return "memory.cloud"
         if path.startswith("memory.processing.rerank"):
             return "memory.rerank"
         if path.startswith("memory.processing.multimodal"):
@@ -1118,6 +1099,15 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
     de-duplicating — as a whole, which is what stops the recovery loop.
     """
 
+    if section == "memory.cloud":
+        match = re.search(r"Config '([^']+)'", str(error))
+        if not match:
+            return None
+        path = match.group(1)
+        prefix = "memory.cloud."
+        if not path.startswith(prefix):
+            return None
+        return path[len(prefix) :].split(".", 1)[0]
     if section not in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return None
     match = re.search(r"Config '([^']+)'", str(error))
@@ -1181,6 +1171,94 @@ def _recover_switch_section_field(
     return False
 
 
+def _memory_cloud_recovery_requires_managed_fence(payload: dict) -> bool:
+    """Fail closed when a paired instance is not authoritatively personal."""
+
+    remote_access = payload.get("remote_access")
+    if not isinstance(remote_access, dict):
+        return False
+    vibe_cloud = remote_access.get("vibe_cloud")
+    if not isinstance(vibe_cloud, dict):
+        return False
+    instance_kind = vibe_cloud.get("instance_kind")
+    if instance_kind == "personal":
+        return False
+    if instance_kind == "organization":
+        return True
+    return bool(
+        vibe_cloud.get("enabled") is True
+        and isinstance(vibe_cloud.get("instance_id"), str)
+        and vibe_cloud.get("instance_id", "").strip()
+        and isinstance(vibe_cloud.get("instance_secret"), str)
+        and vibe_cloud.get("instance_secret", "").strip()
+    )
+
+
+def _arm_memory_cloud_recovery(memory: dict) -> None:
+    """Keep an unknown cloud identity behind the existing rebuild ladder."""
+
+    if memory.get("recovery_intent") is None:
+        memory["recovery_intent"] = "rebuild"
+
+
+def _recover_memory_cloud_section(payload: dict, field_name: Optional[str]) -> bool:
+    """Recover one cloud-cache member without losing valid runtime ownership."""
+
+    memory = payload.get("memory")
+    if not isinstance(memory, dict):
+        return False
+    cloud = memory.get("cloud")
+    managed_fence = _memory_cloud_recovery_requires_managed_fence(payload)
+    if not isinstance(cloud, dict) or field_name is None:
+        if managed_fence:
+            memory["cloud"] = {
+                "scope": "organization",
+                "organization_attached": True,
+                "runtime_apply_pending": True,
+            }
+            _arm_memory_cloud_recovery(memory)
+        else:
+            memory["cloud"] = {}
+            if memory.get("mode") == "platform":
+                _arm_memory_cloud_recovery(memory)
+        return True
+
+    cloud.pop(field_name, None)
+    if field_name == "runtime_apply_pending":
+        cloud["runtime_apply_pending"] = True
+    elif field_name == "memory_llm_source":
+        # A source mismatch means the cached effective LLM cannot be trusted.
+        # Keep the rest of the cloud identity for diagnostics, but fail closed
+        # until the next authoritative status refresh supplies a new pair.
+        capabilities = cloud.get("capabilities")
+        if isinstance(capabilities, dict):
+            capabilities["memory_llm"] = False
+    elif field_name == "applied_embedding_identity":
+        live_identity = cloud.get("embedding_identity")
+        if isinstance(live_identity, str) and live_identity.strip():
+            cloud["applied_embedding_identity"] = live_identity
+        else:
+            _arm_memory_cloud_recovery(memory)
+    elif field_name == "source_instance_id":
+        cloud["capabilities"] = {}
+        cloud["embedding_identity"] = None
+        cloud["model_access_key"] = None
+        cloud["proxy_base_url"] = None
+        _arm_memory_cloud_recovery(memory)
+
+    if managed_fence and field_name in {
+        "scope",
+        "organization_attached",
+        "transition_notice_pending",
+    }:
+        cloud["scope"] = "organization"
+        cloud["organization_attached"] = True
+        cloud["transition_notice_pending"] = False
+        cloud["transition_rebuild_owned"] = False
+        _arm_memory_cloud_recovery(memory)
+    return True
+
+
 def _reset_recoverable_config_section(
     payload: dict, section: str, field_name: Optional[str] = None
 ) -> bool:
@@ -1207,6 +1285,8 @@ def _reset_recoverable_config_section(
             return False
         processing.pop("multimodal", None)
         return True
+    if section == "memory.cloud":
+        return _recover_memory_cloud_section(payload, field_name)
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
         # required cwd, so an empty object would make the recovery loop fail a
@@ -1347,20 +1427,39 @@ def _backup_config_file(
 
 
 def _config_file_lock(path: Path):
-    """Return the shared cross-process lock for one config path."""
+    """The shared cross-process lock guarding one config file."""
 
-    # Import lazily because storage's package initializer imports V2Config.
-    from storage.lock import MigrationFileLock
+    return _path_file_lock(
+        path.with_name(f".{path.name}.lock"),
+        timeout_seconds=CONFIG_FILE_LOCK_TIMEOUT_SECONDS,
+    )
 
-    return MigrationFileLock(path.with_name(f".{path.name}.lock"))
+
+@contextmanager
+def config_file_lock(config_path: Optional[Path] = None) -> Iterator[None]:
+    """Serialize work that must observe one exact persisted config snapshot.
+
+    This is the same cross-process transaction used by ``V2Config.save`` and
+    ``config_write_transaction``. It also takes the migration lock used by
+    ``V2Config.load`` while persisting migrations, so ordinary saves cannot
+    replace a file between migration verification and replacement. Keeping one
+    lock path for ordinary config writes and guarded state transitions prevents
+    a pairing update from racing a reader that is about to persist
+    instance-owned state.
+    """
+
+    path = config_path or paths.get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _memory_config_transaction(path):
+        with _config_file_lock(path):
+            yield
 
 
 def _write_config_payload(path: Path, payload: dict) -> None:
     content = json.dumps(payload, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with CONFIG_LOCK:
-        with _config_file_lock(path):
-            _atomic_write_text(path, content)
+    with config_file_lock(path):
+        write_atomic(path, content)
 
 
 def _write_config_payload_if_unchanged(
@@ -1705,6 +1804,16 @@ class AudioAsrConfig:
 _MEMORY_MAX_URL_BYTES = 2048
 _MEMORY_MAX_MODEL_BYTES = 512
 _MEMORY_MAX_API_KEY_BYTES = 16 * 1024
+_MEMORY_CLOUD_MODEL_ALIAS = "avibe-cloud-chat"
+_MEMORY_CLOUD_MULTIMODAL_ALIAS = "avibe-cloud-multimodal"
+
+MemoryMode = Literal["platform", "custom"]
+MemoryCloudScope = Literal["organization", "platform"]
+MemoryCloudLlmSource = Literal["dedicated", "chat_fallback"]
+MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
+MEMORY_RERANK_PROVIDERS = frozenset(get_args(MemoryRerankProvider))
+DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
+DASHSCOPE_RERANK_MODEL = "gte-rerank-v2"
 
 
 @dataclass
@@ -1714,18 +1823,53 @@ class MemoryEndpointConfig:
     base_url: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = field(default=None, repr=False)
+    provider: Optional[str] = None
 
     def validate(self, *, name: str) -> None:
-        self.base_url = _validate_memory_url(self.base_url, name=name)
+        self.base_url = _validate_memory_url(
+            self.base_url,
+            path=f"memory.processing.{name}.base_url",
+        )
         self.model = _validate_memory_text(
             self.model,
             name=f"memory.processing.{name}.model",
             maximum=_MEMORY_MAX_MODEL_BYTES,
         )
-        self.api_key = _validate_memory_key(self.api_key, name=name)
+        self.api_key = _validate_memory_key(
+            self.api_key,
+            path=f"memory.processing.{name}.api_key",
+        )
+        if name != "rerank":
+            self.provider = None
+            return
+        if not any((self.base_url, self.model, self.api_key)):
+            self.provider = None
+            return
+        provider = (self.provider or "").strip() or _inferred_memory_rerank_provider(
+            base_url=self.base_url,
+            model=self.model,
+        )
+        if provider not in MEMORY_RERANK_PROVIDERS:
+            raise ValueError(
+                "Memory rerank endpoint provider must be deepinfra, vllm, or dashscope"
+            )
+        if provider == "dashscope" and self.model != DASHSCOPE_RERANK_MODEL:
+            raise ValueError(
+                "Memory DashScope rerank endpoint model must be gte-rerank-v2"
+            )
+        self.provider = provider
 
     def complete(self) -> bool:
         return bool(self.base_url and self.model and self.api_key)
+
+    def rerank_provider(self) -> MemoryRerankProvider:
+        provider = (self.provider or "").strip()
+        if provider in MEMORY_RERANK_PROVIDERS:
+            return provider
+        return _inferred_memory_rerank_provider(
+            base_url=self.base_url,
+            model=self.model,
+        )
 
 
 @dataclass
@@ -1740,7 +1884,13 @@ class MemoryProcessingConfig:
         self.embedding.validate(name="embedding")
         if self.rerank is not None:
             self.rerank.validate(name="rerank")
-            if not any((self.rerank.base_url, self.rerank.model, self.rerank.api_key)):
+            if not any(
+                (
+                    self.rerank.base_url,
+                    self.rerank.model,
+                    self.rerank.api_key,
+                )
+            ):
                 self.rerank = None
             elif not self.rerank.complete():
                 raise ValueError(
@@ -1760,6 +1910,131 @@ class MemoryProcessingConfig:
                 raise ValueError(
                     "Memory multimodal endpoint must include base_url, model, and api_key"
                 )
+
+
+@dataclass
+class MemoryCloudCapabilities:
+    asr: bool = False
+    chat: bool = False
+    embedding: bool = False
+    multimodal: bool = False
+    # Older persisted cloud caches did not have the effective Memory LLM
+    # capability. ``None`` keeps that shape distinguishable while the helper
+    # methods treat it as Chat fallback until the next status sync.
+    memory_llm: bool | None = None
+
+    def validate(self) -> None:
+        if any(
+            not isinstance(value, bool)
+            for value in (
+                self.asr,
+                self.chat,
+                self.embedding,
+                self.multimodal,
+            )
+        ) or (self.memory_llm is not None and not isinstance(self.memory_llm, bool)):
+            raise ValueError("Config 'memory.cloud.capabilities' values must be booleans")
+
+    def memory_available(self) -> bool:
+        effective_memory_llm = self.chat if self.memory_llm is None else self.memory_llm
+        return effective_memory_llm and self.embedding
+
+
+@dataclass
+class MemoryCloudConfig:
+    """Cached Cloud Model Service resolution and write-only model key."""
+
+    scope: MemoryCloudScope | None = None
+    capabilities: MemoryCloudCapabilities = field(default_factory=MemoryCloudCapabilities)
+    memory_llm_source: MemoryCloudLlmSource | None = None
+    embedding_identity: str | None = None
+    revision: int | None = None
+    quota_enforced: bool = False
+    model_access_key: str | None = field(default=None, repr=False)
+    proxy_base_url: str | None = None
+    source_instance_id: str = ""
+    organization_attached: bool = False
+    transition_notice_pending: bool = False
+    transition_rebuild_owned: bool = False
+    applied_embedding_identity: str | None = None
+    runtime_apply_pending: bool = False
+
+    def validate(self) -> None:
+        if self.scope is not None and self.scope not in get_args(MemoryCloudScope):
+            raise ValueError("Config 'memory.cloud.scope' must be 'organization', 'platform', or null")
+        if self.memory_llm_source is not None and self.memory_llm_source not in get_args(
+            MemoryCloudLlmSource
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' must be 'dedicated', 'chat_fallback', or null"
+            )
+        self.capabilities.validate()
+        if self.memory_llm_source == "dedicated" and self.capabilities.memory_llm is False:
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' dedicated requires memory_llm"
+            )
+        if (
+            self.memory_llm_source == "chat_fallback"
+            and self.capabilities.memory_llm is not None
+            and self.capabilities.memory_llm != self.capabilities.chat
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' chat_fallback requires chat"
+            )
+        if self.embedding_identity is not None:
+            self.embedding_identity = _validate_memory_text(
+                self.embedding_identity,
+                name="memory.cloud.embedding_identity",
+                maximum=_MEMORY_MAX_MODEL_BYTES,
+            )
+        if self.applied_embedding_identity is not None:
+            self.applied_embedding_identity = _validate_memory_text(
+                self.applied_embedding_identity,
+                name="memory.cloud.applied_embedding_identity",
+                maximum=_MEMORY_MAX_MODEL_BYTES,
+            )
+        if self.revision is not None and (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 0
+        ):
+            raise ValueError("Config 'memory.cloud.revision' must be a non-negative integer or null")
+        for name, value in (
+            ("quota_enforced", self.quota_enforced),
+            ("organization_attached", self.organization_attached),
+            ("transition_notice_pending", self.transition_notice_pending),
+            ("transition_rebuild_owned", self.transition_rebuild_owned),
+            ("runtime_apply_pending", self.runtime_apply_pending),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"Config 'memory.cloud.{name}' must be a boolean")
+        if not isinstance(self.source_instance_id, str):
+            raise ValueError("Config 'memory.cloud.source_instance_id' must be a string")
+        self.source_instance_id = self.source_instance_id.strip()
+        if len(self.source_instance_id.encode("utf-8")) > _MEMORY_MAX_MODEL_BYTES:
+            raise ValueError("Config 'memory.cloud.source_instance_id' is invalid")
+        if self.proxy_base_url is not None:
+            self.proxy_base_url = _validate_memory_url(
+                self.proxy_base_url,
+                path="memory.cloud.proxy_base_url",
+            )
+        if self.model_access_key is not None:
+            self.model_access_key = _validate_memory_key(
+                self.model_access_key,
+                path="memory.cloud.model_access_key",
+            )
+            if not self.model_access_key.startswith("mak_"):
+                raise ValueError("Config 'memory.cloud.model_access_key' is invalid")
+
+    def memory_capability_available(self) -> bool:
+        return bool(
+            self.capabilities.memory_available()
+            and self.embedding_identity
+            and self.proxy_base_url
+        )
+
+    def runtime_ready(self) -> bool:
+        return self.memory_capability_available() and bool(self.model_access_key)
 
 
 @dataclass
@@ -1785,13 +2060,17 @@ class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
 
     enabled: bool = False
+    mode: MemoryMode | None = None
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
+    cloud: MemoryCloudConfig = field(default_factory=MemoryCloudConfig)
     diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
     recovery_intent: MemoryRecoveryIntent | None = None
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
+        if self.mode is not None and self.mode not in get_args(MemoryMode):
+            raise ValueError("Config 'memory.mode' must be 'platform', 'custom', or null")
         if self.recovery_intent is not None and (
             not isinstance(self.recovery_intent, str)
             or self.recovery_intent not in MEMORY_RECOVERY_INTENTS
@@ -1800,23 +2079,148 @@ class MemoryConfig:
                 "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
             )
         self.processing.validate()
+        self.cloud.validate()
         self.diagnostics.validate()
-        if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
+        if self.cloud.transition_rebuild_owned and (
+            not self.cloud.transition_notice_pending
+            or self.recovery_intent != "rebuild"
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.transition_rebuild_owned' requires a pending transition rebuild"
+            )
+        if (
+            self.enabled
+            and not self.cloud_runtime_selected()
+            and not self.custom_processing_complete()
+        ):
             raise ValueError("Both Memory processing endpoints must be complete before enabling Memory")
 
+    def custom_processing_complete(self) -> bool:
+        return self.processing.llm.complete() and self.processing.embedding.complete()
 
-def _validate_memory_url(value: object, *, name: str) -> Optional[str]:
+    def arm_rebuild_if_idle(self) -> bool:
+        """Request an embedding rebuild without downgrading a stronger recovery."""
+
+        if self.recovery_intent is not None:
+            return False
+        self.recovery_intent = "rebuild"
+        return True
+
+    def cloud_runtime_selected(self) -> bool:
+        if self.cloud.scope == "organization":
+            # A pending enterprise transition is deliberately fenced on the
+            # last applied custom identity until the user confirms the rebuild.
+            return self.cloud.organization_attached
+        # Mode owns the runtime source. A missing or recovered cloud cache must
+        # pause platform Memory, never expose saved custom endpoints as fallback.
+        return self.mode == "platform"
+
+    def runtime_source(self) -> Literal["cloud", "custom", "unavailable"]:
+        if self.cloud_runtime_selected():
+            return "cloud" if self.cloud.runtime_ready() else "unavailable"
+        if self.custom_processing_complete():
+            return "custom"
+        return "unavailable"
+
+    def settings_mode(self) -> Literal["organization", "platform", "custom"]:
+        if self.cloud.scope == "organization":
+            # An organization without the complete Memory pair cannot replace
+            # a released working custom setup. Fresh installs still get the
+            # read-only managed state instead of a misleading platform fallback.
+            if self.custom_processing_complete() and not (
+                self.cloud.memory_capability_available()
+                or self.cloud.organization_attached
+                or self.cloud.transition_notice_pending
+            ):
+                return "custom"
+            return "organization"
+        if self.mode == "platform":
+            return "platform"
+        return "custom"
+
+    def runtime_processing(self) -> MemoryProcessingConfig:
+        """Return the sidecar-facing endpoints without changing saved custom slots."""
+
+        if not self.cloud_runtime_selected():
+            return self.processing
+        if not self.cloud.runtime_ready():
+            return MemoryProcessingConfig()
+        base_url = self.cloud.proxy_base_url
+        key = self.cloud.model_access_key
+        embedding_identity = self.cloud.embedding_identity
+        multimodal = None
+        if self.cloud.capabilities.multimodal:
+            multimodal = MemoryEndpointConfig(
+                base_url=f"{base_url}/mm",
+                model=_MEMORY_CLOUD_MULTIMODAL_ALIAS,
+                api_key=key,
+            )
+        return MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url=base_url,
+                model=_MEMORY_CLOUD_MODEL_ALIAS,
+                api_key=key,
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url=base_url,
+                model=f"avibe-cloud-embedding-{embedding_identity}",
+                api_key=key,
+            ),
+            rerank=None,
+            multimodal=multimodal,
+        )
+
+    def runtime_embedding_identity(self) -> tuple[str, str | None, str | None]:
+        if self.cloud_runtime_selected():
+            # Capability removal clears the live status identity, but the last
+            # applied value remains the comparison baseline for a checked resume.
+            return (
+                "cloud",
+                self.cloud.embedding_identity
+                or self.cloud.applied_embedding_identity,
+                None,
+            )
+        return (
+            "custom",
+            self.processing.embedding.base_url,
+            self.processing.embedding.model,
+        )
+
+    def effective_multimodal_available(self) -> bool:
+        if self.cloud_runtime_selected():
+            # Cloud chat is the declared fallback when no dedicated mm slot exists;
+            # a dedicated multimodal slot remains valid without Chat.
+            return self.cloud.runtime_ready() and (
+                self.cloud.capabilities.multimodal or self.cloud.capabilities.chat
+            )
+        return bool(self.processing.multimodal and self.processing.multimodal.complete())
+
+
+def _inferred_memory_rerank_provider(
+    *,
+    base_url: Optional[str],
+    model: Optional[str] = None,
+) -> MemoryRerankProvider:
+    hostname = (urlsplit((base_url or "").strip()).hostname or "").lower()
+    # Legacy omitted-provider configs meant DeepInfra. Only an unambiguous
+    # Bailian workspace host may change that default on upgrade.
+    if hostname.endswith(".maas.aliyuncs.com"):
+        return "dashscope"
+    return DEFAULT_MEMORY_RERANK_PROVIDER
+
+
+def _validate_memory_url(value: object, *, path: str) -> Optional[str]:
     if value is None or value == "":
         return None
     if not isinstance(value, str):
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' must be a string")
+        raise ValueError(f"Config '{path}' must be a string")
     candidate = value.strip()
     if (
         not candidate
         or len(candidate.encode("utf-8")) > _MEMORY_MAX_URL_BYTES
         or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
     ):
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     parsed = urlsplit(candidate)
     if (
         parsed.scheme not in {"http", "https"}
@@ -1826,20 +2230,20 @@ def _validate_memory_url(value: object, *, name: str) -> Optional[str]:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     try:
         port = parsed.port
     except ValueError as exc:
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid") from exc
+        raise ValueError(f"Config '{path}' is invalid") from exc
     if port is not None and not 1 <= port <= 65535:
-        raise ValueError(f"Config 'memory.processing.{name}.base_url' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     if parsed.scheme == "http":
         try:
             loopback = ipaddress.ip_address(parsed.hostname).is_loopback
         except ValueError:
             loopback = False
         if not loopback:
-            raise ValueError(f"Config 'memory.processing.{name}.base_url' requires HTTPS")
+            raise ValueError(f"Config '{path}' requires HTTPS")
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 
@@ -1859,17 +2263,17 @@ def _validate_memory_text(value: object, *, name: str, maximum: int) -> Optional
     return candidate
 
 
-def _validate_memory_key(value: object, *, name: str) -> Optional[str]:
+def _validate_memory_key(value: object, *, path: str) -> Optional[str]:
     if value is None or value == "":
         return None
     if not isinstance(value, str):
-        raise ValueError(f"Config 'memory.processing.{name}.api_key' must be a string")
+        raise ValueError(f"Config '{path}' must be a string")
     if (
         len(value.encode("utf-8")) > _MEMORY_MAX_API_KEY_BYTES
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
         or _looks_like_ui_mask(value)
     ):
-        raise ValueError(f"Config 'memory.processing.{name}.api_key' is invalid")
+        raise ValueError(f"Config '{path}' is invalid")
     return value
 
 
@@ -1886,26 +2290,62 @@ def memory_config_to_payload(
 ) -> dict:
     """Project Memory config without ever returning a reusable API key."""
 
-    def endpoint_payload(endpoint: MemoryEndpointConfig) -> dict:
+    def endpoint_payload(
+        endpoint: MemoryEndpointConfig,
+        *,
+        include_provider: bool = False,
+    ) -> dict:
         key = endpoint.api_key
-        return {
+        payload = {
             "base_url": endpoint.base_url,
             "model": endpoint.model,
             "api_key": key if include_secrets else None,
             "has_api_key": bool(key),
         }
+        if include_provider:
+            payload["provider"] = endpoint.rerank_provider()
+        return payload
 
     processing = {
         "llm": endpoint_payload(memory.processing.llm),
         "embedding": endpoint_payload(memory.processing.embedding),
     }
     if memory.processing.rerank is not None:
-        processing["rerank"] = endpoint_payload(memory.processing.rerank)
+        processing["rerank"] = endpoint_payload(
+            memory.processing.rerank,
+            include_provider=True,
+        )
     if memory.processing.multimodal is not None:
         processing["multimodal"] = endpoint_payload(memory.processing.multimodal)
     payload = {
         "enabled": memory.enabled,
+        "mode": memory.mode,
         "processing": processing,
+        "cloud": {
+            "scope": memory.cloud.scope,
+            "capabilities": {
+                "asr": memory.cloud.capabilities.asr,
+                "chat": memory.cloud.capabilities.chat,
+                "embedding": memory.cloud.capabilities.embedding,
+                "multimodal": memory.cloud.capabilities.multimodal,
+                "memory_llm": memory.cloud.capabilities.memory_llm,
+            },
+            "memory_llm_source": memory.cloud.memory_llm_source,
+            "embedding_identity": memory.cloud.embedding_identity,
+            "revision": memory.cloud.revision,
+            "quota_enforced": memory.cloud.quota_enforced,
+            "model_access_key": (
+                memory.cloud.model_access_key if include_secrets else None
+            ),
+            "has_model_access_key": bool(memory.cloud.model_access_key),
+            "proxy_base_url": memory.cloud.proxy_base_url,
+            "source_instance_id": memory.cloud.source_instance_id,
+            "organization_attached": memory.cloud.organization_attached,
+            "transition_notice_pending": memory.cloud.transition_notice_pending,
+            "transition_rebuild_owned": memory.cloud.transition_rebuild_owned,
+            "applied_embedding_identity": memory.cloud.applied_embedding_identity,
+            "runtime_apply_pending": memory.cloud.runtime_apply_pending,
+        },
         "diagnostics": {
             "log_provider_calls": memory.diagnostics.log_provider_calls,
         },
@@ -1955,6 +2395,14 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
         payload.get("diagnostics", {}),
         name="memory.diagnostics",
     )
+    cloud_payload = _optional_memory_object(
+        payload.get("cloud", {}),
+        name="memory.cloud",
+    )
+    cloud_capabilities_payload = _optional_memory_object(
+        cloud_payload.get("capabilities", {}),
+        name="memory.cloud.capabilities",
+    )
 
     legacy_present = "embedding_change_pending" in payload
     legacy_pending = payload.get("embedding_change_pending", False)
@@ -1977,6 +2425,7 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
 
     memory = MemoryConfig(
         enabled=payload.get("enabled", False),
+        mode=payload.get("mode"),
         recovery_intent=recovery_intent,
         processing=MemoryProcessingConfig(
             llm=MemoryEndpointConfig(
@@ -2002,6 +2451,20 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
                 if multimodal_payload is not None
                 else None
             ),
+        ),
+        cloud=MemoryCloudConfig(
+            **_filter_dataclass_fields(
+                MemoryCloudConfig,
+                {
+                    **cloud_payload,
+                    "capabilities": MemoryCloudCapabilities(
+                        **_filter_dataclass_fields(
+                            MemoryCloudCapabilities,
+                            cloud_capabilities_payload,
+                        )
+                    ),
+                },
+            )
         ),
         diagnostics=MemoryDiagnosticsConfig(
             **_filter_dataclass_fields(
@@ -2059,6 +2522,11 @@ class OpenCodeConfig:
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
     active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
+    # Provenance for the legacy-default neutralization: once this config has
+    # been written (or migrated) under the opt-in semantics the key is present,
+    # and a deliberate ``active_turn_timeout_seconds == 5400`` saved afterwards
+    # is an explicit operator choice the load migration must preserve.
+    legacy_turn_timeout_neutralized: bool = True
     # Provider the user picked in Settings → Backends → OpenCode. The provider
     # catalog itself lives in ~/.config/opencode/opencode.json (OpenCode's own
     # state file). Stays ``None`` until the user explicitly chooses so legacy
@@ -2131,6 +2599,64 @@ class AgentsConfig:
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
+_SettledItem = TypeVar("_SettledItem")
+
+
+def _collapse_settled_duplicates(
+    parsed: list[_SettledItem],
+    identity: Callable[[_SettledItem], object],
+    as_written: list,
+    message: str,
+    *,
+    repairing: bool,
+) -> list[_SettledItem]:
+    """Keep a collection of model identifiers unique after spelling is settled.
+
+    `normalized_model_id` is a many-to-one map applied inside the leaf validator,
+    while the uniqueness check belongs to the parent holding the collection. So
+    every such parent is checking pre-images while the object it builds carries
+    post-images, and the difference is not cosmetic: the loaded config keeps both
+    entries, `to_payload` writes one spelling for both, and the next load of what
+    this one wrote raises. Loading a file must produce something loadable, and
+    that round trip is what this restores.
+
+    Duplicates **as written** are a malformed payload either way and raise.
+    Duplicates that appear only once spelling is settled depend on where the
+    payload came from, which is what `repairing` names:
+
+    - Repairing a payload already on disk, the later entry collapses into the
+      earlier. It was already unreachable — an inventory lookup and an exact hop
+      comparison both find the first — and raising would fail exactly the load the
+      persisted-shape rule requires to succeed.
+    - Admitting a payload from a caller, the same pair is a request to name one
+      model twice, and silently keeping one half answers with a collection the
+      caller did not send. It raises, so the caller learns which spelling survived
+      by being told rather than by reading the response.
+
+    Required, and not defaulted, because the answer is a property of the caller
+    rather than of the collection: a parser cannot infer whether it is repairing
+    history or admitting a request, and a default would let the next call site
+    inherit whichever guess this one made.
+    """
+
+    if len(set(as_written)) != len(as_written):
+        raise ValueError(message)
+    if not repairing:
+        settled_ids = [identity(item) for item in parsed]
+        if len(set(settled_ids)) != len(settled_ids):
+            raise ValueError(message)
+        return list(parsed)
+    collapsed: list[_SettledItem] = []
+    seen: set[object] = set()
+    for item in parsed:
+        settled = identity(item)
+        if settled in seen:
+            continue
+        seen.add(settled)
+        collapsed.append(item)
+    return collapsed
+
+
 @dataclass
 class ModelHubModelConfig:
     id: str
@@ -2187,8 +2713,15 @@ class ModelHubModelConfig:
             raise ValueError(
                 "Config 'model_hub.sources.models.retired' must be false for manual models"
             )
+        # Spelling is settled here, at the one place a payload becomes a model
+        # config, so no admission path can invent a second spelling for one
+        # model and split its usage across two ledger rows. The length bound
+        # stays with the admission surfaces: this constructor also reads files
+        # older releases wrote, and rejecting one of those would fail config load.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
         return cls(
-            id=model_id,
+            id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
             display_name=display_name,
@@ -2343,7 +2876,7 @@ class ModelHubSourceConfig:
     masked_credential: Optional[str] = None
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
+    def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources' entries must be objects")
         allowed_fields = {
@@ -2399,8 +2932,13 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
         if any(not isinstance(model_id, str) for model_id in model_ids):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if len(set(model_ids)) != len(model_ids):
-            raise ValueError("Config 'model_hub.sources.models' contains duplicate ids")
+        models = _collapse_settled_duplicates(
+            [ModelHubModelConfig.from_payload(model) for model in models_payload],
+            lambda model: model.id,
+            model_ids,
+            "Config 'model_hub.sources.models' contains duplicate ids",
+            repairing=repairing,
+        )
         usage_payload = payload.get("usage")
         base_url = payload.get("base_url")
         credential_ref = payload.get("credential_ref")
@@ -2441,7 +2979,7 @@ class ModelHubSourceConfig:
             supply_channel=supply_channel,
             billing=billing,
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
-            models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            models=models,
             created_at=(
                 _validate_optional_datetime(
                     created_at,
@@ -2505,7 +3043,13 @@ class ModelHubRouteHopConfig:
             or _contains_model_hub_credential_material(model_id)
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
-        return cls(source_id=source_id, model_id=model_id)
+        # A hop names a model in some source's inventory, and membership is decided
+        # by an exact comparison against that inventory. So the reference has to be
+        # spelled by whatever spells the thing it refers to: normalizing one side
+        # only would turn a working chain into `model_unsupported` on upgrade.
+        from core.handlers.model_hub.identifiers import normalized_model_id
+
+        return cls(source_id=source_id, model_id=normalized_model_id(model_id))
 
     def to_payload(self) -> dict:
         return {"source_id": self.source_id, "model_id": self.model_id}
@@ -2516,17 +3060,23 @@ class ModelHubRouteConfig:
     hops: tuple[ModelHubRouteHopConfig, ...] = ()
 
     @classmethod
-    def from_payload(cls, payload: object) -> "ModelHubRouteConfig":
+    def from_payload(cls, payload: object, *, repairing: bool = False) -> "ModelHubRouteConfig":
         if not isinstance(payload, dict) or set(payload) != {"hops"}:
             raise ValueError("Config 'model_hub.agents.routes' entries must contain hops")
         hops = payload.get("hops")
         if not isinstance(hops, list):
             raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
-        parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
-        pairs = [(hop.source_id, hop.model_id) for hop in parsed]
-        if len(set(pairs)) != len(pairs):
-            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
-        return cls(hops=parsed)
+        return cls(
+            hops=tuple(
+                _collapse_settled_duplicates(
+                    [ModelHubRouteHopConfig.from_payload(hop) for hop in hops],
+                    lambda hop: (hop.source_id, hop.model_id),
+                    [(hop["source_id"], hop["model_id"]) for hop in hops],
+                    "Config 'model_hub.agents.routes.hops' must contain unique pairs",
+                    repairing=repairing,
+                )
+            )
+        )
 
     def to_payload(self) -> dict:
         return {"hops": [hop.to_payload() for hop in self.hops]}
@@ -2603,7 +3153,13 @@ class ModelHubAgentSupplyConfig:
         )
 
     @classmethod
-    def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
+    def from_payload(
+        cls,
+        payload: dict,
+        *,
+        expected_backend: Optional[str] = None,
+        repairing: bool = False,
+    ) -> "ModelHubAgentSupplyConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents' entries must be objects")
         if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
@@ -2633,7 +3189,7 @@ class ModelHubAgentSupplyConfig:
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
         routes = {
-            model_id: ModelHubRouteConfig.from_payload(route)
+            model_id: ModelHubRouteConfig.from_payload(route, repairing=repairing)
             for model_id, route in routes_payload.items()
         }
         menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
@@ -2713,7 +3269,7 @@ class ModelHubConfig:
         return list(self.agents[backend].sources.order)
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubConfig":
+    def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
         if set(payload) - {"sources", "agents"}:
@@ -2726,7 +3282,10 @@ class ModelHubConfig:
             raise ValueError("Config 'model_hub.agents' must be an object")
         if set(agents_payload) - set(MODEL_HUB_BACKENDS):
             raise ValueError("Config 'model_hub.agents' contains unknown backends")
-        sources = [ModelHubSourceConfig.from_payload(source) for source in sources_payload]
+        sources = [
+            ModelHubSourceConfig.from_payload(source, repairing=repairing)
+            for source in sources_payload
+        ]
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
@@ -2761,6 +3320,7 @@ class ModelHubConfig:
             agents[backend] = ModelHubAgentSupplyConfig.from_payload(
                 raw_agent,
                 expected_backend=backend,
+                repairing=repairing,
             )
             expected_menu_ids = (
                 model_hub_fixed_menu_ids(backend)
@@ -3094,6 +3654,7 @@ class V2Config:
         cls,
         config_path: Optional[Path] = None,
         *,
+        persist_migrations: bool = True,
         _migration_reload_depth: int = 0,
     ) -> "V2Config":
         paths.ensure_data_dirs()
@@ -3163,7 +3724,12 @@ class V2Config:
                 recovery_warnings.append(f"Recovered invalid config section '{recovered}': {exc}")
 
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
-        if migrated and not migration_warnings and not recovery_warnings:
+        if (
+            persist_migrations
+            and migrated
+            and not migration_warnings
+            and not recovery_warnings
+        ):
             persisted_payload = copy.deepcopy(payload)
             persisted_payload["model_hub"] = config.model_hub.to_payload()
             try:
@@ -3344,7 +3910,15 @@ class V2Config:
             # the user explicitly opts in after the release capability is enabled.
             model_hub = ModelHubConfig()
         else:
-            model_hub = ModelHubConfig.from_payload(model_hub_payload)
+            # The one repairing door, because this is the one caller parsing a
+            # document a previous release wrote. Every other entry into these
+            # constructors is either a request from a client — which must be told
+            # it named a model twice rather than answered with half of what it
+            # sent — or a round trip of objects this process already settled. The
+            # save paths reach here too, but never with this subtree: the config
+            # API drops ``model_hub`` from what the client sends, so the payload
+            # under this key is always what was last read off disk.
+            model_hub = ModelHubConfig.from_payload(model_hub_payload, repairing=True)
 
         ui_payload = payload.get("ui") or {}
         if not isinstance(ui_payload, dict):
@@ -3540,7 +4114,19 @@ class V2Config:
         return config
 
     def save(self, config_path: Optional[Path] = None) -> None:
-        """Persist non-Memory changes while preserving the durable Memory unit."""
+        """Persist non-Memory changes while preserving the durable Memory unit.
+
+        WARNING — cross-process lost updates: this writes the object's
+        FULL snapshot. If this ``V2Config`` was loaded earlier (another
+        request, minutes ago) while a different process (UI API server
+        vs controller, both write this file) committed changes since,
+        saving here silently reverts them. UI/controller writers must
+        instead declare their change through ``update_config_fields``
+        (see docs/plans/config-cross-process-write-serialization.md),
+        which loads fresh inside the cross-process file lock and only
+        applies the caller's fields. Direct load → mutate → ``save()``
+        cycles are only acceptable in single-writer contexts.
+        """
 
         if self.load_warnings:
             raise ValueError(

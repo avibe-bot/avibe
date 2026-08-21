@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, ExternalLink, MonitorX, PinOff } from 'lucide-react';
+import { ArrowLeft, MonitorX, PinOff } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { appTabHref } from '../../apps/appLaunch';
-import { showPageAvatar, showPagePrivatePath } from '../../apps/showPageAvatar';
-import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
+import { sessionChatPath, showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
+import { Button } from '../ui/button';
+import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
+import { ShowPageLaunchControl } from '../workbench/ShowPageLaunchControl';
+import { ShowPageShareControl } from '../workbench/ShowPageShareControl';
+import { useShowPageAnnotation } from '../workbench/useShowPageAnnotation';
 
 // The `/apps/show/:sessionId` route — a pinned Show Page opened as an app on the
 // current surface. Desktop keeps windows (mirrors LibraryRoute): focus an
@@ -50,17 +54,19 @@ export const ShowPageRoute: React.FC = () => {
   return <MobileShowPage key={sessionId} sessionId={sessionId} />;
 };
 
-// Full-screen mobile body: a back-affordance header over the framed Show Page.
-// Sized like the mobile Library route so it fits within the AppShell header +
-// bottom-nav chrome (100dvh − header − tab bar).
+// Full-screen mobile body: it owns the viewport below the safe-area inset, so
+// AppShell withdraws its brand header, page padding, and bottom navigation.
 const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const { t } = useTranslation();
   const api = useApi();
   const navigate = useNavigate();
   const { unpin } = useDock();
+  const { capabilities } = useInstanceAuthorization();
 
   const [state, setState] = useState<'loading' | 'ready' | 'missing'>(sessionId ? 'loading' : 'missing');
   const [title, setTitle] = useState('');
+  const [annotateOpen, setAnnotateOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   // Read the session once (error-suppressed — a gone session must NOT toast) to
   // upgrade the header to the LIVE title and to detect missing/archived, exactly
@@ -88,51 +94,55 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
     };
   }, [sessionId, api]);
 
-  const avatar = sessionId ? showPageAvatar(sessionId, title) : null;
   const label = title || t('apps.showPage.label');
   const missing = !sessionId || state === 'missing';
-  const externalHref = appTabHref({ appId: 'showpage', sessionId });
+  const src = missing ? null : showPageEmbeddedPath(showPagePrivatePath(sessionId));
+  const {
+    state: annotationState,
+    setIframe,
+    handleIframeLoad,
+    enable: enableAnnotation,
+    disable: disableAnnotation,
+    setMode: setAnnotationMode,
+  } = useShowPageAnnotation(src);
 
   return (
-    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-border bg-surface">
-      <header className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-2">
-        <button
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-background pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+      <header className="flex shrink-0 items-center gap-3 border-b border-border bg-surface/70 px-4 py-2.5 backdrop-blur">
+        <Button
           type="button"
+          variant="outline"
+          size="icon"
           onClick={() => navigate(-1)}
           aria-label={t('common.back')}
-          className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+          className="size-7 shrink-0"
         >
-          <ArrowLeft className="size-[18px]" />
-        </button>
-        {avatar && (
-          <span
-            aria-hidden
-            // §7.1k sweep: borderless — the per-session accent border removed. Keep the 16%
-            // tint + accent letter color and the header's existing 12px radius. Routes the
-            // avatar through the shared ShowPageAvatarContent chokepoint (letter-only here:
-            // this header loads the session, not the icon inventory, so it has no favicon
-            // — §7.1f — but it now shares the one render path if that changes).
-            className="grid size-7 shrink-0 place-items-center overflow-hidden rounded-lg text-[13px] font-bold leading-none"
-            style={{
-              color: `var(${avatar.accentVar})`,
-              backgroundColor: `color-mix(in srgb, var(${avatar.accentVar}) 16%, transparent)`,
-            }}
-          >
-            <ShowPageAvatarContent iconUrl={null} letter={avatar.letter} />
-          </span>
-        )}
+          <ArrowLeft className="size-3.5" />
+        </Button>
         <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">{label}</span>
-        {state === 'ready' && externalHref && (
-          <a
-            href={externalHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={t('apps.window.openInNewTab')}
-            title={t('apps.window.openInNewTab')}
-            className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
-          >
-            <ExternalLink className="size-[17px]" />
-          </a>
+        {state === 'ready' && (
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <ShowPageAnnotateControl
+              state={annotationState}
+              onEnable={enableAnnotation}
+              onDisable={disableAnnotation}
+              onSetMode={setAnnotationMode}
+              onPopoverOpenChange={setAnnotateOpen}
+            />
+            <ShowPageLaunchControl
+              sessionId={sessionId}
+              title={title || null}
+              showPageMode
+              busy={false}
+              onToggle={() => navigate(sessionChatPath(sessionId, { showChat: true }))}
+              onPrepareLaunch={async () => true}
+            />
+            <ShowPageShareControl
+              sessionId={sessionId}
+              canManageInstance={capabilities.can_manage_instance}
+              onOpenChange={setShareOpen}
+            />
+          </div>
         )}
       </header>
 
@@ -165,11 +175,13 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
         // Sandbox copied verbatim from the desktop Show Page window / ChatPage: the
         // workbench Show Page frame is intentionally same-origin-trusted — not hardened.
         <iframe
+          ref={setIframe}
+          onLoad={handleIframeLoad}
           title={t('chat.showPage.title')}
-          src={showPagePrivatePath(sessionId)}
+          src={src ?? undefined}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
-          className="min-h-0 w-full flex-1 border-0 bg-background"
+          className={`min-h-0 w-full flex-1 border-0 bg-background${annotateOpen || shareOpen ? ' pointer-events-none' : ''}`}
         />
       )}
     </div>

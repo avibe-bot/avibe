@@ -10,6 +10,7 @@ import { SettingsDependenciesPage } from './SettingsDependenciesPage';
 const api = vi.hoisted(() => ({
   factoryResetMemory: vi.fn(),
   getMemorySettings: vi.fn(),
+  getMemoryStatus: vi.fn(),
   installDependency: vi.fn(),
   listDependencies: vi.fn(),
 }));
@@ -109,6 +110,7 @@ const renderPage = () => render(
 beforeEach(() => {
   api.listDependencies.mockResolvedValue({ ok: true, deps: [memoryRuntime()] });
   api.getMemorySettings.mockResolvedValue(settings());
+  api.getMemoryStatus.mockResolvedValue({ status: 'failed', error: 'memory_sidecar_unavailable' });
   api.installDependency.mockResolvedValue({ ok: true });
   api.factoryResetMemory.mockResolvedValue({
     ok: true,
@@ -160,7 +162,9 @@ describe('SettingsDependenciesPage Memory reinitialization', () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole('button', { name: 'settings.dependencies.repair' }));
+    const repair = await screen.findByRole('button', { name: 'settings.dependencies.repair' });
+    await waitFor(() => expect((repair as HTMLButtonElement).disabled).toBe(false));
+    await user.click(repair);
 
     expect(await screen.findByRole('button', { name: 'memory.factoryReset.retry' })).toBeTruthy();
     expect(api.getMemorySettings).toHaveBeenCalledTimes(2);
@@ -241,9 +245,44 @@ describe('SettingsDependenciesPage Memory reinitialization', () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole('button', { name: 'settings.dependencies.repair' }));
+    const repair = await screen.findByRole('button', { name: 'settings.dependencies.repair' });
+    await waitFor(() => expect((repair as HTMLButtonElement).disabled).toBe(false));
+    await user.click(repair);
     expect((screen.getByRole('button', { name: 'memory.factoryReset.button' }) as HTMLButtonElement).disabled).toBe(true);
     finishInstall?.({ ok: true });
+  });
+
+  it('disables Memory runtime Repair and explains why while the sidecar is available', async () => {
+    api.getMemoryStatus.mockResolvedValue({
+      status: 'ok',
+      source: { status: 'available', observed_at: '2026-08-18T14:44:35.331Z', reason: null },
+      health: { status: 'ok', version: '1.2.3', capabilities: {}, disabled_features: [], cascade: null, recorder: null },
+    });
+    renderPage();
+
+    const repair = await screen.findByRole('button', { name: 'settings.dependencies.repair' });
+    await waitFor(() => expect(screen.getByText('settings.dependencies.memoryRuntimeDisableBeforeRepair')).toBeTruthy());
+    expect((repair as HTMLButtonElement).disabled).toBe(true);
+    expect(api.installDependency).not.toHaveBeenCalled();
+  });
+
+  it('localizes a live-sidecar Repair refusal instead of showing the raw token', async () => {
+    api.installDependency.mockResolvedValue({
+      ok: false,
+      message: 'memory_runtime_install_requires_disabled_memory',
+      output: null,
+      reason: 'memory_runtime_install_requires_disabled_memory',
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    const repair = await screen.findByRole('button', { name: 'settings.dependencies.repair' });
+    await waitFor(() => expect((repair as HTMLButtonElement).disabled).toBe(false));
+    await user.click(repair);
+    expect(showToast).toHaveBeenCalledWith(
+      'errors.memory_runtime_install_requires_disabled_memory',
+      'error',
+    );
   });
 
   it('MEMORY-FACTORY-002 closes confirmation and reports partial per-root outcomes', async () => {

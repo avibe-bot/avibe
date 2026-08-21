@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    ConfinedRoot,
+    ensure_private_directory,
+)
 from core.memory.observations import (
     AddAck,
     AddRejected,
@@ -767,32 +772,6 @@ def _verify_current_schema(conn: sqlite3.Connection) -> None:
         raise RuntimeError("Memory store failed integrity check")
 
 
-def _absolute_path_without_resolve(value: Path | str) -> Path:
-    """Make a lexical absolute path without following any filesystem links."""
-
-    return Path(os.path.abspath(os.path.expanduser(os.fspath(value))))
-
-
-def _ensure_no_follow_directory_chain(directory: Path) -> None:
-    """Create and validate each directory component before SQLite can open a file."""
-
-    if not directory.is_absolute():
-        raise OSError("Memory store path must be absolute")
-    current = Path(directory.anchor)
-    for component in directory.parts[1:]:
-        current /= component
-        try:
-            info = os.lstat(current)
-        except FileNotFoundError:
-            try:
-                os.mkdir(current, mode=0o700)
-            except FileExistsError:
-                pass
-            info = os.lstat(current)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise OSError("Memory store path contains an unsafe directory component")
-
-
 @dataclass(frozen=True)
 class MemoryMeta:
     epoch: int
@@ -1017,10 +996,27 @@ class ProcessingHealthCommit:
 class MemoryStore:
     """Own the small, durable Memory queue without exposing SQLite to callers."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self._effective_home = _absolute_path_without_resolve(paths.get_vibe_remote_dir())
-        requested_path = db_path if db_path is not None else memory_store_path()
-        self.path = _absolute_path_without_resolve(requested_path)
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        effective_home: Path | str | None = None,
+    ) -> None:
+        root = ConfinedRoot.from_home(
+            paths.get_vibe_remote_dir() if effective_home is None else effective_home
+        )
+        self._effective_home = root.physical_home
+        requested_path = (
+            db_path
+            if db_path is not None
+            else root.logical_home / "state" / MEMORY_STORE_DIRNAME / MEMORY_STORE_FILENAME
+        )
+        try:
+            self.path = root.confine(requested_path)
+        except ConfinedFilesystemError as error:
+            raise OSError(
+                "Memory store path must stay within the effective Avibe home"
+            ) from error
         self._validate_store_confinement()
         self._prepare_private_directory()
         self._initialize()
@@ -3572,8 +3568,10 @@ class MemoryStore:
         )
 
     def _prepare_private_directory(self) -> None:
-        _ensure_no_follow_directory_chain(self._effective_home)
-        _ensure_no_follow_directory_chain(self.path.parent)
+        try:
+            ensure_private_directory(self._effective_home, self.path.parent)
+        except ConfinedFilesystemError as error:
+            raise OSError("Memory store path contains an unsafe directory component") from error
         directory_info = os.lstat(self.path.parent)
         if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
             raise OSError("Memory store directory must be an owned directory")

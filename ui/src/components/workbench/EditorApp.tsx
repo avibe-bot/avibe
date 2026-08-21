@@ -143,10 +143,12 @@ function languageLabel(filename: string | undefined): string | undefined {
 export const EditorApp: React.FC<{
   windowId?: string;
   params?: Record<string, unknown>;
+  /** Start with the explorer collapsed on the phone; the activity bar can reopen it. */
+  mobile?: boolean;
   /** Report whether ANY open tab has unsaved edits — the full-page route uses it for an unload guard
    *  (the window mount relies on useWindowCloseGuard instead). */
   onDirtyChange?: (dirty: boolean) => void;
-}> = ({ windowId, params, onDirtyChange }) => {
+}> = ({ windowId, params, mobile = false, onDirtyChange }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const [root, setRoot] = useState<string | null>(null);
@@ -159,6 +161,10 @@ export const EditorApp: React.FC<{
   const [status, setStatus] = useState<Record<string, PaneStatus>>({});
   const [picker, setPicker] = useState<PickerState | null>(null);
   const [view, setView] = useState<'files' | 'search'>('files');
+  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
+  // border). Width persists for the window's lifetime (state, not navigation).
+  const [explorerCollapsed, setExplorerCollapsed] = useState(mobile);
+  const [explorerWidth, setExplorerWidth] = useState(240);
   // A pending Monaco jump (from a cross-file search result), scoped to one tab. The nonce makes a
   // repeat jump to the same spot re-fire even when the tab is already open.
   const [reveal, setReveal] = useState<{ tabId: string; line: number; column: number; endColumn: number; nonce: number } | null>(null);
@@ -236,8 +242,9 @@ export const EditorApp: React.FC<{
       } catch {
         openFile(path, name, null, target);
       }
+      if (mobile) setExplorerCollapsed(true);
     },
-    [openFile],
+    [mobile, openFile],
   );
 
   // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
@@ -250,6 +257,7 @@ export const EditorApp: React.FC<{
       // markdown / code / json / csv stay editable (with a preview toggle inside the pane).
       if (previewOverlayKind(entry)) {
         openPreview(path, entry.name);
+        if (mobile) setExplorerCollapsed(true);
         return;
       }
       // Fetch fresh metadata (also content-sniffs `text`) and decide by CONTENT, not just the
@@ -259,6 +267,7 @@ export const EditorApp: React.FC<{
         const m = await fileMeta(path);
         if (isEditableMeta(m)) {
           openFile(path, entry.name, m.mtime);
+          if (mobile) setExplorerCollapsed(true);
         } else {
           downloadFile(path);
         }
@@ -266,12 +275,13 @@ export const EditorApp: React.FC<{
         // Metadata fetch failed — fall back to the name-only guess so a known text type still opens.
         if (isEditableFile(entry)) {
           openFile(path, entry.name, entry.mtime);
+          if (mobile) setExplorerCollapsed(true);
         } else {
           downloadFile(path);
         }
       }
     },
-    [openFile, openPreview],
+    [mobile, openFile, openPreview],
   );
 
   // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
@@ -619,10 +629,11 @@ export const EditorApp: React.FC<{
     return () => window.removeEventListener('keydown', onKey, true);
   }, [windowId, wm.focusedId]);
 
-  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
-  // border). Width persists for the window's lifetime (state, not navigation).
-  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
-  const [explorerWidth, setExplorerWidth] = useState(240);
+  // Selecting a file from the mobile explorer returns the editor to the foreground. This keeps
+  // the narrow screen useful after every open while leaving the desktop panel behavior unchanged.
+  useEffect(() => {
+    if (mobile && active) setExplorerCollapsed(true);
+  }, [active, mobile]);
   // Holds the in-flight drag's teardown so an unmount mid-drag (window closed while dragging) can
   // still remove the window listeners and restore the body cursor / user-select.
   const resizeTeardown = useRef<(() => void) | null>(null);
@@ -698,7 +709,10 @@ export const EditorApp: React.FC<{
             active activity-bar icon; drag its right border to resize. Explorer is ALWAYS present in
             Files view (design w0qoC keeps it in the welcome state). */}
         {!explorerCollapsed && (
-        <div className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2" style={{ width: explorerWidth }}>
+        <div
+          className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2"
+          style={{ width: mobile ? 'min(240px, 72vw)' : explorerWidth }}
+        >
           {view === 'search' ? (
             <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} onFilesChanged={reloadTabs} />
           ) : (
@@ -794,7 +808,7 @@ export const EditorApp: React.FC<{
                         type="button"
                         onClick={() => closeTab(tab.id)}
                         aria-label={t('common.close')}
-                        className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
+                        className="grid size-4 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground md:opacity-0 md:group-hover/tab:opacity-100"
                       >
                         <X className="size-3" strokeWidth={2.5} />
                       </button>
@@ -820,7 +834,8 @@ export const EditorApp: React.FC<{
                             path={tab.path}
                             filename={tab.name}
                             mtime={tab.mtime}
-                            chromeless
+                            chromeless={!mobile}
+                            forceDark
                             onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
                             onCursor={(line, col, indent) => setStatus((s) => ({ ...s, [tab.id]: { line, col, insertSpaces: indent.insertSpaces, tabSize: indent.tabSize } }))}
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}

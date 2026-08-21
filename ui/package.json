@@ -16,6 +16,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
+    "validate:catalog": "node scripts/validate-scenario-catalog.mjs",
     "validate:theme": "node scripts/validate-theme.mjs"
   },
   "dependencies": {
@@ -82,6 +83,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "js-yaml": "^4.1.0",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.15",
     "tailwindcss": "^4.1.18",

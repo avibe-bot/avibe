@@ -23,11 +23,10 @@ accepting an optional ``home`` override so they stay unit-testable in isolation
 
 from __future__ import annotations
 
-import os
-import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
+from config.atomic_io import write_atomic
 from modules.agents.catalog import AGENT_BACKENDS, is_agent_backend
 from vibe.claude_config import get_claude_home
 from vibe.codex_config import get_codex_home
@@ -100,37 +99,13 @@ def read_all_global_agents_md(home: Path | None = None) -> list[dict]:
     return [read_global_agents_md(backend, home) for backend in AGENT_BACKENDS]
 
 
-def _atomic_write(path: Path, content: str) -> None:
-    """Write *content* to *path* atomically, creating parent dirs as needed.
-
-    A temp file in the target directory is swapped in with ``os.replace`` so a
-    failed write never truncates an existing global instructions file.
-
-    Writes *through* a symlink to its real target: a user who symlinks their
-    global prompt file into a shared dotfiles repo (e.g. ``~/.claude/CLAUDE.md``
-    -> ``~/dotfiles/CLAUDE.md``) keeps the link intact, since replacing it with a
-    regular file would silently break that sharing setup.
-    """
-    target = Path(os.path.realpath(path))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent), text=True)
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(tmp, target)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:  # pragma: no cover - best effort cleanup
-                pass
-
-
 def write_global_agents_md(backend: str, content: str, home: Path | None = None) -> dict:
     """Write *content* to *backend*'s global instructions file and re-read it."""
     path = global_instruction_path(backend, home)
-    _atomic_write(path, content)
+    # ``follow_symlinks`` keeps a dotfiles setup intact: a user who links
+    # ``~/.claude/CLAUDE.md`` -> ``~/dotfiles/CLAUDE.md`` expects an edit here to
+    # land in the repo, not to replace the link with a regular file.
+    write_atomic(path, content, follow_symlinks=True)
     return read_global_agents_md(backend, home)
 
 

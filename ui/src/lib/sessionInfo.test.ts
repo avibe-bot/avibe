@@ -102,6 +102,53 @@ describe('normalizeSessionInfo', () => {
     expect(normalizeSessionInfo(null)).toEqual({ remote: true, authenticated: false });
   });
 
+  it('preserves an explicit member role and capability', () => {
+    const session = normalizeSessionInfo({
+      remote: true,
+      authenticated: true,
+      email: 'member@example.com',
+      instance_kind: 'organization',
+      instance_role: 'member',
+      capabilities: {
+        ...OWNER_INSTANCE_CAPABILITIES,
+        can_manage_access_members: false,
+        is_instance_owner: false,
+      },
+    });
+
+    expect(session).toMatchObject({
+      instance_role: 'member',
+      capabilities: {
+        ...OWNER_INSTANCE_CAPABILITIES,
+        can_manage_access_members: false,
+        is_instance_owner: false,
+      },
+    });
+  });
+
+  it('does not grant can_manage_access_members from a pre-member payload', () => {
+    const session = normalizeSessionInfo({
+      remote: true,
+      authenticated: true,
+      email: 'owner@example.com',
+      instance_role: 'owner',
+      capabilities: {
+        is_instance_owner: true,
+        can_manage_instance: true,
+      },
+    });
+
+    expect(session).toMatchObject({
+      instance_role: 'owner',
+      capabilities: {
+        ...DENIED_INSTANCE_CAPABILITIES,
+        is_instance_owner: true,
+        can_manage_instance: true,
+        can_manage_access_members: false,
+      },
+    });
+  });
+
   it.each([
     ['personal', 'personal'],
     ['organization', 'organization'],

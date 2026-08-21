@@ -21,9 +21,33 @@ downloads, sources, prebuilt assets, or version directories.
   10 MiB, retaining the newest 5 MiB. This preserves the inode used by live tail
   readers and avoids racing a subprocess that is actively appending output.
 - Before an existing SQLite database advances to another schema revision,
-  create a consistent SQLite online backup. Retain the newest two SQLite
-  migration/repair rollback points and the newest three legacy JSON migration
-  snapshots.
+  hold a consistent SQLite online backup of it, and bound the rollback window
+  in the same call. Creating the rollback point is unconditional, so the bound
+  has to be too: gating it on the upgrade finishing leaves the window unbounded
+  in the one situation that produces attempt after attempt.
+- Take the copy unconditionally, and never reuse one already in the window. A
+  copy is a rollback point only if restoring it loses no committed data, and
+  nothing readable from a copy proves that: a migration that commits row
+  changes and then fails moves neither the schema nor the revision stamp, and
+  an operator who restores a copy and keeps serving writes moves the contents
+  under a stamp that never changed. Every rule that recognised a copy as "the
+  same rollback point" was a label standing in for the contents, and each one
+  could be made to agree while the contents differed.
+- Bound the window to the newest two SQLite migration/repair rollback points
+  and the newest three legacy JSON migration snapshots, with the copy a call
+  has just written protected from that call's own prune. Copies left by a
+  machine whose clock ran ahead are dated into the future permanently, so
+  ordering alone cannot defend a fresh rollback point.
+- The window bounds disk, and that is all it promises beyond holding the
+  database as it stands at each call. It cannot also promise to keep the last
+  copy taken before a migration started damaging the database: under a
+  migration that keeps failing, the attempts after the first copy an
+  already-damaged database, and no property measurable from those copies
+  distinguishes them from the clean one. That property belongs to not retrying
+  a failed migration once per service entry point, not to retention.
+- Record in each manifest the revisions read back from the copy, not the ones
+  the caller reported: another process can advance the database in between, and
+  an operator choosing a rollback point reads the manifest to do it.
 - Prune only strict Avibe formats: self-identifying managed backup directories,
   historical `sqlite-state-migration-*` directories with valid manifests, and
   the exact legacy `vibe-pre-<revision>[-release-head]-repair-<timestamp>` file

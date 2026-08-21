@@ -13,6 +13,22 @@ def _expand_path(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def physical_home(home: Path | str) -> Path:
+    """Resolve an Avibe home to the path a no-follow walk can traverse.
+
+    The home is a trust anchor, not an attack surface. Supported layouts reach
+    it through symlinks that Avibe or the operating system created: a
+    ``/home/<user>`` entry pointing at another volume, or the legacy
+    ``~/.vibe_remote`` back-symlink. A per-component ``O_NOFOLLOW`` walk that
+    starts at ``/`` rejects exactly those layouts, because Linux reports
+    ``ENOTDIR`` when ``O_NOFOLLOW | O_DIRECTORY`` meets a symlink. Callers
+    resolve the home once here and keep ``O_NOFOLLOW`` for every component
+    Avibe owns below it, where a planted symlink would be an actual escape.
+    """
+
+    return Path(os.path.realpath(os.path.expanduser(os.fspath(home))))
+
+
 def _default_avibe_dir(home: Path | None = None) -> Path:
     return (home or Path.home()) / AVIBE_HOME_DIRNAME
 
@@ -200,10 +216,6 @@ def get_discovered_chats_path() -> Path:
 
 def get_sqlite_state_path() -> Path:
     return get_state_dir() / "vibe.sqlite"
-
-
-def get_sqlite_migration_lock_path() -> Path:
-    return get_state_dir() / "migration.lock"
 
 
 def get_state_backups_dir() -> Path:

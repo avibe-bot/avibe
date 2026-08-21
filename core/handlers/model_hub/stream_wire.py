@@ -147,6 +147,59 @@ ProtocolObservationOutcome = Literal["served", "failed_terminal", "protocol_erro
 ErrorEnvelopePath = tuple[str, ...]
 
 
+# Token counts are vendor-reported, never self-measured, so one hostile or buggy
+# response must not be able to poison a persisted aggregate. The ceiling is fixed
+# in our code; it is never derived from a value the upstream declares.
+USAGE_TOKEN_CEILING: Final = 1_000_000_000
+
+
+@dataclass(frozen=True)
+class ProtocolUsageReport:
+    """One protocol-normalized token report observed on the wire."""
+
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+
+    @classmethod
+    def of(
+        cls,
+        *,
+        input_tokens: int,
+        cached_input_tokens: int,
+        output_tokens: int,
+    ) -> "ProtocolUsageReport":
+        """Build one report with the cached-input subset invariant enforced.
+
+        Cached input is a *part* of the input the turn was billed for, which is
+        what the read contract promises and what the settings page will divide
+        by. Both numbers come from the same upstream, so the only bound worth
+        trusting is the input count this module normalized itself — never a
+        total the response declares. Cached input reported without a readable
+        input count is a subset of nothing, so it clamps to zero.
+        """
+
+        return cls(
+            input_tokens=input_tokens,
+            cached_input_tokens=min(cached_input_tokens, input_tokens),
+            output_tokens=output_tokens,
+        )
+
+    def merge(self, other: "ProtocolUsageReport") -> "ProtocolUsageReport":
+        """Combine two reports for the same turn by taking the larger of each.
+
+        The per-field max is re-normalized because the winning input and cached
+        counts can come from different frames, which is a second way an upstream
+        could compose a cached count larger than the input it belongs to.
+        """
+
+        return ProtocolUsageReport.of(
+            input_tokens=max(self.input_tokens, other.input_tokens),
+            cached_input_tokens=max(self.cached_input_tokens, other.cached_input_tokens),
+            output_tokens=max(self.output_tokens, other.output_tokens),
+        )
+
+
 @dataclass(frozen=True)
 class ProtocolObservation:
     outcome: ProtocolObservationOutcome | None = None
@@ -155,6 +208,7 @@ class ProtocolObservation:
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     sequence_number: int | None = None
     message: str | None = None
+    usage: ProtocolUsageReport | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +231,23 @@ class ProtocolModelOutputEnvelope:
 
 
 @dataclass(frozen=True)
+class ProtocolUsageTaxonomy:
+    """Declare where one protocol reports token usage and how to compose it.
+
+    Leaf paths are relative to a container. Values found under the leaves of one
+    logical field are summed within a single container, because a protocol may
+    split one quantity across sibling members; candidates from different
+    containers are then merged by taking the larger, because protocols repeat a
+    cumulative report across frames.
+    """
+
+    container_paths: tuple[tuple[str, ...], ...]
+    input_paths: tuple[tuple[str, ...], ...]
+    cached_input_paths: tuple[tuple[str, ...], ...]
+    output_paths: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
 class ProtocolStreamTaxonomy:
     terminal_envelopes: tuple[ProtocolTerminalEnvelope, ...]
     model_output_envelopes: tuple[ProtocolModelOutputEnvelope, ...]
@@ -185,6 +256,7 @@ class ProtocolStreamTaxonomy:
     buffered_error_envelope_paths: tuple[ErrorEnvelopePath, ...]
     terminal_event_name: str | None
     render_terminal_event: Callable[[str, str, int], dict[str, object]]
+    usage: ProtocolUsageTaxonomy
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
@@ -225,6 +297,23 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
         render_terminal_event=_anthropic_terminal_event,
+        usage=ProtocolUsageTaxonomy(
+            # https://platform.claude.com/docs/en/build-with-claude/streaming
+            # message_start nests the report under `message`; message_delta and
+            # buffered responses report it at the top level.
+            container_paths=(("message", "usage"), ("usage",)),
+            # https://platform.claude.com/docs/en/docs/build-with-claude/prompt-caching
+            # `input_tokens` excludes both cache members, so the input total is
+            # their sum. Only cache reads are input served from cache; cache
+            # creation is fresh input that was also written to the cache.
+            input_paths=(
+                ("input_tokens",),
+                ("cache_read_input_tokens",),
+                ("cache_creation_input_tokens",),
+            ),
+            cached_input_paths=(("cache_read_input_tokens",),),
+            output_paths=(("output_tokens",),),
+        ),
     ),
     "openai_responses": ProtocolStreamTaxonomy(
         terminal_envelopes=(
@@ -302,6 +391,17 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
         render_terminal_event=_responses_terminal_event,
+        usage=ProtocolUsageTaxonomy(
+            # https://platform.openai.com/docs/api-reference/responses/object#responses/object-usage
+            # Terminal response events nest the completed response; buffered
+            # responses are that object.
+            container_paths=(("response", "usage"), ("usage",)),
+            # `input_tokens` already includes cached input, so the cached count
+            # is an informational subset and never an addend.
+            input_paths=(("input_tokens",),),
+            cached_input_paths=(("input_tokens_details", "cached_tokens"),),
+            output_paths=(("output_tokens",),),
+        ),
     ),
     "openai_chat": ProtocolStreamTaxonomy(
         terminal_envelopes=(
@@ -352,6 +452,15 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name=None,
         render_terminal_event=_chat_terminal_event,
+        usage=ProtocolUsageTaxonomy(
+            # https://platform.openai.com/docs/api-reference/chat/object#chat/object-usage
+            # Streaming chat reports usage only when the client asked for it via
+            # `stream_options.include_usage`, on a dedicated final chunk.
+            container_paths=(("usage",),),
+            input_paths=(("prompt_tokens",),),
+            cached_input_paths=(("prompt_tokens_details", "cached_tokens"),),
+            output_paths=(("completion_tokens",),),
+        ),
     ),
 }
 
@@ -405,6 +514,48 @@ def is_protocol_model_output(
     )
 
 
+def _usage_sum(container: Mapping[str, object], paths: tuple[tuple[str, ...], ...]) -> int | None:
+    """Sum one logical field's leaves, rejecting anything not a bounded count."""
+
+    total: int | None = None
+    for path in paths:
+        for value in _path_values(container, path):
+            if not isinstance(value, int) or isinstance(value, bool):
+                continue
+            if value < 0 or value > USAGE_TOKEN_CEILING:
+                continue
+            total = value if total is None else total + value
+    if total is None:
+        return None
+    return min(total, USAGE_TOKEN_CEILING)
+
+
+def extract_protocol_usage(
+    protocol: str,
+    payload: Mapping[str, object],
+) -> ProtocolUsageReport | None:
+    """Read one document's token report, or None when it carries none."""
+
+    taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol].usage
+    report: ProtocolUsageReport | None = None
+    for container_path in taxonomy.container_paths:
+        for container in _path_values(payload, container_path):
+            if not isinstance(container, Mapping):
+                continue
+            input_tokens = _usage_sum(container, taxonomy.input_paths)
+            cached_input_tokens = _usage_sum(container, taxonomy.cached_input_paths)
+            output_tokens = _usage_sum(container, taxonomy.output_paths)
+            if input_tokens is None and cached_input_tokens is None and output_tokens is None:
+                continue
+            candidate = ProtocolUsageReport.of(
+                input_tokens=input_tokens or 0,
+                cached_input_tokens=cached_input_tokens or 0,
+                output_tokens=output_tokens or 0,
+            )
+            report = candidate if report is None else report.merge(candidate)
+    return report
+
+
 def _try_parse_payload(data: bytes) -> object | None:
     """Parse untrusted observation data without leaking parser failures."""
 
@@ -433,6 +584,8 @@ def observe_protocol_response(
     if not isinstance(payload, dict):
         return ProtocolObservation(outcome="served" if not streamed else None)
 
+    usage = extract_protocol_usage(protocol, payload)
+
     if not streamed:
         if any(
             isinstance(value, Mapping)
@@ -443,8 +596,9 @@ def observe_protocol_response(
                 outcome="failed_terminal",
                 error_payload=data,
                 error_envelope_paths=taxonomy.buffered_error_envelope_paths,
+                usage=usage,
             )
-        return ProtocolObservation(outcome="served")
+        return ProtocolObservation(outcome="served", usage=usage)
 
     sequence_number: int | None = None
     if taxonomy.sequence_number_path is not None:
@@ -480,10 +634,12 @@ def observe_protocol_response(
                 envelope.error_envelope_paths if envelope.terminal_outcome == "failed_terminal" else ()
             ),
             sequence_number=sequence_number,
+            usage=usage,
         )
     return ProtocolObservation(
         model_output_started=model_output_started,
         sequence_number=sequence_number,
+        usage=usage,
     )
 
 
@@ -498,6 +654,7 @@ class ProtocolSSEState:
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     last_sequence_number: int = -1
     model_output_started: bool = False
+    usage: ProtocolUsageReport | None = None
 
     def observe(self, chunk: bytes) -> None:
         for frame in self.tokenizer.feed(chunk):
@@ -516,6 +673,22 @@ class ProtocolSSEState:
     def next_sequence_number(self) -> int:
         return self.last_sequence_number + 1
 
+    @property
+    def reached_model(self) -> bool:
+        """Whether this stream got far enough upstream to have been billed.
+
+        Forwarded model output proves the call reached the model even when the
+        stream then ended without a recognized terminal — a connection lost after
+        a text delta is a request that happened, and `token_reports` staying at
+        zero is exactly how the ledger records that nobody reported its tokens.
+
+        Lives on the tracker rather than beside one of its readers, because both
+        sides of the hand-off keep a tracker over the same body and a fact read
+        from only one of them is a fact the other half of the turn cannot use.
+        """
+
+        return self.terminal_outcome == "served" or self.model_output_started
+
     def _observe_frame(self, frame: bytes) -> None:
         if self.terminal_outcome is not None:
             return
@@ -529,6 +702,10 @@ class ProtocolSSEState:
         )
         if observation.model_output_started:
             self.model_output_started = True
+        if observation.usage is not None:
+            self.usage = (
+                observation.usage if self.usage is None else self.usage.merge(observation.usage)
+            )
         if observation.outcome in {"served", "failed_terminal"}:
             self.terminal_outcome = observation.outcome
         if observation.error_payload is not None:
@@ -538,11 +715,21 @@ class ProtocolSSEState:
             self.last_sequence_number = observation.sequence_number
 
     def terminal_observation(self) -> ProtocolObservation | None:
+        """Report the settled facts, including everything accumulated to get here.
+
+        Usage often arrives before the terminal — Anthropic reports input tokens on
+        ``message_start`` — so a terminal that dropped the accumulated report would
+        lose tokens the upstream already billed on exactly the streams that end
+        badly.
+        """
+
         if self.terminal_outcome is not None:
             return ProtocolObservation(
                 outcome=self.terminal_outcome,
                 error_payload=self.error_payload,
                 error_envelope_paths=self.error_envelope_paths,
+                model_output_started=self.model_output_started,
+                usage=self.usage,
             )
         return None
 

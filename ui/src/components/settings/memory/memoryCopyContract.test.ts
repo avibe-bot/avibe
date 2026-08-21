@@ -6,6 +6,55 @@ import zh from '../../../i18n/zh.json';
 const BUNDLES = { en, zh } as const;
 
 describe('Memory UI copy contracts', () => {
+  it('keeps the three-state model-source copy aligned with the approved frames', () => {
+    expect({
+      title: en.memory.settings.avibeCloudTitle,
+      price: en.memory.settings.avibeCloudFree,
+      included: en.memory.settings.avibeCloudIncluded,
+      description: en.memory.settings.avibeCloudDescription,
+      prompt: en.memory.settings.customPrompt,
+      customAction: en.memory.settings.useCustomEndpoints,
+      customTitle: en.memory.settings.customEndpointsTitle,
+      customDescription: en.memory.settings.customEndpointsDescription,
+      cloudAction: en.memory.settings.useAvibeCloud,
+      managed: en.memory.settings.organizationManaged,
+    }).toEqual({
+      title: 'Model provider',
+      price: 'Free',
+      included: 'Provided by Avibe Cloud. No setup required.',
+      description: 'Memory works out of the box.',
+      prompt: 'Using your own provider instead?',
+      customAction: 'Use custom endpoints',
+      customTitle: 'Custom endpoints',
+      customDescription: 'Your own provider, models and keys.',
+      cloudAction: 'Use Avibe Cloud',
+      managed: 'Models are managed by your organization.',
+    });
+    expect({
+      title: zh.memory.settings.avibeCloudTitle,
+      price: zh.memory.settings.avibeCloudFree,
+      included: zh.memory.settings.avibeCloudIncluded,
+      description: zh.memory.settings.avibeCloudDescription,
+      prompt: zh.memory.settings.customPrompt,
+      customAction: zh.memory.settings.useCustomEndpoints,
+      customTitle: zh.memory.settings.customEndpointsTitle,
+      customDescription: zh.memory.settings.customEndpointsDescription,
+      cloudAction: zh.memory.settings.useAvibeCloud,
+      managed: zh.memory.settings.organizationManaged,
+    }).toEqual({
+      title: '模型供应商',
+      price: '免费',
+      included: '由 Avibe 云端提供，无需设置',
+      description: '记忆功能开箱即用',
+      prompt: '想改用自己的服务商？',
+      customAction: '改用自定义接口',
+      customTitle: '自定义接口',
+      customDescription: '使用你自己的服务商、模型和密钥。',
+      cloudAction: '改用 Avibe 云端',
+      managed: '模型由你的组织统一管理。',
+    });
+  });
+
   it.each(['en', 'zh'] as const)('describes runtime capabilities beyond models in %s', (language) => {
     const text = BUNDLES[language].memory.processingRecord.runtime.capabilitiesHelp;
 
@@ -34,6 +83,22 @@ describe('Memory UI copy contracts', () => {
       expect(disclosure).toContain('搜索查询');
       expect(disclosure).toContain('14 天');
       expect(disclosure).toContain('Avibe 在本机上管理');
+    }
+  });
+
+  it.each(['en', 'zh'] as const)('keeps local-data disclosure in cloud modes in %s', (language) => {
+    const settings = BUNDLES[language].memory.settings;
+    const disclosure = settings.cloudDisclosure.join('\n');
+
+    expect(disclosure).toMatch(/5,000/);
+    if (language === 'en') {
+      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('Turning Memory off pauses it');
+      expect(settings.cloudDisclosureAttachment).toContain('cloud model service');
+    } else {
+      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('关闭记忆只是暂停记录');
+      expect(settings.cloudDisclosureAttachment).toContain('云端模型服务');
     }
   });
 
@@ -66,6 +131,10 @@ describe('Memory UI copy contracts', () => {
   it.each(['en', 'zh'] as const)('keeps rebuild cost guidance conditional in %s', (language) => {
     const text = BUNDLES[language].memory.settings.rebuildConfirmDescription;
     expect(text).toMatch(language === 'en' ? /may use/ : /可能消耗/);
+  });
+
+  it.each(['en', 'zh'] as const)('localizes the closed cloud capability error in %s', (language) => {
+    expect(BUNDLES[language].errors.memory_capability_unavailable).toBeTruthy();
   });
 
   it('keeps processing terminology aligned with the runtime contracts', () => {
@@ -150,5 +219,28 @@ describe('Memory UI copy contracts', () => {
       expect(zh.memory.log.description).toBe('查看本安装中所有用户和项目的已创建记忆条目的处理记录。');
       expect(zh.memory.clear.confirmDescription).toContain('Avibe 在本机上管理的记忆数据');
     }
+  });
+
+  it.each(['en', 'zh'] as const)('keeps Repair copy on the Processing Record path the UI reads in %s', (language) => {
+    const processingRecord = BUNDLES[language].memory.processingRecord;
+    const repair = processingRecord.repair;
+
+    expect(repair).toEqual({
+      action: language === 'en' ? 'Repair index' : '修复索引',
+      running: language === 'en' ? 'Repairing…' : '正在修复…',
+      confirmTitle: language === 'en' ? 'Repair the Memory index?' : '修复记忆索引？',
+      confirmDescription: language === 'en'
+        ? 'Repair rescans Markdown memory and drains pending work while the live Memory sidecar stays available. Embedding work may use API quota.'
+        : '修复会重新扫描 Markdown 记忆并排空待处理工作，同时保持记忆 sidecar 可用。此过程可能消耗 Embedding API 配额。',
+      confirmLabel: language === 'en' ? 'Repair index' : '修复索引',
+      healthResult: language === 'en' ? 'Health after repair' : '修复后的健康状态',
+      healthy: language === 'en' ? 'Healthy' : '健康',
+      completed: language === 'en' ? 'Memory index repair completed.' : '记忆索引修复完成。',
+      completedWithWarnings: language === 'en'
+        ? 'Memory index repair completed with health warnings.'
+        : '记忆索引修复完成，但健康状态有警告。',
+      failed: language === 'en' ? 'Memory index repair failed.' : '记忆索引修复失败。',
+    });
+    expect('repair' in processingRecord.runtime).toBe(false);
   });
 });

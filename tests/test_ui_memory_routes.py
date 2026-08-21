@@ -10,6 +10,8 @@ import pytest
 
 from config.v2_config import (
     AgentsConfig,
+    MemoryCloudCapabilities,
+    MemoryCloudConfig,
     MemoryConfig,
     MemoryEndpointConfig,
     MemoryProcessingConfig,
@@ -20,7 +22,7 @@ from config.v2_config import (
 from core.memory.operation_lock import MemoryOperationLease
 from core.memory.runtime import MEMORY_LIST_CURSOR_MAX_BYTES
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
-from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
+from vibe import api, internal_client, model_service, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
 
 
@@ -122,6 +124,7 @@ def test_memory_settings_patch_accepts_optional_complete_rerank_endpoint() -> No
         "https://rerank.example.test/v1/inference",
         "rerank-model",
         "rerank-secret",
+        "deepinfra",
     )
 
 
@@ -266,6 +269,60 @@ def _save_memory(memory: MemoryConfig) -> V2Config:
         memory_config_to_payload(memory, include_secrets=True),
         recovery_intent=memory.recovery_intent,
     )
+
+
+def test_cloud_mode_switch_returns_a_localized_closed_error_when_key_mint_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    memory = MemoryConfig(
+        enabled=True,
+        mode="custom",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                "https://llm.example.test/v1",
+                "chat",
+                "llm-key",
+            ),
+            embedding=MemoryEndpointConfig(
+                "https://embed.example.test/v1",
+                "embed",
+                "embed-key",
+            ),
+        ),
+        cloud=MemoryCloudConfig(
+            scope="platform",
+            capabilities=MemoryCloudCapabilities(chat=True, embedding=True),
+            embedding_identity="emb-cloud",
+            proxy_base_url="https://backend.example.test/v1/model",
+            source_instance_id="instance-1",
+        ),
+    )
+    _save_memory(memory)
+
+    def fail_mint(_config: V2Config) -> V2Config:
+        raise model_service.ModelServiceResolutionError("mint_unavailable")
+
+    monkeypatch.setattr(model_service, "ensure_model_access_key", fail_mint)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"mode": "platform", "confirm_rebuild": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_capability_unavailable",
+    }
+    persisted = V2Config.load().memory
+    assert persisted.mode == "custom"
+    assert persisted.cloud.model_access_key is None
 
 
 def test_enabled_rerank_change_runs_typed_preflight_before_persisting(
@@ -433,13 +490,17 @@ def _save_remote_config(tmp_path) -> V2Config:
     config = V2Config.load()
     cloud = config.remote_access.vibe_cloud
     cloud.enabled = True
+    cloud.backend_url = "https://backend.test"
     cloud.public_url = "https://alex.avibe.bot"
     cloud.client_id = "vr_client_123"
     cloud.instance_id = "inst_123"
+    cloud.instance_kind = "organization"
+    cloud.instance_secret = "instance-secret"
     cloud.session_secret = "session-secret"
     cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
     cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
     config.save()
+    remote_access._replace_authorization_revision(config, 0)
     return config
 
 

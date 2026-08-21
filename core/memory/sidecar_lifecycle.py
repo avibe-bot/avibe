@@ -28,6 +28,18 @@ class SidecarSnapshot:
     def running(self) -> bool:
         return bool(self.process and self.process.running)
 
+    @property
+    def supervisor_can_restart(self) -> bool:
+        """Whether retained launch authority can still produce a child."""
+
+        return bool(self.process and self.process.restart_authorized)
+
+    @property
+    def retains_active_config(self) -> bool:
+        """Whether this supervisor can still execute under captured settings."""
+
+        return bool(self.process and self.process.retains_active_config)
+
 
 @dataclass(frozen=True, slots=True)
 class RecorderAdmission:
@@ -117,7 +129,13 @@ class MemorySidecarLifecycle:
     def _set_records_calls_for_runtime(self, value: bool) -> None:
         self._records_calls = value
 
-    async def start(self, python: Path, settings: EverOSProcessSettings) -> bool:
+    async def start(
+        self,
+        python: Path,
+        settings: EverOSProcessSettings,
+        *,
+        provider_root_guard: Callable[[], None] | None = None,
+    ) -> bool:
         """Replace the supervised sidecar, assigning ownership before start."""
 
         await self.stop()
@@ -150,6 +168,7 @@ class MemorySidecarLifecycle:
             effective_home=self._effective_home,
             settings=settings,
             socket_path=self._socket_path,
+            provider_root_guard=provider_root_guard,
             on_ready=ready,
             before_start=before_start,
             on_reaped=reaped,

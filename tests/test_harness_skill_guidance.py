@@ -34,7 +34,7 @@ def _embedded_cli_examples(body: str) -> list[str]:
 
 
 def test_avibe_skills_teach_current_harness_defaults() -> None:
-    for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
+    for path in ("skills/use-avibe/SKILL.md",):
         body = _read(path)
 
         assert "Runs are async by default" in body
@@ -103,7 +103,6 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
 
     for path in (
         "skills/use-avibe/SKILL.md",
-        "skills/use-vibe-remote/SKILL.md",
         "skills/background-watch-hook/SKILL.md",
     ):
         body = _read(path)
@@ -112,7 +111,7 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
 
 
 def test_use_avibe_skill_keeps_its_broad_scope_without_a_session_lifecycle_protocol() -> None:
-    for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
+    for path in ("skills/use-avibe/SKILL.md",):
         body = _read(path)
 
         assert "configure, repair, explain, or operate a local Avibe installation" in body
@@ -211,5 +210,21 @@ def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
     assert "disable the Watch's per-cycle timeout" in agents
     assert "Never reseed" in body
     assert "never use `--forever`" not in body
+    # The PR-body reaction is a level, not an edge, and the sha-bearing pass
+    # comment is emitted only in answer to an explicit trigger. Drop either and
+    # the loop deadlocks waiting on something nothing will send. Matched against
+    # the unwrapped text: the rule is the sentence, not where the line breaks.
+    flat = " ".join(body.split())
+    assert "one state slot, not an append-only log" in flat
+    assert "Waiting for that comment instead of triggering waits forever." in flat
+    assert "produced by an explicit trigger and by nothing else" in flat
+    # The bot quotes `@codex review` in its own boilerplate, so a body-text search
+    # for the trigger matches the verdicts it is supposed to be distinguished from.
+    assert "never find one by matching `@codex review` in comment bodies" in flat
+    # Only the *passing* auto-review is reaction-only. Broadening that to every
+    # auto-review tells an agent to ignore a findings review and keep waiting on
+    # a reaction that will never describe it.
+    assert "An auto-review that finds something submits a review with inline threads" in flat
+    assert "Only the passing case is asymmetric" in flat
     assert (ROOT / "skills/background-watch-hook/scripts/wait_pr.py").is_file()
     assert (ROOT / "skills/background-watch-hook/scripts/wait_action.py").is_file()

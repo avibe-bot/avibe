@@ -6,6 +6,7 @@ import pytest
 
 import core.show_runtime as show_runtime
 from core.show_runtime import (
+    SHOW_RUNTIME_BASE_HEADER,
     SHOW_RUNTIME_CONTEXT_HEADER,
     SHOW_RUNTIME_PROTOCOL_HEADER,
     ShowRuntimeContext,
@@ -132,7 +133,12 @@ def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
     envelope = ShowRuntimeProtocolEnvelope(ShowRuntimeContext.SHARED)
 
     async def exercise():
-        first = await manager.request("GET", "/sessions/ses/app/", envelope=envelope)
+        first = await manager.request(
+            "GET",
+            "/sessions/ses/app/",
+            envelope=envelope,
+            headers={"X-Vibe-Show-Base": "/p/untrusted/"},
+        )
         second = await manager.request("GET", "/sessions/ses/app/src/main.tsx", envelope=envelope)
         clock["now"] = 101.0
         third = await manager.request("GET", "/sessions/ses/app/src/App.tsx", envelope=envelope)
@@ -144,6 +150,8 @@ def test_show_live_015_transient_probe_keeps_shared_request_live_and_retries(
     assert probes == [manager._base_url, manager._base_url]
     assert all(call[2][SHOW_RUNTIME_PROTOCOL_HEADER] == "1" for call in requests)
     assert all(call[2][SHOW_RUNTIME_CONTEXT_HEADER] == "shared" for call in requests)
+    assert all(call[2][SHOW_RUNTIME_BASE_HEADER] == "/show/ses/" for call in requests)
+    assert all("X-Vibe-Show-Base" not in call[2] for call in requests)
 
 
 def test_show_live_014_capability_cache_resets_with_process_base_and_manager_lifetime(

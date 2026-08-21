@@ -66,6 +66,11 @@ def test_start_service_disables_stdout_logging_for_background_process(monkeypatc
     # Stub the real spawn so we never fork a real vibe service, and short-circuit
     # the post-spawn lock wait. This captures the env start_service would launch with.
     monkeypatch.setattr(runtime, "wait_for_service_pid", lambda pid, *args, **kwargs: True)
+    # And the readiness gate after it: this test is about the env a spawn is
+    # handed, not about whether the process that gets it comes up. The stubbed
+    # process never reports a running phase, so the real gate would sit here for
+    # the full slow-start timeout and then raise.
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout=None: pid)
 
     def fake_spawn_service_background_process(args, stdout_name, stderr_name, env=None):
         captured["args"] = args

@@ -20,11 +20,26 @@ import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import {
+  appShellScrollElement,
+  clearProjectVisibleCount,
+  holdMobileProjectsListForChatReturn,
+  markMobileProjectsListRestored,
+  readAppShellScrollTop,
+  readMobileProjectsListSnapshot,
+  rememberMobileProjectsListCounts,
+  rememberMobileProjectsListOnPageLeave,
+  rememberMobileProjectsListScroll,
+  revealMoreVisibleCount,
+  visibleSessionCountFor,
+  writeAppShellScrollTop,
+  type MobileProjectsVisibleCounts,
+} from '../../lib/mobileProjectsListMemory';
 import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -43,7 +58,6 @@ const DOT: Record<string, string> = {
   failed: 'bg-destructive',
   idle: 'bg-muted',
 };
-const MOBILE_SESSION_PAGE_SIZE = 8;
 
 // One row in a ⋯ popover menu, on the design-system Button idiom (plain button to
 // match the desktop sidebar menus). `danger` tints destructive actions (archive).
@@ -78,14 +92,15 @@ const MobileProjectRow: React.FC<{
   open: boolean;
   state: ProjectSessionsState;
   onToggle: () => void;
-}> = ({ project, open, state, onToggle }) => {
+  onLeaveToChat: () => void;
+}> = ({ project, open, state, onToggle, onLeaveToChat }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { capabilities } = useInstanceAuthorization();
   const canManageProjects = capabilities.can_manage_projects;
   const canArchive = canManageProjects;
   const canEditAgentsMd = canManageProjects;
-  const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
+  const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsActions();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
   const creatingSessionRef = useRef(false);
@@ -186,7 +201,10 @@ const MobileProjectRow: React.FC<{
                 creatingSessionRef.current = true;
                 try {
                   const session = await createSessionForProject(project.id);
-                  if (session) navigate(`/chat/${encodeURIComponent(session.id)}`);
+                  if (session) {
+                    onLeaveToChat();
+                    navigate(`/chat/${encodeURIComponent(session.id)}`);
+                  }
                 } finally {
                   creatingSessionRef.current = false;
                 }
@@ -262,9 +280,10 @@ const MobileSessionRow: React.FC<{
   canChat: boolean;
   canManageMetadata: boolean;
   onOpen: () => void;
-}> = ({ projectId, session, unread, canChat, canManageMetadata, onOpen }) => {
+  onLeaveToChat: () => void;
+}> = ({ projectId, session, unread, canChat, canManageMetadata, onOpen, onLeaveToChat }) => {
   const { t } = useTranslation();
-  const { renameSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsActions();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -282,7 +301,10 @@ const MobileSessionRow: React.FC<{
       handledRef.current = false;
       setRenaming(true);
     },
-    onOpenSession: (sessionId) => navigate(`/chat/${encodeURIComponent(sessionId)}`),
+    onOpenSession: (sessionId) => {
+      onLeaveToChat();
+      navigate(`/chat/${encodeURIComponent(sessionId)}`);
+    },
   });
 
   useEffect(() => {
@@ -382,7 +404,8 @@ export const ProjectsPage: React.FC = () => {
     capabilities,
   } = useInstanceAuthorization();
   const canCreateProject = canCreateLocalProject(capabilities);
-  const { unreadBySession } = useWorkbenchInbox();
+  // Per-session dots only; the feed list itself lives in the sidebar / Inbox.
+  const { unreadBySession } = useWorkbenchInbox({ feed: false });
   const {
     projects,
     projectsError,
@@ -392,18 +415,58 @@ export const ProjectsPage: React.FC = () => {
     toggleExpanded,
     loadMore,
     reloadSessions,
-    upsertProjectToTop,
   } = useWorkbenchProjectsTree();
   const [showNewProject, setShowNewProject] = useState(false);
-  const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
+  const [visibleSessionCounts, setVisibleSessionCounts] = useState<MobileProjectsVisibleCounts>(
+    () => readMobileProjectsListSnapshot().visibleCounts,
+  );
+  useEffect(() => {
+    const top = readMobileProjectsListSnapshot().scrollTop;
+    const restore = () => writeAppShellScrollTop(appShellScrollElement(), top);
+    restore();
+    const frame = requestAnimationFrame(restore);
+    markMobileProjectsListRestored();
+    const scrollEl = appShellScrollElement();
+    const onScroll = () => rememberMobileProjectsListScroll(readAppShellScrollTop(scrollEl));
+    scrollEl?.addEventListener?.('scroll', onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      scrollEl?.removeEventListener?.('scroll', onScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    rememberMobileProjectsListCounts(visibleSessionCounts);
+    return () => {
+      rememberMobileProjectsListOnPageLeave({
+        visibleCounts: visibleSessionCounts,
+        scrollTop: readMobileProjectsListSnapshot().scrollTop,
+      });
+    };
+  }, [visibleSessionCounts]);
+
+  const captureListForChatReturn = () => {
+    holdMobileProjectsListForChatReturn({
+      visibleCounts: visibleSessionCounts,
+      scrollTop: readAppShellScrollTop(appShellScrollElement()),
+    });
+  };
 
   const openSession = (sessionId: string) => {
-    navigate(`/chat/${sessionId}`);
+    captureListForChatReturn();
+    navigate(`/chat/${encodeURIComponent(sessionId)}`);
+  };
+  const toggleProject = (projectId: string) => {
+    const willCollapse = isExpanded(projectId);
+    if (willCollapse) {
+      setVisibleSessionCounts((prev) => clearProjectVisibleCount(prev, projectId));
+    }
+    toggleExpanded(projectId);
   };
   const revealMoreSessions = (projectId: string, state: ProjectSessionsState, visibleCount: number, loadedCount: number) => {
     setVisibleSessionCounts((prev) => ({
       ...prev,
-      [projectId]: visibleCount + MOBILE_SESSION_PAGE_SIZE,
+      [projectId]: revealMoreVisibleCount(visibleCount),
     }));
     if (loadedCount <= visibleCount && state.cursor) {
       loadMore(projectId);
@@ -456,13 +519,19 @@ export const ProjectsPage: React.FC = () => {
         const open = isExpanded(project.id);
         const state = sessionsOf(project.id);
         const allSessionRows = state.sessions ?? [];
-        const visibleSessionCount = visibleSessionCounts[project.id] ?? MOBILE_SESSION_PAGE_SIZE;
+        const visibleSessionCount = visibleSessionCountFor(visibleSessionCounts, project.id);
         const sessionRows = allSessionRows.slice(0, visibleSessionCount);
         const hasHiddenCachedSessions = allSessionRows.length > visibleSessionCount;
         const hasMoreSessions = hasHiddenCachedSessions || !!state.cursor;
         return (
           <div key={project.id} className="overflow-hidden rounded-xl border border-border bg-surface">
-            <MobileProjectRow project={project} open={open} state={state} onToggle={() => toggleExpanded(project.id)} />
+            <MobileProjectRow
+              project={project}
+              open={open}
+              state={state}
+              onToggle={() => toggleProject(project.id)}
+              onLeaveToChat={captureListForChatReturn}
+            />
 
             {open && (
               <div className="flex flex-col gap-0.5 border-t border-border px-2 py-2">
@@ -494,6 +563,7 @@ export const ProjectsPage: React.FC = () => {
                     canChat={capabilities.can_chat && project.capabilities.can_chat}
                     canManageMetadata={capabilities.can_manage_projects || project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
+                    onLeaveToChat={captureListForChatReturn}
                   />
                 ))}
                 {hasMoreSessions && (
@@ -516,10 +586,7 @@ export const ProjectsPage: React.FC = () => {
       {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setShowNewProject(false);
-            upsertProjectToTop(project);
-          }}
+          onCreated={() => setShowNewProject(false)}
         />
       )}
     </div>

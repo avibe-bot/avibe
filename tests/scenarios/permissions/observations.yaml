@@ -1,0 +1,43 @@
+version: 1
+capability: current_instance_permissions
+observations:
+  - id: OBS-PERMISSIONS-001
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-001
+      - PERMISSIONS-002
+      - PERMISSIONS-003
+      - PERMISSIONS-009
+    summary: Permissions authority is the existing Avibe session plus the paired exact-instance credential, not a second Cloud user session.
+    previous_assumption: Embedded Organization management needed a browser-held Management OAuth grant.
+    observed_behavior: Backend now accepts a device-secret capability bound to exactly one instance and independently enforces policy authority.
+    required_updates:
+      - never accept target instance or Organization identifiers from the browser
+      - require owner or can_manage_instance before paired mutations
+      - remove Management OAuth cookies callbacks and proxy routes
+  - id: OBS-PERMISSIONS-002
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-005
+      - PERMISSIONS-006
+      - PERMISSIONS-007
+      - PERMISSIONS-008
+    summary: Authority connectivity convergence and conflict are separate user-visible states.
+    previous_assumption: A failed Cloud request could collapse to one generic empty or login-required state.
+    observed_behavior: Cloud-owned policy is readable, offline uses last-known exact-instance data, applying waits for acknowledgement, and conflict retains the draft for explicit retry.
+    required_updates:
+      - cache only sanitized successful projections bound to the paired instance
+      - never mask credential or authorization failures with cached policy
+      - keep revisions explicit on every mutation
+  - id: OBS-PERMISSIONS-003
+    source: issue_contract
+    related_scenarios:
+      - PERMISSIONS-011
+      - PERMISSIONS-012
+    summary: Resource ACL is bound to the exact-current-instance credential and covers agent / vault_secret / skill only; Show Page sharing is the local single-axis /p model with no Resource ACL row.
+    previous_assumption: Show Page Workspace access was a show_page Resource ACL kind that the access panel could derive Organization ownership for from a browser claim.
+    observed_behavior: The local service resolves pairing ownership, proxies canonical Resource ACL reads and writes for the remaining kinds, preserves stale drafts on revision conflict, and rejects the retired show_page kind before Backend contact.
+    required_updates:
+      - bind every Resource ACL request to the paired instance and strip the browser match field before Backend contact
+      - keep Show Page link visibility and Limited-email grants as a separate local policy dimension with no show_page Resource ACL
+      - reject the retired show_page resource kind as invalid_request without any Backend contact

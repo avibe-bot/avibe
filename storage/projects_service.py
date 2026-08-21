@@ -59,8 +59,12 @@ def _resolve_folder(folder_path: str) -> Path:
     return folder
 
 
-def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[str, Any]]:
-    """Find an existing avibe *project* scope whose folder matches ``workdir``.
+def _find_project_by_workdir(
+    conn: Connection,
+    context: AuthorizationContext,
+    workdir: str,
+) -> Optional[dict[str, Any]]:
+    """Find the visible avibe *project* scope whose folder matches ``workdir``.
 
     Only avibe project scopes are considered: IM channel scopes can carry
     their own ``scope_settings.workdir``, so matching across all scopes would
@@ -69,6 +73,15 @@ def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[st
     so it lines up with how projects are stored. When legacy duplicates share a
     path, prefer an active row, then the most recently seen, so the pick is
     deterministic.
+
+    The visibility check lives *here* rather than in the caller, because a
+    folder path is a lookup key exactly as much as a project id is. Gating the
+    one caller would leave the next one free to skip it; gating the resolver
+    means every way of reaching a project row goes through the same check
+    ``list_projects`` applies. A hidden match raises ``LookupError`` — the same
+    404 the id-keyed paths answer with — rather than reporting "no match":
+    reporting no match would mint a second project scope over a folder a
+    restricted project already owns, which is a worse outcome than refusing.
     """
 
     row = (
@@ -96,6 +109,7 @@ def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[st
     )
     if row is None:
         return None
+    _require_visible_project(conn, context, str(row["native_id"]))
     return {"scope_id": row["scope_id"], "native_id": row["native_id"], "enabled": row["enabled"]}
 
 
@@ -138,6 +152,23 @@ class ProjectAgentUnavailableError(ValueError):
     def __init__(self, *, agent_name: str) -> None:
         super().__init__(self.code)
         self.agent_name = agent_name
+
+
+class ProjectAgentAudienceError(ProjectAgentUnavailableError):
+    """Retained for the coded 400 contract; no longer raised at assignment time.
+
+    A project default used to be rejected unless its resource policy was
+    audience-wide. That check was removed: no predicate over policy shape is
+    both sound and usable (see ``core.vibe_agents`` above
+    ``resolve_usable_default_agent``). The ACL is now enforced per-principal at
+    use time, where a default the caller cannot use degrades to one they can.
+
+    The class stays so the ``project_agent_audience_restricted`` code remains a
+    recognized, machine-distinguishable member of the coded 400 family for any
+    client that still branches on it.
+    """
+
+    code = "project_agent_audience_restricted"
 
 
 # Single source of truth for the columns every project payload reads, so
@@ -280,6 +311,34 @@ def list_projects(
     ]
 
 
+def _require_visible_project(
+    conn: Connection,
+    context: AuthorizationContext,
+    project_id: str,
+) -> None:
+    """Refuse a Project the caller cannot see, exactly as ``list_projects`` hides it.
+
+    The instance role says whether a principal may administer Projects at all;
+    it does not say *which* Projects. Those are two different questions, and
+    answering only the first is what let a caller who knows an id mutate a
+    restricted Project that ``list_projects`` correctly omits for them.
+
+    ``get_effective_project_role`` is the same helper the list path applies, so
+    the floor here is the visibility floor rather than a second predicate:
+    Instance Owner and Personal installs short-circuit inside it (a Personal
+    install has no Project ACL, so the instance role stays sufficient), an
+    ``inherit`` or absent policy yields the instance role, and a restricted
+    policy yields the caller's binding or nothing at all.
+
+    ``LookupError`` rather than a refusal, matching ``get_project``: a Project
+    the caller may not see must not be distinguishable from one that does not
+    exist, or the 403/404 split enumerates the restricted Projects.
+    """
+
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
+
+
 def get_project(
     conn: Connection,
     project_id: str,
@@ -330,13 +389,18 @@ def create_project(
     after archiving, without a dedicated unarchive endpoint. The caller's
     ``display_name`` is intentionally ignored on reuse so re-opening a folder
     never clobbers a name the user set earlier; renaming stays explicit.
+
+    Reuse is a project lookup, so it carries the same visibility rule as every
+    other one: ``_find_project_by_workdir`` refuses a match the caller cannot
+    see, which is what stops a folder path from being a side door onto a
+    restricted project's payload — or onto reviving an archived one.
     """
 
-    context = require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "member")
     folder = _resolve_folder(folder_path)
     now = _utc_now_iso()
 
-    existing = _find_project_by_workdir(conn, str(folder))
+    existing = _find_project_by_workdir(conn, context, str(folder))
     if existing is not None:
         scope_id = existing["scope_id"]
         if not existing["enabled"]:
@@ -415,8 +479,14 @@ def update_project(
     lets Project Settings clear the default back to "follow the global default"
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
+
+    A newly selected default is checked for existence and availability only. It
+    is deliberately not validated against the project audience: the ACL is
+    enforced per-principal at use time, where a default a caller cannot use
+    degrades to one they can (``core.vibe_agents.resolve_usable_default_agent``).
     """
-    context = require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "member")
+    _require_visible_project(conn, context, project_id)
     reserve_write_lock(conn)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
@@ -466,10 +536,9 @@ def update_project(
         if selected_agent is None:
             raise ProjectAgentUnavailableError(agent_name=cleaned_agent_id)
         preserves_current_identity = cleaned_agent_id == current_agent_id
-        if not preserves_current_identity and (
-            not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None
-        ):
-            raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
+        if not preserves_current_identity:
+            if not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None:
+                raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
         agent_name = selected_agent["name"]
     elif agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
@@ -481,15 +550,15 @@ def update_project(
             except ValueError as exc:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent) from exc
             available_agent = conn.execute(
-                select(agents.c.name)
+                select(agents.c.id, agents.c.name)
                 .where(agents.c.normalized_name == normalized_agent)
                 .where(agents.c.enabled == 1)
                 .where(agents.c.archived_at.is_(None))
                 .limit(1)
-            ).scalar_one_or_none()
+            ).mappings().first()
             if available_agent is None:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent)
-            agent_name = available_agent
+            agent_name = available_agent["name"]
     for field_name, value in (
         ("agent_name", agent_name),
         ("agent_variant", agent_variant),
@@ -510,7 +579,8 @@ def archive_project(
     *,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    context = require_instance_role(authorization_context, "owner")
+    context = require_instance_role(authorization_context, "member")
+    _require_visible_project(conn, context, project_id)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:

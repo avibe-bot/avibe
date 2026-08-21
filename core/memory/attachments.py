@@ -10,31 +10,33 @@ import re
 import secrets
 import stat
 import threading
+import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from config import paths
+from core.inbound_attachment_lease import (
+    InboundAttachmentLease,
+    LeasedAttachmentRecord,
+    leased_attachment_records,
+    open_leased_attachment_record,
+)
+from core.memory import modality as memory_modality
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    ConfinedRoot,
     SpilledDirectoryOrder,
+    ensure_private_directory,
+    open_confined_directory,
     required_no_follow_flag,
 )
-from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 from core.memory.types import (
     CaptureAttachment,
     MemoryContentKind,
     MemoryErrorCode,
 )
-
-if TYPE_CHECKING:
-    from core.handlers.inbound_attachments import (
-        InboundAttachmentLease,
-        _LeasedAttachmentRecord,
-    )
-
 
 MAX_PINNED_ATTACHMENTS = 8
 MAX_PINNED_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -45,6 +47,7 @@ IM_ATTACHMENT_CAPTURE_PLATFORMS = frozenset(
 
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MAX_ATTACHMENT_NAME_BYTES = 512
+_OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS = 30.0
 _MAX_FILE_URI_BYTES = 8 * 1024
 _BUNDLE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -224,21 +227,28 @@ class AttachmentPinStore:
         effective_home: Path | str | None = None,
         source_root: Path | None = None,
     ) -> None:
-        self._effective_home = _absolute_lexical(
-            paths.get_vibe_remote_dir()
-            if effective_home is None
-            else effective_home
-        )
-        self._root = (
-            _absolute_lexical(root)
-            if root is not None
-            else attachment_pin_root(self._effective_home)
-        )
-        self._source_root = _absolute_lexical(
-            source_root
-            if source_root is not None
-            else self._effective_home / "attachments" / "avibe"
-        )
+        try:
+            self._filesystem_root = ConfinedRoot.from_home(
+                paths.get_vibe_remote_dir()
+                if effective_home is None
+                else effective_home
+            )
+            self._effective_home = self._filesystem_root.physical_home
+            self._root = self._filesystem_root.confine(
+                root
+                if root is not None
+                else self._filesystem_root.logical_home / "memory" / "attachments"
+            )
+            self._source_root = self._filesystem_root.confine(
+                source_root
+                if source_root is not None
+                else self._filesystem_root.logical_home / "attachments" / "avibe"
+            )
+        except ConfinedFilesystemError as error:
+            raise AttachmentPinError(
+                "memory_store_unavailable",
+                "attachment paths must stay below the effective Avibe home",
+            ) from error
         self._staging = self._root / "staging"
         self._bundles = self._root / "bundles"
         self._lock = threading.RLock()
@@ -269,8 +279,9 @@ class AttachmentPinStore:
         source_root, allowed_records = self._pin_source(source_lease)
         with self._lock:
             self._verify_private_layout()
-            staging_fd = _open_private_directory(self._staging, "attachment staging root")
-            bundles_fd = _open_private_directory(self._bundles, "attachment bundles root")
+            office_conversion_deadline = _office_conversion_deadline(source_items)
+            staging_fd = _open_private_directory(self._effective_home, self._staging, "attachment staging root")
+            bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             bundle_id: str | None = None
             stage_name: str | None = None
             renamed = False
@@ -287,15 +298,16 @@ class AttachmentPinStore:
                 pinned: list[PinnedAttachment] = []
                 total_bytes = 0
                 try:
-                    for index, source in enumerate(source_items):
-                        source_fd, source_info, source_sha256 = self._open_source(
-                            source,
-                            source_root=source_root,
-                            allowed_records=allowed_records,
-                            source_lease=source_lease,
-                        )
+                    for source in source_items:
+                        filename = _bundle_filename(len(pinned), source.ext)
+                        source_fd: int | None = None
                         try:
-                            filename = _bundle_filename(index, source.ext)
+                            source_fd, source_info, source_sha256 = self._open_source(
+                                source,
+                                source_root=source_root,
+                                allowed_records=allowed_records,
+                                source_lease=source_lease,
+                            )
                             size_bytes, digest = _copy_source_file(
                                 source_fd,
                                 source_info,
@@ -304,18 +316,58 @@ class AttachmentPinStore:
                                 total_before=total_bytes,
                                 expected_sha256=source_sha256,
                             )
+                            if (
+                                source.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                                and not _pinned_office_matches(
+                                    stage_fd,
+                                    filename,
+                                    source.kind,
+                                    source.ext,
+                                    conversion_path=(
+                                        self._staging / stage_name / filename
+                                    ),
+                                    conversion_timeout_seconds=(
+                                        _remaining_office_conversion_seconds(
+                                            office_conversion_deadline
+                                        )
+                                    ),
+                                )
+                            ):
+                                raise AttachmentPinError(
+                                    "memory_invalid_input",
+                                    "Office attachment changed before it was pinned",
+                                )
+                        except AttachmentPinError as error:
+                            if (
+                                source.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                                and error.error
+                                in {"memory_invalid_input", "memory_input_too_large"}
+                            ):
+                                _discard_staged_file(stage_fd, filename)
+                                continue
+                            raise
                         finally:
-                            os.close(source_fd)
+                            if source_fd is not None:
+                                os.close(source_fd)
                         total_bytes += size_bytes
                         pinned.append(
                             PinnedAttachment(
                                 kind=source.kind,
                                 name=source.name,
                                 ext=source.ext,
-                                storage_key=_storage_key(bundle_id, index, source.ext),
+                                storage_key=_storage_key(
+                                    bundle_id,
+                                    len(pinned),
+                                    source.ext,
+                                ),
                                 size_bytes=size_bytes,
                                 sha256=digest,
                             )
+                        )
+                    if not pinned:
+                        raise AttachmentPinError(
+                            "memory_invalid_input",
+                            "no attachment remained valid while pinning",
                         )
                     _fsync_fd(stage_fd, "attachment staging bundle")
                 finally:
@@ -379,7 +431,7 @@ class AttachmentPinStore:
 
         with self._lock:
             self._verify_private_layout()
-            bundles_fd = _open_private_directory(self._bundles, "attachment bundles root")
+            bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             try:
                 observed_files = _validate_private_bundle(bundles_fd, checked.bundle_id)
                 expected_files = tuple(
@@ -398,9 +450,32 @@ class AttachmentPinStore:
                 )
                 try:
                     projected: list[CaptureAttachment] = []
+                    office_conversion_deadline = _office_conversion_deadline(
+                        checked.attachments
+                    )
                     for index, pinned in enumerate(checked.attachments):
                         filename = _bundle_filename(index, pinned.ext)
                         _verify_pinned_file(bundle_fd, filename, pinned)
+                        if (
+                            pinned.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+                            and not _pinned_office_matches(
+                                bundle_fd,
+                                filename,
+                                pinned.kind,
+                                pinned.ext,
+                                conversion_path=(
+                                    self._bundles
+                                    / checked.bundle_id
+                                    / filename
+                                ),
+                                conversion_timeout_seconds=(
+                                    _remaining_office_conversion_seconds(
+                                        office_conversion_deadline
+                                    )
+                                ),
+                            )
+                        ):
+                            continue
                         projected.append(
                             CaptureAttachment(
                                 kind=pinned.kind,
@@ -422,7 +497,7 @@ class AttachmentPinStore:
             raise AttachmentPinError("memory_invalid_input", "invalid attachment bundle id")
         with self._lock:
             self._verify_private_layout()
-            bundles_fd = _open_private_directory(self._bundles, "attachment bundles root")
+            bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             try:
                 _remove_private_bundle(bundles_fd, bundle_id, strict_files=True)
             finally:
@@ -445,8 +520,8 @@ class AttachmentPinStore:
 
         with self._lock:
             self._verify_private_layout()
-            staging_fd = _open_private_directory(self._staging, "attachment staging root")
-            bundles_fd = _open_private_directory(self._bundles, "attachment bundles root")
+            staging_fd = _open_private_directory(self._effective_home, self._staging, "attachment staging root")
+            bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             removed: list[str] = []
             try:
                 for name in _directory_entry_names(staging_fd):
@@ -481,8 +556,8 @@ class AttachmentPinStore:
 
         with self._lock:
             self._verify_private_layout()
-            staging_fd = _open_private_directory(self._staging, "attachment staging root")
-            bundles_fd = _open_private_directory(self._bundles, "attachment bundles root")
+            staging_fd = _open_private_directory(self._effective_home, self._staging, "attachment staging root")
+            bundles_fd = _open_private_directory(self._effective_home, self._bundles, "attachment bundles root")
             try:
                 for directory_fd in (staging_fd, bundles_fd):
                     for name in _directory_entry_names(directory_fd):
@@ -499,7 +574,13 @@ class AttachmentPinStore:
 
     def _prepare_private_layout(self) -> None:
         for directory in (self._root, self._staging, self._bundles):
-            _ensure_private_directory(directory)
+            try:
+                ensure_private_directory(self._effective_home, directory)
+            except ConfinedFilesystemError as error:
+                raise AttachmentPinError(
+                    "memory_store_unavailable",
+                    "attachment storage path contains an unsafe directory component",
+                ) from error
 
     def _verify_private_layout(self) -> None:
         for directory, label in (
@@ -507,7 +588,7 @@ class AttachmentPinStore:
             (self._staging, "attachment staging root"),
             (self._bundles, "attachment bundles root"),
         ):
-            descriptor = _open_private_directory(directory, label)
+            descriptor = _open_private_directory(self._effective_home, directory, label)
             os.close(descriptor)
 
     def _validate_sources(self, sources: tuple[CaptureAttachment, ...]) -> None:
@@ -565,13 +646,9 @@ class AttachmentPinStore:
     def _pin_source(
         self,
         source_lease: InboundAttachmentLease | None,
-    ) -> tuple[Path, dict[Path, _LeasedAttachmentRecord] | None]:
+    ) -> tuple[Path, dict[Path, LeasedAttachmentRecord] | None]:
         if source_lease is None:
             return self._source_root, None
-        from core.handlers.inbound_attachments import (
-            InboundAttachmentLease,
-            leased_attachment_records,
-        )
 
         if type(source_lease) is not InboundAttachmentLease:
             raise AttachmentPinError(
@@ -608,10 +685,17 @@ class AttachmentPinStore:
         source: CaptureAttachment,
         *,
         source_root: Path,
-        allowed_records: dict[Path, _LeasedAttachmentRecord] | None,
+        allowed_records: dict[Path, LeasedAttachmentRecord] | None,
         source_lease: InboundAttachmentLease | None,
     ) -> tuple[int, os.stat_result, str | None]:
         source_path = _path_from_file_uri(source.uri)
+        try:
+            source_path = self._filesystem_root.confine(source_path)
+        except ConfinedFilesystemError as error:
+            raise AttachmentPinError(
+                "memory_invalid_input",
+                "attachment is outside the source root",
+            ) from error
         if allowed_records is not None and source_path not in allowed_records:
             raise AttachmentPinError(
                 "memory_invalid_input",
@@ -630,11 +714,6 @@ class AttachmentPinStore:
             raise AttachmentPinError("memory_invalid_input", "attachment extension is inconsistent")
 
         if source_lease is not None:
-            from core.handlers.inbound_attachments import (
-                leased_attachment_records,
-                open_leased_attachment_record,
-            )
-
             directory_fd: int | None = None
             try:
                 current_root, directory_fd, current_records = leased_attachment_records(source_lease)
@@ -676,7 +755,8 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
 
     if not isinstance(files, list):
         return ()
-    source_root = _absolute_lexical(paths.get_attachments_dir() / "avibe")
+    filesystem_root = ConfinedRoot.from_home(paths.get_vibe_remote_dir())
+    source_root = filesystem_root.confine(paths.get_attachments_dir() / "avibe")
     converted: list[CaptureAttachment] = []
     for file in files:
         local_path = getattr(file, "local_path", None)
@@ -685,23 +765,36 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
         if not all(isinstance(value, str) and value for value in (local_path, name, mimetype)):
             continue
         try:
-            path = Path(local_path)
+            path = filesystem_root.confine(Path(local_path))
             if not path.is_absolute():
                 continue
             relative = path.relative_to(source_root)
             if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
                 continue
-        except (OSError, ValueError):
+        except (ConfinedFilesystemError, OSError, ValueError):
             continue
         extension = path.suffix.lstrip(".").lower()
         if _EXTENSION_PATTERN.fullmatch(extension) is None:
             continue
-        if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+        if extension not in memory_modality.SUPPORTED_ATTACHMENT_EXTENSIONS:
             # The provider answers an unparseable extension with a permanent
             # rejection, so an upload it cannot read never becomes a capture.
             continue
+        office_classification = None
+        if extension in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS:
+            # EverOS aborts the whole /add batch when soffice is missing or the
+            # bytes are not a convertible Office container.
+            office_classification = memory_modality.classify_pinned_attachment(
+                name,
+                mimetype,
+                path,
+            )
+            if office_classification is None:
+                continue
         normalized_mime = mimetype.lower().split(";", 1)[0].strip()
-        if normalized_mime.startswith("image/"):
+        if office_classification is not None:
+            kind, _classified_extension = office_classification
+        elif normalized_mime.startswith("image/"):
             kind: MemoryContentKind = "image"
         elif normalized_mime.startswith("audio/"):
             kind = "audio"
@@ -713,16 +806,7 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
             kind = "email"
         else:
             kind = "doc"
-        display_name = Path(name).name
-        try:
-            encoded_name = display_name.encode("utf-8")
-        except UnicodeError:
-            continue
-        if len(encoded_name) > _MAX_ATTACHMENT_NAME_BYTES:
-            display_name = encoded_name[:_MAX_ATTACHMENT_NAME_BYTES].decode(
-                "utf-8",
-                errors="ignore",
-            )
+        display_name = _bounded_attachment_name(Path(name).name)
         if display_name:
             converted.append(
                 CaptureAttachment(
@@ -733,6 +817,29 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
                 )
             )
     return tuple(converted)
+
+
+def _bounded_attachment_name(name: str) -> str:
+    try:
+        encoded_name = name.encode("utf-8")
+    except UnicodeError:
+        return ""
+    if len(encoded_name) <= _MAX_ATTACHMENT_NAME_BYTES:
+        return name
+    suffix = Path(name).suffix
+    encoded_suffix = suffix.encode("utf-8", errors="ignore")
+    if not suffix or len(encoded_suffix) >= _MAX_ATTACHMENT_NAME_BYTES:
+        return encoded_name[:_MAX_ATTACHMENT_NAME_BYTES].decode(
+            "utf-8",
+            errors="ignore",
+        )
+    stem = name[: -len(suffix)]
+    stem_budget = _MAX_ATTACHMENT_NAME_BYTES - len(encoded_suffix)
+    bounded_stem = stem.encode("utf-8")[:stem_budget].decode(
+        "utf-8",
+        errors="ignore",
+    )
+    return f"{bounded_stem}{suffix}"
 
 
 def _absolute_lexical(value: Path | str) -> Path:
@@ -805,64 +912,6 @@ def _file_write_flags() -> int:
     )
 
 
-def _ensure_private_directory(directory: Path) -> None:
-    if not directory.is_absolute():
-        raise AttachmentPinError("memory_store_unavailable", "attachment storage path must be absolute")
-    try:
-        descriptor = os.open(directory.anchor, _directory_open_flags())
-    except OSError as error:
-        raise _storage_failure(error, "attachment storage anchor is unavailable") from error
-    try:
-        for component in directory.parts[1:]:
-            try:
-                next_descriptor = os.open(
-                    component,
-                    _directory_open_flags(),
-                    dir_fd=descriptor,
-                )
-            except FileNotFoundError:
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
-                    _fsync_fd(descriptor, "attachment directory parent")
-                except FileExistsError:
-                    pass
-                except AttachmentPinError:
-                    raise
-                except OSError as error:
-                    raise _storage_failure(
-                        error,
-                        "attachment directory could not be created",
-                    ) from error
-                try:
-                    next_descriptor = os.open(
-                        component,
-                        _directory_open_flags(),
-                        dir_fd=descriptor,
-                    )
-                except OSError as error:
-                    raise _storage_failure(
-                        error,
-                        "attachment directory is unavailable",
-                    ) from error
-            except OSError as error:
-                raise _storage_failure(
-                    error,
-                    "attachment storage path contains an unsafe directory component",
-                ) from error
-            os.close(descriptor)
-            descriptor = next_descriptor
-
-        _require_current_owner(os.fstat(descriptor), "attachment storage directory", storage=True)
-        try:
-            os.fchmod(descriptor, 0o700)
-        except OSError as error:
-            raise _storage_failure(error, "attachment directory could not be made private") from error
-        _require_private_directory(os.fstat(descriptor), "attachment storage directory")
-        _fsync_fd(descriptor, "attachment storage directory")
-    finally:
-        os.close(descriptor)
-
-
 def _open_directory_no_follow(path: Path, label: str) -> int:
     if not path.is_absolute():
         raise AttachmentPinError("memory_store_unavailable", f"{label} path must be absolute")
@@ -891,8 +940,14 @@ def _open_directory_no_follow(path: Path, label: str) -> int:
         raise
 
 
-def _open_private_directory(path: Path, label: str) -> int:
-    descriptor = _open_directory_no_follow(path, label)
+def _open_private_directory(home: Path, path: Path, label: str) -> int:
+    try:
+        descriptor = open_confined_directory(home, path)
+    except ConfinedFilesystemError as error:
+        raise AttachmentPinError(
+            "memory_store_unavailable",
+            f"{label} is unavailable",
+        ) from error
     try:
         _require_private_directory(os.fstat(descriptor), label)
     except BaseException:
@@ -996,6 +1051,70 @@ def _require_safe_source_file(info: os.stat_result) -> None:
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022:
         raise AttachmentPinError("memory_invalid_input", "attachment source is unsafe")
     _require_current_owner(info, "attachment source", storage=False)
+
+
+def _office_conversion_deadline(
+    attachments: Sequence[CaptureAttachment] | tuple[PinnedAttachment, ...],
+) -> float | None:
+    if not any(
+        attachment.ext in memory_modality.OFFICE_ATTACHMENT_EXTENSIONS
+        for attachment in attachments
+    ):
+        return None
+    return time.monotonic() + _OFFICE_CONVERSION_BUNDLE_BUDGET_SECONDS
+
+
+def _remaining_office_conversion_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _pinned_office_matches(
+    directory_fd: int,
+    filename: str,
+    kind: MemoryContentKind,
+    extension: str,
+    *,
+    conversion_path: Path | None = None,
+    conversion_timeout_seconds: float | None = None,
+) -> bool:
+    try:
+        descriptor = os.open(filename, _file_read_flags(), dir_fd=directory_fd)
+    except OSError as error:
+        raise _storage_failure(error, "pinned Office attachment is unavailable") from error
+    try:
+        _require_private_file(os.fstat(descriptor), "pinned Office attachment")
+        classification = memory_modality.classify_pinned_attachment(
+            filename,
+            "application/octet-stream",
+            Path(filename),
+            file_fd=descriptor,
+        )
+        if classification != (kind, extension):
+            return False
+        if conversion_path is None:
+            return True
+        if (
+            conversion_timeout_seconds is None
+            or conversion_timeout_seconds <= 0
+        ):
+            return False
+        return memory_modality.office_document_conversion_succeeds(
+            conversion_path,
+            timeout_seconds=conversion_timeout_seconds,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _discard_staged_file(directory_fd: int, filename: str) -> None:
+    try:
+        os.unlink(filename, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _storage_failure(error, "invalid Office attachment could not be discarded") from error
 
 
 def _copy_source_file(
@@ -1221,7 +1340,7 @@ def _valid_kind_name_extension(kind: object, name: object, extension: object) ->
         or "\x00" in name
         or not isinstance(extension, str)
         or _EXTENSION_PATTERN.fullmatch(extension) is None
-        or extension not in SUPPORTED_ATTACHMENT_EXTENSIONS
+        or extension not in memory_modality.SUPPORTED_ATTACHMENT_EXTENSIONS
     ):
         return False
     try:
@@ -1294,7 +1413,7 @@ def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
             if (
                 match is None
                 or match.group(1) != f"{index:02d}"
-                or match.group(2) not in SUPPORTED_ATTACHMENT_EXTENSIONS
+                or match.group(2) not in memory_modality.SUPPORTED_ATTACHMENT_EXTENSIONS
             ):
                 raise AttachmentBundleInvalidError(
                     "memory_store_unavailable",

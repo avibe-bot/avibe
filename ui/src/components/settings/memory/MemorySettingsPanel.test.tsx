@@ -51,6 +51,7 @@ const endpoint = (baseUrl: string) => ({
 const legacySettings: MemorySettings = {
   status: 'ok',
   enabled: true,
+  mode: 'custom',
   im_attachment_capture_available: true,
   processing: {
     llm: endpoint('https://old.example.test/v1'),
@@ -68,6 +69,7 @@ const emptyEndpoint = {
 const firstSetupSettings: MemorySettings = {
   status: 'ok',
   enabled: false,
+  mode: 'custom',
   im_attachment_capture_available: true,
   processing: {
     llm: emptyEndpoint,
@@ -81,6 +83,264 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('renders the personal Avibe Cloud state without exposing endpoint fields', () => {
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, mode: 'platform', cloud_available: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.getByText('memory.settings.avibeCloudTitle')).toBeTruthy();
+    expect(screen.getByText('memory.settings.avibeCloudFree')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'memory.settings.useCustomEndpoints' })).toBeTruthy();
+    expect(screen.getByText('memory.settings.disclosureTitle')).toBeTruthy();
+    expect(screen.getByText('memory.settings.cloudDisclosureAttachment')).toBeTruthy();
+    expect(screen.queryByText('memory.settings.llmTitle')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.settings.save' })).toBeNull();
+  });
+
+  it('renders the organization state as read-only model management', () => {
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, mode: 'organization', managed: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.getByText('memory.settings.organizationManaged')).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'memory.settings.enableLabel' })).toBeTruthy();
+    expect(screen.getByText('memory.settings.disclosureTitle')).toBeTruthy();
+    expect(screen.getByText('memory.settings.cloudDisclosureAttachment')).toBeTruthy();
+    expect(screen.queryByText('memory.settings.llmTitle')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.settings.save' })).toBeNull();
+  });
+
+  it.each([
+    ['platform', false],
+    ['organization', true],
+  ] as const)('keeps local Memory deletion available in %s mode', async (mode, managed) => {
+    const onClearAll = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...legacySettings,
+          mode,
+          managed,
+          cloud_available: true,
+        }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_in_progress: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={onClearAll}
+        clearing={false}
+      />,
+    );
+
+    const clear = screen.getByRole('button', { name: 'memory.clear.button' });
+    await user.click(clear);
+    expect(onClearAll).toHaveBeenCalledOnce();
+  });
+
+  it('keeps fresh managed Memory unavailable until the organization provides the pair', () => {
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...firstSetupSettings,
+          mode: 'organization',
+          managed: true,
+          cloud_available: false,
+        }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.getByText('memory.settings.organizationManaged')).toBeTruthy();
+    expect((screen.getByRole('switch', {
+      name: 'memory.settings.enableLabel',
+    }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText('memory.settings.customEndpointsTitle')).toBeNull();
+  });
+
+  it('does not re-enable a paused personal cloud mode before its capability pair returns', () => {
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...firstSetupSettings,
+          mode: 'platform',
+          cloud_available: false,
+          capability_paused: true,
+        }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect((screen.getByRole('switch', {
+      name: 'memory.settings.enableLabel',
+    }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('memory.settings.cloudPausedTitle')).toBeTruthy();
+  });
+
+  it('opens the unchanged custom editor and confirms a cloud-to-custom identity switch', async () => {
+    api.saveMemorySettings.mockResolvedValue(legacySettings);
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, mode: 'platform', cloud_available: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'memory.settings.useCustomEndpoints' }));
+    expect(screen.getByText('memory.settings.customEndpointsTitle')).toBeTruthy();
+    expect(screen.getByText('memory.settings.llmTitle')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'confirm-rebuild' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      mode: 'custom',
+      confirm_rebuild: true,
+    }));
+  });
+
+  it('acknowledges enterprise attachment through the rebuild confirmation flow', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      mode: 'organization',
+      managed: true,
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...legacySettings,
+          mode: 'organization',
+          managed: true,
+          cloud_available: true,
+          transition_notice_pending: true,
+          rebuild_required: true,
+        }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'memory.settings.retryRebuild' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'memory.settings.organizationTransitionAction' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-rebuild' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      acknowledge_transition: true,
+      confirm_rebuild: true,
+    }));
+  });
+
+  it('applies the Memory toggle immediately outside custom mode', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      mode: 'platform',
+      enabled: false,
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, mode: 'platform', cloud_available: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('switch', { name: 'memory.settings.enableLabel' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: false }));
+  });
+
+  it.each([
+    ['platform', false],
+    ['organization', true],
+  ] as const)('restores a failed immediate toggle in %s mode', async (mode, managed) => {
+    api.saveMemorySettings.mockResolvedValue({
+      status: 'failed',
+      error: 'memory_llm_unavailable',
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{
+          ...legacySettings,
+          enabled: false,
+          mode,
+          managed,
+          cloud_available: true,
+        }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const toggle = screen.getByRole('switch', { name: 'memory.settings.enableLabel' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    await user.click(toggle);
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({ enabled: true }));
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+  });
+
   it('hides multimodal configuration until IM attachment capture is available', () => {
     render(
       <MemorySettingsPanel
@@ -98,8 +358,10 @@ describe('MemorySettingsPanel', () => {
 
     expect(screen.queryByText('memory.settings.multimodalTitle')).toBeNull();
     expect(screen.queryByText('memory.settings.disclosureAttachment')).toBeNull();
-    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
-    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(2);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(2);
+    expect(screen.getByPlaceholderText('https://api.deepinfra.com/v1/inference')).not.toBeNull();
+    expect(screen.getByPlaceholderText('Qwen/Qwen3-Reranker-4B')).not.toBeNull();
   });
 
   it('renders optional multimodal configuration once IM capture is available', () => {
@@ -118,10 +380,12 @@ describe('MemorySettingsPanel', () => {
     );
 
     expect(screen.getByText('memory.settings.rerankTitle')).not.toBeNull();
+    expect(screen.getByLabelText('memory.settings.rerankProvider')).not.toBeNull();
     expect(screen.getByText('memory.settings.multimodalTitle')).not.toBeNull();
     expect(screen.getByText('memory.settings.disclosureAttachment')).not.toBeNull();
-    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(4);
-    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(4);
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')).toHaveLength(3);
+    expect(screen.getAllByPlaceholderText('memory.settings.modelPlaceholder')).toHaveLength(3);
+    expect(screen.getByPlaceholderText('https://api.deepinfra.com/v1/inference')).not.toBeNull();
   });
 
   it('submits a complete multimodal endpoint as the IM attachment opt-in', async () => {
@@ -150,8 +414,8 @@ describe('MemorySettingsPanel', () => {
     const baseUrls = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder');
     const models = screen.getAllByPlaceholderText('memory.settings.modelPlaceholder');
     const keys = screen.getAllByPlaceholderText('memory.settings.apiKeyPlaceholder');
-    await user.type(baseUrls[3], 'https://vision.example.test/v1');
-    await user.type(models[3], 'vision-model');
+    await user.type(baseUrls[2], 'https://vision.example.test/v1');
+    await user.type(models[2], 'vision-model');
     await user.type(keys[3], 'vision-secret');
     await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
 

@@ -7,6 +7,7 @@ import inspect
 import json
 import re
 import textwrap
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.identifiers import MODEL_ID_MAX_LENGTH
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import (
     NativeOAuthSourceStatus,
@@ -45,6 +47,8 @@ from core.handlers.model_hub.oauth import (
 )
 from core.handlers.model_hub.provenance import BoundedProvenanceStore
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
+from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.usage import BoundedUsageLedger
 from core.handlers.model_hub.service import (
     CONTRACT_VERSION,
     ModelHubError,
@@ -326,6 +330,10 @@ def _service(tmp_path, adapter=None):
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
+        usage=BoundedUsageLedger(
+            tmp_path / "usage.json",
+            now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        ),
         native_oauth_adapter=adapter,
         oauth_flows=OAuthFlowRegistry(
             tmp_path / "oauth_flows.json",
@@ -513,8 +521,53 @@ def _seed_response_conformance_service(tmp_path: Path) -> ModelHubService:
     provenance = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
     provenance["turn_id"] = "turn_contract01"
     service.provenance.put(provenance)
+    service.usage.record(
+        source_id="src_conform001",
+        model_id="claude-opus-4-6",
+        usage=ProtocolUsageReport(
+            input_tokens=148230,
+            cached_input_tokens=96010,
+            output_tokens=4120,
+        ),
+        at=service.now(),
+    )
+    service.usage.record(
+        source_id="src_conform001",
+        model_id="claude-opus-4-6",
+        usage=None,
+        at=service.now(),
+    )
     asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub"}))
     return service
+
+
+def _as_ui_client(service):
+    """Give a controller service the sync/async shape the UI routes are written against.
+
+    The routes call `ModelHubRemoteService`, and one of its reads is deliberately
+    async where the service's is sync: `usage_summary` blocks on the lock the
+    ledger's writers hold across an fsync, so the RPC hop crosses a thread and the
+    UI side awaits rather than occupying a worker. A stub shaped like the service
+    instead makes every route look synchronous, which is a shape no deployment
+    has — the conformance driver below reported HTTP 500 on a route that works.
+
+    Derived from the client class rather than from a list of method names, so the
+    next async-only read is carried without editing this helper.
+    """
+
+    class UIClientShape:
+        def __getattr__(self, name):
+            attribute = getattr(service, name)
+            over_the_wire = getattr(ModelHubRemoteService, name, None)
+            if not inspect.iscoroutinefunction(over_the_wire) or inspect.iscoroutinefunction(attribute):
+                return attribute
+
+            async def awaited(*args, **kwargs):
+                return attribute(*args, **kwargs)
+
+            return awaited
+
+    return UIClientShape()
 
 
 def test_api_response_registry_exactly_covers_contract_and_server_routes():
@@ -663,7 +716,7 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
     save_config(isolated_home)
     service = _seed_response_conformance_service(tmp_path)
-    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
     request_kwargs = {
@@ -784,7 +837,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     runtime = asyncio.run(service.runtime_start())
 
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 5
+    assert runtime["contract_version"] == 6
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -954,7 +1007,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 5, "status": {"health": "ok"}}
+        return {"contract_version": 6, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -971,7 +1024,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 5, "status": {"health": "installing"}}
+        return {"contract_version": 6, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1797,6 +1850,37 @@ def test_agent_supply_rpc_refreshes_cli_presence_before_first_response(tmp_path)
 
     assert payload["cli_present"] is True
     assert calls == ["refresh"]
+
+
+def test_usage_summary_rpc_reads_the_ledger_off_the_controller_loop(tmp_path):
+    """Review 4960570946: the read blocks as hard as the write it mirrors.
+
+    Summarising reads the ledger file and the config store, and takes the same
+    lock a concurrent `record()` holds across `fsync()`. Awaited on the
+    controller loop that is every turn on this machine waiting on one settings
+    page, so it belongs in a worker thread exactly as the two writers already do.
+    """
+
+    from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+
+    service, _store, _adapter = _service(tmp_path)
+    summarised_on: list[threading.Thread] = []
+    real_summary = service.usage_summary
+
+    def observed(**kwargs):
+        summarised_on.append(threading.current_thread())
+        return real_summary(**kwargs)
+
+    service.usage_summary = observed
+
+    async def exercise() -> tuple[dict, threading.Thread]:
+        payload = await dispatch_model_hub_rpc(service, "usage_summary", {"days": 7})
+        return payload, threading.current_thread()
+
+    payload, loop_thread = asyncio.run(exercise())
+
+    assert payload["totals"]["requests"] == 0
+    assert summarised_on and loop_thread not in summarised_on
 
 
 def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
@@ -5183,7 +5267,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 5
+    assert runtime["contract_version"] == 6
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
@@ -5653,6 +5737,149 @@ def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
     assert exc_info.value.code == "discovery_failed"
     assert store.config.sources[0].base_url == "https://relay.example/v1"
     assert "sk-model-never-persist-this" not in json.dumps(store.config.to_payload())
+
+
+def test_admitted_model_ids_are_stored_in_their_canonical_form(tmp_path):
+    """Review 4959575659 finding 11: one notion of "the same model", everywhere.
+
+    A model ID is compared in config, sent upstream, and keys a usage row. If
+    admission kept the surrounding whitespace the ledger's canonical key would
+    split one model's usage in two, so admission stores what the ledger keys by.
+    """
+
+    service, store, adapter = _service(tmp_path)
+
+    async def padded_models(vendor, protocol, base_url, credential_ref):
+        return ("  discovered-model  ",)
+
+    adapter.discover_models = padded_models
+    source = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Padded source",
+                "key": "sk-test-transient-only",
+            },
+        )
+    )
+    asyncio.run(
+        service.add_custom_model(
+            source["id"],
+            {"model_id": "  manual-model  ", "reasoning_efforts": []},
+        )
+    )
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        "discovered-model",
+        "manual-model",
+    ]
+
+
+def test_models_declared_inline_at_source_creation_are_admitted_the_same_way(tmp_path):
+    """Review 4960570946: the third admission path obeyed neither half.
+
+    A source may be created with its models inline, so this is the other way a
+    client-declared identifier enters config. Spelling is now settled by the
+    config validator, which every path goes through; the length bound stays with
+    the admission surfaces, because that same validator also loads files older
+    releases wrote and rejecting one of those would fail config load.
+    """
+
+    service, store, _ = _service(tmp_path)
+
+    def creation(models: list[dict]) -> dict:
+        return {
+            "kind": "api_key",
+            "vendor": "custom",
+            "display_name": "Inline models",
+            "base_url": "https://relay.example/v1",
+            "key": "sk-test-transient-only",
+            "models": models,
+        }
+
+    asyncio.run(
+        _create_source(
+            service,
+            creation([{"id": "  inline-model  ", "origin": "manual", "reasoning_efforts": []}]),
+        )
+    )
+
+    stored = [model.id for model in store.config.sources[0].models]
+
+    assert "inline-model" in stored
+    assert "  inline-model  " not in stored
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.create_source(
+                creation(
+                    [
+                        {
+                            "id": "m" * (MODEL_ID_MAX_LENGTH + 1),
+                            "origin": "manual",
+                            "reasoning_efforts": [],
+                        }
+                    ]
+                )
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert len(store.config.sources) == 1
+
+
+def test_a_persisted_model_id_past_the_bound_still_loads(tmp_path):
+    """The bound is an admission rule, not a load rule.
+
+    Nothing stops a file written before the bound existed from holding a longer
+    identifier, and per the persisted-shape rule that file must still load. It
+    keeps its length and gains only the canonical spelling.
+    """
+
+    model = ModelHubModelConfig.from_payload(
+        {
+            "id": "  " + "m" * (MODEL_ID_MAX_LENGTH + 1) + "  ",
+            "origin": "manual",
+            "reasoning_efforts": [],
+        }
+    )
+
+    assert model.id == "m" * (MODEL_ID_MAX_LENGTH + 1)
+
+
+def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path):
+    """Two spellings of one identity are a failed listing, not two models."""
+
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "display_name": "Safe relay",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-test-transient-only",
+            },
+        )
+    )
+
+    async def duplicate_spellings(vendor, protocol, base_url, credential_ref):
+        return ("relay-model", " relay-model")
+
+    adapter.discover_models = duplicate_spellings
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.patch_source(
+                source["id"],
+                {"base_url": "https://other-relay.example/v1"},
+            )
+        )
+
+    assert exc_info.value.code == "discovery_failed"
+    assert store.config.sources[0].base_url == "https://relay.example/v1"
 
 
 def test_base_url_change_guards_and_prunes_invalid_exact_hops(

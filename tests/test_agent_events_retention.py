@@ -241,7 +241,7 @@ def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None
     """Legacy fractional timestamps must not lexically precede the cutoff.
 
     The hazard: a row stamped ``...12:00:00.500000+00:00`` is 0.5s NEWER than
-    ``...12:00:00Z`` but sorts BEFORE it lexically. The 0057 migration
+    ``...12:00:00Z`` but sorts BEFORE it lexically. The 0060 migration
     canonicalizes released rows; this test pins both halves — the hazard is
     real in raw form, and the canonical form is safe.
     """
@@ -258,7 +258,7 @@ def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None
         raw = agent_events_retention.plan(conn, retention_days=30, now=_NOW)
     assert raw["eligible_count"] == 1  # demonstrates the lexical hazard exists
 
-    # Canonical form of the same instant (what migration 0057 produces).
+    # Canonical form of the same instant (what migration 0060 produces).
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "update agent_events set created_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at) "
@@ -269,7 +269,7 @@ def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None
     assert canonical["eligible_count"] == 0  # normalized: not eligible, correctly
 
 
-def test_migration_0057_leaves_non_retention_events_untouched(tmp_path, monkeypatch) -> None:
+def test_migration_0060_leaves_non_retention_events_untouched(tmp_path, monkeypatch) -> None:
     """silent_terminal timestamps keep their precision (fork ordering anchors)."""
     import sqlite3
 
@@ -278,7 +278,7 @@ def test_migration_0057_leaves_non_retention_events_untouched(tmp_path, monkeypa
 
     db_path = tmp_path / "state.sqlite"
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    command.upgrade(migrations.alembic_config(db_path), "20260818_0057")
+    command.upgrade(migrations.alembic_config(db_path), "20260821_0060")
     conn = sqlite3.connect(db_path)
     conn.executemany(
         "insert into agent_events (id, platform, event_type, visibility, content_json, "
@@ -291,9 +291,9 @@ def test_migration_0057_leaves_non_retention_events_untouched(tmp_path, monkeypa
     conn.commit()
     conn.close()
 
-    # Apply 0057 to pre-seeded rows: downgrade to the prior head, re-upgrade.
-    command.downgrade(migrations.alembic_config(db_path), "20260817_0056")
-    command.upgrade(migrations.alembic_config(db_path), "20260818_0057")
+    # Apply 0060 to pre-seeded rows: downgrade to the prior head, re-upgrade.
+    command.downgrade(migrations.alembic_config(db_path), "20260821_0059")
+    command.upgrade(migrations.alembic_config(db_path), "20260821_0060")
 
     conn = sqlite3.connect(db_path)
     trace_stamp = conn.execute("select created_at from agent_events where id='trace-row'").fetchone()[0]
@@ -351,7 +351,7 @@ def test_maybe_compact_reports_lease_loss_during_vacuum(state) -> None:
         assert result["reason"] == "lease_lost_during_compaction"
 
 
-def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypatch) -> None:
+def test_migration_0060_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypatch) -> None:
     """The migration rewrites offset/fractional stamps to whole-second Z."""
     import sqlite3
 
@@ -360,8 +360,8 @@ def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypa
 
     db_path = tmp_path / "state.sqlite"
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    # Build schema up to 0056, seed a legacy-form row, then run 0057.
-    command.upgrade(migrations.alembic_config(db_path), "20260817_0056")
+    # Build schema up to 0059, seed a legacy-form row, then run 0060.
+    command.upgrade(migrations.alembic_config(db_path), "20260821_0059")
     conn = sqlite3.connect(db_path)
     conn.execute(
         "insert into agent_events (id, platform, event_type, visibility, content_json, "
@@ -371,14 +371,14 @@ def test_migration_0057_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypa
     conn.commit()
     conn.close()
 
-    command.upgrade(migrations.alembic_config(db_path), "20260818_0057")
+    command.upgrade(migrations.alembic_config(db_path), "20260821_0060")
 
     conn = sqlite3.connect(db_path)
     stamp = conn.execute("select created_at from agent_events where id = 'legacy-row'").fetchone()[0]
     version = conn.execute("select version_num from alembic_version").fetchone()[0]
     conn.close()
     assert stamp == "2026-07-18T12:00:00Z"
-    assert version == "20260818_0057"
+    assert version == "20260821_0060"
 def test_plan_measures_utf8_bytes_not_characters(state) -> None:
     engine = state
     chinese = "测" * 100  # 300 UTF-8 bytes, 100 characters

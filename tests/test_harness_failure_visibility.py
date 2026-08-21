@@ -6491,11 +6491,12 @@ def _callback_session(
         )
 
 
-def _persist_callback_result(
+def _persist_callback_receipt(
     sqlite_store,
     run_id: str,
     *,
     text: str,
+    message_type: str = "result",
     delivery_suppressed: bool = False,
 ) -> None:
     """Materialize the durable message receipt that a callback success requires."""
@@ -6510,7 +6511,7 @@ def _persist_callback_result(
             platform="avibe",
             author="agent",
             source="agent",
-            message_type="result",
+            message_type=message_type,
             text=text,
             metadata={
                 "run_id": run_id,
@@ -6551,7 +6552,11 @@ def _notice_drain_service(tmp_path: Path, sqlite_store, requests) -> tuple[Any, 
     return service, delivered
 
 
-def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -> None:
+@pytest.mark.parametrize("receipt_type", ["result", "output"])
+def test_failed_run_with_callback_delivers_exactly_one_message(
+    tmp_path: Path,
+    receipt_type: str,
+) -> None:
     """Owed by the plan (corrected 2026-07-29): a pending callback IS the delivery.
 
     A failed run carrying ``callback_session_id`` gets a user-visible result turn
@@ -6618,7 +6623,12 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
             terminal_status="succeeded",
         )
         assert delivered_callback["terminal_transition"]
-        _persist_callback_result(sqlite, callback.id, text="callback delivered")
+        _persist_callback_receipt(
+            sqlite,
+            callback.id,
+            text="callback delivered",
+            message_type=receipt_type,
+        )
         sqlite.update_owed_failure_notice("run-cb", next_attempt_at=None)
         asyncio.run(service._drain_failure_notices())
         notice = sqlite.owed_failure_notice("run-cb")
@@ -6900,7 +6910,7 @@ def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
         terminal_status="succeeded",
     )
     assert recorded["terminal_transition"]
-    _persist_callback_result(sqlite, callback.id, text="hidden callback body")
+    _persist_callback_receipt(sqlite, callback.id, text="hidden callback body")
     assert sqlite.run_callback_state("run-cb-hidden") == "failed"
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
@@ -6941,7 +6951,7 @@ def test_suppressed_callback_history_is_not_visible_delivery_evidence(
         text="local callback history",
         terminal_status="succeeded",
     )
-    _persist_callback_result(
+    _persist_callback_receipt(
         sqlite,
         callback.id,
         text="local callback history",
@@ -7606,7 +7616,7 @@ def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
         text="shared Turn callback delivered",
         terminal_status="succeeded",
     )
-    _persist_callback_result(sqlite, callback.id, text="shared Turn callback delivered")
+    _persist_callback_receipt(sqlite, callback.id, text="shared Turn callback delivered")
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
     import core.scheduled_tasks as scheduled_tasks
@@ -7806,7 +7816,7 @@ def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
                 text="callback delivered",
                 terminal_status="succeeded",
             )
-            _persist_callback_result(sqlite, callback.id, text="callback delivered")
+            _persist_callback_receipt(sqlite, callback.id, text="callback delivered")
         assert sqlite.cancel_run(parent.id)
         return parent, callback
 

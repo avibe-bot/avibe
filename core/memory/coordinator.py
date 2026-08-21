@@ -552,6 +552,20 @@ class SessionFlushCoordinator:
                     retryable=True,
                 )
                 return False
+        if (
+            row.attachment_bundle_id is not None
+            and not row.payload_text.strip()
+            and not attachments
+        ):
+            await self._settle_failure(
+                row,
+                lease_owner=lease_owner,
+                outcome=MessageFailure(
+                    error="memory_invalid_input",
+                    retryable=False,
+                ),
+            )
+            return False
         capture = ProviderCapture(
             session_ref=row.provider_session_ref,
             text=row.payload_text,

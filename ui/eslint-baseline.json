@@ -96,12 +96,8 @@
     "src/components/ui/vault-chat-requests.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
-    "src/components/workbench/AppsEditorPage.tsx": {
-      "react-hooks/set-state-in-effect": 1
-    },
     "src/components/workbench/ChatPage.tsx": {
       "@typescript-eslint/no-explicit-any": 1,
-      "react-hooks/preserve-manual-memoization": 2,
       "react-hooks/set-state-in-effect": 3
     },
     "src/components/workbench/FileTree.tsx": {

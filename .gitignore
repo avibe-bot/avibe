@@ -154,7 +154,7 @@ _tmp/
 .DS_Store
 logs/
 .vibe_remote/
-ui/node_modules/
+node_modules/
 ui/dist/
 ui/.vite/
 vibe/show_runtime/*.tgz

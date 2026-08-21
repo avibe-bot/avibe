@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.admission import (
+    MEMORY_CLI_ADMITTED_METADATA,
+    MEMORY_ORDINARY_TEXT_METADATA,
+    MEMORY_USER_ID_METADATA,
+    CaptureAdmission,
+    InboundTurnFacts,
+    is_cli_admitted,
+    is_ordinary_text,
+    merge_identity,
+)
 from core.memory.attachments import workbench_capture_attachments
 from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 from core.handlers.inbound_attachments import InboundAttachmentMaterializer
@@ -508,6 +521,14 @@ def _upload(uploads: Path, filename: str, mimetype: str) -> SimpleNamespace:
     return SimpleNamespace(name=filename, mimetype=mimetype, local_path=str(path))
 
 
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
+
+
 def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, tmp_path: Path) -> None:
     """The runtime answers an unparseable extension with a permanent rejection.
 
@@ -522,7 +543,8 @@ def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, 
             _upload(uploads, "notes.txt", "text/plain"),
             _upload(uploads, "export.json", "application/json"),
             _upload(uploads, "receipt.pdf", "application/pdf"),
-            # Needs LibreOffice, absent from the text-only runtime.
+            # Office bytes that are not a convertible container stay out even when
+            # LibreOffice is present, so a malformed xlsx cannot abort the batch.
             _upload(uploads, "report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             # In the runtime's IMAGE set, but needs the absent cairosvg support.
             _upload(uploads, "logo.svg", "image/svg+xml"),
@@ -533,6 +555,39 @@ def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, 
     assert [attachment.name for attachment in converted] == ["notes.txt", "receipt.pdf", "diagram.png"]
     assert [attachment.ext for attachment in converted] == ["txt", "pdf", "png"]
     assert [attachment.kind for attachment in converted] == ["doc", "pdf", "image"]
+
+
+def test_workbench_office_uploads_require_soffice_and_convertible_bytes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    uploads = _uploads_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    valid = uploads / "report.xlsx"
+    valid.write_bytes(_xlsx_bytes())
+    fake = _upload(
+        uploads,
+        "broken.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name="report.xlsx",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(valid),
+            ),
+            fake,
+            _upload(uploads, "logo.svg", "image/svg+xml"),
+        ]
+    )
+
+    assert [attachment.name for attachment in converted] == ["report.xlsx"]
+    assert [attachment.kind for attachment in converted] == ["doc"]
+    assert [attachment.ext for attachment in converted] == ["xlsx"]
 
 
 def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch, tmp_path: Path) -> None:
@@ -573,6 +628,112 @@ def test_unparseable_upload_does_not_cost_its_turn_the_text(monkeypatch, tmp_pat
     assert isinstance(request, CaptureRequest)
     assert request.text == "see the attached export"
     assert request.attachments == ()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (None, (None, False, False)),
+        ("not-a-dict", (None, False, False)),
+        (1, (None, False, False)),
+        (["_memory_user_id", "local"], (None, False, False)),
+        ({}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: None}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: ""}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: "   "}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: 1}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: True}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: ["local"]}, (None, False, False)),
+        ({MEMORY_USER_ID_METADATA: "local"}, ("local", False, False)),
+        ({MEMORY_USER_ID_METADATA: "  local  "}, ("local", False, False)),
+        (
+            {
+                MEMORY_USER_ID_METADATA: "local",
+                MEMORY_ORDINARY_TEXT_METADATA: True,
+                MEMORY_CLI_ADMITTED_METADATA: True,
+            },
+            ("local", True, True),
+        ),
+        (
+            {
+                MEMORY_ORDINARY_TEXT_METADATA: "true",
+                MEMORY_CLI_ADMITTED_METADATA: 1,
+            },
+            (None, False, False),
+        ),
+        (
+            {
+                MEMORY_ORDINARY_TEXT_METADATA: False,
+                MEMORY_CLI_ADMITTED_METADATA: False,
+            },
+            (None, False, False),
+        ),
+    ],
+)
+def test_merge_identity_normalizes_unusable_metadata(
+    metadata: object,
+    expected: tuple[str | None, bool, bool],
+) -> None:
+    """Queue merge identity matches today's strip/None/`is True` semantics."""
+
+    assert merge_identity(metadata) == expected
+    assert is_ordinary_text(metadata) is expected[1]
+    assert is_cli_admitted(metadata) is expected[2]
+
+
+def test_delivery_store_shares_metadata_keys_without_capture_admission() -> None:
+    """Storage can name the keys without loading CaptureAdmission or aiohttp."""
+
+    script = """
+import sys
+from storage import message_deliveries
+from core.memory.admission_metadata import MEMORY_USER_ID_METADATA
+assert message_deliveries.MEMORY_USER_ID_METADATA is MEMORY_USER_ID_METADATA
+assert "core.memory.admission" not in sys.modules
+assert "core.memory.im_attachments" not in sys.modules
+assert "core.memory.module" not in sys.modules
+assert "core.memory.store" not in sys.modules
+assert "core.memory.types" not in sys.modules
+assert "core.handlers" not in sys.modules
+assert "httpx" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_session_turns_import_keeps_memory_and_handlers_behind_their_boundaries() -> None:
+    """Scenario: MEMORY-INDEP-004.
+
+    The delivery FSM must not load optional Memory or handler implementations.
+    """
+
+    script = """
+import sys
+import core.session_turns
+assert "core.memory.admission" not in sys.modules
+assert "core.memory.attachments" not in sys.modules
+assert "core.memory.im_attachments" not in sys.modules
+assert "core.memory.module" not in sys.modules
+assert "core.memory.runtime" not in sys.modules
+assert "core.memory.types" not in sys.modules
+assert "core.handlers" not in sys.modules
+assert "core.handlers.message_handler" not in sys.modules
+assert "aiohttp" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:

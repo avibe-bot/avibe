@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -78,6 +79,11 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import derive_session_harness_activities
 from core.message_output import terminal_turn_output
+from core.memory.admission_metadata import (
+    is_cli_admitted as memory_cli_admitted,
+    is_ordinary_text as memory_ordinary_text,
+    merge_identity as memory_admission_merge_identity,
+)
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -91,27 +97,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-TURN_LIFECYCLE_ADMISSION_KEY = "_turn_lifecycle_admission"
+@dataclass
+class _SessionLifecycleState:
+    """One live session generation retained only by active lifecycle work."""
+
+    admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    epoch: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SessionLifecycleSnapshot:
+    """Strong reference proving which live session generation admitted a turn."""
+
+    _state: _SessionLifecycleState
+    epoch: int
 
 
 @dataclass
 class TurnLifecycleAdmission:
     """One idempotent lease bridging turn admission into Memory capture."""
 
-    _lock: asyncio.Lock
+    _state: _SessionLifecycleState
     _released: bool = field(default=False, init=False)
 
     def release(self) -> None:
         if self._released:
             return
         self._released = True
-        self._lock.release()
-
-
-class SessionTurnLifecycleBusyError(RuntimeError):
-    """A destructive lifecycle operation could not quiesce admitted turns."""
-
-    code = "memory_session_lifecycle_busy"
+        self._state.admission_lock.release()
 
 
 def _utc_now_iso() -> str:
@@ -378,25 +392,9 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
 
 
 def _memory_admission_merge_identity(row: dict[str, Any]) -> tuple[str | None, bool, bool]:
-    """Return the Memory facts that one dispatch context must keep singular.
+    """Opaque Memory identity for one delivery row's merge batch."""
 
-    ``author_id`` is the web-push ownership identity, not the Memory principal.
-    Keep the durable Memory identity alongside the two admission flags so a
-    merged turn can never cross principals. Only a non-empty string is usable.
-    """
-
-    metadata = row.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    memory_user_id = metadata.get("_memory_user_id")
-    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
-        memory_user_id = None
-    elif memory_user_id != memory_user_id.strip():
-        memory_user_id = memory_user_id.strip()
-    return (
-        memory_user_id,
-        metadata.get("_memory_ordinary_text") is True,
-        metadata.get("_memory_cli_admitted") is True,
-    )
+    return memory_admission_merge_identity(row.get("metadata"))
 
 
 def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -627,8 +625,9 @@ class SessionTurnManager:
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
-        self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
-        self._session_lifecycle_epochs: dict[str, int] = {}
+        self._session_lifecycle_states: weakref.WeakValueDictionary[
+            str, _SessionLifecycleState
+        ] = weakref.WeakValueDictionary()
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
@@ -668,36 +667,75 @@ class SessionTurnManager:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
 
+    def _session_lifecycle_state(
+        self,
+        raw_session_id: str,
+    ) -> _SessionLifecycleState:
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            raise ValueError("session lifecycle requires a session id")
+        state = self._session_lifecycle_states.get(raw_session_id)
+        if state is None:
+            state = _SessionLifecycleState()
+            self._session_lifecycle_states[raw_session_id] = state
+        return state
+
+    def snapshot_session_lifecycle(
+        self,
+        raw_session_id: str,
+    ) -> SessionLifecycleSnapshot:
+        """Retain the generation that may attribute one optional capture."""
+
+        state = self._session_lifecycle_state(raw_session_id)
+        return SessionLifecycleSnapshot(state, state.epoch)
+
+    def session_lifecycle_snapshot_matches(
+        self,
+        raw_session_id: str,
+        snapshot: object,
+    ) -> bool:
+        """Revalidate a retained generation before Memory attribution."""
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            raise ValueError("session lifecycle requires a session id")
+        if not isinstance(snapshot, SessionLifecycleSnapshot):
+            return False
+        state = self._session_lifecycle_states.get(raw_session_id)
+        return (
+            state is snapshot._state
+            and snapshot._state.epoch == snapshot.epoch
+        )
+
     async def acquire_lifecycle_admission(
         self,
         raw_session_id: str,
     ) -> TurnLifecycleAdmission:
-        """Fence one admitted turn until its Memory capture is durably decided."""
+        """Best-effort lease so a capture can quiesce before a destructive op.
 
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            raise ValueError("session lifecycle admission requires a session id")
-        lock = self._session_lifecycle_locks.setdefault(
-            raw_session_id,
-            asyncio.Lock(),
-        )
-        await lock.acquire()
-        return TurnLifecycleAdmission(lock)
+        Turn dispatch must not await this lock. Capture tasks acquire it on
+        their own task so a hung sidecar cannot fence the next message.
+        """
 
-    def session_lifecycle_epoch(self, raw_session_id: str) -> int:
-        """Return the local lifecycle generation for one canonical session."""
+        state = self._session_lifecycle_state(raw_session_id)
+        await state.admission_lock.acquire()
+        return TurnLifecycleAdmission(state)
 
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            raise ValueError("session lifecycle epoch requires a session id")
-        return self._session_lifecycle_epochs.get(raw_session_id, 0)
-
-    def session_lifecycle_epoch_matches(
+    def _advance_session_lifecycle(
         self,
         raw_session_id: str,
-        expected_epoch: int,
-    ) -> bool:
-        """Revalidate a pre-await lifecycle fact inside lifecycle admission."""
+        state: _SessionLifecycleState,
+        *,
+        abandon_captures: bool = False,
+    ) -> None:
+        """Invalidate retained snapshots; cancel captures only when asked."""
 
-        return self.session_lifecycle_epoch(raw_session_id) == expected_epoch
+        if self._session_lifecycle_states.get(raw_session_id) is not state:
+            raise RuntimeError("session lifecycle ownership changed")
+        state.epoch += 1
+        if abandon_captures:
+            handler = getattr(self.controller, "message_handler", None)
+            abandon = getattr(handler, "abandon_memory_captures_for_session", None)
+            if callable(abandon):
+                abandon(raw_session_id)
 
     async def run_session_lifecycle(
         self,
@@ -706,24 +744,43 @@ class SessionTurnManager:
         *,
         deadline_seconds: float = 5.0,
     ) -> Any:
-        """Run a destructive transition after admitted turns finish capture."""
+        """Run a destructive transition, failing open if capture is still busy.
 
+        Waits up to ``deadline_seconds`` so a nearly-finished capture can
+        flush. On timeout the generation advances, in-flight captures are
+        abandoned, and ``operation`` still runs. A hung Memory sidecar
+        must not fail ``/new`` or archive.
+        """
+
+        state = self._session_lifecycle_state(raw_session_id)
+        await state.operation_lock.acquire()
+        admission = None
         try:
-            admission = await asyncio.wait_for(
-                self.acquire_lifecycle_admission(raw_session_id),
-                timeout=max(float(deadline_seconds), 0.001),
-            )
-        except asyncio.TimeoutError as exc:
-            raise SessionTurnLifecycleBusyError(
-                "turn capture admission did not quiesce before the deadline"
-            ) from exc
-        try:
-            pre_epoch = self.session_lifecycle_epoch(raw_session_id)
+            try:
+                admission = await asyncio.wait_for(
+                    self.acquire_lifecycle_admission(raw_session_id),
+                    timeout=max(float(deadline_seconds), 0.001),
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "session lifecycle admission did not quiesce before the "
+                    "deadline; proceeding without the capture lock "
+                    "session=%s",
+                    raw_session_id,
+                )
+            pre_epoch = state.epoch
             result = await operation()
-            self._session_lifecycle_epochs[raw_session_id] = pre_epoch + 1
+            if state.epoch == pre_epoch:
+                self._advance_session_lifecycle(
+                    raw_session_id,
+                    state,
+                    abandon_captures=admission is None,
+                )
             return result
         finally:
-            admission.release()
+            if admission is not None:
+                admission.release()
+            state.operation_lock.release()
 
     @staticmethod
     def _agent_run_ids_from_spec(spec: Any) -> set[str]:
@@ -2275,17 +2332,15 @@ class SessionTurnManager:
             if context.platform != "avibe" and native_message_id
             else str(delivery["id"])
         )
-        memory_identity = _memory_admission_merge_identity(
-            {"metadata": payload.get("metadata")}
-        )[0]
-        # ``author_id`` owns web-push delivery. Memory capture must use only its
-        # separately persisted principal and fail closed when it is absent.
-        context.user_id = memory_identity
+        # Routing identity only. Memory's principal already travels in
+        # delivery ``message_metadata`` via the Memory admission vocabulary.
+        if payload.get("author_id"):
+            context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
         metadata = payload.get("metadata") or {}
-        context.is_ordinary_text = metadata.get("_memory_ordinary_text") is True
-        if metadata.get("_memory_cli_admitted") is True:
+        context.is_ordinary_text = memory_ordinary_text(metadata)
+        if memory_cli_admitted(metadata):
             context.platform_specific["memory_cli_admitted"] = True
         else:
             context.platform_specific.pop("memory_cli_admitted", None)
@@ -4052,110 +4107,88 @@ class SessionTurnManager:
                 evidence_kind="context_build_failed",
             )
             return False
-        lifecycle_admission = await self.acquire_lifecycle_admission(
-            self._lifecycle_anchor_for_delivery(delivery, str(turn["session_id"]))
+        lifecycle_anchor = self._lifecycle_anchor_for_delivery(
+            delivery,
+            str(turn["session_id"]),
         )
-
-        def release_lifecycle_admission_if_owned() -> None:
-            payload = getattr(resolved, "platform_specific", None)
-            if isinstance(payload, dict) and payload.get(
-                TURN_LIFECYCLE_ADMISSION_KEY
-            ) is lifecycle_admission:
-                payload.pop(TURN_LIFECYCLE_ADMISSION_KEY, None)
-            lifecycle_admission.release()
-
-        @contextmanager
-        def release_lifecycle_admission_on_error() -> Iterator[None]:
-            try:
-                yield
-            except BaseException:
-                release_lifecycle_admission_if_owned()
-                raise
-
-        def terminalize_and_release(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            try:
-                return self._terminalize_durable_turn(*args, **kwargs)
-            finally:
-                release_lifecycle_admission_if_owned()
+        lifecycle_snapshot = self.snapshot_session_lifecycle(lifecycle_anchor)
 
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
         invalid_delivery_ids: set[str] = set()
         remote_authorization_denials: dict[str, str] = {}
-        with release_lifecycle_admission_on_error():
-            with self._sqlite_engine().begin() as conn:
-                reserve_write_lock(conn)
-                latest = delivery_store.get_turn(conn, turn_id)
-                session_status = conn.execute(
-                    select(agent_sessions.c.status).where(
-                        agent_sessions.c.id == str(turn["session_id"])
-                    )
-                ).scalar_one_or_none()
-                fresh_deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
-                fresh_delivery = fresh_deliveries[0] if fresh_deliveries else None
-                if (
-                    latest is None
-                    or latest["state"] != "starting"
-                    or latest.get("start_attempt_id") != attempt_id
-                    or (
-                        expected_start_attempt_id is not None
-                        and str(latest.get("start_attempt_id") or "")
-                        != expected_start_attempt_id
-                    )
-                    or fresh_delivery is None
-                    or latest.get("initial_delivery_id") != fresh_delivery.get("id")
-                    or any(row["state"] != "claimed" for row in fresh_deliveries)
-                ):
-                    release_lifecycle_admission_if_owned()
-                    return False
-                turn = latest
-                deliveries = fresh_deliveries
-                delivery = fresh_delivery
-                archived_before_dispatch = session_status != "active"
-                invalid_delivery_ids = {
-                    str(row["id"])
-                    for row in deliveries
-                    if not self._has_resolvable_delivery_input(conn, row)
-                }
-                remote_authorization_denials = {
-                    str(row["id"]): reason
-                    for row in deliveries
-                    if (
-                        reason := self._remote_delivery_execution_denial(conn, row)
-                    )
-                    is not None
-                }
-                run_ids = list(
-                    dict.fromkeys(
-                        run_id
-                        for row in deliveries
-                        for run_id in delivery_store.agent_run_ids_for_delivery(conn, row)
-                    )
+        with self._sqlite_engine().begin() as conn:
+            reserve_write_lock(conn)
+            latest = delivery_store.get_turn(conn, turn_id)
+            session_status = conn.execute(
+                select(agent_sessions.c.status).where(
+                    agent_sessions.c.id == str(turn["session_id"])
                 )
-                if not archived_before_dispatch and run_ids:
-                    run_rows = {
-                        str(row["id"]): row
-                        for row in conn.execute(
-                            select(
-                                agent_runs.c.id,
-                                agent_runs.c.status,
-                                agent_runs.c.cancel_requested,
-                                agent_runs.c.metadata_json,
-                            ).where(agent_runs.c.id.in_(run_ids))
-                        ).mappings()
-                    }
-                    for run_id in run_ids:
-                        run_row = run_rows.get(run_id)
-                        if run_row is None:
-                            continue
-                        run_status = normalize_run_status(run_row["status"])
-                        if bool(run_row["cancel_requested"]) or run_status not in {
-                            "queued",
-                            "running",
-                        }:
-                            run_terminal_before_dispatch = True
+            ).scalar_one_or_none()
+            fresh_deliveries = delivery_store.initial_deliveries_for_turn(conn, turn_id)
+            fresh_delivery = fresh_deliveries[0] if fresh_deliveries else None
+            if (
+                latest is None
+                or latest["state"] != "starting"
+                or latest.get("start_attempt_id") != attempt_id
+                or (
+                    expected_start_attempt_id is not None
+                    and str(latest.get("start_attempt_id") or "")
+                    != expected_start_attempt_id
+                )
+                or fresh_delivery is None
+                or latest.get("initial_delivery_id") != fresh_delivery.get("id")
+                or any(row["state"] != "claimed" for row in fresh_deliveries)
+            ):
+                return False
+            turn = latest
+            deliveries = fresh_deliveries
+            delivery = fresh_delivery
+            archived_before_dispatch = session_status != "active"
+            invalid_delivery_ids = {
+                str(row["id"])
+                for row in deliveries
+                if not self._has_resolvable_delivery_input(conn, row)
+            }
+            remote_authorization_denials = {
+                str(row["id"]): reason
+                for row in deliveries
+                if (
+                    reason := self._remote_delivery_execution_denial(conn, row)
+                )
+                is not None
+            }
+            run_ids = list(
+                dict.fromkeys(
+                    run_id
+                    for row in deliveries
+                    for run_id in delivery_store.agent_run_ids_for_delivery(conn, row)
+                )
+            )
+            if not archived_before_dispatch and run_ids:
+                run_rows = {
+                    str(row["id"]): row
+                    for row in conn.execute(
+                        select(
+                            agent_runs.c.id,
+                            agent_runs.c.status,
+                            agent_runs.c.cancel_requested,
+                            agent_runs.c.metadata_json,
+                        ).where(agent_runs.c.id.in_(run_ids))
+                    ).mappings()
+                }
+                for run_id in run_ids:
+                    run_row = run_rows.get(run_id)
+                    if run_row is None:
+                        continue
+                    run_status = normalize_run_status(run_row["status"])
+                    if bool(run_row["cancel_requested"]) or run_status not in {
+                        "queued",
+                        "running",
+                    }:
+                        run_terminal_before_dispatch = True
         if archived_before_dispatch:
-            terminalize_and_release(
+            self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="session_archive",
@@ -4163,7 +4196,7 @@ class SessionTurnManager:
             )
             return False
         if run_terminal_before_dispatch:
-            terminal = terminalize_and_release(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="agent_run_terminal",
@@ -4178,7 +4211,7 @@ class SessionTurnManager:
                 turn_id,
                 remote_authorization_denials,
             )
-            terminal = terminalize_and_release(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="remote_authorization_denied",
@@ -4198,7 +4231,7 @@ class SessionTurnManager:
                 "durable Turn=%s lost its resolvable input before native dispatch",
                 turn_id,
             )
-            terminal = terminalize_and_release(
+            terminal = self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="invalid_input",
@@ -4211,9 +4244,6 @@ class SessionTurnManager:
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
-            resolved.platform_specific[TURN_LIFECYCLE_ADMISSION_KEY] = (
-                lifecycle_admission
-            )
             resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
@@ -4260,7 +4290,7 @@ class SessionTurnManager:
                 "durable native start failed during pre-dispatch preparation for Turn=%s",
                 turn_id,
             )
-            terminalize_and_release(
+            self._terminalize_durable_turn(
                 turn_id,
                 "not_written",
                 settled_by="pre_write_failure",
@@ -4276,13 +4306,12 @@ class SessionTurnManager:
                 logical_turn_id=turn_id,
                 delivery_id=str((delivery or {}).get("id") or "") or None,
                 durable_preallocated=True,
+                lifecycle_snapshot=(
+                    lifecycle_snapshot if source == SOURCE_HUMAN else None
+                ),
             )
             return True
-        except asyncio.CancelledError:
-            release_lifecycle_admission_if_owned()
-            raise
         except Exception:
-            release_lifecycle_admission_if_owned()
             logger.exception("durable native start became ambiguous for Turn=%s", turn_id)
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
@@ -7173,6 +7202,7 @@ class SessionTurnManager:
         logical_turn_id: str | None = None,
         delivery_id: str | None = None,
         durable_preallocated: bool = False,
+        lifecycle_snapshot: object | None = None,
     ) -> None:
         """Start a fire-and-forget turn and HOLD it open until it settles.
 
@@ -7206,6 +7236,7 @@ class SessionTurnManager:
         context.platform_specific["turn_token"] = logical_turn_id
 
         async def _runner() -> None:
+            nonlocal lifecycle_snapshot
             cancelled = False
             failed = False
             prewrite_refused = False
@@ -7230,7 +7261,12 @@ class SessionTurnManager:
                         evidence_kind="terminal_run_before_native_dispatch",
                     )
                     return
-                outcome = await dispatch_turn_with_outcome(
+                snapshot_options = (
+                    {"lifecycle_snapshot": lifecycle_snapshot}
+                    if lifecycle_snapshot is not None
+                    else {}
+                )
+                dispatch = dispatch_turn_with_outcome(
                     self.controller,
                     context,
                     text,
@@ -7244,7 +7280,11 @@ class SessionTurnManager:
                     # slot would free + a Chat send could preempt the still-running
                     # scheduled turn (Codex P2).
                     on_chunk=self._noop_chunk,
+                    **snapshot_options,
                 )
+                snapshot_options.clear()
+                lifecycle_snapshot = None
+                outcome = await dispatch
                 settled_by = outcome.settled_by
                 definitive_prewrite_exit = outcome.backend_dispatch_attempted is False
                 current = self.in_flight.get(str(session_id or ""))
@@ -7385,18 +7425,6 @@ class SessionTurnManager:
                         )
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
-        lifecycle_admission = context.platform_specific.get(
-            TURN_LIFECYCLE_ADMISSION_KEY
-        )
-        if lifecycle_admission is not None:
-            def release_unclaimed_admission(_task: asyncio.Task[Any]) -> None:
-                payload = context.platform_specific or {}
-                if payload.get(TURN_LIFECYCLE_ADMISSION_KEY) is not lifecycle_admission:
-                    return
-                payload.pop(TURN_LIFECYCLE_ADMISSION_KEY, None)
-                lifecycle_admission.release()
-
-            task.add_done_callback(release_unclaimed_admission)
         if isinstance(session_id, str) and session_id:
             self.in_flight[session_id] = Turn(
                 task=task,
@@ -7997,6 +8025,78 @@ class SessionTurnManager:
                     session_id
                 ),
             }
+        memory_dead = turn is None or turn.task.done()
+        if owner is not None and memory_dead and not agent_run_id:
+            owner_id = str(owner["id"])
+            restored_identity = self._active_identity(
+                str(owner["backend"]),
+                session_id,
+                owner_id,
+            )
+            if restored_identity is None or restored_identity[0] != owner_id:
+                start_receipt = str(owner.get("start_receipt_outcome") or "")
+                starting = str(owner.get("state") or "") == "starting"
+                never_started = starting and start_receipt not in {"accepted", "unknown"}
+                unknown_start = starting and start_receipt == "unknown"
+                if never_started:
+                    with self._sqlite_engine().connect() as conn:
+                        initial_delivery_ids = {
+                            str(row["id"])
+                            for row in delivery_store.initial_deliveries_for_turn(
+                                conn,
+                                owner_id,
+                            )
+                            if row["state"] == "claimed"
+                        }
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "not_written",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_no_live_runtime"},
+                        retire_unwritten_delivery_ids=initial_delivery_ids,
+                        retire_unwritten_attempt_outcome="canceled",
+                    )
+                elif unknown_start:
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "failed",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_unknown_start"},
+                        abandon_unaccepted_start=True,
+                    )
+                else:
+                    terminal = self._terminalize_durable_turn(
+                        owner_id,
+                        "canceled",
+                        settled_by=SETTLED_BY_STOPPED,
+                        evidence_kind="runtime_gone",
+                        evidence={"reason": "stop_with_no_live_runtime"},
+                    )
+                if terminal.get("changed"):
+                    logger.info(
+                        "Released durable Turn=%s for Session=%s after Stop found no live runtime",
+                        owner_id,
+                        session_id,
+                    )
+                    from core.inbox_events import bus
+
+                    bus.publish(
+                        "turn.end",
+                        _turn_event_payload(session_id, owner_id),
+                    )
+                    successor_turn_id = str(terminal.get("successor_turn_id") or "")
+                    if successor_turn_id:
+                        await self._start_persisted_turn(successor_turn_id)
+                    elif not terminal.get("defer_queue_resume"):
+                        await self._resume_post_terminal(session_id)
+                    return {
+                        "ok": True,
+                        "session_id": session_id,
+                        "status": "stale_released",
+                        "reason": "runtime_gone",
+                    }
         result = await self.deliver(
             DeliveryRequest(
                 session_id=session_id,

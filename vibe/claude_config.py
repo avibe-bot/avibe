@@ -23,9 +23,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from config.atomic_io import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -191,33 +192,6 @@ def _load_settings_for_write(path: Path) -> Dict[str, Any]:
     return data
 
 
-def _atomic_write(path: Path, content: str, *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-        text=True,
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:  # pragma: no cover - best effort cleanup
-                pass
-    try:
-        path.chmod(mode)
-    except OSError as exc:  # pragma: no cover - non-POSIX
-        logger.debug("chmod %s failed: %s", path, exc)
-
-
 def _clean_relevant_env_values(env_values: Dict[str, str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for key in RELEVANT_ENV_KEYS:
@@ -247,10 +221,9 @@ def write_claude_oauth_settings_backup(
         clear_claude_oauth_settings_backup(home)
         return
     payload = {"version": 1, "env": cleaned}
-    _atomic_write(
+    write_atomic(
         get_claude_oauth_settings_backup_path(home),
         json.dumps(payload, indent=2) + "\n",
-        mode=0o600,
     )
 
 
@@ -333,7 +306,7 @@ def apply_claude_auth(
 
     _ensure_managed_env_values(env_block)
 
-    _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
+    write_atomic(path, json.dumps(settings, indent=2) + "\n")
     return {"settings_path": str(path)}
 
 
@@ -382,7 +355,7 @@ def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = 
     if not env_block:
         settings.pop("env", None)
 
-    _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
+    write_atomic(path, json.dumps(settings, indent=2) + "\n")
 
 
 def read_claude_auth_state(home: Path | None = None) -> Dict[str, Any]:

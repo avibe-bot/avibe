@@ -10,6 +10,7 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultLockIndicator } from '../ui/vault-lock-indicator';
+import { onPageReactivated } from '../../lib/pageActivity';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
@@ -551,16 +552,11 @@ export const VaultsPage: React.FC = () => {
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          setEventBridgeConnected(true);
-          refresh();
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) refresh();
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the indicator's level: it comes with its own
+      // `onConnected`, and refetching from both would pay twice for one gap.
+      onConnected: () => refresh(),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => refresh(),
       onAuthorizationChanged: () => refresh(),
@@ -600,18 +596,12 @@ export const VaultsPage: React.FC = () => {
       timer = window.setTimeout(tick, 5000);
     };
 
-    const refreshNow = () => {
-      if (document.visibilityState === 'visible') void tick();
-    };
-
     void tick();
-    document.addEventListener('visibilitychange', refreshNow);
-    window.addEventListener('focus', refreshNow);
+    const stopReactivation = onPageReactivated(() => void tick());
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', refreshNow);
-      window.removeEventListener('focus', refreshNow);
+      stopReactivation();
     };
   }, [eventBridgeConnected, refresh]);
 

@@ -1178,7 +1178,12 @@ describe('SourceDetailPanel', () => {
     }
 
     expect(reached).toEqual(new Set(Object.keys(REPAIR_LABEL_KEY) as RepairKind[]));
-  });
+    // Explicit budget rather than the 5s default: this test's cost is the enum
+    // product, so it grows whenever a status, cause, kind, or channel is added —
+    // exactly the growth that makes it valuable. ~0.9s alone, but it runs beside
+    // 67 other files, and a scheduling-noise failure here reads as a real defect.
+    // Still bounded well below a hung render.
+  }, 15_000);
 
   it('opens key replacement from the revoked hub credential repair tap', async () => {
     render(

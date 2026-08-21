@@ -148,6 +148,7 @@ def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True, **kwargs: 100)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
     monkeypatch.setattr(runtime, "start_ui", lambda host, port, **kwargs: 333)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 100)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 100)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 333)  # service 100 dead, ui alive
 
@@ -208,3 +209,79 @@ def test_main_adopts_scoped_service_lock_holder(monkeypatch, tmp_path):
 
     assert waited == [(100, runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)]
     assert statuses[0] == ("running", 200, 333)
+
+
+def test_main_does_not_adopt_a_lock_holder_that_never_finished_starting(monkeypatch, tmp_path):
+    # Round 8, finding 1. The failure this exists for: a restart spawns a new
+    # service, that process takes the instance lock and then hangs inside its own
+    # migration, and the restart job dies. Holding the lock makes
+    # `service_pid_recorded` true, so adopting on that alone tracks the hung
+    # generation as this supervisor's healthy service -- it loops forever, never
+    # exits nonzero, and the unit's `Restart=on-failure` never fires. Readiness is
+    # the question, and `service_instance_started` is the only thing that answers
+    # it.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    paths.get_runtime_pid_path().write_text("200", encoding="utf-8")
+    paths.get_runtime_ui_pid_path().write_text("333", encoding="utf-8")
+
+    monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
+    monkeypatch.setattr(supervisor, "_reap_child", lambda pid: None)
+    monkeypatch.setattr(supervisor, "_restart_in_progress", lambda: False)
+    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True, **kwargs: 100)
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(runtime, "start_ui", lambda host, port, **kwargs: 333)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 100)
+    # 200 is alive and holds the lock -- and has not finished starting. 100, the
+    # pid this supervisor started and had ready, is gone.
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 200)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: False)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {200, 333})
+    monkeypatch.setattr(runtime, "stop_ui", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "stop_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+
+    assert supervisor._adoptable_service_pid(200) is False
+    rc = supervisor.main()
+
+    assert rc == 1
+    assert runtime.read_status()["state"] == "error"
+
+
+def test_main_adopts_the_replacement_once_it_finishes_starting(monkeypatch, tmp_path):
+    # The other half of the same property, and the reason it is a deferral rather
+    # than a refusal: the same pid, same lock, one iteration later, now reporting
+    # that it finished starting -- and the supervisor tracks it instead of exiting
+    # for systemd. A test that only asserted the refusal above would pass just as
+    # well against a supervisor that never adopts anything.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    paths.get_runtime_pid_path().write_text("200", encoding="utf-8")
+    paths.get_runtime_ui_pid_path().write_text("333", encoding="utf-8")
+
+    monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
+    monkeypatch.setattr(supervisor, "_reap_child", lambda pid: None)
+    monkeypatch.setattr(supervisor, "_restart_in_progress", lambda: False)
+    monkeypatch.setattr(runtime, "start_service", lambda wait_for_ready=True, **kwargs: 100)
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(runtime, "start_ui", lambda host, port, **kwargs: 333)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 100)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 200)
+    monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 200)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {200, 333})
+    monkeypatch.setattr(runtime, "stop_ui", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "stop_service", lambda *args, **kwargs: None)
+
+    statuses: list[str] = []
+    monkeypatch.setattr(runtime, "write_status", lambda state, *a, **k: statuses.append(state))
+
+    class _Stop(Exception):
+        pass
+
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: (_ for _ in ()).throw(_Stop()))
+
+    assert supervisor._adoptable_service_pid(200) is True
+    with pytest.raises(_Stop):
+        supervisor.main()
+
+    assert "error" not in statuses

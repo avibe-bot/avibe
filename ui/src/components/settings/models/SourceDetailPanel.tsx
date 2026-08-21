@@ -62,7 +62,7 @@ const ManualModelMenu: React.FC<{
       onOpenChange={setOpen}
       sheetTitle={model.id}
       className="w-40"
-      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="grid size-8 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
     >
       <button type="button" role="menuitem" className="flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold text-destructive-ink hover:bg-destructive/[0.08]" onClick={() => { setOpen(false); onRemove(); }}>{t('settings.models.sourceDetail.row.remove')}</button>
     </ResponsiveMenu>
@@ -89,7 +89,7 @@ const SourceManageMenu: React.FC<{
       onOpenChange={setOpen}
       sheetTitle={source.display_name}
       className="w-44"
-      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="grid size-8 place-items-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
     >
       {manageActions().map((kind) => (
         <button
@@ -206,16 +206,16 @@ const TierEditor: React.FC<{
         onClick={() => { setFailedNext(null); setEditing(true); }}
       >
         {tiers.length > 0 ? tiers.map((tier) => (
-          <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border text-foreground">{tier}</span>
-        )) : <span className="model-hub-source-tier text-muted">{t('settings.models.sourceDetail.tiers.empty')}</span>}
-        <span className="model-hub-source-tier model-hub-ink-mint font-semibold">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
+          <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border font-mono text-foreground">{tier}</span>
+        )) : <span className="model-hub-source-tier-empty">{t('settings.models.sourceDetail.tiers.empty')}</span>}
+        <span className="model-hub-source-tier model-hub-source-tier-add inline-flex rounded-full border font-semibold">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
       </button>
     );
   }
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {tiers.map((tier) => (
-        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border text-foreground">
+        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border font-mono text-foreground">
           {tier}
           <button type="button" disabled={saving} onMouseDown={(event) => event.preventDefault()} onClick={() => void commit({ kind: 'remove', tier })} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
             <X className="size-2.5" />
@@ -257,7 +257,7 @@ const DraftTiers: React.FC<{
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {tiers.map((tier) => (
-        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border text-foreground">
+        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border font-mono text-foreground">
           {tier}
           <button type="button" onClick={() => onChange(tiers.filter((item) => item !== tier))} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground"><X className="size-2.5" /></button>
         </span>
@@ -758,19 +758,24 @@ export const SourceDetailPanel: React.FC<{
     <div className="model-hub-source-detail">
       <section className="model-hub-source-bar flex flex-col border border-border bg-surface sm:flex-row sm:items-center">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
-        <div className="min-w-0 flex-1">
-          <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
-          {(state.key || source.last_discovered_at) && <p className={cn('mt-1 flex flex-wrap items-center gap-x-2 gap-y-1', state.textClass)}>
-            {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
+        {/* Two lines inside a 64px bar, as the design draws it: identity and
+            state share the first, and the mono endpoint summary owns the
+            second. The name leads line one rather than taking a line of its own
+            — the design omits it entirely, but a subscription source has no
+            host to fall back on and would be unidentifiable without it. */}
+        <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
+          <div className={cn('model-hub-source-line flex min-w-0 flex-wrap items-center gap-x-[7px]', state.textClass)}>
+            <h2 ref={headingRef} tabIndex={-1} className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
+            {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
-          </p>}
-          <p className="model-hub-source-summary mt-1 truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
+          </div>
+          <p className="model-hub-source-summary truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
         </div>
         <div className="flex shrink-0 gap-2">
           {repairDestination === 'reauth_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {repairDestination === 'replace_key_dialog' && <Button size="sm" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
           {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
-          {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+          {source.kind === 'api_key' && <Button size="sm" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
@@ -780,12 +785,12 @@ export const SourceDetailPanel: React.FC<{
       {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
       <section className="model-hub-source-table overflow-hidden border border-border bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
-          <span>{t('settings.models.sourceDetail.col.id')}</span><span>{t('settings.models.sourceDetail.col.entry')}</span><span className="flex items-center gap-1">{t('settings.models.sourceDetail.col.tiers')}<Info className="size-3" /></span><span />
+          <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span><span className="truncate">{t('settings.models.sourceDetail.col.entry')}</span><span className="flex min-w-0 items-center gap-1"><span className="truncate">{t('settings.models.sourceDetail.col.tiers')}</span><Info className="model-hub-ink-59 size-[13px] shrink-0" /></span><span />
         </div>
         {models.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : models.map((model) => (
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.origin === 'discovered' ? 'auto' : 'manual'}`)}</span>
+            <span className={cn('model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border font-semibold', model.origin !== 'discovered' && 'model-hub-source-entry-pill--manual')}>{t(`settings.models.sourceDetail.entry.${model.origin === 'discovered' ? 'auto' : 'manual'}`)}</span>
             <TierEditor model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} trackMutation={trackMutation} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
@@ -809,7 +814,7 @@ export const SourceDetailPanel: React.FC<{
               placeholder={t('settings.models.sourceDetail.col.id') as string}
               className="model-hub-source-manual-id model-hub-source-model h-8 font-mono"
             />
-            <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t('settings.models.sourceDetail.entry.manual')}</span>
+            <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>
             <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false, retryRead: false } : current)} />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
@@ -819,14 +824,17 @@ export const SourceDetailPanel: React.FC<{
           </div>
         )}
         {source.kind === 'api_key' && !manualDraft && (
-          <button type="button" className="model-hub-source-table-add model-hub-source-model model-hub-ink-mint flex w-full items-center gap-2 border-b border-border text-left font-semibold" onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}>
-            <Plus className="size-3.5" />
+          <button type="button" className="model-hub-source-table-add model-hub-source-model model-hub-ink-mint flex w-full items-center gap-2 text-left font-semibold" onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}>
+            <Plus className="size-3.5 shrink-0" />
             {t('settings.models.sourceDetail.action.addModel')}
-            <span className="text-[10.5px] font-normal text-muted">{t('settings.models.sourceDetail.addRow.hint')}</span>
+            <span className="model-hub-source-add-hint truncate font-mono font-normal">{t('settings.models.sourceDetail.addRow.hint')}</span>
           </button>
         )}
       </section>
-      <p className="model-hub-source-footnote leading-relaxed">{t('settings.models.sourceDetail.footnote')}</p>
+      <p className="model-hub-source-footnote flex gap-2">
+        <Info className="model-hub-ink-59 mt-px size-[13px] shrink-0" aria-hidden="true" />
+        <span>{t('settings.models.sourceDetail.footnote')}</span>
+      </p>
       {/* Confirmed before the journey opens, not inside it: `OAuthConnectDialog`
           POSTs the re-auth as it mounts, and on a native source that call is the
           irreversible half — `mark_native_irreversible_start` empties every

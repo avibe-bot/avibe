@@ -624,10 +624,14 @@ def test_native_session_service_loads_default_providers_lazily(monkeypatch) -> N
 
 
 def test_native_session_lightweight_imports_do_not_require_sqlite() -> None:
-    """The agent-setup / command-handler / session-handler import path must NOT
+    """Scenario: MEMORY-INDEP-009.
+
+    The agent-setup / command-handler / session-handler import path must NOT
     transitively pull in sqlite: those modules only need the avibe-cloud URL
     availability helpers, which now live in the storage-free ``core.avibe_cloud``
-    (not ``core.show_pages``, which imports ``storage.db`` to back ``ShowPageStore``)."""
+    (not ``core.show_pages``, which imports ``storage.db`` to back
+    ``ShowPageStore``).
+    """
     repo_root = Path(__file__).resolve().parents[1]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(repo_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -649,6 +653,8 @@ for module_name in [
     "core.handlers.session_handler",
 ]:
     __import__(module_name)
+
+assert "core.session_turns" not in sys.modules
 """
 
     completed = subprocess.run(

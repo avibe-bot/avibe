@@ -13,7 +13,7 @@ from core.inbox_events import (
 )
 
 
-INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
+INSTANCE_ROLES = frozenset({"owner", "member", "editor", "viewer"})
 INSTANCE_ACCESS_SOURCES = frozenset(
     {
         "owner",
@@ -25,12 +25,39 @@ INSTANCE_ACCESS_SOURCES = frozenset(
     }
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
-_ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+INSTANCE_KINDS = frozenset({"personal", "organization"})
+_ROLE_RANK = {"viewer": 1, "editor": 2, "member": 3, "owner": 4}
+
+
+def recognized_instance_kind(value: object) -> str | None:
+    """Return a recognized instance kind, or None for a genuine no-kind snapshot.
+
+    A present-but-unrecognized value (corruption, a future release, a typo)
+    is not a no-kind legacy snapshot. Callers that need fail-closed behavior
+    must distinguish ``None`` (absent/legacy) from an unrecognized string
+    via :func:`instance_kind_is_unsupported`.
+    """
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned if cleaned in INSTANCE_KINDS else None
+
+
+def instance_kind_is_unsupported(value: object) -> bool:
+    """True when a kind field is present but not a known Personal/Organization value."""
+
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        return True
+    return value.strip() not in {"", *INSTANCE_KINDS}
+
+
 _RESOURCE_USE_MINIMUM_ROLES = {
     "agent": "editor",
     "skill": "editor",
     "vault_secret": "editor",
-    "show_page": "viewer",
 }
 
 _VIEWER_WORKBENCH_EVENTS = frozenset(
@@ -78,10 +105,19 @@ class AuthorizationContext:
     authorization_revision: int | None = None
     show_page_id: str | None = None
     is_remote: bool = False
+    instance_kind: str | None = None
 
     @property
     def is_instance_owner(self) -> bool:
         return self.instance_role == "owner"
+
+    @property
+    def is_personal_instance(self) -> bool:
+        return self.instance_kind == "personal"
+
+    @property
+    def is_organization_instance(self) -> bool:
+        return self.instance_kind == "organization"
 
     @property
     def is_active_organization_member(self) -> bool:
@@ -98,7 +134,7 @@ class AuthorizationContext:
 
     @property
     def can_read_instance(self) -> bool:
-        return self.has_role("viewer")
+        return self.has_role("viewer") and self.instance_access_source != "show_page_email"
 
     @property
     def can_chat(self) -> bool:
@@ -110,14 +146,18 @@ class AuthorizationContext:
 
     @property
     def can_manage_projects(self) -> bool:
-        return self.has_role("owner")
+        return self.has_role("member")
 
     @property
     def can_manage_agents(self) -> bool:
-        return self.has_role("owner")
+        return self.has_role("member")
 
     @property
     def can_manage_instance(self) -> bool:
+        return self.has_role("member")
+
+    @property
+    def can_manage_access_members(self) -> bool:
         return self.has_role("owner")
 
     def can_use_resource(self, resource_kind: str) -> bool:
@@ -150,7 +190,7 @@ class AuthorizationContext:
 
     @property
     def can_use_system(self) -> bool:
-        return self.has_role("owner")
+        return self.has_role("member")
 
     def capability_projection(self) -> dict[str, bool]:
         return {
@@ -160,10 +200,11 @@ class AuthorizationContext:
             "can_manage_projects": self.can_manage_projects,
             "can_manage_agents": self.can_manage_agents,
             "can_manage_instance": self.can_manage_instance,
+            "can_manage_access_members": self.can_manage_access_members,
             "can_use_agents": self.can_use_resource("agent"),
             "can_use_skills": self.can_use_resource("skill"),
             "can_use_vault_secrets": self.can_use_resource("vault_secret"),
-            "can_use_show_pages": self.can_use_resource("show_page"),
+            "can_use_show_pages": self.can_read_instance,
             "can_use_terminal_files": self.can_use_terminal_files,
             "can_use_terminal": self.can_use_terminal,
             "can_use_files": self.can_use_files,
@@ -227,6 +268,11 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
     )
     if organization_role not in ORGANIZATION_ROLES:
         organization_role = None
+    raw_instance_kind = payload.get("vibe_instance_kind")
+    if instance_kind_is_unsupported(raw_instance_kind):
+        instance_kind = None
+    else:
+        instance_kind = recognized_instance_kind(raw_instance_kind)
     return AuthorizationContext(
         instance_role=role,
         subject=_optional_string(payload.get("sub")),
@@ -255,6 +301,7 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
         ),
         show_page_id=show_page_id,
         is_remote=True,
+        instance_kind=instance_kind,
     )
 
 
@@ -300,6 +347,8 @@ def required_workbench_event_role(event_type: str) -> str:
         return "viewer"
     if event_type in _EDITOR_WORKBENCH_EVENTS:
         return "editor"
+    if event_type in _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS:
+        return "member"
     return "owner"
 
 
@@ -331,7 +380,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/session$",
         r"^/api/csrf-token$",
         r"^/api/config$",
-        r"^/api/version$",
+        r"^/api/version(?:/local)?$",
         r"^/api/platforms$",
         r"^/api/projects(?:/[^/]+)?$",
         r"^/api/workbench/prefs$",
@@ -343,8 +392,8 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/events$",
         r"^/api/inbox$",
         r"^/api/media/[^/]+(?:/meta)?$",
-        r"^/api/org/(?:context|groups)$",
-        r"^/api/resource-policies$",
+        r"^/api/permissions$",
+        r"^/api/permissions/resources/[^/]+/[^/]+/access$",
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/access$",
         r"^/api/show-pages/[^/]+/icon$",
@@ -353,9 +402,8 @@ _VIEWER_HTTP_RULES = tuple(
 
 # Advertised Editor/Viewer surfaces are admitted by namespace so a newly
 # added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push route
-# inherits the same Instance role as the rest of that capability. Routes
-# that stay Owner-only — Agent create/import/update/delete, system config —
-# remain outside these prefixes and fail closed to owner.
+# inherits the same Instance role as the rest of that capability. Remaining
+# unknown APIs fail closed to Owner; see _MEMBER_HTTP_RULES.
 _EDITOR_HTTP_NAMESPACES = (
     "/api/skills",
     "/api/vault",
@@ -373,6 +421,101 @@ _VIEWER_HTTP_MUTATION_RULES = (
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
 )
 
+# Pairing identity, member set, and ownership stay Owner-only. Writes under
+# /api/remote-access default to owner so a newly added pair/unpair/settings
+# sibling cannot slip through as member. The ops below cannot change instance
+# id, backend URL, or secrets, so member keeps them.
+_REMOTE_ACCESS_HTTP_NAMESPACE = "/api/remote-access"
+_REMOTE_ACCESS_MEMBER_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("GET", r"^/api/remote-access/status$"),
+        ("GET", r"^/api/remote-access/network-interfaces$"),
+        ("POST", r"^/api/remote-access/optimize-route$"),
+        ("POST", r"^/api/remote-access/diagnostics$"),
+    )
+)
+
+# The member surface is an allow-list, and the unknown-route default is Owner.
+#
+# Enumerating the Owner exceptions instead was tried and does not converge: with
+# an unknown route defaulting to member, adding the member rank silently widened
+# every `/api/*` route that no other table classified -- 112 of them, including
+# `POST /api/control`, `POST /api/upgrade`, every `/api/backend/*/auth` route,
+# and the resource/project ACL PUTs. Review found members of that set one head at
+# a time because a list of exceptions is only ever as complete as the last audit.
+#
+# Inverting makes the omission safe in the other direction: a route absent from
+# this table keeps exactly the role it had before the member rank existed, so a
+# newly added management route cannot become member-reachable by accident and the
+# blast radius of this capability is bounded by what is written here.
+#
+# What belongs here: the routes backing the capabilities the member rank is
+# defined to grant -- ``can_manage_agents`` (Agent CRUD and the model routing an
+# Agent is configured against) and ``can_manage_projects``, plus read-only
+# instance state. What deliberately does not, and is therefore Owner:
+#   * anything that mints, revokes, or promotes instance access -- the cloud
+#     allowlist, IM bound users, and bind codes. A bind code is a bearer
+#     credential, so *listing* them is equivalent to minting and stays Owner
+#     while ``GET /api/users`` is a member read.
+#   * anything holding or minting a credential -- `/api/backend/*/auth`, model
+#     source credentials and OAuth, and the platform `auth_test`/channel probes
+#     that take a bot token.
+#   * instance lifecycle and host reach -- control, upgrade, ui/reload, logs,
+#     doctor writes, dependency installs, and the filesystem browse routes.
+#   * anything that changes an ACL or the IM access boundary -- the resource and
+#     project access PUTs, and the channel/thread settings writes that carry
+#     ``require_bind``.
+#   * bulk Agent onboarding, a one-way instance-wide migration whose GET
+#     discloses every Agent row and whose POST claims every policy-less one under
+#     the caller's private ACL.
+_MEMBER_HTTP_RULES = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        # can_manage_agents: Agent CRUD and instance-wide default selection.
+        # /api/agent-onboarding is a bulk migration and stays Owner by default.
+        #
+        # ``/api/agent/<name>/install`` is absent on purpose, and so is its job
+        # status sibling: the handler runs a package manager, a self-update, or a
+        # curl script on the host, persists the resulting CLI path, and may
+        # restart the backend. That is the "dependency installs" bullet above --
+        # host lifecycle, not Agent CRUD -- and it reached member only because
+        # this table was written by hand while the policy sat in a comment. There
+        # is no owner exception listed for it because none is needed: an absent
+        # route keeps the role it had before the member rank existed, which is
+        # Owner.
+        ("POST", r"^/api/agents$"),
+        ("PATCH", r"^/api/agents/[^/]+$"),
+        ("DELETE", r"^/api/agents/[^/]+$"),
+        ("POST", r"^/api/agents/import$"),
+        ("POST", r"^/api/agents/default$"),
+        # can_manage_agents: selecting among already-authenticated model sources.
+        # Adding or re-authenticating a source is credential work and stays Owner.
+        ("GET", r"^/api/models/agents$"),
+        ("GET", r"^/api/models/agents/[^/]+/chain$"),
+        ("PUT", r"^/api/models/agents/[^/]+/chain$"),
+        ("GET", r"^/api/models/agents/[^/]+/sources$"),
+        ("PUT", r"^/api/models/agents/[^/]+/sources$"),
+        ("PUT", r"^/api/models/agents/opencode/menu$"),
+        ("PATCH", r"^/api/models/agents/[^/]+/mode$"),
+        ("POST", r"^/api/models/agents/[^/]+/chains/reorder$"),
+        ("GET", r"^/api/models/sources$"),
+        # can_manage_agents: instance-wide prompt text, not a credential.
+        ("GET", r"^/api/global-prompts$"),
+        ("PUT", r"^/api/global-prompts$"),
+        # can_manage_projects. Project ACL lives under /api/permissions and is
+        # Owner; agents-md is project content.
+        ("POST", r"^/api/projects$"),
+        ("PATCH", r"^/api/projects/[^/]+$"),
+        ("DELETE", r"^/api/projects/[^/]+$"),
+        ("GET", r"^/api/projects/[^/]+/agents-md$"),
+        ("PUT", r"^/api/projects/[^/]+/agents-md$"),
+        # Read-only instance state. The member set is readable, not writable.
+        ("GET", r"^/api/settings$"),
+        ("GET", r"^/api/users$"),
+    )
+)
+
 _EDITOR_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
@@ -380,6 +523,22 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/agents/[^/]+$"),
         ("GET", r"^/api/agents-graph$"),
         ("GET", r"^/api/agent-backends$"),
+        # Read-only model catalogs. Chat's route picker is an editor surface and
+        # the Agents detail panel is a member one, so the catalog they share is
+        # editor-tier and member inherits it. Both routes are snapshot reads of a
+        # shared model catalog: no provider configuration, no backend contact.
+        # Listed one route at a time rather than as a namespace, so neither
+        # `/api/claude/*` nor `/api/codex/*` grows an editor-visible mutation by
+        # accident.
+        #
+        # OpenCode has no editor-visible catalog. Its only one is
+        # `/api/backend/opencode/providers`, which is the Settings surface --
+        # base URLs, masked API keys, active auth type, tool-call permission
+        # state -- and reaching it runs `ensure_running()`, which can install a
+        # plugin, restart, or launch the daemon. Both stay Owner; the model
+        # picker treats the refusal as "no catalog" instead.
+        ("GET", r"^/api/claude/models$"),
+        ("GET", r"^/api/codex/models$"),
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
         # Files favorites live under /api/browse, not /api/files. Admit only this
@@ -403,6 +562,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/config$"),
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
+        ("GET", r"^/api/show-pages/[^/]+$"),
         ("POST", r"^/api/show-pages/[^/]+/icon$"),
         ("POST", r"^/api/show-pages/[^/]+/(?:ensure|availability)$"),
         ("POST", r"^/api/show-pages/[^/]+/access-settings/(?:read|apply)$"),
@@ -428,10 +588,6 @@ def http_authorization_policy(
     """Return the minimum Instance role for one HTTP request."""
 
     normalized_method = method.upper()
-    # Organization management is an explicit Cloud proxy namespace. Cloud user
-    # identity and object authorization are re-evaluated by that boundary.
-    if path.startswith("/api/cloud-management/"):
-        return HttpAuthorizationPolicy("viewer")
     if path.startswith("/show/"):
         return HttpAuthorizationPolicy("viewer")
     if path == "/status":
@@ -447,7 +603,15 @@ def http_authorization_policy(
         return HttpAuthorizationPolicy("viewer")
     if _path_in_namespaces(path, _EDITOR_HTTP_NAMESPACES):
         return HttpAuthorizationPolicy("editor")
+    if _path_in_namespaces(path, (_REMOTE_ACCESS_HTTP_NAMESPACE,)):
+        if _http_rule_matches(normalized_method, path, _REMOTE_ACCESS_MEMBER_HTTP_RULES):
+            return HttpAuthorizationPolicy("member")
+        return HttpAuthorizationPolicy("owner")
+    if _http_rule_matches(normalized_method, path, _MEMBER_HTTP_RULES):
+        return HttpAuthorizationPolicy("member")
 
+    # Default deny: an unclassified /api route is Owner-only, so adding the
+    # member rank cannot widen a route nobody listed. See _MEMBER_HTTP_RULES.
     minimum_role = "owner"
     for rule_method, pattern in _EDITOR_HTTP_RULES:
         if normalized_method == rule_method and pattern.fullmatch(path):
@@ -466,8 +630,12 @@ def required_instance_role(method: str, path: str) -> str | None:
     """Return the minimum role for a remote HTTP request.
 
     Non-API page/static reads are handled by the authenticated shell. Unknown
-    API routes deliberately default to owner so a newly added management route
-    cannot accidentally become available to editors or viewers.
+    API routes deliberately default to owner, so a newly added management route
+    is never reachable by a role that predates it. The member rank widens only
+    the routes listed in ``_MEMBER_HTTP_RULES`` plus the read/ops quartet under
+    ``/api/remote-access``; access administration, credential and lifecycle
+    routes, ACL writes, and bulk Agent migration are Owner by that default
+    rather than by per-route exception.
     """
 
     return http_authorization_policy(method, path).minimum_role

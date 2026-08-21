@@ -23,9 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 _NewSessionResult = TypeVar("_NewSessionResult")
-_NEW_SESSION_ERROR_I18N_KEYS = {
-    "memory_session_lifecycle_busy": "error.memorySessionLifecycleBusy",
-}
 
 
 class CommandHandlers(BaseHandler):
@@ -156,7 +153,16 @@ class CommandHandlers(BaseHandler):
         session_anchor: Optional[str],
         operation: Callable[[], Awaitable[_NewSessionResult]],
     ) -> _NewSessionResult:
-        """Run `/new` after admitted turns finish their Memory capture."""
+        """Run `/new`, waiting briefly for capture then failing open."""
+
+        budget = 5.0
+        deadline_at = time.monotonic() + budget
+
+        def remaining_seconds() -> float:
+            leftover = deadline_at - time.monotonic()
+            if leftover >= budget - 0.05:
+                return budget
+            return max(leftover, 0.001)
 
         async def run_memory_lifecycle() -> _NewSessionResult:
             lifecycle = getattr(
@@ -169,7 +175,7 @@ class CommandHandlers(BaseHandler):
                     context,
                     session_anchor,
                     operation,
-                    deadline_seconds=5.0,
+                    deadline_seconds=remaining_seconds(),
                 )
 
             await self._final_flush_for_new(context, session_anchor)
@@ -181,7 +187,7 @@ class CommandHandlers(BaseHandler):
             return await turn_lifecycle(
                 session_anchor,
                 run_memory_lifecycle,
-                deadline_seconds=5.0,
+                deadline_seconds=budget,
             )
         return await run_memory_lifecycle()
 
@@ -584,9 +590,8 @@ class CommandHandlers(BaseHandler):
             # topic. The new topic context is not a valid identity for this flush.
             session_anchor, memory_session_anchor = self._session_anchors_for_new(context)
             # ``/new`` deletes the session rows that scheduled tasks and watches may
-            # be pinned to. Keep this entire destructive transition behind the same
-            # exact-session admission fence as capture, including Telegram's old
-            # topic handoff. A stalled or failed flush still fails open to reset.
+            # be pinned to. Wait briefly for in-flight capture, then always reset
+            # (a stalled or failed Memory flush must not fail the command).
             async def _reset_session() -> tuple[bool, list[dict[str, Any]]]:
                 if platform == "telegram" and hasattr(im_client, "start_new_topic_session"):
                     topic_context = await im_client.start_new_topic_session(context)
@@ -653,8 +658,7 @@ class CommandHandlers(BaseHandler):
             logger.error(f"Error starting new session: {e}", exc_info=True)
             try:
                 channel_context = self._get_channel_context(context)
-                error_key = _NEW_SESSION_ERROR_I18N_KEYS.get(getattr(e, "code", None))
-                error_message = self._t(error_key) if error_key else self._t("error.clearSession", error=str(e))
+                error_message = self._t("error.clearSession", error=str(e))
                 await im_client.send_message(channel_context, f"❌ {error_message}")
             except Exception as send_error:
                 logger.error(f"Failed to send error message: {send_error}", exc_info=True)

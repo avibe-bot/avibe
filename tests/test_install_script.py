@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = REPO_ROOT / "install.sh"
+INSTALL_POWERSHELL = REPO_ROOT / "install.ps1"
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -385,6 +386,35 @@ def test_install_script_continues_when_node_install_fails(tmp_path):
     assert "avibe-os installed successfully" in install_result.stdout
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
+
+
+def test_install_script_probes_the_same_libreoffice_path_as_memory(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_INSTALL_SKIP_NODE"] = "1"
+
+    _write_executable(path_dir / "soffice", "#!/usr/bin/env bash\nexit 0\n")
+    result = _install(env, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LibreOffice is not available" in result.stdout
+    assert "Memory will skip Word, Excel, PowerPoint" in result.stdout
+    assert "LibreOffice is available for Memory Office attachment capture" not in result.stdout
+    assert 'PATH="/usr/bin:/bin" command -v soffice' in INSTALL_SCRIPT.read_text()
+    powershell = INSTALL_POWERSHELL.read_text()
+    assert 'Test-Command "soffice"' not in powershell
+    assert '@("/usr/bin/soffice", "/bin/soffice")' not in powershell
+    assert "Memory Office attachment capture is unavailable on native Windows" in powershell
+    assert "Install LibreOffice from https://www.libreoffice.org/" not in powershell
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):

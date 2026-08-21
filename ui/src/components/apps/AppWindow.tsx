@@ -14,6 +14,7 @@ import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesAct
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
 import { WindowBodyGestureShield } from './WindowBodyGestureShield';
 import { shouldShieldWindowBody } from './windowGesture';
+import { appWindowMotionClass } from './windowMotion';
 import { ErrorBoundary } from '../ui/error-boundary';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
 import { ShowPageShareControl } from '../workbench/ShowPageShareControl';
@@ -53,6 +54,11 @@ export const AppWindow: React.FC<{
   // CSS owns the timing). Minimizing is a pure mounted hide (see className) so the
   // window body — terminal session, editor buffer — stays alive and intact.
   const [exitKind, setExitKind] = useState<'close' | null>(null);
+  // Frozen at first paint: a reload of a Dock-minimized window must not play the
+  // entrance keyframe (it animates opacity to 1 over the minimized hide). Restoring
+  // later still morphs via the transform/opacity transition; flipping this would
+  // re-add the in-class and replay the keyframe on top of that morph.
+  const [skipEntrance] = useState(win.minimized);
   // Animate window GEOMETRY (maximize/restore) but NOT during a drag/resize, which must track the
   // pointer instantly. `dragging` is state (not a ref) so the transition is enabled in the SAME render
   // that changes the bounds — otherwise the geometry jumps before the transition class arrives and
@@ -288,7 +294,7 @@ export const AppWindow: React.FC<{
           ? 'transition-[transform,opacity] duration-200 ease-out'
           : 'transition-[left,top,width,height,transform,opacity] duration-300 ease-out',
         win.maximized ? 'rounded-none' : 'rounded-xl',
-        exitKind === 'close' ? 'animate-appwindow-out' : 'animate-appwindow-in',
+        appWindowMotionClass({ exitKind, skipEntrance }),
         // Minimize = mounted hide: the body stays alive (terminal/editor state preserved) while the
         // window shrinks toward the Dock (inline transform above) and stops taking pointer events.
         win.minimized ? 'pointer-events-none opacity-0' : 'pointer-events-auto',

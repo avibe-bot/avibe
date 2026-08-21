@@ -1,13 +1,13 @@
 import { createContext, useContext } from 'react';
 
 import type { InstanceCapabilities } from './ApiContext';
-import type { InstanceKind } from '../lib/sessionInfo';
+import type { InstanceKind, InstanceRole } from '../lib/sessionInfo';
 import { DENIED_INSTANCE_CAPABILITIES } from '../lib/sessionInfo';
 
 export interface InstanceAuthorizationValue {
   remote: boolean;
   instanceKind: InstanceKind | null;
-  instanceRole: 'owner' | 'editor' | 'viewer' | null;
+  instanceRole: InstanceRole | null;
   capabilities: InstanceCapabilities;
 }
 

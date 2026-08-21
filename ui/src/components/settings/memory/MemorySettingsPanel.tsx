@@ -1,7 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Loader2, RefreshCw, ShieldAlert, Trash2 } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Building2,
+  Cloud,
+  Loader2,
+  RefreshCw,
+  ShieldAlert,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
@@ -10,19 +19,28 @@ import { ConfirmDialog } from '../../ui/confirm-dialog';
 import { InfoHint } from '../../ui/info-hint';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
+import { Select } from '../../ui/select';
 import { Switch } from '../../ui/switch';
 import { useApi } from '../../../context/ApiContext';
 import type {
   MemoryEndpointConfig,
   MemoryMaintenance,
+  MemoryRerankProvider,
   MemorySettings,
   MemorySettingsPatch,
   MemorySettingsResult,
 } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
-import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
-import type { EndpointDraft } from '../../../lib/memorySettings';
 import { isMemoryOk, memoryErrorMessage } from '../../../lib/memoryRead';
+import {
+  DASHSCOPE_RERANK_MODEL,
+  DEFAULT_MEMORY_RERANK_PROVIDER,
+  MEMORY_RERANK_PROVIDERS,
+  buildEndpointPatch,
+  draftFromConfig,
+  normalizeRerankProvider,
+} from '../../../lib/memorySettings';
+import type { EndpointDraft } from '../../../lib/memorySettings';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 
@@ -31,6 +49,21 @@ const EMPTY_ENDPOINT: MemoryEndpointConfig = {
   model: null,
   api_key: null,
   has_api_key: false,
+};
+
+const RERANK_FIELD_HINTS: Record<MemoryRerankProvider, { baseUrl: string; model: string }> = {
+  deepinfra: {
+    baseUrl: 'https://api.deepinfra.com/v1/inference',
+    model: 'Qwen/Qwen3-Reranker-4B',
+  },
+  vllm: {
+    baseUrl: 'http://localhost:8000/v1',
+    model: 'Qwen/Qwen3-Reranker-4B',
+  },
+  dashscope: {
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    model: DASHSCOPE_RERANK_MODEL,
+  },
 };
 
 const EndpointFields: React.FC<{
@@ -44,6 +77,7 @@ const EndpointFields: React.FC<{
   identityHint?: string;
   canClearKey: boolean;
   clearKeyLabel?: string;
+  showProvider?: boolean;
 }> = ({
   title,
   help,
@@ -55,9 +89,12 @@ const EndpointFields: React.FC<{
   identityHint,
   canClearKey,
   clearKeyLabel,
+  showProvider = false,
 }) => {
   const { t } = useTranslation();
   const clearLabel = clearKeyLabel ?? t('memory.settings.clearKeyLabel');
+  const provider = showProvider ? normalizeRerankProvider(draft.provider) : DEFAULT_MEMORY_RERANK_PROVIDER;
+  const hints = showProvider ? RERANK_FIELD_HINTS[provider] : null;
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
@@ -70,13 +107,38 @@ const EndpointFields: React.FC<{
         )}
       </div>
       {identityHint ? <p className="text-[11.5px] leading-snug text-muted">{identityHint}</p> : null}
+      {showProvider ? (
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-[12px] text-muted">{t('memory.settings.rerankProvider')}</Label>
+          <Select
+            value={provider}
+            disabled={disabled}
+            aria-label={t('memory.settings.rerankProvider')}
+            onChange={(event) => {
+              const nextProvider = normalizeRerankProvider(event.target.value);
+              const nextModel = nextProvider === 'dashscope'
+                ? DASHSCOPE_RERANK_MODEL
+                : draft.model === DASHSCOPE_RERANK_MODEL
+                  ? ''
+                  : draft.model;
+              onChange({ ...draft, provider: nextProvider, model: nextModel });
+            }}
+          >
+            {MEMORY_RERANK_PROVIDERS.map((value) => (
+              <option key={value} value={value}>
+                {t(`memory.settings.rerankProviders.${value}`)}
+              </option>
+            ))}
+          </Select>
+        </div>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1.5">
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
             value={draft.baseUrl}
             disabled={disabled}
-            placeholder={t('memory.settings.baseUrlPlaceholder')}
+            placeholder={hints?.baseUrl ?? t('memory.settings.baseUrlPlaceholder')}
             onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
             className="text-[13px]"
           />
@@ -85,8 +147,8 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
             value={draft.model}
-            disabled={disabled}
-            placeholder={t('memory.settings.modelPlaceholder')}
+            disabled={disabled || provider === 'dashscope'}
+            placeholder={hints?.model ?? t('memory.settings.modelPlaceholder')}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
             className="text-[13px]"
           />
@@ -172,9 +234,10 @@ export const MemorySettingsPanel: React.FC<{
   const api = useApi();
   const { showToast } = useToast();
   const [enabledDraft, setEnabledDraft] = useState(settings.enabled);
+  const [modeDraft, setModeDraft] = useState<MemorySettings['mode']>(settings.mode);
   const [llmDraft, setLlmDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.llm));
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
-  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+  const [rerankDraft, setRerankDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT, { includeProvider: true }));
   const [multimodalDraft, setMultimodalDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -184,9 +247,10 @@ export const MemorySettingsPanel: React.FC<{
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
   useEffect(() => {
     setEnabledDraft(settings.enabled);
+    setModeDraft(settings.mode);
     setLlmDraft(draftFromConfig(settings.processing.llm));
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
-    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT));
+    setRerankDraft(draftFromConfig(settings.processing.rerank ?? EMPTY_ENDPOINT, { includeProvider: true }));
     setMultimodalDraft(draftFromConfig(settings.processing.multimodal ?? EMPTY_ENDPOINT));
   }, [settings]);
 
@@ -195,10 +259,13 @@ export const MemorySettingsPanel: React.FC<{
   const canClearRequiredKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
   const busy = saving || rebuildBusy || repairBusy || mutationBusy;
+  const customMode = modeDraft === 'custom';
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
     if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
+    if (modeDraft !== settings.mode && modeDraft !== 'organization') patch.mode = modeDraft;
+    if (!customMode) return patch;
     // Required keys can clear only while the resulting state stays disabled.
     const allowRequiredClear = !enabledDraft;
     const llmPatch = buildEndpointPatch(
@@ -219,6 +286,7 @@ export const MemorySettingsPanel: React.FC<{
       settings.processing.rerank ?? EMPTY_ENDPOINT,
       true,
       false,
+      true,
       true,
     );
     const multimodalPatch = settings.im_attachment_capture_available === true
@@ -284,6 +352,9 @@ export const MemorySettingsPanel: React.FC<{
             failure.diagnostic?.provider_error_code,
           ),
         );
+        if (!customMode && typeof patch.enabled === 'boolean') {
+          setEnabledDraft(settings.enabled);
+        }
         // Confirmed rebuild keeps the candidate on failure. Exit the confirm
         // modal so a second click cannot re-submit a now-non-identity patch;
         // Retry rebuild is the recovery control under the pending marker.
@@ -301,6 +372,9 @@ export const MemorySettingsPanel: React.FC<{
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
+      if (!customMode && typeof patch.enabled === 'boolean') {
+        setEnabledDraft(settings.enabled);
+      }
       setConfirmRebuildOpen(false);
       setPendingPatch(null);
       onReloadSettings();
@@ -319,7 +393,10 @@ export const MemorySettingsPanel: React.FC<{
       return;
     }
     if (
-      identityChanged(embeddingDraft, settings.processing.embedding)
+      (
+        modeDraft !== settings.mode
+        || identityChanged(embeddingDraft, settings.processing.embedding)
+      )
       && !factoryResetRequired
     ) {
       // Retain the draft and open confirmation; the same patch is replayed with
@@ -367,12 +444,62 @@ export const MemorySettingsPanel: React.FC<{
     }
   };
 
+  const setMemoryEnabled = (checked: boolean) => {
+    setEnabledDraft(checked);
+    if (!customMode) void submitPatch({ enabled: checked });
+  };
+
+  const usePlatformMode = () => {
+    if (settings.mode === 'platform') {
+      setModeDraft('platform');
+      return;
+    }
+    setPendingPatch({ mode: 'platform' });
+    setConfirmRebuildOpen(true);
+  };
+
+  const acknowledgeOrganizationTransition = () => {
+    setPendingPatch({ acknowledge_transition: true });
+    setConfirmRebuildOpen(true);
+  };
+
   return (
     <div className="flex flex-col gap-4">
       {rebuildRequired ? (
-        <div className="flex flex-col gap-1 rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
-          <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.rebuildRequiredTitle')}</span>
-          <span className="text-[12px] leading-snug text-muted">{t('memory.settings.rebuildRequiredDescription')}</span>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.rebuildRequiredTitle')}</span>
+            <span className="text-[12px] leading-snug text-muted">{t('memory.settings.rebuildRequiredDescription')}</span>
+          </div>
+          {!factoryResetRequired && !settings.transition_notice_pending ? (
+            <Button variant="secondary" size="sm" onClick={() => void retryRebuild()} disabled={busy}>
+              {rebuildBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              {rebuildBusy ? t('memory.settings.retryingRebuild') : t('memory.settings.retryRebuild')}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {settings.transition_notice_pending ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.organizationTransitionTitle')}</span>
+            <span className="text-[12px] leading-snug text-muted">{t('memory.settings.organizationTransitionDescription')}</span>
+          </div>
+          <Button
+            size="sm"
+            onClick={acknowledgeOrganizationTransition}
+            disabled={busy || !settings.cloud_available}
+          >
+            {t('memory.settings.organizationTransitionAction')}
+          </Button>
+        </div>
+      ) : null}
+
+      {settings.capability_paused ? (
+        <div className="rounded-xl border border-gold/40 bg-gold/10 px-4 py-3">
+          <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.cloudPausedTitle')}</span>
+          <p className="mt-1 text-[12px] leading-snug text-muted">{t('memory.settings.cloudPausedDescription')}</p>
         </div>
       ) : null}
 
@@ -395,61 +522,122 @@ export const MemorySettingsPanel: React.FC<{
         </div>
         <Switch
           checked={enabledDraft}
-          onCheckedChange={setEnabledDraft}
-          disabled={busy || factoryResetRequired || rebuildRequired || (!enabledDraft && !dependencyReady)}
+          onCheckedChange={setMemoryEnabled}
+          disabled={
+            busy
+            || factoryResetRequired
+            || rebuildRequired
+            || (!enabledDraft && !dependencyReady)
+            || (!enabledDraft && !customMode && !settings.cloud_available)
+          }
           label={t('memory.settings.enableLabel')}
         />
       </div>
 
-      <EndpointFields
-        title={t('memory.settings.llmTitle')}
-        help={t('memory.settings.llmHelp')}
-        helpLabel={t('memory.settings.llmHelpLabel')}
-        draft={llmDraft}
-        original={settings.processing.llm}
-        onChange={setLlmDraft}
-        disabled={busy}
-        canClearKey={canClearRequiredKeys}
-      />
+      {modeDraft === 'platform' ? (
+        <div className="overflow-hidden rounded-xl border border-border bg-surface">
+          <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3.5">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/15 text-mint-ink">
+                <Cloud className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-[13px] font-semibold text-foreground">{t('memory.settings.avibeCloudTitle')}</h3>
+                <p className="text-[11.5px] leading-snug text-muted">{t('memory.settings.avibeCloudIncluded')}</p>
+              </div>
+            </div>
+            <Badge variant="success">{t('memory.settings.avibeCloudFree')}</Badge>
+          </div>
+          <p className="px-4 py-4 text-[12px] leading-relaxed text-muted">{t('memory.settings.avibeCloudDescription')}</p>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background/40 px-4 py-3">
+            <span className="text-[11.5px] text-muted">{t('memory.settings.customPrompt')}</span>
+            <Button variant="secondary" size="sm" onClick={() => setModeDraft('custom')} disabled={busy}>
+              {t('memory.settings.useCustomEndpoints')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
-      <EndpointFields
-        title={t('memory.settings.embeddingTitle')}
-        help={t('memory.settings.embeddingHelp')}
-        helpLabel={t('memory.settings.embeddingHelpLabel')}
-        draft={embeddingDraft}
-        original={settings.processing.embedding}
-        onChange={setEmbeddingDraft}
-        disabled={busy}
-        identityHint={t('memory.settings.embeddingIdentityHint')}
-        canClearKey={canClearRequiredKeys}
-      />
+      {modeDraft === 'organization' ? (
+        <div className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-4">
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-cyan/15 text-cyan-ink">
+            <Building2 className="size-5" />
+          </span>
+          <span className="text-[13px] font-medium text-foreground">{t('memory.settings.organizationManaged')}</span>
+        </div>
+      ) : null}
 
-      <EndpointFields
-        title={t('memory.settings.rerankTitle')}
-        help={t('memory.settings.rerankHelp')}
-        helpLabel={t('memory.settings.rerankHelpLabel')}
-        draft={rerankDraft}
-        original={settings.processing.rerank ?? EMPTY_ENDPOINT}
-        onChange={setRerankDraft}
-        disabled={busy}
-        identityHint={t('memory.settings.rerankIdentityHint')}
-        canClearKey
-        clearKeyLabel={t('memory.settings.rerankClearLabel')}
-      />
+      {customMode ? (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-surface px-4 py-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-violet/15 text-violet-ink">
+                <SlidersHorizontal className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-[13px] font-semibold text-foreground">{t('memory.settings.customEndpointsTitle')}</h3>
+                <p className="text-[11.5px] leading-snug text-muted">{t('memory.settings.customEndpointsDescription')}</p>
+              </div>
+            </div>
+            {settings.cloud_available && !settings.managed ? (
+              <Button variant="secondary" size="sm" onClick={usePlatformMode} disabled={busy}>
+                {t('memory.settings.useAvibeCloud')}
+              </Button>
+            ) : null}
+          </div>
 
-      {settings.im_attachment_capture_available === true ? (
-        <EndpointFields
-          title={t('memory.settings.multimodalTitle')}
-          help={t('memory.settings.multimodalHelp')}
-          helpLabel={t('memory.settings.multimodalHelpLabel')}
-          draft={multimodalDraft}
-          original={settings.processing.multimodal ?? EMPTY_ENDPOINT}
-          onChange={setMultimodalDraft}
-          disabled={busy}
-          identityHint={t('memory.settings.multimodalIdentityHint')}
-          canClearKey
-          clearKeyLabel={t('memory.settings.multimodalClearLabel')}
-        />
+          <EndpointFields
+            title={t('memory.settings.llmTitle')}
+            help={t('memory.settings.llmHelp')}
+            helpLabel={t('memory.settings.llmHelpLabel')}
+            draft={llmDraft}
+            original={settings.processing.llm}
+            onChange={setLlmDraft}
+            disabled={busy}
+            canClearKey={canClearRequiredKeys}
+          />
+
+          <EndpointFields
+            title={t('memory.settings.embeddingTitle')}
+            help={t('memory.settings.embeddingHelp')}
+            helpLabel={t('memory.settings.embeddingHelpLabel')}
+            draft={embeddingDraft}
+            original={settings.processing.embedding}
+            onChange={setEmbeddingDraft}
+            disabled={busy}
+            identityHint={t('memory.settings.embeddingIdentityHint')}
+            canClearKey={canClearRequiredKeys}
+          />
+
+          <EndpointFields
+            title={t('memory.settings.rerankTitle')}
+            help={t('memory.settings.rerankHelp')}
+            helpLabel={t('memory.settings.rerankHelpLabel')}
+            draft={rerankDraft}
+            original={settings.processing.rerank ?? EMPTY_ENDPOINT}
+            onChange={setRerankDraft}
+            disabled={busy}
+            identityHint={t('memory.settings.rerankIdentityHint')}
+            canClearKey
+            clearKeyLabel={t('memory.settings.rerankClearLabel')}
+            showProvider
+          />
+
+          {settings.im_attachment_capture_available === true ? (
+            <EndpointFields
+              title={t('memory.settings.multimodalTitle')}
+              help={t('memory.settings.multimodalHelp')}
+              helpLabel={t('memory.settings.multimodalHelpLabel')}
+              draft={multimodalDraft}
+              original={settings.processing.multimodal ?? EMPTY_ENDPOINT}
+              onChange={setMultimodalDraft}
+              disabled={busy}
+              identityHint={t('memory.settings.multimodalIdentityHint')}
+              canClearKey
+              clearKeyLabel={t('memory.settings.multimodalClearLabel')}
+            />
+          ) : null}
+        </>
       ) : null}
 
       {error ? (
@@ -461,19 +649,16 @@ export const MemorySettingsPanel: React.FC<{
       ) : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => void save()} disabled={busy}>
-            {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-            {saving ? t('memory.settings.saving') : t('memory.settings.save')}
-          </Button>
-          {rebuildRequired && !factoryResetRequired ? (
-            <Button variant="secondary" onClick={() => void retryRebuild()} disabled={busy}>
-              {rebuildBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-              {rebuildBusy ? t('memory.settings.retryingRebuild') : t('memory.settings.retryRebuild')}
+        {customMode ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => void save()} disabled={busy}>
+              {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              {saving ? t('memory.settings.saving') : t('memory.settings.save')}
             </Button>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
         <Button
+          className={customMode ? undefined : 'ml-auto'}
           variant="destructive"
           size="sm"
           onClick={onClearAll}
@@ -487,7 +672,10 @@ export const MemorySettingsPanel: React.FC<{
       <div className="rounded-xl border border-border bg-surface p-4">
         <h3 className="mb-2 text-[13px] font-semibold text-foreground">{t('memory.settings.disclosureTitle')}</h3>
         <ul className="flex flex-col gap-1.5">
-          {(t('memory.settings.disclosure', { returnObjects: true }) as string[]).map((line, idx) => (
+          {(t(
+            customMode ? 'memory.settings.disclosure' : 'memory.settings.cloudDisclosure',
+            { returnObjects: true },
+          ) as string[]).map((line, idx) => (
             <li key={idx} className="flex gap-2 text-[11.5px] leading-snug text-muted">
               <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
               {line}
@@ -496,7 +684,11 @@ export const MemorySettingsPanel: React.FC<{
           {settings.im_attachment_capture_available === true ? (
             <li className="flex gap-2 text-[11.5px] leading-snug text-muted">
               <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
-              {t('memory.settings.disclosureAttachment')}
+              {t(
+                customMode
+                  ? 'memory.settings.disclosureAttachment'
+                  : 'memory.settings.cloudDisclosureAttachment',
+              )}
             </li>
           ) : null}
         </ul>

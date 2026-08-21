@@ -49,6 +49,7 @@ from config.v2_settings import (
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
+from core import latest_version_cache
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -1039,7 +1040,23 @@ def save_config(
             pass
         persisted = load_config()
         _ensure_builtin_default_agents(persisted)
-        return persisted
+        model_service_pairing_changed = (
+            base_config.remote_access.vibe_cloud.runtime_credentials()
+            if base_config is not None
+            else None
+        ) != persisted.remote_access.vibe_cloud.runtime_credentials()
+
+    if model_service_pairing_changed:
+        try:
+            from vibe.model_service import request_model_service_refresh
+
+            request_model_service_refresh()
+        except Exception:
+            logger.warning(
+                "Cloud Model Service refresh could not be requested",
+                exc_info=True,
+            )
+    return persisted
 
 
 def save_memory_config(
@@ -1378,6 +1395,18 @@ def _remote_access_pairing_projection(payload: dict) -> dict:
     return {"vibe_cloud": {"paired": paired}}
 
 
+# ``strip_pairing_identity_from_config_write`` used to sit here: a non-owner
+# config write had ``remote_access`` removed and everything else was persisted.
+# It is gone rather than kept beside the allowlist, because a subtractive filter
+# and a closed allowlist cannot both be the non-owner write schema — the
+# subtractive one is only ever as complete as the last section somebody
+# remembered, and that is precisely how credential-bearing sections stayed
+# writable for a member. ``editor_config_write_payload`` is now the single
+# schema for every writer below Owner, and pairing identity is covered by it the
+# same way every other Owner-only section is: ``remote_access`` is not on the
+# allowlist, so the write is refused.
+
+
 def _audio_asr_preference_projection(payload: dict) -> dict:
     audio_asr = payload.get("audio_asr")
     if not isinstance(audio_asr, dict):
@@ -1550,24 +1579,12 @@ def list_show_pages(*, user_context: Any = None) -> dict:
     try:
         result = store.list_page(page_request=None, user_context=user_context)
         pages = [show_page_payload(page, config=config) for page in result.items]
-        with store.engine.connect() as connection:
-            for payload in pages:
-                session_id = payload["session_id"]
-                payload["can_manage"] = (
-                    resource_access_service.can_manage_show_page_access(
-                        context,
-                        session_id,
-                        connection=connection,
-                    )
-                )
-                payload["can_publish_public"] = (
-                    resource_access_service.can_control_resource_sharing(
-                        context,
-                        "show_page",
-                        session_id,
-                        connection=connection,
-                    )
-                )
+        # §3.2: management and sharing control follow the Instance Editor role
+        # alone — show_page no longer has a Resource ACL row to consult.
+        can_manage = context.has_role("editor")
+        for payload in pages:
+            payload["can_manage"] = can_manage
+            payload["can_publish_public"] = can_manage
     finally:
         store.close()
     _apply_session_meta(pages)
@@ -1592,13 +1609,10 @@ def _show_page_mutation_response(
     from storage import resource_access_service
 
     context = resource_access_service.resolve_resource_access_context(user_context)
-    with store.engine.connect() as connection:
-        can_use = resource_access_service.can_use_resource(
-            context,
-            "show_page",
-            page.session_id,
-            connection=connection,
-        )
+    can_use = (
+        context.has_role("viewer")
+        and context.instance_access_source != "show_page_email"
+    )
     if not can_use:
         # Access managers may take a page offline without page-use access. Do
         # not return page paths, URLs, share IDs, audience, or session metadata.
@@ -1664,8 +1678,36 @@ def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
+def get_show_page(session_id: str, *, user_context: Any = None) -> dict:
+    """Read one session's Show Page without creating it.
+
+    The read-only counterpart of ``ensure_show_page``: same payload and the same
+    access enforcement for a page that exists, and ``show_page_not_found`` where
+    ensure would have created one. A caller that only needs to DISPLAY the page
+    uses this, so ``ensure_show_page``'s one-shot ``existed`` edge stays with the
+    single caller that owns the "visualize this session" prompt. The response
+    deliberately carries no ``existed`` key: there is no creation fact to report,
+    and none to accidentally consume.
+    """
+    from core.show_pages import ShowPageStore, show_page_payload
+
+    config = V2Config.load()
+    store = ShowPageStore()
+    try:
+        page = store.get_for_use(session_id, user_context=user_context)
+        payload = show_page_payload(page, config=config)
+    finally:
+        store.close()
+    return {"ok": True, **_apply_session_meta([payload])[0]}
+
+
 def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
-    """Return the applied authenticated audience and sharing authority."""
+    """Return the applied authenticated audience and sharing authority.
+
+    §3.2 removed show_page from the Resource ACL, so there is no policy row:
+    the ownership fence drives ``mode``/``ownership_status`` and the Instance
+    role alone drives ``can_use``/``can_manage``/``can_publish_public``.
+    """
 
     from core.show_pages import ShowPageError, ShowPageStore
     from storage import resource_access_service
@@ -1676,49 +1718,31 @@ def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
         page = store.get(session_id)
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-        with store.engine.connect() as connection:
-            policy = resource_access_service.get_resource_policy(
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            can_use = resource_access_service.can_use_resource(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            can_manage = resource_access_service.can_manage_show_page_access(
-                context,
-                page.session_id,
-                connection=connection,
-            )
-            can_publish_public = resource_access_service.can_control_resource_sharing(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            )
-            if not (can_use or can_manage):
-                raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+        reconciliation = store.reconcile_resource_policy(page.session_id)
+        can_use = (
+            context.has_role("viewer")
+            and context.instance_access_source != "show_page_email"
+        )
+        can_manage = context.has_role("editor")
+        can_publish_public = context.has_role("editor")
+        if not (can_use or can_manage):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
     finally:
         store.close()
 
-    organization_id = policy.get("organization_id") if policy else None
-    instance_id = context.instance_id
-    if context.is_instance_owner and organization_id and not instance_id:
-        instance_id = V2Config.load().remote_access.vibe_cloud.instance_id or None
+    ownership = reconciliation["ownership"]
+    organization_id = ownership.get("organization_id")
     return {
         "ok": True,
-        "mode": "organization" if organization_id else "personal",
-        "instance_id": instance_id,
+        "mode": ownership["mode"],
+        "ownership_status": reconciliation["status"],
+        "instance_id": ownership.get("instance_id"),
         "organization_id": organization_id,
-        "access_level": policy.get("access_level", "private") if policy else "private",
-        "group_ids": list(policy.get("group_ids") or []) if policy else [],
-        "policy_revision": policy.get("policy_revision") if policy else None,
-        "last_applied_control_plane_revision": (
-            policy.get("last_applied_control_plane_revision") if policy else None
-        ),
+        "policy_organization_id": None,
+        "access_level": "private",
+        "group_ids": [],
+        "policy_revision": None,
+        "last_applied_control_plane_revision": None,
         "can_use": can_use,
         "can_manage": can_manage,
         "can_publish_public": can_publish_public,
@@ -1739,17 +1763,11 @@ def require_show_access_settings_control(
         page = store.get(session_id)
         if page is None:
             raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
-        with store.engine.connect() as connection:
-            if not resource_access_service.can_control_resource_sharing(
-                context,
-                "show_page",
-                page.session_id,
-                connection=connection,
-            ):
-                raise ShowPageError(
-                    "Show Page access is not permitted.",
-                    code="resource_access_forbidden",
-                )
+        if not context.has_role("editor"):
+            raise ShowPageError(
+                "Show Page access is not permitted.",
+                code="resource_access_forbidden",
+            )
     finally:
         store.close()
 
@@ -5968,6 +5986,20 @@ def get_version_info() -> dict:
     return result
 
 
+def get_local_version_info() -> dict:
+    """Return only the version already loaded by this process.
+
+    Upgrade recovery must be able to identify the release that is still
+    running even when the package index is unavailable. Keep this endpoint
+    separate from :func:`get_version_info`, whose update check is intentionally
+    allowed to perform network I/O for the user-facing version screen.
+    """
+
+    from vibe import __version__
+
+    return {"current": __version__, "build": get_build_identity().as_dict()}
+
+
 def do_upgrade(auto_restart: bool = True) -> dict:
     """Perform upgrade to latest version.
 
@@ -6006,6 +6038,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        rollback_to=plan.rollback_to,
                     )
                     restarting = True
                 except Exception as exc:
@@ -7467,6 +7500,35 @@ def _probe_avault_version(path: str | None) -> str | None:
     return None
 
 
+def refresh_avault_if_stale() -> dict:
+    """Bring avault to the managed pin, installing only when that changes it.
+
+    Sibling of ``refresh_askill_if_stale`` for the version-pinned dependency, so
+    both managed local deps answer "am I current?" before paying for an install.
+    The wanted version is ``AVAULT_VERSION`` rather than an upstream latest, so
+    the staleness question is answered locally with no download at all.
+
+    ``force`` on ``ensure_avault_installed`` stays a repair verb — it reinstalls
+    an equal or older managed release on purpose — so callers that only want the
+    pin satisfied come here instead of charging every call a ~20s reinstall of
+    the release that is already on disk.
+
+    Skipping the install may never report a healthier state than forcing it
+    would. Being at the pin is not the whole of being current: when the
+    readiness floor is raised ahead of the published pin, a binary equal to
+    ``AVAULT_VERSION`` is still ``upgrade_required``, and only the forced path
+    surfaces that release gap. So the question is asked of the status as a
+    whole, not of the version alone.
+    """
+    status = avault_status()
+    current = (
+        bool(status.get("installed"))
+        and status.get("status") == "ready"
+        and _version_at_least(status.get("version"), AVAULT_VERSION)
+    )
+    return ensure_avault_installed(force=not current)
+
+
 def avault_status() -> dict:
     """Report whether avault is installed and its version (best-effort)."""
     path = _resolve_avault_cli_path()
@@ -8090,19 +8152,10 @@ def _fetch_latest_askill_version() -> str | None:
 
 
 def _cached_latest_askill() -> str | None:
-    # Share the backend lifecycle cache so every local tool latest probe obeys the
-    # same one-hour success TTL and short failure TTL.
-    key = "askill"
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_LATEST_CACHE.get(key)
-    if cached:
-        ttl = _BACKEND_LATEST_TTL_SECONDS if cached[1] else _BACKEND_LATEST_FAILURE_TTL_SECONDS
-        if time.time() - cached[0] < ttl:
-            return cached[1]
-    latest = _fetch_latest_askill_version()
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE[key] = (time.time(), latest)
-    return latest
+    # Share the managed-dependency cache so every local tool latest probe obeys
+    # the same TTLs — and, more to the point here, so ``vibe runtime prepare``
+    # inherits the answer a previous process already paid GitHub for.
+    return latest_version_cache.cached_latest(_ASKILL_CACHE_KEY, _fetch_latest_askill_version)
 
 
 def askill_update_status(*, include_latest: bool = True) -> dict:
@@ -8117,9 +8170,80 @@ def askill_update_status(*, include_latest: bool = True) -> dict:
         "has_update": has_update,
         "auto_update": not _askill_auto_update_disabled(),
     }
-    if current.get("installed") and current_version is None:
+    if current.get("installed") and not _is_comparable_version(current_version):
+        # Not just a missing version: a version nobody can order (``dev``, a git
+        # sha) tells us as little as no version at all, and every consumer —
+        # the Dependencies page, prepare — must read the same fact from the same
+        # field rather than re-deriving it from the raw string.
         out["status"] = "unknown"
     return out
+
+
+def refresh_askill_if_stale() -> dict:
+    """Bring askill to the published version, installing only when that changes it.
+
+    The single owner of "is the managed askill current, and make it so". Every
+    caller that wants currency asks this instead of forcing an install, because
+    the askill.sh installer re-downloads the CLI on every run: answering the
+    question costs one cached version probe, answering it by reinstalling costs
+    ~30s of network even when the local binary is already the published version.
+    ``refresh_avault_if_stale`` is the same rule for the version-pinned sibling.
+
+    Callers own their own policy gate; this function only decides staleness. An
+    install attempt is reported by ``action``, so its absence means the
+    dependency was already current.
+
+    ``up_to_date`` is an affirmative verdict, never a fallthrough: it requires
+    two versions that could actually be ordered. Anything else is unknown, and
+    unknown is answered by the repair the forced path would have done.
+    """
+    status = askill_update_status()
+    if not status.get("installed"):
+        result = ensure_askill_installed(force=False)
+        result["action"] = "install"
+        return result
+
+    latest = status.get("latest_version")
+    if status.get("status") == "unknown":
+        # A binary whose version cannot be ordered is not current, it is broken —
+        # whether it reported nothing or reported ``dev``. The status field owns
+        # that judgement (see ``askill_update_status``) so this path and the
+        # Dependencies page cannot disagree. Deciding it before the
+        # ``latest_unavailable`` exit keeps the repair from being gated on
+        # network reachability: callers that used to force this install
+        # unconditionally would otherwise be told a broken askill is ready
+        # whenever the latest lookup failed too.
+        logger.info("askill local version is unknown; refreshing managed dependency")
+        result = ensure_askill_installed(force=True)
+        result["action"] = "refresh_unknown_version"
+        result["latest_version"] = latest
+        return result
+
+    if not _is_comparable_version(latest):
+        # No usable upstream version to compare against — missing, or a string
+        # that cannot be ordered. Either way staleness is undecided, which is a
+        # different fact from being current; each caller owns what to do with it
+        # (prepare installs, the update cadence skips).
+        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
+
+    if not status.get("has_update"):
+        # Two comparable versions, compared: this is the one state that may claim
+        # currency, and it is reached only by having established it.
+        return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
+
+    logger.info("askill update available: %s -> %s", status.get("version"), latest)
+    result = ensure_askill_installed(force=True)
+    result["action"] = "update"
+    result["from_version"] = status.get("version")
+    result["latest_version"] = latest
+    # Deliberately no cache invalidation here, unlike the in-memory cache this
+    # replaced. The entry says which version askill *publishes*, and installing
+    # that version does not change the answer — it makes it the one a later
+    # ``askill_update_status`` needs, to compare a freshly measured local version
+    # against and conclude ``up_to_date``. Dropping it would send the next
+    # ``runtime prepare`` back to GitHub for a string we still hold, in the one
+    # window (right after an update) where prepare runs most often.
+    return result
 
 
 def reconcile_askill_auto_update() -> dict:
@@ -8133,35 +8257,7 @@ def reconcile_askill_auto_update() -> dict:
     """
     if _askill_auto_update_disabled():
         return {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
-
-    status = askill_update_status()
-    if not status.get("installed"):
-        result = ensure_askill_installed(force=False)
-        result["action"] = "install"
-        return result
-
-    latest = status.get("latest_version")
-    if latest is None:
-        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
-
-    if status.get("version") is None:
-        logger.info("askill local version is unknown; refreshing managed dependency")
-        result = ensure_askill_installed(force=True)
-        result["action"] = "refresh_unknown_version"
-        result["latest_version"] = latest
-        return result
-
-    if not status.get("has_update"):
-        return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
-
-    logger.info("askill update available: %s -> %s", status.get("version"), latest)
-    result = ensure_askill_installed(force=True)
-    result["action"] = "update"
-    result["from_version"] = status.get("version")
-    result["latest_version"] = latest
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE.pop("askill", None)
-    return result
+    return refresh_askill_if_stale()
 
 
 # =============================================================================
@@ -8455,14 +8551,12 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     candidates.sort(key=lambda page: (page.updated_at, page.session_id), reverse=True)
     pages = []
     for page in candidates[:resolved_limit]:
-        base_path = f"/p/{page.share_id}/" if page.visibility == VISIBILITY_PUBLIC and page.share_id else None
-        context = ShowRuntimeContext.SHARED if base_path else ShowRuntimeContext.PRIVATE
+        context = ShowRuntimeContext.SHARED if page.visibility == VISIBILITY_PUBLIC else ShowRuntimeContext.PRIVATE
         pages.append(
             {
                 "session_id": page.session_id,
                 "visibility": page.visibility,
                 "updated_at": page.updated_at,
-                "base_path": base_path,
                 "context": context.value,
             }
         )
@@ -8636,9 +8730,14 @@ def start_dependency_install_job(dep: str) -> dict:
 # Backend lifecycle (version probe, latest check, restart)
 # =============================================================================
 
-# In-memory caches keyed by (backend, cli_path) so version answers stay tied
-# to the binary they came from. Trade freshness for fewer probes during rapid
-# popover opens. Tuned for human pacing (seconds), not bots.
+# The *locally installed* version, keyed by (backend, cli_path) so answers stay
+# tied to the binary they came from. Trade freshness for fewer probes during
+# rapid popover opens. Tuned for human pacing (seconds), not bots.
+#
+# In memory only, deliberately: this answers "what did the binary at this path
+# just print", which a new process can re-measure in milliseconds and which a
+# stale file could get wrong after an install. The *published* version is the
+# expensive one, and :mod:`core.latest_version_cache` persists that instead.
 #
 # The UI server handles requests on multiple threads, so reads, writes, and
 # invalidation can race. A single lock serializes mutation — fast in practice
@@ -8647,14 +8746,12 @@ def start_dependency_install_job(dep: str) -> dict:
 # scan in ``_invalidate_version_cache``.
 _BACKEND_CACHE_LOCK = __import__("threading").Lock()
 _BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
-_BACKEND_LATEST_CACHE: dict[str, tuple[float, str | None]] = {}
 _BACKEND_VERSION_TTL_SECONDS = 30.0
-_BACKEND_LATEST_TTL_SECONDS = 3600.0
-# Failed lookups (network down, registry hiccup) re-probe sooner so a
-# transient outage doesn't pin "—" for the full hour.
-_BACKEND_LATEST_FAILURE_TTL_SECONDS = 120.0
 _BACKEND_RUNTIME_USER_AGENT = "avibe/backend-runtime"
 _ASKILL_RELEASE_REPOSITORY = "avibe-bot/askill"
+#: askill is a managed dependency, not an agent backend, so it needs a name of
+#: its own in the shared latest-version cache.
+_ASKILL_CACHE_KEY = "askill"
 _ASKILL_AUTO_UPDATE_ENV = "VIBE_ASKILL_AUTO_UPDATE"
 _ASKILL_SKIP_ENV = "VIBE_INSTALL_SKIP_ASKILL"
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -8774,17 +8871,39 @@ def _invalidate_version_cache(name: str) -> None:
 
 
 def _cached_latest(name: str) -> str | None:
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_LATEST_CACHE.get(name)
-    if cached:
-        ttl = _BACKEND_LATEST_TTL_SECONDS if cached[1] else _BACKEND_LATEST_FAILURE_TTL_SECONDS
-        if time.time() - cached[0] < ttl:
-            return cached[1]
-    # Network fetch outside the lock — same reasoning as ``_cached_version``.
-    latest = _fetch_latest_version(name)
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE[name] = (time.time(), latest)
-    return latest
+    return latest_version_cache.cached_latest(name, lambda: _fetch_latest_version(name))
+
+
+def _is_comparable_version(value: str | None) -> bool:
+    """Whether *value* can be ordered against another version at all.
+
+    The single owner of "do we actually have a version?", because a nonempty
+    string is not the same fact: ``askill --version`` answers ``askill dev`` on a
+    development build, and the last token of that is stored as the version. Both
+    comparison helpers deliberately return False for anything they cannot parse,
+    so every caller that asks a comparison instead of asking this reads "cannot
+    tell" as "no update available" — which is how a broken binary comes to look
+    current. Ask this first; a False answer means unknown, not healthy.
+    """
+    if not value:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            Version(value)
+            return True
+        except InvalidVersion:
+            pass
+    except Exception:  # pragma: no cover - packaging is a transitive dep
+        pass
+
+    core = value.split("+", 1)[0].split("-", 1)[0]
+    try:
+        tuple(int(part) for part in core.split("."))
+    except ValueError:
+        return False
+    return True
 
 
 def _compare_versions(current: str | None, latest: str | None) -> bool:
@@ -8793,9 +8912,10 @@ def _compare_versions(current: str | None, latest: str | None) -> bool:
     Honors PEP 440 / semver pre-release ordering when possible (e.g. ``0.77.1``
     is greater than ``0.77.1-beta.0``). Falls back to a conservative numeric
     tuple comparison; returns False on any parsing failure so we never nag the
-    user with a phantom update.
+    user with a phantom update. That conservatism is why "no update" is not a
+    statement about health: use ``_is_comparable_version`` to tell the two apart.
     """
-    if not current or not latest or current == latest:
+    if not _is_comparable_version(current) or not _is_comparable_version(latest) or current == latest:
         return False
 
     try:

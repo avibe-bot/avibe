@@ -18,6 +18,17 @@
       "dispatchFailed": "Show 事件已记录，但未能投递对应的 Agent turn。",
       "idConflict": "此 Show 事件 ID 已绑定到不同的事件内容。",
       "unsupportedEventType": "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
+    },
+    "pageUnavailable": {
+      "title": "Show Page 暂时不可用",
+      "heading": "此页面暂时不可用",
+      "message": "页面不存在，或已不再提供访问。"
+    },
+    "pageAccessDenied": {
+      "title": "无权访问此 Show Page",
+      "heading": "你无权访问此页面",
+      "message": "请联系页面所有者，将你的邮箱加入允许访问名单。",
+      "back": "返回首页"
     }
   },
   "harness": {
@@ -98,9 +109,9 @@
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
         "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。",
         "backendRefresh": "[Avibe Harness] 本次 run 执行途中，它所用的 Agent 运行时被刷新，因此被中断，通常发生在刚保存 Agent 设置之后。这次 run 本身没有问题，请重新触发。",
-        "restarted": "[Avibe Harness] 本次 run 执行途中服务已关闭，因此被中断。该次执行已被记录，服务重启后不会重放。如果这项工作仍需完成，请重新触发。",
+        "restarted": "[Avibe Harness] 本次 run 执行途中被中断。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
         "interrupted": "[Avibe Harness] 本次 run 在执行途中被中断。该次执行已被记录，不会重新排队。如果这项工作仍需完成，请重新触发。",
-        "orphaned": "[Avibe Harness] 本次 run 一直标记为 running，但已经没有任何执行在推进它，通常是服务在它执行途中重启导致的。它此前已经发出的输出仍会保留在这次 run 上。如果这项工作仍需完成，请重新运行。",
+        "orphaned": "[Avibe Harness] 本次 run 没有任何执行在推进它，通常是服务在它执行途中重启导致的。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
         "transportUnavailable": "[Avibe Harness] 本次 run 一直排队等待，因为它对应的聊天平台始终没有重新连接，消息也就无法送达。请在设置中检查该平台连接，然后重新触发。",
         "queueHoldExpired": "[Avibe Harness] 本次 run 在所属 session 的 turn 队列后面排队过久，始终没有开始执行。请检查该 session 是否有卡住的 turn，然后重新触发这次 run。"
       },
@@ -313,7 +324,6 @@
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",
-    "memorySessionLifecycleBusy": "记忆系统仍在处理当前会话，请稍后重试 /new。",
     "settingsFailed": "无法打开设置。请重试。",
     "cwdChangeFailed": "无法打开目录更改对话框。请重试。",
     "resumeFailed": "无法打开恢复对话框。请重试。",
@@ -361,7 +371,8 @@
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
     "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
     "opencodeBackendError": "OpenCode 错误：{error}",
-    "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。"
+        "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。",
+        "opencodePollTransportFailure": "OpenCode 连续 {count} 次轮询失败，运行时不可达；原生 Turn 已中止并记为失败。"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",
@@ -768,11 +779,6 @@
         "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
       },
       "partialRestartWarning": "记忆设置内容暂不可用：Web UI 已重启，但服务仍在运行，\n  两者共享的记忆访问凭证仅存在于运行中的进程内。\n  请先运行 'vibe stop'，再运行 'vibe'，以同时重启两者。"
-    },
-    "alert": {
-      "credential": "记忆处理已于 {occurred_at} 暂停：无法调用已配置的模型接口，请检查 API Key 余额/权限。排队捕获：{queued} 条。",
-      "engine": "记忆处理已于 {occurred_at} 暂停：记忆引擎内部错误，可尝试修复记忆运行时。排队捕获：{queued} 条。",
-      "recovered": "记忆处理已于 {occurred_at} 恢复。排队捕获：{queued} 条。"
     }
   },
   "language": {
@@ -891,7 +897,32 @@
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f \u672c\u8f6e\u6267\u884c\u88ab\u4e2d\u65ad\u2014\u2014Avibe \u670d\u52a1\u5728\u5b83\u8fd0\u884c\u671f\u95f4\u91cd\u542f\uff0c\u5176 Agent \u8fd0\u884c\u65f6\u65e0\u6cd5\u6062\u590d\u3002\u8fd9\u4e00\u8f6e\u4e0d\u4f1a\u518d\u6709\u4efb\u4f55\u540e\u7eed\u7ed3\u679c\u3002\u5982\u679c\u8fd9\u9879\u5de5\u4f5c\u4ecd\u7136\u9700\u8981\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u8bf7\u6c42\u3002"
+      "serviceRestart": "\u26a0\ufe0f \u672c\u8f6e\u6267\u884c\u88ab\u4e2d\u65ad\u2014\u2014Avibe \u670d\u52a1\u5728\u5b83\u8fd0\u884c\u671f\u95f4\u91cd\u542f\u3002\u5982\u679c\u8fd9\u9879\u5de5\u4f5c\u4ecd\u7136\u9700\u8981\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u8bf7\u6c42\u3002"
+    }
+  },
+  "runtime": {
+    "clean": {
+      "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
+      "wouldRemoveItems": "\u5c06\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
+      "wouldRemoveArchives": "\u5c06\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
+      "wouldRemoveGit": "\u5c06\u6e05\u7406 {count} \u9879 Git Runtime \u7f13\u5b58\u3002",
+      "removedItems": "\u5df2\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
+      "removedArchives": "\u5df2\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
+      "removedGit": "\u5df2\u6e05\u7406 {count} \u9879 Git Runtime \u7f13\u5b58\u3002",
+      "partiallyRemoved": " \u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8bf7\u68c0\u67e5\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
+      "skipped": "\u5f52\u6863\u6e05\u7406\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u5728\u6b63\u5728\u8fd0\u884c\u7684\u5b89\u88c5\u6216\u6e05\u7406\u7ed3\u675f\u540e\u91cd\u8bd5\u3002",
+      "removalFailed": "\u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8fc7\u671f\u5f52\u6863\u4ecd\u4fdd\u7559\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
+      "skippedInspection": "\u5f52\u6863\u6e05\u7406\u65e0\u6cd5\u68c0\u67e5\u7f13\u5b58\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
+      "gitSkipped": "Git Runtime \u6e05\u7406\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u8fc7\u671f\u6761\u76ee\u4ecd\u4fdd\u7559\u3002",
+      "gitSkippedPreview": "Git Runtime \u7f13\u5b58\u9884\u89c8\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u6761\u76ee\u3002"
+    },
+    "doctor": {
+      "archiveCacheReclaimable": "Show Runtime \u5f52\u6863\u7f13\u5b58\u4e2d\u6709 {count} \u4e2a\u53ef\u56de\u6536\u5f52\u6863\uff08{size}\uff09\uff1b\u5f53\u524d\u4e0e\u56de\u6eda\u5f52\u6863\u4f1a\u88ab\u4fdd\u7559\u3002",
+      "archiveCacheReclaimableAction": "\u5148\u8fd0\u884c `vibe runtime clean --dry-run` \u9884\u89c8\uff0c\u518d\u8fd0\u884c `vibe runtime clean` \u56de\u6536\u7a7a\u95f4\u3002",
+      "archiveCacheClean": "Show Runtime \u5f52\u6863\u7f13\u5b58\u6ca1\u6709\u53ef\u56de\u6536\u5f52\u6863",
+      "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
+      "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
+      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002"
     }
   },
   "data": {

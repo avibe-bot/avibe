@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import os
 import sqlite3
 import stat
+import zipfile
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +59,14 @@ def _attachment(path: Path, *, name: str | None = None) -> CaptureAttachment:
     )
 
 
+def _xlsx_bytes() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"content types")
+        archive.writestr("xl/workbook.xml", b"workbook")
+    return payload.getvalue()
+
+
 def _assert_pin_error(error: pytest.ExceptionInfo[AttachmentPinError], expected: str) -> None:
     assert error.value.error == expected
 
@@ -101,6 +111,47 @@ def test_pin_is_private_relative_durable_and_releasable(attachment_roots) -> Non
     assert not pinned_path.parent.exists()
 
 
+def test_pin_store_uses_one_physical_home_through_a_symlinked_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    physical_home = tmp_path / "volume" / "user" / ".avibe"
+    source_root = physical_home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = _source_file(source_root, "notes.txt", b"physical source")
+    logical_parent = tmp_path / "home"
+    logical_parent.symlink_to(tmp_path / "volume", target_is_directory=True)
+    logical_home = logical_parent / "user" / ".avibe"
+    monkeypatch.setattr(
+        attachment_module.paths,
+        "get_vibe_remote_dir",
+        lambda: logical_home,
+    )
+
+    store = AttachmentPinStore(
+        effective_home=logical_home,
+        source_root=logical_home / "attachments" / "avibe",
+    )
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name=source.name,
+                mimetype="text/plain",
+                local_path=str(source),
+            )
+        ]
+    )
+    bundle = store.pin(converted)
+
+    assert converted == (_attachment(source),)
+    assert store._effective_home == physical_home
+    assert store._root == physical_home / "memory" / "attachments"
+    assert store.provider_attachments(bundle)[0].uri.startswith(
+        (physical_home / "memory" / "attachments").as_uri()
+    )
+    store.release(bundle.bundle_id)
+
+
 def test_workbench_conversion_preserves_symlink_for_pin_rejection(attachment_roots) -> None:
     _home, source_root = attachment_roots
     target = _source_file(source_root, "real.txt")
@@ -114,6 +165,163 @@ def test_workbench_conversion_preserves_symlink_for_pin_rejection(attachment_roo
     with pytest.raises(AttachmentPinError) as error:
         AttachmentPinStore().pin(converted)
     _assert_pin_error(error, "memory_invalid_input")
+
+
+@pytest.mark.parametrize("replacement", ["regular", "symlink"])
+def test_pin_revalidates_workbench_office_copy_without_losing_siblings(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
+    notes = _source_file(source_root, "notes.txt", b"keep this sibling")
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name="report.xlsx",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(office),
+            ),
+            SimpleNamespace(
+                name="notes.txt",
+                mimetype="text/plain",
+                local_path=str(notes),
+            ),
+        ]
+    )
+    assert [attachment.name for attachment in converted] == [
+        "report.xlsx",
+        "notes.txt",
+    ]
+
+    if replacement == "regular":
+        office.write_bytes(b"not an Office container")
+    else:
+        office.unlink()
+        office.symlink_to(notes)
+
+    store = AttachmentPinStore()
+    bundle = store.pin(converted)
+
+    assert [attachment.name for attachment in bundle.attachments] == ["notes.txt"]
+    assert bundle.attachments[0].storage_key.endswith("/00.txt")
+    assert store.provider_attachments(bundle)[0].name == "notes.txt"
+    staged = home / "memory" / "attachments" / "staging"
+    assert list(staged.iterdir()) == []
+    store.release(bundle.bundle_id)
+
+
+def test_workbench_long_office_display_name_keeps_suffix_through_pin(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        lambda _path, **_kwargs: True,
+    )
+    office = _source_file(source_root, "upload.xlsx", _xlsx_bytes())
+    long_name = f"{'report' * 100}.xlsx"
+
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name=long_name,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(office),
+            )
+        ]
+    )
+    bundle = AttachmentPinStore().pin(converted)
+
+    assert len(converted[0].name.encode("utf-8")) <= 512
+    assert converted[0].name.endswith(".xlsx")
+    assert bundle.attachments[0].name == converted[0].name
+
+
+def test_pin_requires_office_conversion_proof_without_losing_siblings(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        lambda _path, **_kwargs: False,
+    )
+    office = _source_file(source_root, "report.xlsx", _xlsx_bytes())
+    notes = _source_file(source_root, "notes.txt", b"keep this sibling")
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name="report.xlsx",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(office),
+            ),
+            SimpleNamespace(
+                name="notes.txt",
+                mimetype="text/plain",
+                local_path=str(notes),
+            ),
+        ]
+    )
+
+    bundle = AttachmentPinStore().pin(converted)
+
+    assert [attachment.name for attachment in bundle.attachments] == ["notes.txt"]
+    assert bundle.attachments[0].storage_key.endswith("/00.txt")
+
+
+def test_office_conversion_uses_one_bounded_budget_per_pin(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _home, source_root = attachment_roots
+    monkeypatch.setattr(
+        "core.memory.modality.office_conversion_available",
+        lambda: True,
+    )
+    observed_timeouts: list[float] = []
+
+    def conversion_succeeds(_path: Path, *, timeout_seconds: float) -> bool:
+        observed_timeouts.append(timeout_seconds)
+        return True
+
+    monkeypatch.setattr(
+        "core.memory.modality.office_document_conversion_succeeds",
+        conversion_succeeds,
+    )
+    clock = iter([100.0, 105.0, 131.0])
+    monkeypatch.setattr(attachment_module.time, "monotonic", lambda: next(clock))
+    first = _source_file(source_root, "first.xlsx", _xlsx_bytes())
+    second = _source_file(source_root, "second.xlsx", _xlsx_bytes())
+    converted = workbench_capture_attachments(
+        [
+            SimpleNamespace(
+                name=path.name,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                local_path=str(path),
+            )
+            for path in (first, second)
+        ]
+    )
+
+    bundle = AttachmentPinStore().pin(converted)
+
+    assert [attachment.name for attachment in bundle.attachments] == ["first.xlsx"]
+    assert observed_timeouts == [25.0]
 
 
 @pytest.mark.parametrize(
@@ -207,18 +415,19 @@ def test_pin_rejects_group_or_world_writable_sources(attachment_roots, unsafe_ta
 def test_pin_rejects_unowned_source(attachment_roots, monkeypatch: pytest.MonkeyPatch) -> None:
     _home, source_root = attachment_roots
     source = _source_file(source_root, "notes.txt")
+    source_info = source.stat()
     store = AttachmentPinStore()
-    real_uid = os.getuid()
-    calls = 0
+    real_fstat = os.fstat
 
-    def uid_for_layout_then_source() -> int:
-        nonlocal calls
-        calls += 1
-        # Pin verifies the three durable roots, reopens staging/bundles, then
-        # creates and reopens the staging bundle before it reaches the source.
-        return real_uid + 1 if calls == 8 else real_uid
+    def unowned_source_fstat(descriptor: int) -> os.stat_result:
+        info = real_fstat(descriptor)
+        if (info.st_dev, info.st_ino) != (source_info.st_dev, source_info.st_ino):
+            return info
+        values = list(info)
+        values[4] = os.getuid() + 1
+        return os.stat_result(values)
 
-    monkeypatch.setattr(attachment_module.os, "getuid", uid_for_layout_then_source)
+    monkeypatch.setattr(attachment_module.os, "fstat", unowned_source_fstat)
     with pytest.raises(AttachmentPinError) as error:
         store.pin((_attachment(source),))
 

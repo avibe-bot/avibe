@@ -8,7 +8,16 @@ capability:
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
     - tests/test_model_hub_runtime.py
+    - tests/test_model_hub_l3.py
+    - tests/test_model_hub_usage.py
     - tests/test_opencode_server.py
+    # The user-visible half of metering. A vitest case is the only place these
+    # properties can be observed, so the catalog checker resolves both shapes.
+    - ui/src/components/settings/models/UsageTab.test.tsx
+    - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+    # The gate that resolves those rows against vitest's own collection, and
+    # its own evidence.
+    - ui/scripts/scenarioCatalog.test.mjs
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
@@ -38,6 +47,12 @@ scenarios:
     kind: contract
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_001_scenario_catalog_is_complete_and_executable
+  - id: MH-CATALOG-002
+    name: A UI-evidenced row resolves only to a vitest case that runs under its catalog ID
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/scripts/scenarioCatalog.test.mjs::MH-CATALOG-002
   - id: MH-S1-001
     name: Live conditions never change the exact configured hop identity
     status: covered
@@ -117,6 +132,168 @@ scenarios:
     kind: concurrency
     layer: unit
     test: tests/test_opencode_server.py::test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run
+  - id: MH-USAGE-001
+    name: Tokens an upstream reported before the turn ended are still metered
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_the_tokens_the_engine_already_read_survive_every_ending_before_our_first
+  - id: MH-USAGE-002
+    name: A billed failover hop is metered against the Source that billed it
+    status: covered
+    kind: selection
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_billed_failover_hop_is_metered_against_the_source_that_billed_it
+  - id: MH-USAGE-003
+    name: A failed ledger write leaves neither residue nor a damaged document
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_write_that_fails_leaves_neither_residue_nor_a_damaged_document
+  - id: MH-USAGE-004
+    name: Metering never performs its ledger read-modify-write on the event loop
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_neither_metering_owner_writes_the_ledger_on_the_event_loop
+  - id: MH-USAGE-005
+    name: A usage report is metered even when the prelude buffer refuses to keep its bytes
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_tokens_reported_by_the_chunk_that_overflows_the_prelude_are_still_metered
+  - id: MH-USAGE-006
+    name: Every model identifier a persisted config still loads is one the ledger can key
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_metering_can_key_exactly_the_identities_a_config_can_hold
+  - id: MH-USAGE-007
+    name: Two model identifiers a config holds are never metered onto one ledger row
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
+  - id: MH-USAGE-008
+    name: Every metered row is labelled under the identity it was metered for, however it was keyed
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key
+  - id: MH-USAGE-009
+    name: A metering backlog is bounded by configured identities rather than by request rate
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate
+  - id: MH-USAGE-010
+    name: A turn whose settlement raises still meters the call the vendor billed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_settlement_that_raises_still_meters_the_call_it_was_settling
+  - id: MH-USAGE-011
+    name: A ledger that stopped answering cannot hold the served turn open behind it
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open
+  - id: MH-USAGE-012
+    name: A caller that names one model twice is refused rather than answered with half of what it sent
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_config.py::test_a_live_chain_is_refused_the_duplicate_a_persisted_chain_is_repaired
+  - id: MH-USAGE-013
+    name: A model's label belongs to the Source it was metered under, not to its ID alone
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_model_label_is_scoped_to_the_source_it_was_metered_under
+  - id: MH-USAGE-014
+    name: An instant no conversion can carry degrades instead of stopping metering
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_an_instant_no_conversion_can_carry_never_stops_metering
+  - id: MH-USAGE-015
+    name: A wedged ledger write cannot hold the process open at exit
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_wedged_ledger_write_cannot_hold_the_process_open
+  - id: MH-USAGE-016
+    name: The usage report names the window the server served, not the one the view asked for
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-016
+  - id: MH-USAGE-017
+    name: A vanished model's ledger key never reaches the screen, while a vanished Source stays identifiable
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
+  - id: MH-USAGE-018
+    name: A token-report shortfall reads as missing reports rather than unused capacity
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-018
+  - id: MH-USAGE-019
+    name: A day the window covered without a metered turn is drawn as idle rather than closed over
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-019
+  - id: MH-USAGE-020
+    name: The usage report is read when its tab is opened, never as part of the routing surface's first paint
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-020
+  - id: MH-USAGE-021
+    name: A day whose calls carried no token report reads as metered rather than idle
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-021
+  - id: MH-USAGE-022
+    name: The usage report stays reachable from every Model Hub landing, including one with no Source left
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-022
+  - id: MH-USAGE-023
+    name: Every day of the window states its figures in text, not only in a pointer tooltip
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-023
+  - id: MH-USAGE-024
+    name: Every figure in the usage report names the row and the column it answers, not a position on screen
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-024
+  - id: MH-USAGE-025
+    name: A window whose upstreams reported zero tokens reads as measured rather than unreported
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-025
+  - id: MH-USAGE-026
+    name: Every token figure the usage report states names the coverage it was measured from
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-026
+  - id: MH-USAGE-027
+    name: The usage report stays within a narrow viewport and states every chart-axis label without clipping
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-027
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

@@ -13,6 +13,7 @@
 //  - fallback: before any cloud request, throws CloudUnavailableError when no
 //    token can be obtained so callers may use the local relay instead
 import { apiFetch } from './apiFetch';
+import { onPageReactivated } from './pageActivity';
 
 export type CloudToken = { token: string; baseUrl: string; expiresAt: number };
 
@@ -74,11 +75,8 @@ const bindActivityListeners = (): void => {
   const topUp = (): void => {
     if (!isFresh(current)) void mint().catch(() => undefined);
   };
-  window.addEventListener('focus', topUp);
+  onPageReactivated(topUp);
   window.addEventListener('online', topUp);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') topUp();
-  });
 };
 
 // Single-flight: concurrent callers share one in-flight /api/cloud/token request.

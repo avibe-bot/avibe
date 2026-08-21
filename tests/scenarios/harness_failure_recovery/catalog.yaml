@@ -3857,7 +3857,11 @@ scenarios:
     # accepted Turn has a bounded wall-clock owner: expiry aborts the exact native
     # session, emits one failed terminal result, admits the same-Session successor,
     # and lets a different OpenCode Agent waiting on that shared provider continue.
-    # The timeout never enters the empty successful-result fallback.
+    # The timeout never enters the empty successful-result fallback. Since the
+    # upstream runtime bounds its own retries and surfaces the exhausted error, the
+    # cap is an explicit opt-in (nonzero config); this scenario exercises the
+    # opted-in lifecycle only, and the default-disabled deadline has its own unit
+    # coverage beside the poll loop.
     test: tests/test_agent_service.py::test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime
   - id: HFR-434
     name: an OpenCode steer at the native terminal boundary stays reconcilable
@@ -4351,6 +4355,33 @@ scenarios:
     # atomically records the runtime reservation while mismatched bound Runs stay
     # protected by the existing hard refusal.
     test: tests/test_internal_server.py::test_hfr_482_create_per_run_delivery_adopts_reserved_session
+  - id: HFR-483
+    name: a registered cron fire enqueues from its own scheduler arguments
+    status: covered
+    kind: regression
+    layer: contract
+    backend: shared
+    # Every registered job carries its APScheduler job id for the stale-generation
+    # guard, but only an at job carries a run_at. Firing the arguments the
+    # scheduler actually registered proves a cron fire never presents the job id
+    # as half of the one-shot schedule identity the enqueue requires whole.
+    test: tests/test_scheduled_tasks.py::test_hfr_483_registered_job_fires_through_its_own_scheduler_arguments
+  - id: HFR-484
+    name: an in-flight cron fire cannot spend a replacement one-shot
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    # A cron registration carries no schedule identity, so a fire that races an
+    # edit to at could spend a run_at the definition has not reached and leave it
+    # armed. The callback rejects on a fresh mirror; the storage CAS is the
+    # authority when the mirror lags. Either way the replacement schedule is
+    # handed back to the scheduler, because the cron job that keeps firing is
+    # itself the stale generation and nothing else would register the one-shot.
+    # That reconcile is gated on the schedule having actually changed, so a fire
+    # refused for a merely backlogged predecessor leaves its registration alone.
+    # An edit that keeps the definition recurring still runs, at its refreshed value.
+    test: tests/test_scheduled_tasks.py::test_hfr_484_in_flight_cron_fire_cannot_spend_a_replacement_one_shot
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

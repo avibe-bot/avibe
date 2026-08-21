@@ -15,13 +15,16 @@ from alembic.script import ScriptDirectory
 from config import paths
 from storage.backups import create_sqlite_migration_backup, prune_state_backups
 from storage.db import create_sqlite_engine, sqlite_url
+from storage.lock import MigrationFileLock, migration_lock_path_for
 
 
 logger = logging.getLogger(__name__)
 
 # Alembic's EnvironmentContext installs module-level proxies while an upgrade
 # runs. Concurrent store initialization can otherwise tear down another
-# thread's proxy and surface errors such as KeyError("config").
+# thread's proxy and surface errors such as KeyError("config"). This owns that
+# hazard and nothing else: the proxies are per interpreter, not per database, so
+# it must stay global, and it says nothing about other processes.
 _MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
@@ -52,7 +55,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
     "agent_runs",
     "show_pages",
-    "show_page_authorized_emails",
+    "show_page_access_entries",
     "messages",
     "message_deliveries",
     "session_turns",
@@ -148,7 +151,13 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
-    "show_page_authorized_emails": {"session_id", "normalized_email", "created_at"},
+    "show_page_access_entries": {
+        "page_id",
+        "kind",
+        "value",
+        "organization_id",
+        "created_at",
+    },
     "web_push_subscriptions": {"device_id"},
     "remote_access_authorizations": {
         "instance_id",
@@ -196,6 +205,17 @@ UNRELEASED_OLD_INITIAL_TABLES = [
     "schema_meta",
     "alembic_version",
 ]
+# The members above that no release could have produced, which is what makes the presence
+# of one evidence of an unreleased build. `scopes` is in INITIAL_TABLES and every stamped
+# database has `alembic_version` -- the check below requires it a few lines earlier -- so
+# testing the full list proved nothing: any database short of INITIAL_TABLES matched, and
+# a released one then had its `scopes` and its stamp dropped out from under it. Derived
+# rather than written out, so a table added to INITIAL_TABLES leaves this correct.
+UNRELEASED_ONLY_INITIAL_TABLES = [
+    table
+    for table in UNRELEASED_OLD_INITIAL_TABLES
+    if table not in INITIAL_TABLES and table != "alembic_version"
+]
 
 
 def alembic_dir() -> Path:
@@ -215,14 +235,43 @@ def run_migrations(
     revision: str = "head",
     prune_backups_after_upgrade: bool = True,
 ) -> None:
+    """Bring one SQLite state database to `revision`, one migrator at a time.
+
+    Exclusion belongs here rather than at the call sites, because "at most one
+    migrator per database" is a property of the database, and a call site can
+    only promise it for itself. It was previously promised by `ensure_sqlite_state`
+    alone, which left every other entry point -- the discovery helpers, a store
+    constructed with an explicit `db_path`, the background-table bootstrap --
+    running `command.upgrade` against a file another process could be upgrading
+    at the same moment. The controller and the Web UI are separate processes on
+    one state directory, so that pairing is the ordinary case, not a corner.
+
+    Both locks are load-bearing and neither substitutes for the other: the file
+    lock is machine-wide and per database, and `_MIGRATION_LOCK` is per
+    interpreter and global, guarding Alembic's module-level proxies.
+
+    The file lock is taken first, and always first, which is what makes the pair
+    deadlock-free. Taking the global one first would also let a thread hold every
+    database's migrations in this process while it waits on a foreign process --
+    a remote stall propagating into unrelated local work.
+
+    The wait is deliberately unbounded. A file lock is released by the OS when
+    its holder dies, so the only way to wait forever is for a live process to
+    still be migrating -- and a migration's duration is bounded by the data, not
+    by anything we could name here. Any deadline would be a guess that turns a
+    slow, correct upgrade into a failed startup for every other entry point.
+    Waiting is logged with the holder's pid so the wait stays diagnosable.
+    """
+
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     guard_source_checkout_default_state_migration(target_db)
-    with _MIGRATION_LOCK:
-        _run_migrations_locked(
-            target_db,
-            revision=revision,
-            prune_backups_after_upgrade=prune_backups_after_upgrade,
-        )
+    with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
+        with _MIGRATION_LOCK:
+            _run_migrations_locked(
+                target_db,
+                revision=revision,
+                prune_backups_after_upgrade=prune_backups_after_upgrade,
+            )
 
 
 def _run_migrations_locked(
@@ -234,13 +283,9 @@ def _run_migrations_locked(
     cfg = alembic_config(target_db)
     backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
     if backup_revisions is not None:
-        current_revisions, target_revisions = backup_revisions
-        backup_path = create_sqlite_migration_backup(
-            target_db,
-            from_revisions=current_revisions,
-            to_revisions=target_revisions,
-        )
-        logger.info("Created pre-migration SQLite backup at %s", backup_path)
+        _current_revisions, target_revisions = backup_revisions
+        backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        logger.info("Pre-migration SQLite rollback point at %s", backup_path)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
@@ -366,7 +411,7 @@ def _reset_unreleased_initial_schema_drift(db_path: Path) -> None:
         version = conn.execute("select version_num from alembic_version").fetchone()
         if version != (INITIAL_REVISION,):
             return
-        if not any(table in tables for table in UNRELEASED_OLD_INITIAL_TABLES):
+        if not any(table in tables for table in UNRELEASED_ONLY_INITIAL_TABLES):
             return
 
         conn.execute("PRAGMA foreign_keys = OFF")

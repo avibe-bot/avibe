@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
@@ -14,6 +12,8 @@ from pathlib import Path
 from typing import Literal, Optional, TypeAlias, get_args
 
 from vibe.i18n import t as i18n_t
+
+from .state_file import write_state_document
 
 EventAgent = Literal["claude", "codex", "opencode", "system"]
 EventKind = Literal[
@@ -288,15 +288,7 @@ class BoundedEventLog:
         ]
 
     def _write(self, payload: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(payload[-self.max_entries :], ensure_ascii=False, separators=(",", ":"))
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, self.path)
+        write_state_document(self.path, payload[-self.max_entries :])
 
     def append(self, event: ResolutionEvent) -> None:
         payload = event.to_payload()

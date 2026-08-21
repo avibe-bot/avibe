@@ -18,6 +18,17 @@
       "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
       "idConflict": "This Show event ID is already bound to different event contents.",
       "unsupportedEventType": "Show Page writes require a supported human event or mark resolution type."
+    },
+    "pageUnavailable": {
+      "title": "Show Page unavailable",
+      "heading": "This page is unavailable",
+      "message": "The page does not exist or is no longer available."
+    },
+    "pageAccessDenied": {
+      "title": "Show Page access denied",
+      "heading": "You do not have access to this page",
+      "message": "Please contact the page owner to be added to the allowed list.",
+      "back": "Back to home"
     }
   },
   "harness": {
@@ -98,9 +109,9 @@
         "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
         "refusedConcurrentTurn": "[Avibe Harness] This run was skipped because another turn was already in flight for the same session. A session runs one turn at a time; trigger it again once the current turn finishes.",
         "backendRefresh": "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed while the run was in flight, usually right after an Agent setting was saved. Nothing is wrong with the run itself — trigger it again.",
-        "restarted": "[Avibe Harness] This run was interrupted because the service shut down while it was in flight. The interrupted attempt was recorded and will not be replayed after restart. Trigger it again if the work still needs doing.",
+        "restarted": "[Avibe Harness] This run was interrupted during execution. Completed work is preserved. Trigger it again if the work still needs doing.",
         "interrupted": "[Avibe Harness] This run was interrupted while it was in flight. The interrupted attempt was recorded and was not requeued. Trigger it again if the work still needs doing.",
-        "orphaned": "[Avibe Harness] This run was left marked as running with nothing executing it, most likely because the service restarted while it was in flight. Any output it had already sent is still kept on the run. Run it again if the work still needs doing.",
+        "orphaned": "[Avibe Harness] Nothing is executing this run, most likely because the service restarted during execution. Completed work is preserved. Trigger it again if the work still needs doing.",
         "transportUnavailable": "[Avibe Harness] This run stayed queued because its chat platform never reconnected, so it was never delivered. Check the platform connection in Settings, then trigger it again.",
         "queueHoldExpired": "[Avibe Harness] This run stayed queued behind its session's turn queue for too long and was never started. Check whether that session has a stuck turn, then trigger this run again."
       },
@@ -313,7 +324,6 @@
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",
-    "memorySessionLifecycleBusy": "Memory is still processing this session. Please try /new again.",
     "settingsFailed": "Failed to open settings. Please try again.",
     "cwdChangeFailed": "Failed to open directory change dialog. Please try again.",
     "resumeFailed": "Failed to open resume dialog. Please try again.",
@@ -361,7 +371,8 @@
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
     "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
     "opencodeBackendError": "OpenCode error: {error}",
-    "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted."
+        "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted.",
+        "opencodePollTransportFailure": "OpenCode was unreachable after {count} consecutive polling failures; the native turn was aborted and recorded as failed."
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
@@ -768,11 +779,6 @@
         "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."
       },
       "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
-    },
-    "alert": {
-      "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",
-      "engine": "Memory processing paused at {occurred_at}: the Memory engine reported an internal error. Try repairing the Memory runtime. Queued captures: {queued}.",
-      "recovered": "Memory processing recovered at {occurred_at}. Queued captures: {queued}."
     }
   },
   "language": {
@@ -891,7 +897,32 @@
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running, and its agent runtime could not be resumed. Nothing further will arrive for it. Send the request again if the work still needs doing."
+      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
+    }
+  },
+  "runtime": {
+    "clean": {
+      "dryRunHelp": "Report stale archives and cache entries without removing anything.",
+      "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
+      "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",
+      "wouldRemoveGit": "Would remove {count} Git Runtime cache item(s).",
+      "removedItems": "Removed {count} Show Runtime cache item(s).",
+      "removedArchives": "Removed {count} downloaded Show Runtime archive(s) ({size}).",
+      "removedGit": "Removed {count} Git Runtime cache item(s).",
+      "partiallyRemoved": " {failed} archive(s) could not be removed; check permissions and the Avibe log.",
+      "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes.",
+      "removalFailed": "{failed} archive(s) could not be removed; stale archives remain. Check runtime directory permissions and the Avibe log.",
+      "skippedInspection": "Archive cleanup could not inspect the cache ({reason}); stale archives may remain. Check runtime directory permissions and the Avibe log.",
+      "gitSkipped": "Git Runtime cleanup skipped ({reason}); stale entries remain.",
+      "gitSkippedPreview": "Git Runtime cache preview skipped ({reason}); stale entries may remain."
+    },
+    "doctor": {
+      "archiveCacheReclaimable": "Show Runtime archive cache holds {count} reclaimable archive(s) ({size}); the current and rollback archives are kept.",
+      "archiveCacheReclaimableAction": "Run `vibe runtime clean --dry-run` to preview, then `vibe runtime clean` to reclaim.",
+      "archiveCacheClean": "Show Runtime archive cache has no reclaimable archives",
+      "archiveCacheSkipped": "Show Runtime archive cache was not inspected ({reason}); it may still hold reclaimable archives.",
+      "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
+      "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed."
     }
   },
   "data": {

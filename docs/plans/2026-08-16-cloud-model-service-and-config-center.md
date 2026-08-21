@@ -114,6 +114,11 @@ For every model call, resolve the calling **instance**, then:
    capabilities gets exactly those capabilities; the rest stay off (the config UI's empty states
    say so).
 
+**UI banner visibility follows scope binding, not slot completeness.** Once an organization is
+enterprise-bound, its managed-model banner remains visible even when one or every slot is empty;
+an empty slot is an active-scope configuration error, not a reason to make the UI look platform-
+scoped. Before enterprise activation, the staging UI does not show that runtime-management banner.
+
 **Provisioning order (adjudicated 2026-08-16, PR #232)**: org config is **pre-stageable** — org
 owner/admin can read/write their org's config regardless of plan; runtime resolution ignores it
 until `plan='enterprise'`. One principle: **plan gates resolution; roles gate configuration.**
@@ -175,8 +180,9 @@ scope per instance behind them.
 - `model_access_keys`: `instance_id` (PK), `key_hash`, `created_at`, `rotated_at`, plus
   `previous_key_hash` + `previous_valid_until`. Opaque key (`mak_` prefix), shown once at mint,
   SHA-256 stored — same custody discipline as device secrets. **Rotation contract — three
-  properties; the mechanism (state machine + tests) is owned by the M2 implementation PR and
-  deliberately not prescribed here**: (1) *grace-safe* — after any rotation, the key the sidecar
+  properties; the mechanism (state machine + tests) is owned by the M2 backend implementation in
+  `avibe-bot-backend/lib/model-service/access-key.ts` plus its store transaction and route tests,
+  and deliberately not prescribed here**: (1) *grace-safe* — after any rotation, the key the sidecar
   is actually using keeps working long enough (≥ 24 h) for the managed settings ladder to apply
   the new one; (2) *retry-safe* — retrying a rotation whose response was lost, any number of
   times, can never invalidate a key still in use; (3) *on-demand only* — no scheduled rotation
@@ -187,8 +193,32 @@ scope per instance behind them.
 ### 6.2 Key custody
 
 - Slot API keys encrypted at rest with AES-256-GCM under a new env `MODEL_SERVICE_KEY_SECRET`;
-  decrypted only in the proxy call path. All read APIs return `has_api_key: true/false`, never the
-  value. Keys never enter logs, Sentry, or usage events.
+  decrypted only for a model call, a bounded save/explicit-verification probe, or the instance
+  status key-availability check. A save first encrypts the candidate, decrypts that managed
+  ciphertext, and uses only the decrypted value for any upstream probe. Every newly submitted or
+  legacy-materialized key, including one for a disabled slot, must complete the encrypt/decrypt
+  round trip before persistence; every enabled candidate retaining saved ciphertext must do the
+  same, including when `force: true` skips the upstream probe. A disabled slot that retains its
+  unchanged saved ciphertext is exempt. Status uses decrypt-validate-and-discard and never retains
+  or returns plaintext. This status-only read-path exception supersedes the earlier proxy-only wording.
+  All read APIs return `has_api_key: true/false`, never the value. Keys and ciphertext never enter
+  API responses, logs, Sentry, or usage events. Missing or invalid key-secret material for a
+  committed saved slot is reported as a high-priority Sentry event tagged by scope, capability,
+  instance, and config revision, using only scrubbed metadata. Emission is transition-deduplicated
+  by scope, config revision, and capability so status polling cannot create one event per instance
+  per minute; the first observing instance remains a context tag but is not part of the
+  deduplication key. Explicit admin verification uses the fixed non-customer
+  `model-service-probe` context when there is no calling instance; transition-window claimless
+  realtime uses its existing fixed `unattributed-legacy` context. Neither value identifies a
+  customer instance. Both adapters atomically upsert `available`/`unavailable` state in a shared
+  transition table; only a successfully persisted transition to `unavailable` grants permission
+  to emit the outage event. A successful managed decrypt of committed saved ciphertext attempts
+  the `available` transition on every call; candidate save round trips never read or write alert
+  state. If that recovery write fails, the usable call still proceeds, the write is retried on the
+  next successful decrypt, and the persistence failure itself is reported directly to Sentry
+  without relying on the unavailable transition table. Concurrent and cold-started Vercel
+  isolates therefore observe the same edges without making alert infrastructure part of service
+  availability.
 
 ### 6.3 APIs
 
@@ -207,18 +237,43 @@ scope per instance behind them.
   resolves as enterprise (**active scope**), `PUT` runs the same bounded probes inline against the
   changed slots and rejects on failure (`model_service_verification_failed`, 422) unless
   `force: true` — a live org's config change is never blindly activated (mirrors the local
-  settings ladder's probe-before-apply).
+  settings ladder's probe-before-apply). Both successful verify responses (200) and failed verify
+  responses (422) carry the scope's current `revision`, so a caller can settle its optimistic
+  snapshot without another read. Managed-key custody failures are never force-overridable: if any
+  newly submitted or legacy-materialized key, or any enabled retained key, cannot complete its
+  encrypt/decrypt round trip, `PUT` returns `model_service_key_unavailable` (503), performs no
+  upstream probe, and persists nothing.
 - **Platform admin (user session; email ∈ `PLATFORM_ADMIN_EMAILS`, new env following the
   `ORGANIZATION_CREATION_ALLOWED_EMAILS` pattern)**:
   `GET/PUT /api/admin/model-service` (platform slots + limits), `GET /api/admin/model-service/usage`
   (global, per-instance, per-scope — **stays global with per-scope breakdown, never narrowed to
   platform-only**; the per-instance list is bounded top-N by usage with an explicit instance count
   and truncation marker, matching the approved design; cursor pagination is a recorded follow-up,
-  not v1 — both adjudicated 2026-08-16). Platform admin also gets the v1 lever to set
+  not v1 — both adjudicated 2026-08-16), and `POST /api/admin/model-service/verify`, with the same
+  bounded probes and 200/422 `revision` contract as organization verify. Platform admin also gets the v1 lever to set
   `organizations.plan` (`PUT /api/admin/organizations/{orgId}/plan`).
+- **Scope-generic verification and usage**: an active-scope `PUT` (organization or platform) probes
+  every changed enabled slot before save and rejects atomically on probe failure unless
+  `force: true`; route handlers do not reimplement scope-specific probe policy. Every usage summary
+  exposes the same `by_capability` aggregate alongside its scope-specific/global breakdowns, so
+  the shared console panel consumes one contract.
 - **Instance-facing (device-secret headers, existing `/api/v1` family)**:
   `GET /api/v1/instances/{instanceId}/model-service` → mode/capability/identity payload (§8.2);
-  `POST /api/v1/instances/{instanceId}/model-access-key` → mint/rotate `mak_` key.
+  `POST /api/v1/instances/{instanceId}/model-access-key` → mint/rotate `mak_` key. Mint and rotate
+  share one 200 response shape:
+
+  ```json
+  {
+    "key": "mak_...",
+    "created_at": "2026-08-17T00:00:00Z",
+    "rotated": false,
+    "previous_valid_until": null
+  }
+  ```
+
+  First mint returns `rotated: false` and `previous_valid_until: null`; rotation returns
+  `rotated: true` and the old key's grace deadline in `previous_valid_until`. `key` is shown only
+  in this response and is unrecoverable from every read surface.
 - **Proxy (bearer `mak_` key)**: `POST /v1/model/chat/completions`, `POST /v1/model/embeddings`,
   `POST /v1/model/mm/chat/completions` — OpenAI-compatible, SSE streaming passthrough on chat.
   The upstream `model` is **always taken from the resolved slot; client-supplied `model` is
@@ -238,9 +293,12 @@ scope per instance behind them.
   so unattributed-legacy usage can only ever be platform-scope in fact and invariant 2 holds.
   **Error mapping on legacy voice routes** (invariant 6): `model_service_not_configured` surfaces
   through the existing voice error vocabulary (`asr_not_configured` 503 family; a missing chat
-  slot degrades cleanup per §6.5-5); `model_quota_exhausted` (429) and `model_service_unavailable`
-  (503) pass through as new additive codes — released clients already treat unknown codes as
-  generic errors of their status class.
+  slot degrades cleanup per §6.5-5). On required ASR and the dedicated cleanup endpoint,
+  `model_service_key_unavailable` (503), `model_quota_exhausted` (429), and
+  `model_service_unavailable` (503) pass through as new additive codes — released clients already
+  treat unknown codes as generic errors of their status class. Composite voice flows catch every
+  optional cleanup failure, including `model_service_key_unavailable`, and return the successful
+  raw ASR transcript per §6.5-5.
 
 ### 6.4 Quota (platform scope only, v1)
 
@@ -272,10 +330,11 @@ Every cross-cutting property has exactly one code owner; routes never re-impleme
 
 1. **ModelServiceConfigService** — the only config write path: key⇄address binding, encryption,
    revision, sanitized responses.
-2. **ModelServiceStore** — three atomic contracts only, identical semantics in both adapters:
+2. **ModelServiceStore** — atomic contracts with identical semantics in both adapters:
    `resolveCallSnapshot` (instance+org+plan+config+limits in ONE snapshot — every security decision
    reads one consistent state), `reserveQuota`/`extendQuota`/`settleQuota`, and
-   `readUsageSummarySnapshot`.
+   `readUsageSummarySnapshot`; key-unavailable alert edges use a small additive transition table
+   keyed by scope/config revision/capability and atomic `available`/`unavailable` upserts.
 3. **ModelServiceUpstreamClient** — the only egress owner: destination classification
    (allow-only-global-unicast per the IANA IPv4/IPv6 special-purpose registries; transition/tunnel
    prefixes — NAT64 incl. local-use, 6to4, Teredo — rejected outright), **TLS-only upstreams**
@@ -288,6 +347,8 @@ Every cross-cutting property has exactly one code owner; routes never re-impleme
    certainly-not-sent vs possibly-accepted). Routes never call `fetch`/`WebSocket` or parse usage.
 4. **ModelServiceGateway** — the only call-lifecycle owner, fixed order:
    snapshot → reserve → just-in-time decrypt → client → exactly-once settlement → error mapping.
+   The shared saved-key effectiveness predicate is the only owner of `key_status` judgment;
+   status serialization and call routing consume that result rather than defining another test.
 5. **Voice orchestration** — product composition only (required ASR + optional cleanup); cleanup
    failure of ANY kind (quota or upstream) degrades to the raw transcript in composite flows; the
    dedicated cleanup endpoint alone returns 429 on quota.
@@ -358,7 +419,10 @@ shape is not extended for this.
   alike), no transition fires: an existing working `custom`
   configuration keeps running unchanged (the org has not provided a replacement model source), and
   the manual editor stays hidden only for *new* configuration; the transition applies when the org
-  later enables memory slots.
+  later enables memory slots. **Custom preservation is grandfathering only**, not a new-configuration
+  entitlement: a fresh install attached to an organization without the memory pair renders the
+  managed read-only state with Memory unavailable until the organization enables both slots — it
+  never exposes manual setup and never falls back to the platform scope (PM ruling 2026-08-17).
 - **Settings UI (Memory)**: three states per §5.3. Copy through `ui/src/i18n/{en,zh}.json`; show
   state, not mechanism; the enterprise state is one sentence, not a tour.
 - **Voice**: no changes.
@@ -408,9 +472,17 @@ required.
 ```
 
 `mode` ∈ `organization | platform`. `embedding_identity` is an opaque hash of the embedding slot's
-(base_url, model); it changes iff vector-space identity changes, and is `null` when the bound
-scope has no enabled embedding slot (e.g. a voice-only enterprise org) — the client then treats
-cloud memory as unavailable, matching `capabilities.embedding: false`.
+(base_url, model) and changes iff vector-space identity changes. It is `null` exactly when
+`capabilities.embedding` is false because the embedding slot itself is missing, disabled, or
+unavailable through the shared effectiveness predicate. A chat-only degradation leaves the healthy
+embedding capability and identity intact; the released client pauses cloud memory through its
+existing `chat && embedding` pair predicate. Before serializing a saved scope, the endpoint consumes
+that predicate for every enabled slot and immediately discards any plaintext. It includes the
+platform scope's approved legacy-env recovery only when the normalized saved and env provider
+addresses match; organization scope never receives that recovery. A slot with neither decryptable
+saved custody nor eligible recovery is reported unavailable and the response adds a per-slot reason
+map, for example `"degraded": { "asr": "model_service_key_unavailable" }`; `degraded` is omitted
+when no slot is degraded.
 
 ### 8.3 Usage row
 
@@ -433,6 +505,26 @@ turns on.
 ### 8.4 Error codes (stable, machine-readable `code` field)
 
 - `model_service_not_configured` (503) — resolved scope lacks an enabled slot for the capability.
+- `model_service_api_key_required` (400) — an enabled save candidate has no submitted, retained,
+  or materialized API key, or any candidate (enabled or disabled) changes `base_url` or
+  `realtime_url` while trying to retain ciphertext bound to the prior address. Address changes
+  never carry prior ciphertext forward. This client-input validation runs before managed custody
+  validation and never emits a custody alert.
+- `model_service_key_unavailable` (503) — a newly submitted or legacy-materialized candidate key,
+  including one for a disabled slot, cannot complete its managed encrypt/decrypt round trip; an
+  enabled candidate retaining saved ciphertext cannot complete that round trip; or an enabled
+  saved slot has neither decryptable custody nor an eligible same-scope platform env recovery under
+  the shared effectiveness predicate. The failure is not overrideable by `force: true`, never maps to
+  `model_service_not_configured`, makes no upstream call, and persists no candidate change. A
+  rejected pre-save custody check writes a scrubbed structured log only: it creates no transition
+  row and emits no ops alert because the request response and admin UI are its presentation surface.
+  For unrecovered saved-slot failures, status marks the affected capability false with the same
+  reason. Every saved-key decryption-failure transition, including one masked by approved platform
+  recovery, emits one scrubbed high-priority Sentry event per scope/config revision/capability;
+  repeated failures at the same active edge emit none, and successful decryption of the committed
+  saved ciphertext rearms a later failure through the persisted `available` state. Candidate
+  round trips never rearm that state. Failure to persist the committed recovery state never changes
+  the successful call or truthful status result.
 - `model_service_unavailable` (503) — quota **reservation** persistence failed on an
   enforcement-on path, before any upstream call. A **settlement** failure after upstream completion
   never produces this error: the response is served and the un-settled reservation is reaped as a
@@ -454,11 +546,16 @@ turns on.
    reservations per §6.4). Failure responses bearing upstream usage are metered with that usage.
    Dashboard aggregates equal the sum of recorded events.
 2. An instance in an enterprise-configured org never consumes platform credentials or platform
-   quota, for any capability; a misconfigured org yields `model_service_not_configured`, never a
-   silent fallback.
-3. No API response, log line, usage event, or error message ever contains a slot API key; a `mak_`
-   key appears exactly once — in the body of its own mint/rotate response (shown once by design) —
-   and nowhere else; config reads expose only `has_api_key`.
+   quota, for any capability; a missing or disabled organization slot yields
+   `model_service_not_configured`, while an enabled slot with unavailable key custody yields
+   `model_service_key_unavailable`, never a silent fallback.
+3. No API response, log line, Sentry event, usage event, or error message ever contains a slot API
+   key or its ciphertext; a `mak_` key appears exactly once — in the body of its own mint/rotate
+   response (shown once by design) — and nowhere else; config reads expose only `has_api_key`.
+   Every newly submitted or legacy-materialized key is decrypt-valid before persistence, including
+   for a disabled slot; every enabled retained key is likewise decrypt-valid. Status reflects the
+   shared runtime effectiveness result, including only the approved platform env recovery, rather
+   than ciphertext presence.
 4. The upstream model invoked is always the configured slot's model, regardless of any
    client-supplied model string (documented exception: the legacy env cleanup chain, until a
    platform config is saved — each attempt's actual model is metered per §6.6).
@@ -468,8 +565,11 @@ turns on.
    model-configuration affordance.
 6. Released voice clients keep working unchanged across the M1 rewiring (device-secret path,
    cloud-token path, realtime WS).
-7. `embedding_identity` changes iff the embedding slot's (base_url, model) changes, and every
-   member instance's sidecar treats it exactly like a local embedding change (rebuild ladder).
+7. While `capabilities.embedding` remains true, `embedding_identity` changes iff the embedding
+   slot's (base_url, model) changes, and every member instance's sidecar treats it exactly like a
+   local embedding change (rebuild ladder). It is `null` exactly when the embedding capability is
+   unavailable; chat-only degradation leaves the identity unchanged while the client pair predicate
+   pauses memory.
 8. With enforcement on, an over-cap free-pool call fails before reaching any upstream.
 9. Changing any API key (slot key or mak) with base_url and model unchanged never alters
    `embedding_identity`, never triggers a rebuild or re-embedding, and never loses or duplicates
@@ -486,7 +586,9 @@ turns on.
 - **M1 — Config Center core + enterprise voice (backend only)**: schema migrations; key custody;
   org/platform config APIs; platform-admin gate + plan lever; resolution + metering middleware
   wired into all existing voice routes (incl. realtime + cleanup); usage dashboards (shared panel,
-  two mounts); env→platform-scope seeding (env fallback retained until platform config saved).
+  two mounts); env→platform-scope seeding (ordinary env fallback ends when platform config is
+  saved; the address-matched emergency recovery in §8.2 remains available for an undecryptable
+  saved key).
   Acceptance: invariants 1–4, 6 hold on staging (`dev.avibe.tech`); an enterprise org with its own
   DashScope key sees its voice usage in its dashboard and the platform pool records none of it.
 - **M2 — memory over the cloud**: `mak_` mint/rotate; OpenAI-compatible proxy (chat / embeddings /

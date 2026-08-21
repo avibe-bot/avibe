@@ -770,7 +770,11 @@ async def memory_archive_session(
     *,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Await the closed Workbench archive use case without a reporting deadline."""
+    """Await the controller-owned Workbench archive write without a reporting deadline.
+
+    Memory final flush is not on this round-trip. The controller schedules it
+    best-effort after the archive row commits.
+    """
 
     return await _memory_request(
         "POST",

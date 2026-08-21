@@ -1,20 +1,31 @@
 // Show Page link helpers shared by the admin Show Pages list and the in-chat
-// share control. Avibe Cloud-qualified urls in the payload are null on a local
-// install (no remote access configured), so fall back to the same-origin route
-// the page is actually served at locally.
+// share control.
 
 export type ShowPageLinkInfo = {
   session_id: string;
   visibility: string;
   active_url: string | null;
+  public_url?: string | null;
   share_id: string | null;
 };
 
-// Same-origin path a Show Page is served at locally. Null when there is no live
-// route, including Limited until signed-in guest admission is implemented.
+// One session's page as the server reports it: the link fields above plus the
+// serving state. Lives beside `ShowPageLinkInfo` because it is the same family —
+// the API read and the components that render its result share this shape rather
+// than restating it.
+export type ShowPagePayload = ShowPageLinkInfo & {
+  url_available: boolean;
+  url_guidance?: string | null;
+  offline: boolean;
+  title?: string | null;
+};
+
+// Same-origin path a Show Page is served at locally. Limited and Public share
+// one stable /p route; the server decides whether to start identity admission
+// or serve the page anonymously.
 export function localPath(page: ShowPageLinkInfo): string | null {
   if (page.visibility === 'private') return `/show/${encodeURIComponent(page.session_id)}/`;
-  if (page.visibility === 'public' && page.share_id) {
+  if ((page.visibility === 'limited' || page.visibility === 'public') && page.share_id) {
     return `/p/${encodeURIComponent(page.share_id)}/`;
   }
   return null;
@@ -30,9 +41,10 @@ export function editorPath(page: ShowPageLinkInfo): string | null {
 }
 
 export function liveHref(page: ShowPageLinkInfo): string | null {
-  // Limited is configurable in this lane, but its signed-in guest admission is
-  // not active yet. Ignore even a stale server-projected URL until that exists.
-  if (page.visibility === 'limited') return null;
+  // Limited admission depends on Avibe Cloud identity. The server-projected
+  // public URL is therefore the only usable share link; a local /p fallback
+  // would lead recipients to an authorization flow this installation cannot run.
+  if (page.visibility === 'limited') return page.public_url ?? null;
   return page.active_url || localPath(page);
 }
 

@@ -13,11 +13,37 @@ import pytest
 
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    ConfinedRoot,
     PrivateSqliteDatabase,
     remove_anchored_entry,
     remove_confined_path,
     replace_confined,
 )
+
+
+def test_confined_root_maps_home_aliases_without_resolving_owned_children(
+    tmp_path: Path,
+) -> None:
+    physical_home = tmp_path / "volume" / "user" / ".avibe"
+    physical_home.mkdir(parents=True, mode=0o700)
+    logical_parent = tmp_path / "home"
+    logical_parent.symlink_to(tmp_path / "volume", target_is_directory=True)
+    logical_home = logical_parent / "user" / ".avibe"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (physical_home / "memory").symlink_to(outside, target_is_directory=True)
+
+    root = ConfinedRoot.from_home(logical_home)
+
+    expected_child = physical_home / "memory" / "state.sqlite"
+    assert root.physical_home == physical_home
+    assert root.confine(logical_home / "memory" / "state.sqlite") == expected_child
+    assert root.confine(physical_home / "memory" / "state.sqlite") == expected_child
+    assert not root.confine(logical_home / "memory" / "state.sqlite").is_relative_to(
+        outside
+    )
+    with pytest.raises(ConfinedFilesystemError, match="confinement root"):
+        root.confine(tmp_path / "other" / "state.sqlite")
 
 
 def test_memory_persistence_fails_closed_without_no_follow_before_touching_path(

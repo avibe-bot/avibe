@@ -1,10 +1,10 @@
 # Model Hub — REST API contract
 
-Status: **Normative v5** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 6** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 5, ...}`.
+Success envelope: `{ok: true, contract_version: 6, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 5, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 6, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -16,8 +16,9 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract use terminal version 5. Model
-Hub has not shipped, so there is no internal contract migration or compatibility path.
+The shared envelope and every versioned nested contract carry `contract_version` 6, the
+terminal value. Model Hub has not shipped, so there is no internal contract migration or
+compatibility path.
 
 ## Route table
 
@@ -44,6 +45,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; the handler never reads `sources.order`, and the submitted `hops` carry no Source-order semantics. It is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
+| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary}` | Bounded metered token report over a trailing local-day window. `days` is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
@@ -51,7 +53,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v5; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 6; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 
@@ -440,7 +442,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -518,7 +520,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -650,7 +652,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -741,7 +743,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -801,9 +803,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "chain": {
-    "contract_version": 5,
+    "contract_version": 6,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "chain": [
@@ -828,7 +830,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -842,9 +844,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 5,
+  "contract_version": 6,
   "probe": {
-    "contract_version": 5,
+    "contract_version": 6,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -867,7 +869,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 5,
+  "contract_version": 6,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -880,7 +882,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 5,
+  "contract_version": 6,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -896,7 +898,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -955,7 +957,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -964,7 +966,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 5,
+  "contract_version": 6,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
@@ -984,6 +986,48 @@ source orders and named-Agent effective models.
 Model-scoped kinds require a string. `agent: system` is invalid on backend-scoped
 `supply_interrupted`. Source endpoints use canonical ids and are checked for existence
 when emitted.
+
+## Usage metering
+
+Usage is a report, never a control input. Nothing in resolution, admission, or
+cooldown reads these numbers, so an upstream that misreports usage cannot change
+which Source serves the next turn.
+
+The metered unit is one upstream call that reached the model, not one turn: a turn
+that failed over billed every hop that reported tokens, and each hop is counted
+against the Source it was made against. A call counts when the hub forwarded its
+output downstream or when upstream reported tokens for it, so a stream that died
+after its terminal frame and a buffered error that still billed us are both
+metered. A call that never reached the model is not, because the resolution feed
+and Source health already own that.
+
+`requests` is self-measured by hub code and is always present: a stream that
+forwarded model output counts even when it then died without a terminal, because
+that call demonstrably reached the model. Token counts are vendor-reported and may
+be absent for a served call — streaming chat completions report usage only when the
+client asked for it — so `token_reports` counts the calls that carried a report, is
+never greater than `requests`, and a missing report is never read as zero usage.
+Every reported integer is bounded by a ceiling fixed in server code, never by a
+total the response declares.
+
+Input composition follows each protocol rather than one invented total.
+`cached_input_tokens` is always the subset of `input_tokens` that was served from
+cache: Anthropic's own `input_tokens` excludes both cache members, so the reported
+input total is their sum; OpenAI's already includes cached input, so the cached
+count is informational only. The subset holds even when an upstream reports a cached
+count above the input it belongs to, or reports one without a readable input count:
+the merged cached count is bounded by the merged input count. Both subset promises —
+cached input inside input, token reports inside requests — are repaired on read, so a
+corrupt or hand-edited ledger degrades into a smaller true statement instead of
+publishing an impossible one.
+
+`source_id` and `model_id` are reported in the canonical form configuration admitted,
+so one model is one row rather than one row per spelling.
+
+Days are local-calendar days on the Avibe host. `from_day` and `to_day` bound the
+requested window even when no turn fell inside it; `days[]` contains only days that
+carry a metered turn. `label` is joined from current Source config, so it is `null`
+for a Source that has since been removed and follows a rename immediately.
 
 ## Runtime installation and host support
 

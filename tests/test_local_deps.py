@@ -20,6 +20,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from core import latest_version_cache
 from vibe import api
 
 
@@ -823,6 +824,326 @@ def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
     assert out == {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
 
 
+def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeypatch):
+    # The askill.sh installer re-downloads the CLI whenever it runs, so the
+    # shared currency owner must answer "already current" without invoking it.
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.14",
+            "status": "ready",
+            "path": "/x/askill",
+            "latest_version": "0.1.14",
+            "has_update": False,
+        },
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+
+    out = api.refresh_askill_if_stale()
+
+    assert out["ok"] is True
+    assert out["reason"] == "up_to_date"
+    assert "action" not in out
+
+
+def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch):
+    # The waste this closes: ``vibe runtime prepare`` is a fresh process on every
+    # install, upgrade, regression sync, and tenant update, and each one used to
+    # spend a GitHub request re-learning askill's newest release. That request
+    # comes out of the unauthenticated 60/hour/IP budget, and exhausting it makes
+    # the latest lookup fail, which makes prepare reinstall askill outright.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+
+    assert len(probes) == 1
+
+
+def test_installing_askill_keeps_the_persisted_latest_for_the_next_process(monkeypatch):
+    """An install is the one moment prepare runs most, and must not cost a probe.
+
+    Installing 0.1.14 does not change the fact that 0.1.14 is what askill
+    publishes, so the entry that justified the install is exactly what the next
+    process needs: it compares a freshly measured local version against it and
+    concludes ``up_to_date``. Retiring it here — the reflex the in-memory cache
+    this replaced had — would send every post-update ``runtime prepare`` back to
+    GitHub for a string already on disk.
+    """
+
+    installed = {"version": "0.1.13"}
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": installed["version"], "status": "ready"},
+    )
+
+    def _install(force=False):
+        installed["version"] = "0.1.14"
+        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
+
+    monkeypatch.setattr(api, "ensure_askill_installed", _install)
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["action"] == "update"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    assert len(probes) == 1
+
+
+def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):
+    # ``VIBE_ASKILL_AUTO_UPDATE`` disables the update-checker cadence, not the
+    # lifecycle refresh that ``vibe runtime prepare`` performs; keeping the gate
+    # in the cadence wrapper is what lets both callers share one decision.
+    monkeypatch.setenv("VIBE_ASKILL_AUTO_UPDATE", "0")
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.13",
+            "status": "ready",
+            "latest_version": "0.1.14",
+            "has_update": True,
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True]
+    assert out["action"] == "update"
+
+
+def test_refresh_avault_if_stale_does_not_force_when_the_pin_is_satisfied(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not reinstall the pinned release"))
+
+    out = api.refresh_avault_if_stale()
+
+    assert out["ok"] is True
+    assert out["changed"] is False
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def test_refresh_avault_if_stale_upgrades_a_binary_below_the_pin(monkeypatch):
+    # Skipping the install is conditional on the pin, not unconditional: prepare
+    # still has to raise a stale managed binary on upgrade.
+    stale = api.AVAULT_P2_MIN_VERSION
+    assert api._version_at_least(api.AVAULT_VERSION, stale)
+    state = {"version": stale}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: state["version"])
+    calls = []
+
+    def _install(force=False):
+        calls.append(force)
+        state["version"] = api.AVAULT_VERSION
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+
+    out = api.refresh_avault_if_stale()
+
+    assert calls == [True]
+    assert out["ok"] is True
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def test_refresh_avault_if_stale_installs_when_missing(monkeypatch):
+    state = {"path": None}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: state["path"])
+    monkeypatch.setattr(api, "_probe_avault_version", lambda path: api.AVAULT_VERSION if path else None)
+    calls = []
+
+    def _install(force=False):
+        calls.append(force)
+        state["path"] = "/usr/local/bin/avault"
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+
+    out = api.refresh_avault_if_stale()
+
+    assert calls == [True]
+    assert out["ok"] is True
+    assert out["installed"] is True
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def _stub_avault_install_state(monkeypatch, *, version, ready_floor):
+    """Answer every avault code path from one fake on-disk install."""
+    state = {"version": version, "installs": 0}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault" if state["version"] else None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda path: state["version"] if path else None)
+    monkeypatch.setattr(api, "_avault_ready_min_version", lambda: ready_floor)
+    monkeypatch.setattr(
+        api,
+        "_managed_avault_release_satisfies_ready_minimum",
+        lambda: api._version_at_least(api.AVAULT_VERSION, ready_floor),
+    )
+
+    def _install(force=False):
+        state["installs"] += 1
+        state["version"] = api.AVAULT_VERSION
+        return {"ok": True, "changed": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+    return state
+
+
+@pytest.mark.parametrize(
+    "version, ready_floor",
+    [
+        (None, api.AVAULT_VERSION),
+        ("0.1.1", api.AVAULT_VERSION),
+        (api.AVAULT_VERSION, api.AVAULT_VERSION),
+        ("99.0.0", api.AVAULT_VERSION),
+        (api.AVAULT_VERSION, "99.0.0"),
+    ],
+)
+def test_refresh_avault_if_stale_never_answers_healthier_than_forcing(monkeypatch, version, ready_floor):
+    # The property the whole change rests on: skipping a redundant download may
+    # not change the verdict. Whatever ``ensure_avault_installed(force=True)``
+    # concludes about an install state, the currency path must conclude the same
+    # thing — it may only skip the reinstall. Being at the pin is not the whole
+    # of being ready: when the readiness floor is raised ahead of the published
+    # pin, a binary equal to the pin is still ``upgrade_required``, and only the
+    # forced path used to say so.
+    forced_state = _stub_avault_install_state(monkeypatch, version=version, ready_floor=ready_floor)
+    forced = api.ensure_avault_installed(force=True)
+
+    stale_state = _stub_avault_install_state(monkeypatch, version=version, ready_floor=ready_floor)
+    stale = api.refresh_avault_if_stale()
+
+    assert stale["ok"] == forced["ok"]
+    assert stale.get("status") == forced.get("status")
+    assert stale.get("reason") == forced.get("reason")
+    assert stale_state["installs"] <= forced_state["installs"]
+
+
+def test_refresh_askill_if_stale_repairs_an_unreadable_binary_without_the_latest_probe(monkeypatch):
+    # A binary that cannot report its version is broken, not current, and that
+    # verdict must not depend on the upstream probe answering: prepare used to
+    # force this install unconditionally, so gating the repair on a reachable
+    # latest would report a broken askill as ready during a network blip.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": None, "status": "unknown", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: None)
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True]
+    assert out["action"] == "refresh_unknown_version"
+
+
+# Strings a version probe can produce that no comparison can order: absent,
+# empty, a development build, a git description, a partial number. The point is
+# not the list — it is that each one makes `_compare_versions` answer False, the
+# same answer it gives for "already newest", which is how "cannot tell" used to
+# be read as "current".
+UNORDERABLE_VERSIONS = [None, "", "dev", "unknown", "askill", "g1a2b3c", "0.1.x"]
+
+
+@pytest.mark.parametrize("version", UNORDERABLE_VERSIONS)
+def test_askill_status_calls_an_unorderable_version_unknown(monkeypatch, version):
+    # One field owns the fact, so prepare and the Dependencies page cannot
+    # disagree about whether a binary reporting `dev` is healthy.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+
+    assert api.askill_update_status()["status"] == "unknown"
+
+
+@pytest.mark.parametrize("version", UNORDERABLE_VERSIONS)
+def test_refresh_askill_if_stale_repairs_an_unorderable_local_version(monkeypatch, version):
+    # `up_to_date` must be an affirmative verdict, never the branch everything
+    # unrecognised falls into. A version that cannot be ordered against the
+    # published one means unknown, and unknown gets the repair the forced path
+    # would have performed — asserted over the shapes a probe can produce rather
+    # than over the one the review happened to name.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True], f"{version!r} is not a version we can trust as current"
+    assert out["action"] == "refresh_unknown_version"
+
+
+@pytest.mark.parametrize("latest", UNORDERABLE_VERSIONS)
+def test_refresh_askill_if_stale_needs_an_orderable_latest_to_claim_currency(monkeypatch, latest):
+    # The same rule on the upstream side: with nothing orderable to compare
+    # against, staleness is undecided. The owner reports that instead of
+    # currency, and each caller decides (prepare installs, the cadence skips).
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: latest)
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("the owner decides, it does not install here"))
+
+    out = api.refresh_askill_if_stale()
+
+    assert out["reason"] == "latest_unavailable"
+
+
 def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,
@@ -1083,10 +1404,9 @@ def test_startup_show_page_prewarm_targets_recent_non_offline(monkeypatch, tmp_p
     assert out["pages"][0]["context"] == "private"
     assert out["pages"][1]["visibility"] == "limited"
     assert out["pages"][1]["context"] == "private"
-    assert out["pages"][1]["base_path"] is None
     assert out["pages"][2]["visibility"] == "public"
     assert out["pages"][2]["context"] == "shared"
-    assert out["pages"][2]["base_path"].startswith("/p/")
+    assert all("base_path" not in page for page in out["pages"])
 
 
 def test_startup_show_page_prewarm_limit_env(monkeypatch):

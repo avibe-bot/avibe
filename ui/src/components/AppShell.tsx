@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -32,6 +32,8 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
+import { useIsDesktop } from '../lib/useIsDesktop';
 import {
   adminLandingPath,
   isAdvancedSettingsPath,
@@ -257,14 +259,22 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
 export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
-  const { totalUnread } = useWorkbenchInbox();
+  // Badge only — the shell is mounted on every route and renders no feed.
+  const { totalUnread } = useWorkbenchInbox({ feed: false });
+  // The sidebar's own <aside> is hidden below md by CSS, which hides it without
+  // unmounting it — so its inbox-feed and project-tree consumers would still
+  // fetch on a phone. A demand gate keyed on mounting is only honest if mounting
+  // implies visible, so the mount site has to carry the viewport too.
+  const isDesktop = useIsDesktop();
   const {
     capabilities,
-    instanceKind,
     remote,
   } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
+  useEffect(() => {
+    forgetMobileProjectsListUnlessPreserved(location.pathname);
+  }, [location.pathname]);
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
   const [memoryNavVisible, setMemoryNavVisible] = useState(false);
@@ -391,7 +401,6 @@ export const AppShell: React.FC = () => {
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
-  const showOrganizationNavigation = instanceKind === 'organization';
   const canUseShowPageApp =
     location.pathname.startsWith('/apps/show/') && capabilities.can_use_show_pages;
   const localSystemPath = isOwnerOnlyPath(location.pathname);
@@ -423,14 +432,6 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(showOrganizationNavigation
-      ? [{
-          to: '/admin/organization/overview',
-          label: t('nav.organization'),
-          icon: Building2,
-          match: (p: string) => p.startsWith('/admin/organization'),
-        }]
-      : []),
     // Permanent escape hatch to the App Library (a workbench app) for principals
     // covered by the current Apps policy. It stays reachable even when undocked.
     ...(canUseApps
@@ -473,6 +474,12 @@ export const AppShell: React.FC = () => {
       ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain, match: isMemorySettingsPath }]
       : []),
     {
+      to: '/admin/permissions',
+      label: t('nav.permissions'),
+      icon: ShieldCheck,
+      match: (p: string) => p.startsWith('/admin/permissions'),
+    },
+    {
       // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
       // backends, models, and Memory have their own sidebar destinations, so
       // exclude those routes from the active match.
@@ -491,15 +498,11 @@ export const AppShell: React.FC = () => {
   const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
   // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
-  // bar with Workbench, Control Panel, and More (which opens the full nested nav
-  // sheet). The Organization tab follows the same capability visibility as
-  // every other shell entry point. See ``adminMenuOpen``.
+  // bar with Workbench, Control Panel, More, and Advanced Settings. Permissions
+  // stays in the More sheet with the other overflow destinations.
   const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(showOrganizationNavigation
-      ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
-      : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
     {
       to: '/admin/settings/messaging',
@@ -541,13 +544,15 @@ export const AppShell: React.FC = () => {
       : []),
   ];
 
-  // Chat is a full-screen detail (own composer) and Search is a full-screen
-  // focused surface (own header + back button); the wizard owns the whole
-  // viewport. These mobile surfaces render their own top chrome, so the shell's
-  // mobile brand header AND the bottom tab bar are hidden on them.
+  // Chat is a full-screen detail (own composer), Search is a full-screen focused
+  // surface (own header + back button), and built-in apps own their toolbars.
+  // These mobile surfaces render their own top chrome, so the shell's mobile
+  // brand header AND the bottom tab bar are hidden on them.
   const isChat = location.pathname.startsWith('/chat/');
   const isSearch = location.pathname === '/search';
-  const isFullScreenMobile = isChat || isSearch;
+  const isShowPageApp = location.pathname.startsWith('/apps/show/');
+  const isBuiltinApp = isStandaloneAppRoutePath(location.pathname);
+  const isFullScreenMobile = isChat || isSearch || isShowPageApp || isBuiltinApp;
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
@@ -619,7 +624,9 @@ export const AppShell: React.FC = () => {
                 </nav>
               </div>
             )}
-            {shellMode === 'workbench' && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
+            {shellMode === 'workbench' && isDesktop && (
+              <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />
+            )}
           </div>
 
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
@@ -724,6 +731,7 @@ export const AppShell: React.FC = () => {
       )}
 
       <main
+        id={APP_SHELL_SCROLL_ID}
         className={clsx(
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
@@ -732,6 +740,8 @@ export const AppShell: React.FC = () => {
             // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
+            : isFullScreenMobile
+              ? 'min-h-0 flex-1 overflow-hidden md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
           !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
           !chromeless &&
@@ -742,9 +752,9 @@ export const AppShell: React.FC = () => {
           'w-full',
           chromeless
             ? 'h-full'
-            : location.pathname.startsWith('/admin/organization')
-              ? 'mx-auto'
-              : 'mx-auto px-4 py-5 md:px-10 md:py-8',
+            : isFullScreenMobile
+              ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
+            : 'mx-auto px-4 py-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not

@@ -1131,6 +1131,13 @@ def test_opencode_identity_computation_stays_in_validator_and_resolver():
     )
     from pathlib import Path
 
+    OPENCODE_IDENTITY_NAMES = {
+        "STANDARD_OPENCODE_VENDOR_IDS",
+        "opencode_provider_id",
+        "opencode_model_id",
+        "parse_opencode_model_id",
+    }
+
     class RawIdentityCalls(NodeVisitor):
         def __init__(self):
             self.calls = []
@@ -1161,7 +1168,15 @@ def test_opencode_identity_computation_stays_in_validator_and_resolver():
 
         def visit_ImportFrom(self, node):
             if node.module == "core.handlers.model_hub.identifiers":
-                self.calls.extend(alias.name for alias in node.names)
+                # The OpenCode identity names only. That module also owns model-ID
+                # spelling, which the config validator is now the single owner of
+                # — a different property, guarded by its own owner test, and one
+                # this partition has nothing to say about.
+                self.calls.extend(
+                    alias.name
+                    for alias in node.names
+                    if alias.name in OPENCODE_IDENTITY_NAMES
+                )
             if node.module == "core.handlers.model_hub.resolver":
                 self.calls.extend(
                     alias.name
@@ -1659,7 +1674,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 5,
+        "contract_version": 6,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1689,7 +1704,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 5,
+        "contract_version": 6,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",

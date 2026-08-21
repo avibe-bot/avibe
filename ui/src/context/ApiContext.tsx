@@ -6,6 +6,8 @@ import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
+import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
@@ -19,6 +21,13 @@ import {
 } from '../lib/showPageAccess';
 import {
   WorkbenchEventReconnectLoop,
+  WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+  declaredWorkbenchHeartbeatInterval,
+  isWorkbenchHeartbeatFresh,
+  parseWorkbenchHeartbeatInterval,
+  streamCoveredGap,
+  workbenchEventStaleAfterMs,
+  type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
@@ -526,7 +535,15 @@ export type ApiContextType = {
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
-  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
+  /** Read the session's Show Page without creating it; rejects with
+   *  `show_page_not_found` — silently, as an expected answer — when there is none.
+   *  Everything that only DISPLAYS the page uses this — `ensureShowPage` is reserved
+   *  for the one caller that owns the first-creation prompt. */
+  getShowPage: (sessionId: string) => Promise<ShowPagePayload>;
+  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. Callers
+   *  MUST honor `existed === false` by sending the visualize prompt: that edge is
+   *  reported once, so a caller that ignores it silently consumes it. To only read the
+   *  page, use `getShowPage`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
   /** Upload an image as the page's workspace-root favicon (multipart); resolves to the
    *  refreshed page payload carrying the fresh `icon_version` (§7.1j). */
@@ -615,6 +632,7 @@ export type ApiContextType = {
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   getOpencodeProviders: () => Promise<OpencodeProviderListResult>;
+  readOpencodeProvidersForModelPicker: () => Promise<OpencodeProviderListResult>;
   saveOpencodeCustomProvider: (
     payload: OpencodeCustomProviderPayload,
   ) => Promise<OpencodeMutationResult>;
@@ -1152,7 +1170,35 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 };
 
 export type WorkbenchEventHandlers = {
-  onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
+  /**
+   * A stream is live and reaching this consumer, and any gap before now is
+   * over. Every gap ends here, on either of the two legs a stream is carried
+   * over: the browser socket breaking (an error, a page that came back to a
+   * stream that could not prove it survived, a heartbeat that stopped arriving)
+   * is recovered by reconnecting, and this fires once the new subscription
+   * exists; the UI server's controller bridge dropping and coming back is
+   * recovered in place, and this fires when it does. Nothing replays either
+   * gap, so this is also the one place to re-read whatever this consumer keeps
+   * live off the stream — including the window between its own first read and
+   * this subscription.
+   *
+   * Consumers must not re-derive when a gap happened. Neither the reactivation
+   * edge nor `onEventBridgeStatus` is that signal: a returning page whose stream
+   * never broke has missed nothing, and a bridge report is a level rather than
+   * an edge. Both verdicts are made in one place, and a consumer recomputing
+   * them will drift from it.
+   *
+   * It carries no payload, deliberately. Which leg came back, and whether any
+   * handshake stands behind this edge at all -- a page returning onto a stream
+   * that could not prove it survived says to catch up now, rather than wait for
+   * a replacement several backoff windows away -- are distinctions a catch-up
+   * cannot branch on without silently skipping the gaps it does not recognise.
+   * So there is nothing here to branch on. `onEventBridgeStatus` stays the level
+   * a bridge indicator renders from, and is not a second catch-up trigger: every
+   * bridge recovery arrives here too, so refetching from both would charge each
+   * one twice.
+   */
+  onConnected?: () => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onAuthorizationChanged?: (data: {
@@ -1836,6 +1882,8 @@ export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
 
 // Memory plugin contract: docs/plans/memory-plugin-system.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
+export type MemoryRerankProvider = 'deepinfra' | 'vllm' | 'dashscope';
+
 export type MemoryEndpointConfig = {
   base_url: string | null;
   model: string | null;
@@ -1843,6 +1891,7 @@ export type MemoryEndpointConfig = {
   // Typed as `null` so no caller can read a saved key back off the response.
   api_key: null;
   has_api_key: boolean;
+  provider?: MemoryRerankProvider | null;
 };
 
 export type MemoryProcessingConfig = {
@@ -1855,6 +1904,11 @@ export type MemoryProcessingConfig = {
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  mode: 'organization' | 'platform' | 'custom';
+  cloud_available?: boolean;
+  managed?: boolean;
+  transition_notice_pending?: boolean;
+  capability_paused?: boolean;
   im_attachment_capture_available?: boolean;
   repair_available?: boolean;
   processing: MemoryProcessingConfig;
@@ -1870,10 +1924,13 @@ export type MemoryEndpointPatch = {
   base_url?: string | null;
   model?: string | null;
   api_key?: string | null;
+  provider?: MemoryRerankProvider | null;
 };
 
 export type MemorySettingsPatch = {
   enabled?: boolean;
+  mode?: 'platform' | 'custom';
+  acknowledge_transition?: true;
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
@@ -2589,10 +2646,36 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
-  const eventBridgeConnectedRef = useRef(false);
+  // The controller leg of this stream, which is the second thing that can break:
+  // the browser socket stays open and heartbeating while the UI server loses
+  // `/internal/events`, and `vibe/inbox_bridge.py` resumes the live feed without
+  // replaying what the controller published in between. `unknown` is not a third
+  // kind of outage -- it is a stream that has not heard from the leg yet, which
+  // is what keeps its first "connected" report from reading as a recovery.
+  const eventControllerLegRef = useRef<WorkbenchControllerLegState>('unknown');
+  // When the active stream last proved it was alive, and the cadence the server
+  // said it would prove it at. Null whenever there is no stream to speak for --
+  // including a stream that has connected but not yet been heard from, because a
+  // heartbeat is the only thing that proves continuity and nothing else may
+  // stand in for one. A server too old to send them therefore never reads as
+  // proven, which is the pre-heartbeat behavior this optimization replaces.
+  const eventHeartbeatAtRef = useRef<number | null>(null);
+  const eventHeartbeatIntervalRef = useRef(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
+  // When the deadline the current stream is being held to started running, or
+  // null when this server never promised a cadence and so cannot be held to one.
+  // Deliberately separate from the stamp above: a promise is what makes a
+  // deadline enforceable, and only a heartbeat is proof the stream is carrying
+  // events. Collapsing them either lets a handshake vouch for a stream or leaves
+  // a stream that dies before its first heartbeat with no deadline at all.
+  const eventHeartbeatClockAtRef = useRef<number | null>(null);
+  // Fires when the next heartbeat is overdue. A heartbeat is a continuous clock,
+  // so whoever trusts it has to keep watching it: sampling only at the moment a
+  // page returns would leave a stream that dies one second later unquestioned
+  // until the next return, which may never come while the tab stays open.
+  const eventHeartbeatWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
-  const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -2609,10 +2692,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const handleApiError = async (res: Response, path: string) => {
+  const handleApiError = async (
+    res: Response,
+    path: string,
+    { expectedCodes }: { expectedCodes?: readonly string[] } = {},
+  ) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
     let errorCode: string | null = null;
-    
+
     try {
       const data = await res.json();
       const parsed = selectApiErrorFields(data, errorMessage);
@@ -2629,15 +2716,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       errorMessage = `${path}: ${res.statusText || 'Unknown error'} (${res.status})`;
     }
 
-    // Log error details to console
-    console.error(`[API Error] ${path}`, {
-      status: res.status,
-      statusText: res.statusText,
-      error: errorMessage,
-    });
+    // A code the caller declared EXPECTED is an answer, not a failure: it still
+    // rejects, so no caller can mistake an error body for data, but it is neither
+    // announced to the user nor logged as an error. Declared per call site, applied
+    // here, so "expected" cannot mean two different things in two helpers.
+    if (!(errorCode !== null && expectedCodes?.includes(errorCode))) {
+      // Log error details to console
+      console.error(`[API Error] ${path}`, {
+        status: res.status,
+        statusText: res.statusText,
+        error: errorMessage,
+      });
 
-    // Show toast to user
-    showToast(errorMessage, 'error');
+      // Show toast to user
+      showToast(errorMessage, 'error');
+    }
 
     // Archive is TERMINAL, so this particular refusal is not a failure to retry
     // but a state change the client missed (a backgrounded/offline tab can drop
@@ -2660,13 +2753,27 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
+  const getJson = async (
+    path: string,
+    { handleError = true, expectedCodes }: { handleError?: boolean; expectedCodes?: readonly string[] } = {},
+  ) => {
     const res = await apiFetch(path);
     if (!res.ok && handleError) {
-      await handleApiError(res, path);
+      await handleApiError(res, path, { expectedCodes });
     }
     return res.json();
   };
+
+  // Absence is data for a GET of ONE session's Show Page, never an incident: the share
+  // panel opens on sessions that have no page yet and renders that as an empty link.
+  // The property is owned here instead of declared per call site because the panel fires
+  // several of these reads at once — one of them forgetting is a toast the user sees for
+  // the normal case, and the reader cannot tell which of the parallel reads produced it.
+  // Mutations stay off this path deliberately: pinning or re-skinning a page that does
+  // not exist IS a fault worth announcing. So is the POST-shaped access-settings read,
+  // which only mounts once an access read has already proven the page exists, so an
+  // absent page there means it vanished mid-session rather than never existed.
+  const readShowPageJson = (path: string) => getJson(path, { expectedCodes: ['show_page_not_found'] });
 
   const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
     // Best-effort callers (handleError: false) bypass the shared read cache so a
@@ -2746,12 +2853,148 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const clearWorkbenchHeartbeatWatchdog = () => {
+    if (eventHeartbeatWatchdogRef.current === null) return;
+    clearTimeout(eventHeartbeatWatchdogRef.current);
+    eventHeartbeatWatchdogRef.current = null;
+  };
+
   const closeActiveWorkbenchEventSource = () => {
     const source = eventSourceRef.current;
     eventSourceRef.current = null;
     source?.close();
     eventConnectionRef.current = null;
-    eventBridgeConnectedRef.current = false;
+    eventControllerLegRef.current = 'unknown';
+    // The stamp and the cadence both speak for one socket only; a later stream
+    // must earn its own, including the right to be watched on a timer.
+    eventHeartbeatAtRef.current = null;
+    eventHeartbeatClockAtRef.current = null;
+    clearWorkbenchHeartbeatWatchdog();
+  };
+
+  /**
+   * The stream's own handshake, or null while events cannot reach handlers. A
+   * controller-sourced stream is itself the controller leg, so it is down when
+   * that leg reports down.
+   */
+  const workbenchEventHandshake = () => {
+    const connection = eventConnectionRef.current;
+    if (!connection) return null;
+    if (connection.source === 'controller' && eventControllerLegRef.current !== 'connected') return null;
+    return connection;
+  };
+
+  /**
+   * Reconnecting this socket would close no gap, because it is carrying
+   * everything it can carry right now.
+   *
+   * Scoped to this socket on purpose: a stream reaches the browser over two legs
+   * that fail independently, and each one is judged by whoever can see it. This
+   * is the browser leg. Reopening it cannot repair the controller leg behind the
+   * UI server -- the replacement would inherit the same severed bridge -- so the
+   * controller leg is not a term here; it announces its own recovery instead, in
+   * the `workbench.events.bridge.status` listener below.
+   *
+   * That makes this the answer to one question only: whether recycling this
+   * socket would close anything. It is not a verdict on the stream, and asking
+   * it as one is how a controller-leg outage came to read as a gap-free resume.
+   * `streamCoveredGap` is where every leg is accounted for.
+   *
+   * All three terms are needed for this leg. `readyState` is the browser's own
+   * transport verdict, which it revises on network changes and HTTP/2 ping
+   * timeouts. The handshake says a stream that is open can also reach handlers.
+   * Neither survives suspension: a backgrounded tab can have its socket dropped
+   * and be resumed with the connection still reported `OPEN` and no `error` ever
+   * delivered, so only a recent heartbeat distinguishes a quiet stream from that
+   * zombie.
+   */
+  const isWorkbenchBrowserLegLive = () =>
+    eventSourceRef.current?.readyState === EventSource.OPEN &&
+    workbenchEventHandshake() !== null &&
+    isWorkbenchHeartbeatFresh(
+      eventHeartbeatAtRef.current,
+      eventHeartbeatIntervalRef.current,
+      Date.now(),
+    );
+
+  /**
+   * This stream is over: drop it, say so, and let the loop schedule the next
+   * attempt. One owner for the transition, because a stream that dies silently
+   * has to end up in exactly the same state as one that reports `error` --
+   * consumers recover through the reconnect's `connected`, so a path that
+   * skipped any of these steps would strand them.
+   */
+  const failWorkbenchEventStream = () => {
+    closeActiveWorkbenchEventSource();
+    setWorkbenchEventConnectionState('reconnecting');
+    dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
+    getWorkbenchEventReconnectLoop().failed();
+  };
+
+  /**
+   * Watch for the heartbeat the current stream owes us. A stream that stops
+   * proving itself is dead whether or not the browser ever says so, and the
+   * only way a consumer learns that is if someone is still looking.
+   */
+  const armWorkbenchHeartbeatWatchdog = () => {
+    clearWorkbenchHeartbeatWatchdog();
+    // Only a stream whose server promised a cadence owes a heartbeat. A deadline
+    // is a claim about a cadence, so a server that never declared one cannot be
+    // held to it: against an older server -- a rollback under a tab that stayed
+    // open -- this would otherwise close a healthy stream every stale window
+    // forever, charging every consumer a catch-up each round. A modern server
+    // makes that promise in its handshake, which is what puts a stream that dies
+    // before its first heartbeat on a deadline too.
+    const clockAt = eventHeartbeatClockAtRef.current;
+    if (clockAt === null) return;
+    const staleAt = clockAt + workbenchEventStaleAfterMs(eventHeartbeatIntervalRef.current);
+    eventHeartbeatWatchdogRef.current = setTimeout(() => {
+      eventHeartbeatWatchdogRef.current = null;
+      // A hidden page cannot hold a stream open anyway, and its timers are
+      // throttled or frozen: the reactivation edge is the honest check there.
+      if (document.visibilityState !== 'visible') return;
+      // A heartbeat may have landed since this timer was set, in which case the
+      // stream is proving itself and only the deadline moved.
+      if (isWorkbenchBrowserLegLive()) {
+        armWorkbenchHeartbeatWatchdog();
+        return;
+      }
+      failWorkbenchEventStream();
+    }, Math.max(0, staleAt - Date.now()));
+  };
+
+  /**
+   * Start this stream's clock from its server's promise. Called from the
+   * handshake, so a stream that opens and never sends a heartbeat still has a
+   * deadline to miss -- the case a stamp-only clock cannot express, because
+   * there is nothing to stamp.
+   *
+   * Sticky per stream: only a frame that carries a cadence is allowed to speak
+   * for one, so a controller-relayed handshake (no cadence of its own) never
+   * clears a clock the UI server's own handshake started.
+   */
+  const declareWorkbenchHeartbeatCadence = (intervalMs: number) => {
+    eventHeartbeatIntervalRef.current = intervalMs;
+    eventHeartbeatClockAtRef.current = Date.now();
+    armWorkbenchHeartbeatWatchdog();
+  };
+
+  /**
+   * Record proof of life and keep watching for the next one. Stamping and
+   * watching are one action on purpose: a stamp nobody watches expires
+   * unnoticed, and a watchdog armed off a stale stamp fires against the wrong
+   * deadline.
+   *
+   * A heartbeat also restarts the clock, and does so even from a server that
+   * never declared a cadence: whatever the deadline was measured from, the
+   * newest proof is now the honest starting point.
+   */
+  const stampWorkbenchHeartbeat = (intervalMs?: number) => {
+    const now = Date.now();
+    eventHeartbeatAtRef.current = now;
+    eventHeartbeatClockAtRef.current = now;
+    if (intervalMs !== undefined) eventHeartbeatIntervalRef.current = intervalMs;
+    armWorkbenchHeartbeatWatchdog();
   };
 
   function reconnectWorkbenchEventSource(): void {
@@ -2765,6 +3008,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventReconnectLoopRef.current = new WorkbenchEventReconnectLoop({
         reconnect: reconnectWorkbenchEventSource,
         isVisible: () => document.visibilityState === 'visible',
+        isBrowserLegLive: isWorkbenchBrowserLegLive,
       });
     }
     return eventReconnectLoopRef.current;
@@ -2793,15 +3037,34 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
       if (eventSourceRef.current !== source) return;
+      // Deliberately no stamp here. This frame proves the stream is alive now,
+      // which is not the question: the question is whether it will still be
+      // proving that in a minute, and only a heartbeat answers it. Seeding from
+      // the handshake would hand a stream up to one stale window of unearned
+      // trust -- enough for a suspended tab to return, be believed, and skip the
+      // catch-up for a gap it did have.
+      //
+      // What it may do is start the clock: the frame's `interval_ms` is the
+      // server declaring the cadence it owes, which is a promise, not proof.
+      // That is what puts a stream that opens and then goes silent on a
+      // deadline, while a server too old to declare one is still never
+      // watchdogged and still never believed without a heartbeat.
       try {
-        const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
+        const parsed = JSON.parse(e.data) as {
+          sub_id?: number;
+          interval_ms?: unknown;
+          type?: string;
+          data?: unknown;
+        };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
         eventConnectionRef.current = {
           sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1,
           source: sourceKind,
         };
+        const declaredIntervalMs = declaredWorkbenchHeartbeatInterval(parsed.interval_ms);
+        if (declaredIntervalMs !== undefined) declareWorkbenchHeartbeatCadence(declaredIntervalMs);
         if (sourceKind === 'controller') {
-          eventBridgeConnectedRef.current = true;
+          eventControllerLegRef.current = 'connected';
           setWorkbenchEventConnectionState('connected');
           dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: true }));
         }
@@ -2811,9 +3074,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (eventConnectionRef.current) {
         getWorkbenchEventReconnectLoop().streamOpened();
-        const connected = eventConnectionRef.current;
-        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
+        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
       }
+    });
+    // The server's proof of life. It carries no news, so nothing is dispatched
+    // to handlers -- the arrival itself is the whole payload, and the declared
+    // cadence lets the staleness window be sized by the side that sets it.
+    source.addEventListener('heartbeat', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
+      let intervalMs: number | undefined;
+      try {
+        const payload = JSON.parse(e.data) as { interval_ms?: unknown };
+        intervalMs = parseWorkbenchHeartbeatInterval(payload.interval_ms);
+      } catch {
+        // The frame arrived, which is what matters; keep the current cadence.
+      }
+      // The only place a stream is ever stamped, which is what lets a null stamp
+      // mean "nothing has proved this stream yet" even on a stream already
+      // running against a declared deadline.
+      stampWorkbenchHeartbeat(intervalMs);
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<{
@@ -2968,26 +3247,33 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
       getWorkbenchEventReconnectLoop().streamOpened();
-      eventBridgeConnectedRef.current = envelope.data.connected;
+      const previousLeg = eventControllerLegRef.current;
+      eventControllerLegRef.current = envelope.data.connected ? 'connected' : 'disconnected';
       setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'reconnecting');
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onEventBridgeStatus?.(envelope.data);
       });
+      // A leg that was down and is now up is a gap that just ended. The browser
+      // socket stayed open across it, so no reconnect will announce this one --
+      // but the meaning is identical, so it arrives through the same signal, and
+      // consumers need no second concept to handle it. Only from `disconnected`:
+      // a new stream's opening report is the leg's state, not a recovery, and
+      // treating it as one would charge every connect a duplicate catch-up.
+      if (previousLeg === 'disconnected' && envelope.data.connected) {
+        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+      }
     });
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
-      closeActiveWorkbenchEventSource();
+      failWorkbenchEventStream();
       // EventSource does not expose a failed response's status or JSON body.
       // Probe through apiFetch, then inspect the successful /api/session form;
       // both 401s and the 200 refresh payload enter the shared login recovery.
       void apiFetch('/api/session', { cache: 'no-store' })
         .then(recoverRemoteAuthFromSessionProbe)
         .catch(() => undefined);
-      setWorkbenchEventConnectionState('reconnecting');
-      dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
-      getWorkbenchEventReconnectLoop().failed();
     };
   }
 
@@ -3004,27 +3290,80 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   stopWorkbenchEventsRef.current = stopWorkbenchEventSource;
 
-  const wakeWorkbenchEvents = () => {
+  /**
+   * The page or the network came back. Catch the transport up; the stream then
+   * tells consumers whether anything was missed, by reconnecting or not.
+   *
+   * One owner, deliberately. Every consumer used to subscribe to the raw
+   * reactivation edge and refetch unconditionally, which is why returning to a
+   * tab cost a burst of reads that a healthy stream had already delivered. Now
+   * only a stream that cannot prove it survived the gap costs a catch-up, and
+   * consumers hear about it through the same `connected` signal an ordinary
+   * mid-session reconnect already used.
+   *
+   * `awaySince` is when the gap being recovered from opened, or null for one
+   * nothing can date -- a network return, or a page back from an away period
+   * the sampler never saw begin.
+   */
+  const wakeWorkbenchEvents: PageReactivationListener = (awaySince) => {
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
-    setWorkbenchEventConnectionState('reconnecting');
+    // Read before waking, because waking is what changes the answer.
+    //
+    // Two questions, asked separately because they have different subjects. The
+    // transport one -- is this socket worth keeping -- is about the browser leg,
+    // and is the reconnect loop's. This one is about the whole path across an
+    // interval, so it is asked of every leg, by the one function that knows what
+    // the legs are; the browser leg's own verdict goes in as a term rather than
+    // standing in for the answer.
+    const survivedTheGap = streamCoveredGap({
+      browserLegLive: isWorkbenchBrowserLegLive(),
+      lastHeartbeatAt: eventHeartbeatAtRef.current,
+      controllerLeg: eventControllerLegRef.current,
+      awaySince,
+      intervalMs: eventHeartbeatIntervalRef.current,
+      now: Date.now(),
+    });
+    // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
+    // marks it reconnecting on every attempt. Announcing it here instead made a
+    // wake that keeps a live stream flash "reconnecting" over a healthy one.
     getWorkbenchEventReconnectLoop().wake();
+    // Timers are not trustworthy across a hidden period -- throttled, frozen,
+    // or fired while hidden and declined -- so re-establish the watch on a
+    // stream that was kept rather than reasoning about which of those happened.
+    // Idempotent: it re-arms off the surviving clock, and declines for a stream
+    // that was recycled or never declared a cadence.
+    armWorkbenchHeartbeatWatchdog();
+    // This edge owns its own catch-up. Deferring it to the replacement stream's
+    // handshake would make recovery depend on the thing being recovered: a
+    // server that is down, an offline network, or a backoff wait leaves the
+    // reconnect pending for as long as it takes, and until then a returning page
+    // shows whatever it had before it was hidden with nothing on the way. Paying
+    // it here is what the unconditional refetch did before this change, so a
+    // reactivation onto a broken stream costs no more than it used to; the
+    // replacement's later `connected` is a second catch-up in exactly the case
+    // that already paid for two.
+    if (!survivedTheGap) {
+      dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+    }
   };
-  wakeWorkbenchEventsRef.current = wakeWorkbenchEvents;
+  resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
   useEffect(() => {
-    const wakeIfVisible = () => {
+    const wakeIfVisible: PageReactivationListener = (awaySince) => {
       if (document.visibilityState !== 'visible') return;
-      wakeWorkbenchEventsRef.current();
+      resumeWorkbenchEventsRef.current(awaySince);
       syncSessionDraftsRef.current();
     };
-    document.addEventListener('visibilitychange', wakeIfVisible);
-    window.addEventListener('online', wakeIfVisible);
-    window.addEventListener('focus', wakeIfVisible);
+    // Regaining the network is its own gap, independent of the page coming back,
+    // and an undated one: nothing here watched the connection drop, so no
+    // heartbeat can be placed inside it.
+    const wakeFromNetwork = () => wakeIfVisible(null);
+    const stopReactivation = onPageReactivated(wakeIfVisible);
+    window.addEventListener('online', wakeFromNetwork);
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
-      document.removeEventListener('visibilitychange', wakeIfVisible);
-      window.removeEventListener('online', wakeIfVisible);
-      window.removeEventListener('focus', wakeIfVisible);
+      stopReactivation();
+      window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };
   }, []);
@@ -3269,7 +3608,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removeUser: (userId, platform) =>
       deleteJson(platform ? `/api/users/${encodeURIComponent(userId)}?platform=${encodeURIComponent(platform)}` : `/api/users/${encodeURIComponent(userId)}`),
     getShowPages: () => getJson('/api/show-pages'),
-    getShowPageAccess: (sessionId) => getJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
+    getShowPageAccess: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
     probeShowPageAccess: async (sessionId) => {
       try {
         const response = await apiFetch(`/api/show-pages/${encodeURIComponent(sessionId)}/access`);
@@ -3308,6 +3647,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
       { offline },
     ),
+    getShowPage: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}`),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes
@@ -3457,6 +3797,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(options?.model ? { model: options.model } : {}),
       }),
     getOpencodeProviders: () => getJson('/api/backend/opencode/providers'),
+    // The same endpoint, read by the model pickers instead of by Settings, where
+    // a refusal is an answer rather than an incident. OpenCode's only catalog is
+    // this Settings one — it carries provider base URLs, masked keys, and auth
+    // state, and reaching it starts the daemon — so it stays Owner-only while the
+    // pickers render for every rank that may configure an Agent. Those ranks get
+    // no OpenCode suggestions and type the model id, which is what they already
+    // did before the member rank existed; announcing that as an error would put a
+    // toast on a page load the user did nothing wrong on. Declared here rather
+    // than at the three call sites so one of them cannot forget it, and kept off
+    // ``getOpencodeProviders`` so Settings still reports its own 403 loudly.
+    readOpencodeProvidersForModelPicker: () =>
+      getJson('/api/backend/opencode/providers', {
+        expectedCodes: ['instance_access_forbidden'],
+      }),
     saveOpencodeCustomProvider: (payload) =>
       postJson('/api/backend/opencode/custom-provider', payload),
     deleteOpencodeCustomProvider: (providerId) =>
@@ -3943,21 +4297,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           handlers.onConnectionState?.(eventConnectionStateRef.current);
         }
       });
-      if (
-        eventConnectionRef.current &&
-        (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
-      ) {
+      if (workbenchEventHandshake()) {
         queueMicrotask(() => {
-          if (
-            eventHandlersRef.current.has(handlers) &&
-            eventConnectionRef.current &&
-            (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
-          ) {
-            handlers.onConnected?.(eventConnectionRef.current);
+          if (eventHandlersRef.current.has(handlers) && workbenchEventHandshake()) {
+            handlers.onConnected?.();
           }
         });
       }
-      if (eventBridgeConnectedRef.current) {
+      if (eventControllerLegRef.current === 'connected') {
         queueMicrotask(() => {
           if (eventHandlersRef.current.has(handlers)) {
             handlers.onEventBridgeStatus?.({ connected: true });

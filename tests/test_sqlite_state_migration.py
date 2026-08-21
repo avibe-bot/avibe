@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 import hashlib
@@ -11,6 +12,8 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.exc import IntegrityError
@@ -19,8 +22,9 @@ from sqlalchemy.schema import CreateIndex
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
-from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
-from storage import message_deliveries, messages_service, migrations
+from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state, reset_ensured_sqlite_state
+from storage.lock import migration_lock_path_for
+from storage import importer, message_deliveries, messages_service, migrations
 from storage.background import SQLiteBackgroundTaskStore
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
@@ -31,7 +35,14 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260818_0057"
+HEAD_REVISION = "20260820_0058"
+# ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
+# Alembic cannot re-emit them when batch mode recreates a table. Every migration that
+# rebuilds one therefore passes this convention; the rebuild simulated below has to pass
+# the same one to reproduce what those migrations actually do.
+_MIGRATION_FK_NAMING_CONVENTION = {
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"
+}
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -101,14 +112,24 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
         assert all(row[2] for row in rows.values())
 
         show_indexes = {row[1] for row in conn.execute("pragma index_list(show_pages)")}
-        email_indexes = {
+        # 20260820_0058 moved the audience out of ``show_page_authorized_emails``
+        # into the heterogeneous entry table, so that is where the audience half
+        # of this round trip lives at head.
+        entry_indexes = {
             row[1]
-            for row in conn.execute("pragma index_list(show_page_authorized_emails)")
+            for row in conn.execute("pragma index_list(show_page_access_entries)")
         }
         assert {"ix_show_pages_share_id", "ix_show_pages_access_mode"}.issubset(show_indexes)
-        assert "ix_show_page_authorized_emails_email" in email_indexes
+        assert {
+            "ix_show_page_access_entries_lookup",
+            "uq_show_page_access_entries_organization",
+        }.issubset(entry_indexes)
+        assert "show_page_authorized_emails" not in {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
         foreign_key = conn.execute(
-            "pragma foreign_key_list(show_page_authorized_emails)"
+            "pragma foreign_key_list(show_page_access_entries)"
         ).fetchone()
         assert foreign_key is not None
         assert foreign_key[2] == "show_pages"
@@ -128,17 +149,16 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
             "where session_id = 'private-stable'"
         )
         conn.execute(
-            "insert into show_page_authorized_emails values (?, ?, ?)",
-            ("private-stable", "guest@example.com", "2026-08-17T00:00:00Z"),
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)",
+            ("private-stable", "email", "guest@example.com", None, "2026-08-17T00:00:00Z"),
         )
         conn.execute(
-            "insert into show_page_authorized_emails values (?, ?, ?)",
-            ("private-null", "cascade@example.com", "2026-08-17T00:00:00Z"),
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)",
+            ("private-null", "email", "cascade@example.com", None, "2026-08-17T00:00:00Z"),
         )
         conn.execute("delete from show_pages where session_id = 'private-null'")
         assert conn.execute(
-            "select count(*) from show_page_authorized_emails "
-            "where session_id = 'private-null'"
+            "select count(*) from show_page_access_entries where page_id = 'private-null'"
         ).fetchone() == (0,)
 
     command.downgrade(migrations.alembic_config(db_path), "20260815_0054")
@@ -176,11 +196,216 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
             "select access_mode, access_revision, share_id from show_pages "
             "where session_id = 'private-stable'"
         ).fetchone()
-        email_count = conn.execute(
-            "select count(*) from show_page_authorized_emails"
+        entry_count = conn.execute(
+            "select count(*) from show_page_access_entries"
         ).fetchone()
     assert reupgraded == ("private", 0, "private-link")
-    assert email_count == (0,)
+    assert entry_count == (0,)
+
+
+SHOW_PAGE_ACCESS_ENTRY_MIGRATION_MODULE = (
+    "storage.alembic.versions.20260820_0058_show_page_access_entries"
+)
+
+
+def _seed_show_pages(conn: sqlite3.Connection, session_ids: Iterable[str]) -> None:
+    conn.executemany(
+        """
+        insert into show_pages (
+            session_id, share_id, offline_at, access_mode, access_revision,
+            created_at, updated_at
+        ) values (?, ?, null, 'limited', 1, '2026-08-19T00:00:00Z', '2026-08-19T00:00:00Z')
+        """,
+        [(session_id, f"{session_id}-link") for session_id in session_ids],
+    )
+
+
+def _restore_legacy_show_page_email_table(db_path: Path) -> None:
+    """Put the retired pre-0058 email table back the way a replay finds it.
+
+    An unversioned database is stamped at the replay floor, so 20260820_0058
+    runs again over state it already produced. Reusing the revision's own
+    downgrade helper keeps this fixture from becoming a second, drifting copy of
+    that table's shape.
+    """
+
+    migration = import_module(SHOW_PAGE_ACCESS_ENTRY_MIGRATION_MODULE)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            with Operations.context(MigrationContext.configure(conn)):
+                migration._create_legacy_email_table()
+    finally:
+        engine.dispose()
+
+
+def test_show_page_access_entry_migration_moves_every_email_row_and_narrows_on_downgrade(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260819_0057")
+    # One row of every audience shape 20260819_0057 can hold: a page with
+    # several addresses, a page with one, and a page with none.
+    seeded_emails = [
+        ("many-emails", "first@example.com", "2026-08-17T00:00:00Z"),
+        ("many-emails", "second@example.com", "2026-08-18T00:00:00Z"),
+        ("one-email", "only@example.com", "2026-08-18T12:00:00Z"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        _seed_show_pages(conn, ("many-emails", "one-email", "no-emails"))
+        conn.executemany(
+            "insert into show_page_authorized_emails values (?, ?, ?)", seeded_emails
+        )
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        migrated = conn.execute(
+            "select page_id, kind, value, organization_id, created_at "
+            "from show_page_access_entries order by page_id, kind, value"
+        ).fetchall()
+        # The organization-scoped kinds have no pre-0058 representation, so they
+        # only exist from here on.
+        conn.executemany(
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)",
+            [
+                ("many-emails", "group", "group-7", "org-1", "2026-08-20T00:00:00Z"),
+                ("many-emails", "organization", "org-1", "org-1", "2026-08-20T00:00:00Z"),
+            ],
+        )
+    assert migrated == [
+        (page_id, "email", value, None, created_at)
+        for page_id, value, created_at in sorted(seeded_emails)
+    ]
+
+    command.downgrade(migrations.alembic_config(db_path), "20260819_0057")
+    with sqlite3.connect(db_path) as conn:
+        restored = conn.execute(
+            "select session_id, normalized_email, created_at "
+            "from show_page_authorized_emails order by session_id, normalized_email"
+        ).fetchall()
+        legacy_indexes = {
+            row[1]
+            for row in conn.execute("pragma index_list(show_page_authorized_emails)")
+        }
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+    # A pre-0058 reader only understands emails, so the audience narrows and
+    # fails closed: the group and organization grants are dropped, never widened
+    # into an email that was never granted.
+    assert restored == sorted(seeded_emails)
+    assert "ix_show_page_authorized_emails_email" in legacy_indexes
+    assert "show_page_access_entries" not in tables
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        reupgraded = conn.execute(
+            "select page_id, kind, value, organization_id, created_at "
+            "from show_page_access_entries order by page_id, kind, value"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+    assert reupgraded == [
+        (page_id, "email", value, None, created_at)
+        for page_id, value, created_at in sorted(seeded_emails)
+    ]
+    assert "show_page_authorized_emails" not in tables
+
+
+def test_show_page_access_entry_migration_replay_neither_duplicates_nor_overwrites(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    already_migrated = [
+        ("replayed", "email", "kept@example.com", None, "2026-08-20T00:00:00Z"),
+        ("replayed", "group", "group-7", "org-1", "2026-08-20T00:00:00Z"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        _seed_show_pages(conn, ("replayed",))
+        conn.executemany(
+            "insert into show_page_access_entries values (?, ?, ?, ?, ?)", already_migrated
+        )
+
+    _restore_legacy_show_page_email_table(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            "insert into show_page_authorized_emails values (?, ?, ?)",
+            [
+                # One address this revision has already moved, carrying a
+                # different timestamp, and one it has never seen.
+                ("replayed", "kept@example.com", "2000-01-01T00:00:00Z"),
+                ("replayed", "added@example.com", "2026-08-21T00:00:00Z"),
+            ],
+        )
+    command.stamp(migrations.alembic_config(db_path), "20260819_0057")
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        entries = conn.execute(
+            "select page_id, kind, value, organization_id, created_at "
+            "from show_page_access_entries order by kind, value"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+    assert entries == [
+        ("replayed", "email", "added@example.com", None, "2026-08-21T00:00:00Z"),
+        *sorted(already_migrated, key=lambda row: (row[1], row[2])),
+    ]
+    assert "show_page_authorized_emails" not in tables
+
+
+def test_show_page_access_entry_constraints_hold_for_every_kind(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    insert = "insert into show_page_access_entries values (?, ?, ?, ?, '2026-08-20T00:00:00Z')"
+    accepted = [
+        ("page", "email", "guest@example.com", None),
+        ("page", "group", "group-7", "org-1"),
+        ("page", "group", "group-8", "org-1"),
+        ("page", "organization", "org-1", "org-1"),
+        # Another page's audience is independent, including its organization.
+        ("other", "group", "group-7", "org-1"),
+        ("other", "organization", "org-1", "org-1"),
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = on")
+        _seed_show_pages(conn, ("page", "other"))
+        conn.executemany(insert, accepted)
+
+        for row in accepted:
+            # Every accepted shape is unique per (page, kind, value)...
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(insert, row)
+        # ...and "this organization may read" is one switch per page, not a
+        # list, which the composite key alone cannot say.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(insert, ("page", "organization", "org-2", "org-2"))
+
+        rejected = [
+            ("page", "user", "someone", None),
+            ("page", "email", "other@example.com", "org-1"),
+            ("page", "group", "group-9", None),
+            ("page", "organization", "org-9", "org-1"),
+            ("page", "email", "", None),
+            ("page", "email", "a" * 321, None),
+            ("missing-page", "email", "guest@example.com", None),
+        ]
+        for row in rejected:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(insert, row)
+
+        conn.execute("delete from show_pages where session_id = 'other'")
+        surviving = conn.execute(
+            "select page_id, kind, value, organization_id "
+            "from show_page_access_entries order by page_id, kind, value"
+        ).fetchall()
+    assert surviving == sorted(row for row in accepted if row[0] == "page")
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -608,6 +833,255 @@ def test_alembic_script_directory_has_exactly_one_head() -> None:
     assert heads[0] == HEAD_REVISION
 
 
+# v3.0.11 added a branch under 20260724_0034 plus the 20260804_0047 merge, and
+# repointed 20260806_0047 from 20260804_0046 onto that merge. 20260806_0047 shipped
+# in v3.0.9, so every database already live had passed it. Alembic only walks
+# forward from the revision a database is on and never applies an ancestor
+# inserted behind it, so the whole branch was recorded as applied and none of its
+# tables were ever created.
+_SPLICE_POINT_REVISION = "20260806_0047"
+_SPLICED_MERGE_REVISION = "20260804_0047"
+_REPAIR_REVISION = "20260819_0056"
+# Created by 20260725_0038 on the spliced branch and widened by 20260815_0054, so a
+# replay interrupted between the two leaves it present and short of head.
+_INTERRUPTED_TABLE = "remote_access_authorizations"
+
+
+def _schema_of(db_path: Path) -> set[tuple[str, str, str]]:
+    with sqlite3.connect(db_path) as conn:
+        return {
+            (str(kind), str(name), re.sub(r"\s+", " ", str(sql or "")).strip())
+            for kind, name, sql in conn.execute(
+                "select type, name, sql from sqlite_master "
+                "where name not like 'sqlite_%' and name != 'alembic_version'"
+            )
+        }
+
+
+def _upgraded_db(db_path: Path, revision: str) -> Path:
+    command.upgrade(migrations.alembic_config(db_path), revision)
+    return db_path
+
+
+def _revisions_the_repair_must_cover() -> list[str]:
+    """Every released revision a database can still be sitting on below the repair.
+
+    Read from the script directory rather than written down, so a revision added
+    after this one is covered without editing the test.
+    """
+
+    script = ScriptDirectory.from_config(migrations.alembic_config())
+    return [
+        revision.revision
+        for revision in script.iterate_revisions(
+            _REPAIR_REVISION, _SPLICE_POINT_REVISION, inclusive=True
+        )
+        if revision.revision != _REPAIR_REVISION
+    ]
+
+
+def test_repair_completes_a_replay_interrupted_between_two_branch_revisions(
+    tmp_path: Path,
+) -> None:
+    # Every branch table being present does not mean the branch was applied. A repair
+    # interrupted after 20260725_0038 recreated the table but before 20260815_0054
+    # replayed leaves all six tables there, that one short of head, and Alembic still
+    # stamped below the repair. Skipping the replay on a table-presence check would
+    # stamp the repair over the short table, and a stamped revision never runs again:
+    # the columns would then be missing for the life of the database.
+    expected = {obj for obj in _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head")) if obj[1] == _INTERRUPTED_TABLE}
+    assert expected, "the interrupted table must exist at head"
+
+    # Take the interrupted shape from the revision that creates it instead of writing
+    # its DDL down here, so this stays the real pre-20260815_0054 table.
+    scratch = _upgraded_db(tmp_path / "scratch.sqlite", _SPLICED_MERGE_REVISION)
+    with sqlite3.connect(scratch) as conn:
+        interrupted_ddl = [
+            str(sql)
+            for (sql,) in conn.execute(
+                "select sql from sqlite_master where tbl_name = ? and sql is not null",
+                (_INTERRUPTED_TABLE,),
+            )
+        ]
+    assert interrupted_ddl
+
+    db_path = _upgraded_db(tmp_path / "interrupted.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = off")
+        conn.execute(f'drop table "{_INTERRUPTED_TABLE}"')
+        for statement in interrupted_ddl:
+            conn.execute(statement)
+        conn.commit()
+    assert not expected <= _schema_of(db_path), "the seeded database must really be short of head"
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    missing = expected - _schema_of(db_path)
+    assert not missing, f"the repair left an interrupted table short of head: {sorted(missing)}"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
+def test_repair_restores_branch_indexes_whose_tables_survived(tmp_path: Path) -> None:
+    # A table is not the unit of interruption; a schema object is. Each branch
+    # revision creates its table and then its index as two statements, so a run
+    # interrupted between them leaves the table present and the index missing --
+    # and a guard covering both reads the table as proof that neither is needed.
+    # That state is exactly the one the repair exists to fix, and it is also the
+    # one where skipping is permanent: the repair stamps, and a stamped revision
+    # never runs again. Derive the objects from the two sides of the merge rather
+    # than naming them, so an index added to the branch later is covered here
+    # without editing the test.
+    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
+    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
+    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+    branch_names = {name for _, name, _ in with_branch} - {name for _, name, _ in without_branch}
+    branch_indexes = {name for kind, name, _ in with_branch if kind == "index"} & branch_names
+    assert branch_indexes, "the spliced branch must own at least one index"
+    expected = {obj for obj in reference if obj[1] in branch_names}
+
+    db_path = _upgraded_db(tmp_path / "indexless.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        for name in sorted(branch_indexes):
+            conn.execute(f'drop index "{name}"')
+        conn.commit()
+    surviving = {name for _, name, _ in _schema_of(db_path)}
+    assert not branch_indexes & surviving, "the seeded database must really be missing the indexes"
+    assert {name for kind, name, _ in with_branch if kind == "table"} & branch_names <= surviving, (
+        "only the indexes may be missing -- a dropped table would let the table guard "
+        "recreate the index and the test would pass without proving anything"
+    )
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+
+    missing = expected - _schema_of(db_path)
+    assert not missing, f"the repair left branch objects short of a fresh install: {sorted(missing)}"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+
+
+def test_replaying_the_branch_over_a_healthy_database_changes_nothing(tmp_path: Path) -> None:
+    # The repair replays unconditionally, so every database that reaches it replays the
+    # branch over a schema that already has it -- including the backfill in
+    # 20260725_0037, which writes rows rather than DDL. That is only safe while every
+    # replayed revision is a no-op against what it finds, so pin exactly that: same
+    # schema, and a row the backfill would otherwise duplicate or overwrite left alone.
+    #
+    # Upgrade to the repair itself rather than to head. The subject here is the replay,
+    # and a later revision is free to change the schema deliberately -- as 20260819_0057
+    # does -- which would otherwise read as the replay having damaged something.
+    db_path = _upgraded_db(tmp_path / "healthy.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "insert into media_objects (token, session_id, kind, source, local_path, created_at) "
+            "values ('tok', 'ses', 'image', 'agent', '/tmp/tok.png', 'created')"
+        )
+        conn.execute(
+            "insert into media_object_references (token, session_id, created_at) "
+            "values ('tok', 'ses', 'original')"
+        )
+        conn.commit()
+    before = _schema_of(db_path)
+
+    command.upgrade(migrations.alembic_config(db_path), _REPAIR_REVISION)
+
+    assert _schema_of(db_path) == before
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select token, session_id, created_at from media_object_references"
+        ).fetchall() == [("tok", "ses", "original")]
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            (_REPAIR_REVISION,)
+        ]
+
+
+def test_repair_refuses_to_stamp_a_schema_it_could_not_restore(tmp_path: Path) -> None:
+    # Two of the replayed revisions return silently when a table they reference is
+    # absent, so "the replay ran" does not mean "the schema is repaired". The repair
+    # must fail rather than record itself as applied over a schema that is still
+    # short: a stamped half-repair can never re-run, and resurfaces later as an
+    # unattributable error at whichever call site touches the missing table.
+    db_path = _upgraded_db(tmp_path / "short.sqlite", "20260817_0055")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("pragma foreign_keys = off")
+        for table in ("media_object_references", "media_objects"):
+            conn.execute(f'drop table if exists "{table}"')
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="left these tables missing: media_object_references"):
+        command.upgrade(migrations.alembic_config(db_path), "head")
+
+    with sqlite3.connect(db_path) as conn:
+        # Still below head, so the next upgrade retries the repair instead of
+        # skipping it forever.
+        assert conn.execute("select version_num from alembic_version").fetchall() == [
+            ("20260817_0055",)
+        ]
+
+
+def test_spliced_branch_schema_is_restored_from_every_released_revision(tmp_path: Path) -> None:
+    # The property: whatever released revision a database is on, upgrading to head
+    # leaves every schema object the spliced branch owns in the shape a fresh install
+    # has. Deriving that set from the two sides of the merge, instead of sharing a
+    # hand-written list with the migration, means a table added to the branch later
+    # cannot fall out of both at once.
+    reference = _schema_of(_upgraded_db(tmp_path / "fresh.sqlite", "head"))
+    without_branch = _schema_of(_upgraded_db(tmp_path / "pre-merge.sqlite", "20260804_0046"))
+    with_branch = _schema_of(_upgraded_db(tmp_path / "merged.sqlite", _SPLICED_MERGE_REVISION))
+
+    # Compare by name: an object's recorded DDL text also varies with the rebuild
+    # path a table took, which says nothing about who created it.
+    branch_names = {name for _, name, _ in with_branch} - {name for _, name, _ in without_branch}
+    branch_tables = {name for kind, name, _ in with_branch if kind == "table"} & branch_names
+    expected = {obj for obj in reference if obj[1] in branch_names}
+    assert branch_tables, "the spliced branch must own at least one table"
+    assert expected, "the branch's objects must survive to head"
+
+    # The repair's postcondition reads a literal tuple, because a migration cannot
+    # learn what its replayed revisions create without running them. Pin that tuple to
+    # two derivations it does not share: the merge boundary above, and the head table
+    # set the rest of the codebase maintains. A table added to the branch later then
+    # fails here, instead of slipping past the postcondition meant to catch it.
+    script = ScriptDirectory.from_config(migrations.alembic_config())
+    declared = set(script.get_revision(_REPAIR_REVISION).module._BRANCH_TABLES)
+    assert declared == branch_tables
+    assert declared <= migrations.HEAD_TABLES
+
+    revisions = _revisions_the_repair_must_cover()
+    assert _SPLICE_POINT_REVISION in revisions
+
+    for seeded in revisions:
+        db_path = tmp_path / f"stuck-{seeded}.sqlite"
+        _upgraded_db(db_path, seeded)
+        # Reproduce the splice rather than the fork: this database reached its
+        # revision under a release where the branch did not exist at all.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("pragma foreign_keys = off")
+            for table in branch_tables:
+                conn.execute(f'drop table if exists "{table}"')
+            conn.execute(
+                "insert into state_meta (key, value_json, updated_at) "
+                "values ('default_agent_name', '\"kept\"', 'before-upgrade')"
+            )
+            conn.commit()
+
+        command.upgrade(migrations.alembic_config(db_path), "head")
+
+        missing = expected - _schema_of(db_path)
+        assert not missing, f"repair left {seeded} short of a fresh install: {sorted(missing)}"
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "select value_json from state_meta where key = 'default_agent_name'"
+            ).fetchone() == ('"kept"',)
+            assert conn.execute("select version_num from alembic_version").fetchall() == [
+                (HEAD_REVISION,)
+            ]
+
+
 def test_message_transcript_order_upgrade_normalizes_and_indexes_exact_time(
     tmp_path: Path,
 ) -> None:
@@ -701,6 +1175,307 @@ def test_session_queue_hold_removal_is_schema_complete_and_reversible(
             "from agent_sessions where id='ses_queue_hold'"
         ).fetchone()
     assert restored == ("open", 1, None)
+
+
+def _column_defaults(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """Every stored column default in the database, keyed by (table, column)."""
+    tables = [
+        row[0]
+        for row in conn.execute(
+            "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+        )
+    ]
+    return {
+        (table, row[1]): row[4]
+        for table in tables
+        for row in conn.execute(f"pragma table_info('{table}')")
+        if row[4] is not None
+    }
+
+
+def _rebuild_every_table(db_path: Path) -> None:
+    """Run the no-op batch rebuild Alembic performs for a SQLite table alteration.
+
+    This leaves the database only good enough to read column defaults back from: batch
+    mode cannot reflect an expression-based index, so rebuilding every table drops the
+    partial and expression indexes this schema uses. Do not reuse it to assert anything
+    about indexes.
+    """
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            operations = Operations(MigrationContext.configure(conn))
+            tables = [
+                row[0]
+                for row in conn.exec_driver_sql(
+                    "select name from sqlite_master where type = 'table' "
+                    "and name not like 'sqlite_%' and name <> 'alembic_version'"
+                )
+            ]
+            for table in tables:
+                with operations.batch_alter_table(
+                    table,
+                    recreate="always",
+                    naming_convention=_MIGRATION_FK_NAMING_CONVENTION,
+                ):
+                    pass
+            conn.commit()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("schema", ["declared", "migrated"])
+def test_no_table_rebuild_can_corrupt_a_column_default(tmp_path: Path, schema: str) -> None:
+    """A table rebuild must preserve every column default, in every table.
+
+    Alembic alters a SQLite column by reflecting the table and recreating it, and
+    reflection hands a server default back as a ``TextClause``. Recompiling one
+    re-reads ``:name`` as a bind parameter, so a default containing a colon is
+    rewritten -- that is how ``20260811_0050`` silently turned
+    ``message_deliveries.delivery_history_json`` into invalid JSON while replacing
+    an unrelated check constraint.
+
+    Asserting over every default in the schema is what makes this durable: the
+    property holds for defaults nobody has written yet, so a colon-bearing default
+    added to any table fails here when it is declared rather than one unrelated
+    rebuild later. Both the declared schema and the migrated one are checked
+    because they are separately authored and can disagree.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    if schema == "declared":
+        engine = create_sqlite_engine(db_path)
+        try:
+            metadata.create_all(engine)
+        finally:
+            engine.dispose()
+    else:
+        run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        before = _column_defaults(conn)
+    assert before, "expected the schema under test to declare column defaults"
+
+    _rebuild_every_table(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        after = _column_defaults(conn)
+    drifted = {
+        key: (before.get(key), after.get(key))
+        for key in before.keys() | after.keys()
+        if before.get(key) != after.get(key)
+    }
+    assert drifted == {}
+
+
+def test_head_column_defaults_satisfy_their_own_table_constraints(tmp_path: Path) -> None:
+    """A defaulted column must accept an insert that omits it.
+
+    The whole point of a server default is that a writer may leave the column out,
+    so a default the table's own constraints reject is a broken column. This is the
+    reachable half of the ``delivery_history_json`` defect: the corrupted default was
+    not valid JSON, and ``ck_message_deliveries_history_json`` refused every insert
+    that relied on it.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_defaults")
+        _insert_agent_session(
+            conn,
+            row_id="ses_defaults",
+            scope_id="scope_defaults",
+            anchor="defaults",
+            workdir=None,
+            backend="codex",
+            native="native-defaults",
+            last_active="now",
+        )
+        conn.execute(
+            "insert into message_deliveries ("
+            "id, session_id, priority, state, snapshot_sha256, dispatch_sha256, "
+            "submitted_at, updated_at"
+            ") values ('md_defaults', 'ses_defaults', 'p1', 'queued', 'h', 'h', 'now', 'now')"
+        )
+        stored = conn.execute(
+            "select delivery_history_json from message_deliveries where id = 'md_defaults'"
+        ).fetchone()[0]
+        conn.commit()
+
+    assert json.loads(stored) == {"version": 1, "events": []}
+
+
+def test_delivery_history_default_repair_preserves_rows_and_reverses(tmp_path: Path) -> None:
+    """0057 changes that one default and nothing else, over data and back.
+
+    The repair rebuilds a table four others reference, so the rows that already
+    exist are the thing at risk. One row of each shape a real database can hold is
+    seeded -- a reference-clean row, and one whose parent is missing, because SQLite
+    enforces foreign keys only when a connection asks it to and ``20260819_0056``
+    exists to repair databases that are already damaged. Refusing to upgrade over
+    pre-existing damage would pin such an install below head for a reason this
+    revision did not cause.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260819_0056")
+
+    history = json.dumps({"version": 1, "events": [{"kind": "queued"}]})
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "scope_history")
+        _insert_agent_session(
+            conn,
+            row_id="ses_history",
+            scope_id="scope_history",
+            anchor="history",
+            workdir=None,
+            backend="codex",
+            native="native-history",
+            last_active="now",
+        )
+        for row_id, session_id in (("md_clean", "ses_history"), ("md_orphan", "ses_missing")):
+            conn.execute(
+                "insert into message_deliveries ("
+                "id, session_id, priority, state, snapshot_sha256, dispatch_sha256, "
+                "submitted_at, updated_at, delivery_history_json"
+                ") values (?, ?, 'p1', 'queued', 'h', 'h', 'now', 'now', ?)",
+                (row_id, session_id, history),
+            )
+        conn.commit()
+        seeded = _schema_fingerprint(conn)
+        rows_before = _delivery_rows(conn)
+
+    # The check the corrupted default violates is the reason this repair exists, so
+    # prove the fingerprint actually captured it: a comparison over a set that silently
+    # came out empty would hold no matter what the rebuild did.
+    assert "ck_message_deliveries_history_json" in " ".join(
+        seeded["constraints"]["message_deliveries"]
+    )
+
+    run_migrations(db_path, revision="20260819_0057")
+    with sqlite3.connect(db_path) as conn:
+        upgraded = _schema_fingerprint(conn)
+        assert _delivery_rows(conn) == rows_before
+        assert conn.execute("select version_num from alembic_version").fetchone() == (
+            "20260819_0057",
+        )
+    # Only that one column's default may differ -- every other column, constraint,
+    # index, and table in the database is untouched. Later revisions (0058+) are
+    # a different change and have their own round-trip tests; pinning here keeps
+    # 0057's invariant from absorbing them.
+    assert _fingerprint_difference(seeded, upgraded) == {
+        ("message_deliveries", "delivery_history_json")
+    }
+
+    command.downgrade(migrations.alembic_config(db_path), "20260819_0056")
+    with sqlite3.connect(db_path) as conn:
+        assert _schema_fingerprint(conn) == seeded
+        assert _delivery_rows(conn) == rows_before
+
+
+def _delivery_rows(conn: sqlite3.Connection) -> list[tuple[object, ...]]:
+    return conn.execute(
+        "select id, session_id, delivery_history_json from message_deliveries order by id"
+    ).fetchall()
+
+
+def _schema_fingerprint(conn: sqlite3.Connection) -> dict[str, object]:
+    """Column shapes, table constraints, indexes, and foreign keys, whole database.
+
+    Constraints are compared as sets rather than as DDL text because a batch rebuild
+    re-emits them in reflection order, which is not the order they were written in.
+    """
+    tables = sorted(
+        row[0]
+        for row in conn.execute(
+            "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+        )
+    )
+    columns = {
+        (table, row[1]): tuple(row[2:6])
+        for table in tables
+        for row in conn.execute(f"pragma table_info('{table}')")
+    }
+    constraints = {
+        table: {
+            re.sub(r"\s+", " ", item)
+            for item in _split_table_constraints(
+                conn.execute(
+                    "select sql from sqlite_master where type = 'table' and name = ?",
+                    (table,),
+                ).fetchone()[0]
+            )
+        }
+        for table in tables
+    }
+    others = {
+        (row[0], row[1]): re.sub(r"\s+", " ", row[2] or "")
+        for row in conn.execute(
+            "select type, name, sql from sqlite_master "
+            "where type <> 'table' and name not like 'sqlite_%'"
+        )
+    }
+    foreign_keys = {
+        table: sorted(tuple(row[2:]) for row in conn.execute(f"pragma foreign_key_list('{table}')"))
+        for table in tables
+    }
+    return {
+        "columns": columns,
+        "constraints": constraints,
+        "others": others,
+        "foreign_keys": foreign_keys,
+    }
+
+
+_TABLE_CONSTRAINT_KEYWORDS = ("constraint", "check", "foreign", "primary", "unique")
+
+
+def _split_table_constraints(sql: str) -> list[str]:
+    """Table-level constraints declared in a CREATE TABLE body.
+
+    Column definitions are deliberately dropped: ``pragma table_info`` reports column
+    shape exactly, so parsing it out of the DDL text again would only add a second,
+    weaker reading of the same fact. A plain ``split(",")`` also cannot do this --
+    ``check (state in ('a','b'))`` puts commas inside parentheses and a default like
+    ``'{"a":1,"b":2}'`` puts one inside a string literal -- so both are tracked.
+    """
+    body = sql[sql.index("(") + 1 : sql.rindex(")")]
+    items: list[str] = []
+    depth = 0
+    quoted = False
+    current: list[str] = []
+    for char in body:
+        if char == "'":
+            # SQLite escapes a quote by doubling it, which this toggle handles: the
+            # second quote of '' re-enters the literal.
+            quoted = not quoted
+        elif not quoted and char == "(":
+            depth += 1
+        elif not quoted and char == ")":
+            depth -= 1
+        if char == "," and depth == 0 and not quoted:
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    items.append("".join(current).strip())
+    return [
+        item
+        for item in items
+        if item.split(" ", 1)[0].lower() in _TABLE_CONSTRAINT_KEYWORDS
+    ]
+
+
+def _fingerprint_difference(
+    before: dict[str, object], after: dict[str, object]
+) -> set[tuple[str, str]]:
+    """(table, column) pairs whose shape changed; raises if anything else did."""
+    for key in ("constraints", "others", "foreign_keys"):
+        assert before[key] == after[key], f"{key} changed"
+    before_columns = before["columns"]
+    after_columns = after["columns"]
+    assert before_columns.keys() == after_columns.keys()
+    return {key for key in before_columns if before_columns[key] != after_columns[key]}
 
 
 def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
@@ -4128,7 +4903,7 @@ def test_run_migrations_backfills_existing_session_policy_only_for_targeted_defi
         # migration. Current metadata has already replaced the 0004-era
         # ``show_pages.visibility`` shape, so remove the future tables instead of
         # presenting 0004 with an impossible hybrid schema.
-        conn.execute("drop table show_page_authorized_emails")
+        conn.execute("drop table show_page_access_entries")
         conn.execute("drop table show_pages")
         conn.execute("update run_definitions set session_policy = null")
         conn.execute(
@@ -4982,6 +5757,11 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
     _write_discovered_chats(state_dir / "discovered_chats.json")
 
     first = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    # Drop the process-local "already ensured" result so the second call really
+    # replays the pipeline against the migrated database, the way the next
+    # process to start will. Without the reset this would assert the
+    # short-circuit (covered separately) instead of re-run idempotence.
+    reset_ensured_sqlite_state()
     second = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
 
     assert first.imported is True
@@ -5066,6 +5846,79 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
             "background_runs_imported",
         }
     }
+
+
+def test_ensure_sqlite_state_short_circuits_after_first_success(
+    tmp_path: Path, monkeypatch, hold_migration_lock_elsewhere
+) -> None:
+    # Callers put ensure_sqlite_state in front of ordinary operations (a login,
+    # a read-only query, a skill delete), so a repeat call must cost nothing.
+    # Re-running the pipeline per request serialized unrelated work on the
+    # cross-process migration lock and turned transient SQLite contention into a
+    # failed login (page: error=oauth_exchange_failed reason=OperationalError).
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "vibe.sqlite"
+
+    first = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+
+    migrations_run = 0
+    real_run_migrations = importer.run_migrations
+
+    def counting_run_migrations(*args, **kwargs):
+        nonlocal migrations_run
+        migrations_run += 1
+        return real_run_migrations(*args, **kwargs)
+
+    monkeypatch.setattr(importer, "run_migrations", counting_run_migrations)
+
+    # An already-held migration lock is exactly the contention that failed the
+    # login, and only another thread can hold it against this one: the lock is
+    # re-entrant per path and thread, so taking it here would let the repeat call
+    # take it again and pass whether or not it short-circuits. The call runs on
+    # its own thread for the same reason the wait behind that lock is unbounded --
+    # a regression has to fail this test rather than hang it.
+    outcome: list = []
+
+    def repeat_call() -> None:
+        outcome.append(
+            ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+        )
+
+    with hold_migration_lock_elsewhere(migration_lock_path_for(db_path)):
+        caller = threading.Thread(target=repeat_call, daemon=True)
+        caller.start()
+        caller.join(30)
+        assert not caller.is_alive(), "the repeat call queued behind the held migration lock"
+
+    assert outcome, "the repeat call raised instead of short-circuiting"
+    second = outcome[0]
+    assert second is first
+    assert migrations_run == 0
+
+    # The guard is per target, not process-global: a different home still migrates.
+    other_state_dir = tmp_path / "other"
+    other_state_dir.mkdir()
+    other = ensure_sqlite_state(
+        db_path=other_state_dir / "vibe.sqlite",
+        state_dir=other_state_dir,
+        primary_platform="slack",
+    )
+    assert other.db_path != first.db_path
+    assert migrations_run == 1
+
+    # Both homes are migrated now, so nothing on disk distinguishes them any
+    # more -- only the key does. A memo that is not per target would hand the
+    # first home's caller the second home's report, with the wrong db_path and
+    # the wrong counts, and no call would ever notice.
+    assert ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack") is first
+    assert migrations_run == 1
+
+    # A database that disappeared is no longer ensured, whatever we remember.
+    for suffix in ("", "-wal", "-shm"):
+        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+    ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    assert migrations_run == 2
 
 
 def test_ensure_sqlite_state_collapses_multi_backend_anchor_on_import(tmp_path: Path) -> None:
@@ -5185,6 +6038,11 @@ def test_ensure_sqlite_state_preserves_backend_aliases_without_deprecated_backen
         conn.commit()
 
     first = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
+    # Drop the process-local "already ensured" result so the second call really
+    # replays the pipeline against the migrated database, the way the next
+    # process to start will. Without the reset this would assert the
+    # short-circuit (covered separately) instead of re-run idempotence.
+    reset_ensured_sqlite_state()
     second = ensure_sqlite_state(db_path=db_path, state_dir=state_dir, primary_platform="slack")
 
     with sqlite3.connect(db_path) as conn:
@@ -5734,7 +6592,21 @@ def _write_discovered_chats(path: Path) -> None:
     )
 
 
-def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_path: Path) -> None:
+def test_media_reference_migration_derives_no_rows_from_existing_data(tmp_path: Path) -> None:
+    """The revision creates the table. Nothing in the graph reads history to fill it.
+
+    Seeded with one row of every shape the removed backfill consumed -- a media object
+    carrying its own minting session, and an agent message in a *second* session linking
+    that token -- and asserting the table comes out empty, rather than asserting two
+    named rows are absent. A shape the scan would have matched cannot pass by going
+    unlisted.
+
+    Nothing replaced it, because the read path already covers what it wrote:
+    media_service.register() records the reference when a token is minted or reused, and
+    vibe/ui_server.py falls back to the media row's own session and scope when the
+    reference set is empty, so a legacy attachment stays readable by the session that
+    minted it either way.
+    """
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260725_0035")
     now = "2026-07-25T00:00:00Z"
@@ -5800,10 +6672,7 @@ def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_pat
         )
         version = conn.execute("select version_num from alembic_version").fetchone()
 
-    assert references == {
-        ("legacy-shared-token", "ses_media_original"),
-        ("legacy-shared-token", "ses_media_reuse"),
-    }
+    assert references == set()
     assert version == (HEAD_REVISION,)
 
 
@@ -5855,3 +6724,79 @@ def test_run_migrations_upgrades_released_0030_to_acl_head(tmp_path: Path) -> No
         )
         assert "resource_access_policies" in tables
         assert "resource_access_groups" in tables
+
+
+def _initial_era_db(db_path: Path, tables: Iterable[str], stamp: str = migrations.INITIAL_REVISION) -> Path:
+    """A database stamped at ``stamp`` carrying ``tables``, each holding one row.
+
+    The tables are placeholders on purpose. What decides whether the reset below fires is
+    which names are present and what the stamp says, so a faithful copy of any particular
+    release's DDL would only make the fixture look more specific than the thing it tests.
+    The rows are there so a drop is visible as lost data rather than as a lost empty shell.
+    """
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table alembic_version (version_num varchar(32) not null)")
+        conn.execute("insert into alembic_version (version_num) values (?)", (stamp,))
+        for table in tables:
+            conn.execute(f'create table "{table}" (id text primary key)')
+            conn.execute(f'insert into "{table}" (id) values (?)', (f"row-of-{table}",))
+        conn.commit()
+    return db_path
+
+
+def _surviving_tables(db_path: Path) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        names = [
+            str(name)
+            for (name,) in conn.execute(
+                "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'"
+            )
+        ]
+        return {name: conn.execute(f'select count(*) from "{name}"').fetchone()[0] for name in names}
+
+
+@pytest.mark.parametrize("absent", sorted(migrations.INITIAL_TABLES))
+def test_the_initial_drift_reset_never_touches_a_released_database(tmp_path: Path, absent: str) -> None:
+    """A database carrying only released tables is not drift, however incomplete it is.
+
+    The reset only runs at all once INITIAL_TABLES is not a subset of what the database
+    carries, which sounds like a shape no release ships and is not: the initial migration
+    has gained tables since it was first released, so a database from an older release is
+    stamped at INITIAL_REVISION and short of today's set. That is a released database, and
+    the reset dropping `scopes` and the stamp out of it is what made every v2.3-era
+    upgrade abort. The cases come from INITIAL_TABLES itself, so a table added to it later
+    is covered without editing this test, and one absence is the general case because the
+    reset decides once for the database and then drops table by table.
+    """
+
+    present = sorted(migrations.INITIAL_TABLES - {absent})
+    db_path = _initial_era_db(tmp_path / f"without-{absent}.sqlite", present)
+    before = _surviving_tables(db_path)
+
+    migrations._reset_unreleased_initial_schema_drift(db_path)
+
+    assert _surviving_tables(db_path) == before
+
+
+@pytest.mark.parametrize("drifted", migrations.UNRELEASED_ONLY_INITIAL_TABLES)
+def test_the_initial_drift_reset_still_clears_an_unreleased_database(tmp_path: Path, drifted: str) -> None:
+    """Every table the reset treats as evidence of an unreleased build has to be evidence.
+
+    Parametrized over the list the reset reads rather than over a sample of it, so a member
+    that stops firing -- or a list narrowed until nothing does -- fails here instead of
+    leaving a dev database to be upgraded as if it were a released one. Seeded with a
+    released database's tables as well, because the drifted shape carries both and the
+    reset is meant to clear it regardless.
+    """
+
+    db_path = _initial_era_db(
+        tmp_path / f"drifted-{drifted}.sqlite",
+        [*sorted(migrations.INITIAL_TABLES - {"agents"}), drifted],
+    )
+
+    migrations._reset_unreleased_initial_schema_drift(db_path)
+
+    surviving = _surviving_tables(db_path)
+    assert drifted not in surviving
+    assert "alembic_version" not in surviving

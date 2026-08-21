@@ -257,6 +257,39 @@ describe('archived Agent display names', () => {
   });
 });
 
+describe('nonterminal Agent output', () => {
+  it('keeps Agent identity but uses the muted boundary presentation', () => {
+    for (const message of [
+      { ...agentWithQuickReplies(), type: 'output', content: {} },
+      { ...agentWithQuickReplies(), type: 'result', content: {}, metadata: { detached: true } },
+    ] as WorkbenchMessage[]) {
+      const markup = render(
+        <MessageRow message={message} session={session()} messageFontSize={13} />,
+      );
+
+      expect(markup).toContain('lucide-bot');
+      expect(markup).toContain('bg-foreground/[0.03]');
+      expect(markup).not.toContain('bg-mint/[0.09]');
+    }
+  });
+
+  it('keeps a detached backend failure in the status presentation', () => {
+    const message = {
+      ...agentWithQuickReplies(),
+      type: 'notify',
+      content: {},
+      metadata: { detached: true, event: 'backend_failure' },
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={message} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('lucide-bell');
+    expect(markup).toContain('bg-gold/[0.08]');
+    expect(markup).not.toContain('lucide-bot');
+  });
+});
+
 // ── Codex review #3 (ChatPage.tsx:2540) ───────────────────────────────────────
 // The previous round kept the Show Page toggle and the Share control on the
 // theory that the store already refuses archived mutations. That is the
@@ -946,6 +979,22 @@ describe('agent-authored local file links', () => {
     expect(routeMarkup).not.toContain('data-local-file-link');
     expect(routeMarkup).toContain('href="/apps/files"');
     expect(routeMarkup).toContain('target="_blank"');
+  });
+
+  it('opens Workbench chat routes in the current document', () => {
+    const props = {
+      session: session({ workdir: '/workspace/project' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const chatMessage = {
+      ...linkedMessage('agent'),
+      text: '[open chat](/chat/session-456)',
+    } as WorkbenchMessage;
+    const markup = render(<MessageRow {...props} message={chatMessage} />);
+    expect(markup).toContain('href="/chat/session-456"');
+    expect(markup).not.toContain('target="_blank"');
+    expect(markup).not.toContain('data-local-file-link');
   });
 
   it('lets the outer local link own clicks for a linked local image', () => {

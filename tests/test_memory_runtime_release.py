@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -85,6 +86,55 @@ def test_memory_runtime_health_home_uses_a_short_canonical_root(
         assert health_home.parent == Path("/tmp").resolve(strict=True)
         assert health_home == health_home.resolve(strict=True)
         assert len(os.fsencode(socket_path)) < 104
+
+
+def test_memory_runtime_sidecar_smoke_claims_its_provider_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[str] = []
+
+    def capture_run(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        captured.extend(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runtime_builder.subprocess, "run", capture_run)
+
+    runtime_builder._sidecar_health_smoke(
+        Path(sys.executable),
+        effective_home=tmp_path,
+    )
+
+    assert captured[4:] == [str(sys.executable), str(tmp_path), EVEROS_VERSION]
+    tree = ast.parse(captured[3])
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    process_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name) and call.func.id == "EverOSProcess"
+    )
+    ensure_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "ensure"
+    )
+    guard = next(
+        keyword.value
+        for keyword in process_call.keywords
+        if keyword.arg == "provider_root_guard"
+    )
+    assert ast.unparse(ensure_call.func.value) == "provider_root"
+    assert ensure_call.lineno < process_call.lineno
+    assert isinstance(guard, ast.Lambda)
+    assert isinstance(guard.body, ast.Call)
+    assert isinstance(guard.body.func, ast.Attribute)
+    assert ast.unparse(guard.body.func.value) == "provider_root"
+    assert guard.body.func.attr == "require_owned"
+    assert [ast.unparse(argument) for argument in guard.body.args] == [
+        "provider_root_meta",
+        "provider_root_metadata",
+    ]
 
 
 def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:

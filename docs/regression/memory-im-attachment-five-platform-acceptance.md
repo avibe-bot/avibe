@@ -280,9 +280,10 @@ Decision:
   forwards, or snapshots.
 - Claiming WeChat bot/self/system exclusion before the raw shapes prove a stable
   discriminator. This checklist exercises only the ordinary human baseline.
-- Capturing SVG, Office/iWork/ODF/RTF documents, or other extensions excluded by
-  `core/memory/modality.py::SUPPORTED_ATTACHMENT_EXTENSIONS`. WeChat video may
-  reach shared admission, but video processing is not enabled by this acceptance.
+- Capturing SVG or video. Office/iWork/ODF/RTF documents are in the live
+  allowlist only when the regression host has LibreOffice; this checklist still
+  uses SVG as the rejected sibling. WeChat video may reach shared admission, but
+  video processing is not enabled by this acceptance.
 - Group/channel, unbound, edited, forwarded, webhook, or system-message Memory
   capture, and bot-authored capture on platforms with verified source facts.
   Quoted/replied-to traffic is unverified and out of scope rather than claimed

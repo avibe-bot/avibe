@@ -168,9 +168,15 @@ def test_onboarding_preserves_existing_acl_revision(monkeypatch, tmp_path) -> No
     store = VibeAgentStore()
     try:
         agent = store.create(name="revisioned", backend="codex")
-        editor_context = _organization_context(subject="editor-1", instance_role="editor")
-        with pytest.raises(VibeAgentAccessError):
-            store.organization_onboarding_inventory(user_context=editor_context)
+        # Bulk onboarding claims every policy-less Agent under the caller, so it
+        # is Owner-only. Seed every non-Owner role rather than naming one, so a
+        # role added later is covered here without editing this test.
+        for role in ("viewer", "editor", "member"):
+            context = _organization_context(subject=f"{role}-1", instance_role=role)
+            with pytest.raises(VibeAgentAccessError):
+                store.organization_onboarding_inventory(user_context=context)
+            with pytest.raises(VibeAgentAccessError):
+                store.onboard_organization_agents(user_context=context)
 
         store.onboard_organization_agents(user_context=_organization_context())
         _apply_agent_intent(
