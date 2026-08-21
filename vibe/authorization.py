@@ -474,12 +474,20 @@ _MEMBER_HTTP_RULES = tuple(
     for method, pattern in (
         # can_manage_agents: Agent CRUD. /api/agents/default and
         # /api/agent-onboarding are instance-wide and stay Owner by default.
+        #
+        # ``/api/agent/<name>/install`` is absent on purpose, and so is its job
+        # status sibling: the handler runs a package manager, a self-update, or a
+        # curl script on the host, persists the resulting CLI path, and may
+        # restart the backend. That is the "dependency installs" bullet above --
+        # host lifecycle, not Agent CRUD -- and it reached member only because
+        # this table was written by hand while the policy sat in a comment. There
+        # is no owner exception listed for it because none is needed: an absent
+        # route keeps the role it had before the member rank existed, which is
+        # Owner.
         ("POST", r"^/api/agents$"),
         ("PATCH", r"^/api/agents/[^/]+$"),
         ("DELETE", r"^/api/agents/[^/]+$"),
         ("POST", r"^/api/agents/import$"),
-        ("POST", r"^/api/agent/[^/]+/install$"),
-        ("GET", r"^/api/agent/[^/]+/install/[^/]+$"),
         # can_manage_agents: selecting among already-authenticated model sources.
         # Adding or re-authenticating a source is credential work and stays Owner.
         ("GET", r"^/api/models/agents$"),

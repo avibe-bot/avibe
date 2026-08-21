@@ -814,6 +814,96 @@ def test_registered_access_administration_routes_are_owner_only(monkeypatch, tmp
                 assert response.get_json()["error"] == "instance_access_forbidden"
 
 
+def test_agent_cli_install_is_owner_only(monkeypatch, tmp_path) -> None:
+    """Installing a backend CLI is host lifecycle, so it stays above member.
+
+    The handler shells out to a package manager, a self-update, or a curl
+    script, records the resulting CLI path, and can restart the backend. That is
+    the "dependency installs" bullet the member policy declares Owner, and it
+    had been on the member allow-list while the comment above that table said
+    otherwise -- the table is hand-written, so the policy and its entries can
+    disagree silently.
+
+    Enforcement is by absence: neither route is declared, so both inherit the
+    unknown-route Owner default and need no exception entry. Asserting the
+    absence *and* the 403 it produces keeps those two from drifting apart, and
+    the owner leg proves the routes are still live rather than unreachable for
+    everyone. The install implementation is stubbed, so no package manager runs
+    and the assertion at the end is what proves it: only the owner leg ever
+    reached the handler.
+    """
+
+    from tests.ui_server_test_helpers import (
+        csrf_headers,
+        remote_peer,
+        remote_session_cookie,
+        save_config,
+    )
+    from vibe import api, remote_access
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = save_config(tmp_path)
+
+    reached: list[tuple[str, str]] = []
+
+    def _start(name: str) -> dict:
+        reached.append(("start", name))
+        return {"ok": True, "job_id": "job-1", "backend": name, "status": "running"}
+
+    def _status(job_id: str, *, backend: str) -> dict:
+        reached.append(("status", job_id))
+        return {"ok": True, "job_id": job_id, "backend": backend, "status": "success"}
+
+    monkeypatch.setattr(api, "start_agent_install_job", _start)
+    monkeypatch.setattr(api, "get_agent_install_job", _status)
+
+    routes = (
+        ("POST", "/api/agent/claude/install"),
+        ("GET", "/api/agent/claude/install/job-1"),
+    )
+    for method, path in routes:
+        assert not any(
+            rule_method == method and pattern.fullmatch(path)
+            for rule_method, pattern in _MEMBER_HTTP_RULES
+        ), f"{method} {path} must not be declared on the member allow-list"
+        assert http_authorization_policy(method, path).minimum_role == "owner", f"{method} {path}"
+
+    for role in ("viewer", "editor", "member", "owner"):
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(
+                config,
+                f"{role}@example.com",
+                f"{role}-1",
+                role=role,
+                access_source="email" if role != "owner" else "owner",
+            ),
+            domain="alex.avibe.bot",
+        )
+        headers = csrf_headers(client, base_url="https://alex.avibe.bot")
+        for method, path in routes:
+            kwargs = {
+                "headers": headers,
+                "base_url": "https://alex.avibe.bot",
+                "environ_base": remote_peer(),
+            }
+            if method != "GET":
+                kwargs["json"] = {}
+            response = client.request(method, path, **kwargs)
+            if role == "owner":
+                assert response.status_code == 200, f"{role} {method} {path}"
+                assert response.get_json()["ok"] is True, f"{role} {method} {path}"
+            else:
+                assert response.status_code == 403, f"{role} {method} {path}"
+                assert response.get_json()["error"] == "instance_access_forbidden"
+
+    assert reached == [("start", "claude"), ("status", "job-1")], (
+        "only the owner leg may reach the install handler"
+    )
+
+
 def test_access_administration_handlers_gate_without_the_route_policy(monkeypatch, tmp_path) -> None:
     """The handler gate stands on its own, not only the route policy table.
 
