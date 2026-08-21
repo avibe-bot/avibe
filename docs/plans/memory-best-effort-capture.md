@@ -151,13 +151,20 @@ Suggested starting constants, fixed rather than user settings:
   error classified uncommitted)
 - do not retry timeout, truncated response, malformed success, or any
   result that may have committed
-- idle flush: 60s
-- max unflushed age: 5 minutes
+- idle flush: 5 minutes (`SessionFlushCoordinator.IDLE_FLUSH_TIMEOUT`)
+- max unflushed age: 30 minutes (`MAX_UNFLUSHED_AGE`)
+- message-count flush: 100 (`MAX_UNFLUSHED_MESSAGES`)
 - process-local duplicate LRU: 256 source-message digests
+
+These flush timers are recall-freshness, not durability. An `accumulated`
+add is already in EverOS `unprocessed_buffer`. Speeding them up is not
+required for this cut.
 
 `extracted` drops pending flush state for that provider session.
 `accumulated` refreshes one in-memory `PendingFlush(session_ref,
-first_accumulated_at, last_accumulated_at)`.
+first_accumulated_at, last_accumulated_at)`. The pending table does not
+survive process restart; EverOS still holds the buffer until a later
+same-session add, Repair, or provider extraction.
 
 Worker generation increments on disable, shutdown, Reset/Clear, and
 runtime-affecting configuration replacement. The old worker is cancelled,
@@ -448,7 +455,8 @@ Do not ship those doc edits in this planning PR.
 - One worker preserves accepted-item order globally.
 - At most three total attempts, and only for uncommitted failures.
 - Timeout / unknown / truncated success is not retried.
-- `accumulated` schedules idle and max-age flush in memory.
+- `accumulated` schedules idle (5m), max-age (30m), and
+  message-count (100) flush in memory, matching today's coordinator.
 - `extracted` removes pending flush.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
