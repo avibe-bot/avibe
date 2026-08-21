@@ -311,7 +311,9 @@ Source-of-truth rule:
 ## 9. Release Notes
 
 - tags follow the latest version number +1 (for example `v1.0.1` -> `v1.0.2`)
-- before publishing a release, explicitly decide whether the version should notify users; add `<!-- avibe:update-notification=none -->` to the GitHub Release body when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The legacy `vibe-remote` marker is still parsed for compatibility.
+- before publishing a release, explicitly decide whether the version should notify users; put `<!-- avibe:update-notification=none -->` in the annotated tag message when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The workflow emits both the current and legacy `vibe-remote` markers into the GitHub Release body for installed-client compatibility.
+- for an official `v*` release, the annotated tag is the operator's only release-state input: put silent-update intent in the tag annotation, push the tag, and do not pre-create or manually edit a GitHub Release
+- the official workflows stage assets and generated notes in a Draft; `Release (AI Notes)` may update notes but never publishes. The `Publish to PyPI` workflow is the single finalizer: it verifies the exact notes run, publishes the asset-complete GitHub Release, and only then allows PyPI publication so package manifests never point at private Draft assets
 - GitHub-only pre-releases should use the `gh-vX.Y.ZrcN` format (for example `gh-v2.2.8rc2`) so they stay distinct from PyPI-triggering `v*` tags
 - GitHub-only pre-releases must include installable artifacts in the GitHub release assets: a wheel built with `ui/dist` and bundled `vibe/show_runtime/*.tgz`, plus the sdist
 - releases are published automatically by workflow after tagging/push

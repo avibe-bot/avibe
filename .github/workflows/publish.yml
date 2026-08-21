@@ -20,9 +20,15 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       publish_legacy: ${{ steps.tag.outputs.publish_legacy }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      source_sha: ${{ steps.tag.outputs.source_sha }}
+      workflow_branch: ${{ steps.tag.outputs.workflow_branch }}
+      workflow_sha: ${{ steps.tag.outputs.workflow_sha }}
     steps:
       - name: Resolve tag
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -41,8 +47,32 @@ jobs:
             PUBLISH_LEGACY="true"
           fi
 
+          PRERELEASE="false"
+          if [[ "$TAG" == *-* ]]; then
+            PRERELEASE="true"
+          elif [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+)*(([.-])?(a|b|rc|dev)[0-9]+)$ ]]; then
+            PRERELEASE="true"
+          fi
+
+          SOURCE_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/$TAG" --jq '.sha')"
+          if [ -z "$SOURCE_SHA" ]; then
+            echo "Could not resolve source commit for $TAG" >&2
+            exit 1
+          fi
+
+          WORKFLOW_BRANCH="$GITHUB_REF_NAME"
+          WORKFLOW_SHA="$GITHUB_SHA"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            WORKFLOW_BRANCH="$TAG"
+            WORKFLOW_SHA="$SOURCE_SHA"
+          fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "publish_legacy=$PUBLISH_LEGACY" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "workflow_branch=$WORKFLOW_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
   resolve-show-runtime-ref:
     runs-on: ubuntu-latest
@@ -335,26 +365,25 @@ jobs:
             tests/e2e/test_upgrade_command.py \
             -v
 
+      - name: Checkout release automation
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
+          path: release-automation
+          sparse-checkout: scripts/github_release.py
+          sparse-checkout-cone-mode: false
+
       - name: Upload GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           TAG="${{ needs.resolve-tag.outputs.tag }}"
-          PRERELEASE="false"
-          if [[ "$TAG" == *-* ]]; then
-            PRERELEASE="true"
-          elif [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+)*(([.-])?(a|b|rc|dev)[0-9]+)$ ]]; then
-            PRERELEASE="true"
-          fi
-
-          if ! gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            ARGS=(release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --notes "Release assets for $TAG.")
-            if [ "$PRERELEASE" = "true" ]; then
-              ARGS+=(--prerelease)
-            fi
-            gh "${ARGS[@]}" || gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null
-          fi
+          python release-automation/scripts/github_release.py ensure-draft \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --title "$TAG" \
+            --notes "Release assets for $TAG."
 
           # Runtime archives + manifests are IMMUTABLE per tag and must NOT be
           # re-clobbered. Builds are normalized and pinned, but the wheel published
@@ -402,7 +431,9 @@ jobs:
           path: dist/
 
   publish-avibe-os:
-    needs: build
+    needs:
+      - build
+      - finalize-github-release
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -431,6 +462,7 @@ jobs:
     needs:
       - resolve-tag
       - build
+      - finalize-github-release
     if: needs.resolve-tag.outputs.publish_legacy == 'true'
     runs-on: ubuntu-latest
     # PyPI trusted publishers issue project-scoped tokens for the exact OIDC
@@ -459,3 +491,50 @@ jobs:
           skip-existing: true
         # Uses trusted publishing (OIDC), no API token needed
         # Configure at: https://pypi.org/manage/project/vibe-remote/settings/publishing/
+
+  finalize-github-release:
+    needs:
+      - resolve-tag
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ needs.resolve-tag.outputs.workflow_sha }}
+
+      - name: Wait for exact-source release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/github_release.py wait-notes \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "${{ needs.resolve-tag.outputs.tag }}" \
+            --workflow release_ai.yml \
+            --branch "${{ needs.resolve-tag.outputs.workflow_branch }}" \
+            --run-sha "${{ needs.resolve-tag.outputs.workflow_sha }}" \
+            --source-sha "${{ needs.resolve-tag.outputs.source_sha }}" \
+            --event "${{ github.event_name }}" \
+            --timeout 3600 \
+            --interval 15
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          LATEST_MODE="preserve"
+          if [ "${{ needs.resolve-tag.outputs.prerelease }}" = "true" ]; then
+            LATEST_MODE="false"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            LATEST_MODE="true"
+          fi
+
+          python scripts/github_release.py finalize \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "${{ needs.resolve-tag.outputs.tag }}" \
+            --prerelease "${{ needs.resolve-tag.outputs.prerelease }}" \
+            --latest "$LATEST_MODE"
