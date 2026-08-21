@@ -310,11 +310,8 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("GET", "/api/show-pages/session-1"),
         # Read-only model catalogs behind Chat's route picker and the Agents
         # detail panel. Editor-tier because the picker is an editor surface.
-        # OpenCode is here through its model-only projection; the Settings
-        # provider catalog it is projected from stays Owner (see below).
         ("GET", "/api/claude/models"),
         ("GET", "/api/codex/models"),
-        ("GET", "/api/backend/opencode/models"),
     )
     for method, path in editor_examples:
         assert http_authorization_policy(method, path).minimum_role == "editor", path
@@ -367,16 +364,17 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("POST", "/api/logs"),
         # Classifying the read-only catalogs above does not widen /api/backend:
         # credential, custom-provider, install, and runtime routes keep Owner by
-        # the unknown-route default. That includes the Settings provider catalog
-        # itself -- reading it discloses base URLs, masked API keys, the active
-        # auth type, and the tool-call permission setting.
+        # the unknown-route default. That includes OpenCode's provider catalog --
+        # it is the Settings surface (base URLs, masked keys, active auth type,
+        # tool-call permission state) and reading it starts the daemon, so unlike
+        # the Claude and Codex snapshots it is not a catalog a lower rank may
+        # read. The model picker treats its 403 as "no catalog".
         ("GET", "/api/backend/opencode/providers"),
         ("POST", "/api/backend/codex/auth"),
         ("POST", "/api/backend/claude/auth"),
         ("POST", "/api/backend/opencode/auth"),
         ("DELETE", "/api/backend/opencode/auth/anthropic"),
         ("POST", "/api/backend/opencode/providers"),
-        ("POST", "/api/backend/opencode/models"),
         ("POST", "/api/backend/opencode/future-mutation"),
         ("POST", "/api/claude/models/refresh"),
         ("POST", "/api/codex/future-mutation"),
@@ -477,7 +475,13 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
     default. The property is stated over the ranks rather than over a list of
     fixed cases: whoever can reach the surface can complete its load. Chat's
     route picker shares the catalog loader and is an editor surface, so editor is
-    the floor for those three; the rest of the page is member management.
+    the floor for the catalogs; the rest of the page is member management.
+
+    OpenCode is the exception the test also pins. It has no catalog separable
+    from its Settings surface, so its read stays Owner and the picker degrades to
+    a typed model id -- silently, because the loader declares that refusal
+    expected. "Completes its load" therefore means "issues no request whose 403
+    the user is told about", not "every backend answers".
     """
 
     page_load_reads = (
@@ -489,7 +493,6 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
     catalog_reads = (
         ("GET", "/api/claude/models"),
         ("GET", "/api/codex/models"),
-        ("GET", "/api/backend/opencode/models"),
     )
 
     for role in ("editor", "member", "owner"):
@@ -504,11 +507,11 @@ def test_agents_page_load_reads_are_admitted_for_every_rank_that_sees_the_page()
             minimum_role = http_authorization_policy(method, path).minimum_role
             assert minimum_role is not None and context.has_role(minimum_role), f"{role} {path}"
 
-    # The counterparts the UI must therefore stop requesting from those ranks.
-    # Bulk onboarding is a one-way instance-wide migration, and the Settings
-    # provider catalog discloses provider credentials and setup state; both stay
-    # Owner, so a member page load that still calls either is a UI defect, not a
-    # policy gap.
+    # The counterparts a member page load must not announce. Bulk onboarding is a
+    # one-way instance-wide migration and must not be requested at all; the
+    # OpenCode provider catalog may be requested but its refusal is expected data
+    # for the picker. Both stay Owner, so a toast from either is a UI defect
+    # rather than a policy gap.
     owner_only_page_neighbours = (
         ("GET", "/api/agent-onboarding"),
         ("POST", "/api/agent-onboarding"),

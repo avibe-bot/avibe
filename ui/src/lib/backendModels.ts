@@ -1,4 +1,4 @@
-import type { ApiContextType } from '../context/ApiContext';
+import { ApiError, type ApiContextType } from '../context/ApiContext';
 
 export interface BackendModels {
   /** Selectable model identifiers for the backend. */
@@ -54,12 +54,17 @@ export async function fetchBackendModels(
     };
   }
   if (backend === 'opencode') {
-    // The model-only catalog, not the Settings provider endpoint: that one
-    // carries provider credentials and setup state and is Owner-only, while
-    // these pickers render for every rank that can configure an Agent. It
-    // already returns configured providers only.
-    const res = await api.getOpencodeModelCatalog();
-    const models = (res.providers ?? []).flatMap((p) =>
+    // Best-effort: OpenCode's catalog lives behind the Owner-only Settings
+    // endpoint, so a rank that may configure an Agent but not the instance gets
+    // no suggestions and types the model id. ``allowCustomValue`` on every
+    // caller's Combobox is what makes that a degraded list rather than a dead
+    // field. See ``readOpencodeProvidersForModelPicker``.
+    const res = await api.readOpencodeProvidersForModelPicker().catch((err) => {
+      if (err instanceof ApiError && err.code === 'instance_access_forbidden') return null;
+      throw err;
+    });
+    if (!res) return { models: [] };
+    const models = (res.providers ?? []).filter((p) => p.configured).flatMap((p) =>
       (p.models ?? []).map((m) => `${p.id}/${m}`),
     );
     return { models };

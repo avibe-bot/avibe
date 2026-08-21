@@ -7987,20 +7987,6 @@ async def backend_opencode_providers():
     return jsonify(await api.get_opencode_providers_async())
 
 
-@app.route("/api/backend/opencode/models", methods=["GET"])
-async def backend_opencode_models():
-    """Return the selectable OpenCode models for Agent and Chat model pickers.
-
-    The Settings catalog above is Owner-only because it carries provider setup
-    state -- base URLs, masked keys, active auth type, permission settings. The
-    pickers only need ``{id, name, models}`` per configured provider, so this
-    route serves that projection and is the one lower ranks may call.
-    """
-    from vibe import api
-
-    return jsonify(await api.get_opencode_model_catalog_async())
-
-
 @app.route("/api/backend/opencode/custom-provider", methods=["POST"])
 async def backend_opencode_custom_provider_post():
     """Create or update a user-defined OpenCode compatible provider."""

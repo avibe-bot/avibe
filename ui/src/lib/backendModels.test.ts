@@ -1,23 +1,49 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ApiContextType } from '../context/ApiContext';
+import { ApiError, type ApiContextType } from '../context/ApiContext';
 import { fetchBackendModels, loadBackendModelsWithRefresh } from './backendModels';
 
-describe('fetchBackendModels', () => {
-  it('reads OpenCode models from the picker catalog, not the Settings provider endpoint', async () => {
-    const getOpencodeModelCatalog = vi.fn().mockResolvedValue({
+describe('fetchBackendModels for OpenCode', () => {
+  it('reads the provider catalog through the picker helper, never the Settings one', async () => {
+    const readOpencodeProvidersForModelPicker = vi.fn().mockResolvedValue({
       ok: true,
-      providers: [{ id: 'openrouter', name: 'OpenRouter', models: ['anthropic/claude-x'] }],
+      providers: [
+        { id: 'openrouter', configured: true, models: ['anthropic/claude-x'] },
+        { id: 'openai', configured: false, models: ['gpt-5'] },
+      ],
     });
     const getOpencodeProviders = vi.fn();
-    const api = { getOpencodeModelCatalog, getOpencodeProviders } as unknown as ApiContextType;
+    const api = {
+      readOpencodeProvidersForModelPicker,
+      getOpencodeProviders,
+    } as unknown as ApiContextType;
 
     const result = await fetchBackendModels(api, 'opencode');
 
-    // The Settings endpoint carries provider credentials and is Owner-only, so
-    // touching it here would 403 for every rank below the instance owner.
+    // Settings owns the toast-on-403 read; the picker must not borrow it, or a
+    // member's page load announces a refusal it is expected to absorb.
     expect(getOpencodeProviders).not.toHaveBeenCalled();
     expect(result.models).toEqual(['openrouter/anthropic/claude-x']);
+  });
+
+  it('degrades to an empty catalog when the rank may not read the Settings endpoint', async () => {
+    const api = {
+      readOpencodeProvidersForModelPicker: vi
+        .fn()
+        .mockRejectedValue(new ApiError('forbidden', 403, 'instance_access_forbidden')),
+    } as unknown as ApiContextType;
+
+    await expect(fetchBackendModels(api, 'opencode')).resolves.toEqual({ models: [] });
+  });
+
+  it('still propagates a failure that is not the expected refusal', async () => {
+    const api = {
+      readOpencodeProvidersForModelPicker: vi
+        .fn()
+        .mockRejectedValue(new ApiError('boom', 500, null)),
+    } as unknown as ApiContextType;
+
+    await expect(fetchBackendModels(api, 'opencode')).rejects.toBeInstanceOf(ApiError);
   });
 });
 

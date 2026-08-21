@@ -11252,43 +11252,6 @@ async def get_opencode_providers_async() -> dict:
         return {"ok": False, "message": str(exc)}
 
 
-async def get_opencode_model_catalog_async() -> dict:
-    """Return only the selectable OpenCode models, with no credential metadata.
-
-    The Settings provider catalog above answers "how is each provider set up":
-    custom base URLs, masked API-key previews, which auth entry the daemon will
-    use, and the tool-call permission setting. That is Owner material. Model and
-    Agent pickers need a different question answered -- "which models can I
-    choose" -- so they get this projection instead: configured providers only,
-    each reduced to its id, display name, and model ids. Filtering on
-    ``configured`` here rather than in the caller keeps even the setup state of
-    an unconfigured provider out of the response.
-    """
-
-    payload = await get_opencode_providers_async()
-    if not payload.get("ok"):
-        return {"ok": False, "message": payload.get("message") or "OpenCode catalog unavailable"}
-
-    providers = []
-    for provider in payload.get("providers") or []:
-        if not isinstance(provider, dict) or not provider.get("configured"):
-            continue
-        provider_id = provider.get("id")
-        if not isinstance(provider_id, str) or not provider_id:
-            continue
-        models = provider.get("models")
-        providers.append(
-            {
-                "id": provider_id,
-                "name": provider.get("name") or provider_id,
-                "models": [model for model in models if isinstance(model, str)]
-                if isinstance(models, list)
-                else [],
-            }
-        )
-    return {"ok": True, "providers": providers}
-
-
 def _opencode_provider_models_loaded(catalog: dict, provider_id: str) -> bool:
     if not isinstance(catalog, dict) or catalog.get("ok") is False:
         return False
