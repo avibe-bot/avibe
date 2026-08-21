@@ -1220,4 +1220,116 @@ describe('AgentsPage reconnect reconciliation', () => {
     });
     expect(getVibeAgentOnboarding).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['agent_not_found', 'agent_access_forbidden'] as const)(
+    'restores accepted A when pending B disappears (%s)',
+    async (code) => {
+      const agentA = brief('agent-a', 'A');
+      const agentB = brief('agent-b', 'B');
+      const pendingB = deferred<ReturnType<typeof fullAgent>>();
+      const getVibeAgent = vi.fn()
+        .mockResolvedValueOnce(fullAgent(agentA, 'A initial'))
+        .mockReturnValueOnce(pendingB.promise)
+        .mockResolvedValueOnce(fullAgent({ ...agentA, description: 'A after gap' }, 'A refreshed'))
+        .mockResolvedValueOnce(fullAgent({ ...agentA, description: 'A after mutation' }, 'A mutation drain'));
+      const updateVibeAgent = vi.fn().mockResolvedValue(fullAgent(agentA, 'ack'));
+      const api = makeApi(
+        vi.fn().mockResolvedValue(listResult([agentA, agentB])),
+        getVibeAgent,
+        undefined,
+        undefined,
+        updateVibeAgent,
+      );
+      renderPage(api, { canManageAgents: true });
+
+      await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+      fireEvent.click(screen.getByText('agent-b').closest('button')!);
+      await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+      act(() => pendingB.reject({ code, message: 'B disappeared' }));
+      await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+
+      act(() => handlers?.onConnected?.());
+      await waitFor(() => expect(screen.getByDisplayValue('A after gap')).toBeTruthy());
+      expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', {
+        cache: false,
+        expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+      });
+      expect(getVibeAgent.mock.calls.slice(2).some(([name]) => name === 'agent-b')).toBe(false);
+
+      fireEvent.change(screen.getByDisplayValue('A after gap'), { target: { value: 'A local' } });
+      fireEvent.blur(screen.getByDisplayValue('A local'));
+      await waitFor(() => expect(screen.getByDisplayValue('A after mutation')).toBeTruthy());
+      expect(getVibeAgent).toHaveBeenNthCalledWith(4, 'agent-a', {
+        cache: false,
+        expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+      });
+    },
+  );
+
+  it('migrates a stable-id rename and keeps the reconciled name clean', async () => {
+    const oldAgent = brief('agent-old', 'description');
+    const renamedAgent = { ...oldAgent, name: 'agent-new', display_name: 'agent-new' };
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(oldAgent, 'prompt'))
+      .mockResolvedValueOnce(fullAgent(renamedAgent, 'prompt'));
+    const updateVibeAgent = vi.fn().mockResolvedValue(fullAgent(renamedAgent, 'prompt'));
+    const listVibeAgents = vi.fn()
+      .mockResolvedValueOnce(listResult(oldAgent))
+      .mockResolvedValue(listResult(renamedAgent));
+    const api = makeApi(listVibeAgents, getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('agent-old')).toBeTruthy());
+    const nameInput = screen.getByDisplayValue('agent-old');
+    fireEvent.change(nameInput, { target: { value: 'agent-new' } });
+    fireEvent.blur(screen.getByDisplayValue('agent-new'));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-old', { name: 'agent-new' }));
+    await waitFor(() => expect(screen.getByDisplayValue('agent-new')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenNthCalledWith(2, 'agent-new', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
+
+    fireEvent.blur(screen.getByDisplayValue('agent-new'));
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+
+    updateVibeAgent.mockRejectedValueOnce({ message: 'rename failed' });
+    fireEvent.change(screen.getByDisplayValue('agent-new'), { target: { value: 'agent-lost' } });
+    fireEvent.blur(screen.getByDisplayValue('agent-lost'));
+    await waitFor(() => expect(screen.getByDisplayValue('agent-new')).toBeTruthy());
+  });
+
+  it('cancels modal-only prompt edits without dirtying the shared field', async () => {
+    const agent = brief('agent-a', 'description');
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'server prompt'))
+      .mockResolvedValueOnce(fullAgent(agent, 'new server prompt'))
+      .mockResolvedValueOnce(fullAgent(agent, 'latest server prompt'));
+    const updateVibeAgent = vi.fn();
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    const modal = screen.getByRole('dialog');
+    fireEvent.change(screen.getByPlaceholderText('agents.create.systemPromptPlaceholder'), {
+      target: { value: 'canceled modal text' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+
+    act(() => handlers?.onConnected?.());
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    await waitFor(() => expect(screen.getByDisplayValue('new server prompt')).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText('agents.create.systemPromptPlaceholder'), {
+      target: { value: 'x-canceled modal text' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+
+    act(() => handlers?.onConnected?.());
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    await waitFor(() => expect(screen.getByDisplayValue('latest server prompt')).toBeTruthy());
+    expect(modal).not.toBeNull();
+  });
 });

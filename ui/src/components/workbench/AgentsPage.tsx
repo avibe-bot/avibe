@@ -384,12 +384,23 @@ export const AgentsPage: React.FC = () => {
     (identity: string, options: { refreshDefinitions?: boolean } = {}) => {
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.retired.has(identity)) return false;
+      const acceptedIdentity = coordinator.accepted?.name ?? null;
+      const pendingIdentity = coordinator.desiredName === identity;
+      const acceptedCanResume = Boolean(
+        acceptedIdentity &&
+          acceptedIdentity !== identity &&
+          !coordinator.retired.has(acceptedIdentity) &&
+          !coordinator.autoSelectDismissed,
+      );
       coordinator.retired.add(identity);
       advanceSelectedRead(coordinator, identity);
       coordinator.reconciliationDebt.delete(identity);
-      if (coordinator.desiredName === identity) {
+      if (pendingIdentity) {
         coordinator.intentGeneration += 1;
-        coordinator.desiredName = null;
+        // A pending selection can disappear without invalidating the accepted
+        // entity. Keep that accepted entity eligible for reconnect/debt
+        // reconciliation instead of leaving visible A with no desired A.
+        coordinator.desiredName = acceptedCanResume ? acceptedIdentity : null;
       }
       if (coordinator.accepted?.name === identity) commitSelected(null);
       if (!coordinator.desiredName && !coordinator.accepted && !coordinator.autoSelectDismissed) {
@@ -405,6 +416,44 @@ export const AgentsPage: React.FC = () => {
     [clearResourceError, commitSelected],
   );
   retireSelectedIdentityRef.current = retireSelectedIdentity;
+
+  // A successful rename keeps the stable entity id while changing the
+  // transport key used by every read and mutation. Migrate all coordinator
+  // state in one transition so an old-name response can never republish.
+  const migrateSelectedIdentity = useCallback(
+    (oldName: string, newName: string, stableId: string) => {
+      if (!oldName || !newName || oldName === newName) return;
+      const coordinator = selectedCoordinatorRef.current;
+      const accepted = coordinator.accepted;
+      const acceptedMatches = accepted?.id === stableId && accepted.name === oldName;
+      const desiredMatches = coordinator.desiredName === oldName;
+      if (!acceptedMatches && !desiredMatches) return;
+
+      coordinator.retired.add(oldName);
+      advanceSelectedRead(coordinator, oldName);
+
+      const oldDebt = coordinator.reconciliationDebt.get(oldName);
+      coordinator.reconciliationDebt.delete(oldName);
+      if (oldDebt) {
+        coordinator.reconciliationDebt.set(newName, { ...oldDebt, scheduled: false });
+      }
+
+      const oldBatch = coordinator.mutations.get(oldName);
+      if (oldBatch) {
+        coordinator.mutations.delete(oldName);
+        oldBatch.identity = newName;
+        coordinator.mutations.set(newName, oldBatch);
+      }
+
+      coordinator.intentGeneration += 1;
+      if (desiredMatches) coordinator.desiredName = newName;
+      if (acceptedMatches && accepted) {
+        commitSelected({ ...accepted, name: newName, display_name: newName });
+      }
+      advanceSelectedRead(coordinator, newName);
+    },
+    [commitSelected],
+  );
 
   const launchSelectedRead = useCallback(
     async (options: {
@@ -437,6 +486,14 @@ export const AgentsPage: React.FC = () => {
           commitSelected(result.agent);
           finishDebt(true);
           return 'published';
+        }
+        if (
+          options.expectedCodes &&
+          SELECTED_DISAPPEARANCE_CODES.includes(errorCodeOf(result) as (typeof SELECTED_DISAPPEARANCE_CODES)[number])
+        ) {
+          retireSelectedIdentityRef.current?.(options.identity);
+          finishDebt(false);
+          return 'failed';
         }
         const rollback = rollbackSelectedIntent();
         setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
@@ -536,15 +593,15 @@ export const AgentsPage: React.FC = () => {
     (operation: { id: number; identity: string }, failure?: unknown): Promise<void> => {
       if (!selectedMountedRef.current) return Promise.resolve();
       const coordinator = selectedCoordinatorRef.current;
-      const batch = coordinator.mutations.get(operation.identity);
-      if (!batch || batch.id !== operation.id) return Promise.resolve();
+      const batch = [...coordinator.mutations.values()].find((candidate) => candidate.id === operation.id);
+      if (!batch) return Promise.resolve();
       if (failure) batch.failures.push(failure);
       batch.pending = Math.max(0, batch.pending - 1);
       if (batch.pending !== 0) {
         return new Promise<void>((resolve) => batch.waiters.push(resolve));
       }
 
-      const identity = operation.identity;
+      const identity = batch.identity;
       const version = batch.version;
       const failures = [...batch.failures];
       const errorGeneration = batch.errorGeneration;
@@ -790,12 +847,28 @@ export const AgentsPage: React.FC = () => {
     refresh();
   };
 
-  // After a rename (clone-then-delete) the list is stale: the old name lingers
-  // and the new one is missing. Refresh and re-select the renamed agent.
-  const onRenamed = (newName: string) => {
-    beginSelectedIntent(newName);
-    void refresh().then(() => selectAgent(newName));
-    void refreshOnboarding();
+  // Rename is a selected mutation too: migrate the stable entity before the
+  // batch settles so its authoritative drain routes through the new name.
+  const onRename = async (newName: string) => {
+    if (!selected) return;
+    const oldName = selected.name;
+    const operation = beginSelectedMutation(oldName);
+    let settled = false;
+    try {
+      const result = await api.updateVibeAgent(oldName, { name: newName });
+      if (!result.ok) {
+        await settleSelectedMutation(operation, result);
+        settled = true;
+        throw result;
+      }
+      migrateSelectedIdentity(oldName, newName, selected.id);
+      await settleSelectedMutation(operation);
+      settled = true;
+      void refreshOnboarding();
+    } catch (err) {
+      if (!settled) await settleSelectedMutation(operation, err);
+      throw err;
+    }
   };
 
   const onDelete = async () => {
@@ -1062,7 +1135,7 @@ export const AgentsPage: React.FC = () => {
               canEdit={canEditAgents}
               onChange={updateField}
               onSetDefault={onSetDefault}
-              onRenamed={onRenamed}
+              onRename={onRename}
               onDelete={onDelete}
               onClose={dismissSelected}
             />
@@ -1339,7 +1412,7 @@ interface DetailProps {
   canEdit: boolean;
   onChange: (patch: VibeAgentUpdatePayload) => Promise<void>;
   onSetDefault: () => Promise<void>;
-  onRenamed: (newName: string) => void;
+  onRename: (newName: string) => Promise<void>;
   onDelete: () => void;
   onClose: () => void;
 }
@@ -1350,7 +1423,7 @@ interface DetailProps {
 // for user agents. The backend renames the row and its references atomically;
 // system agents keep their locked identity. On a remote instance `canEdit` is
 // false and the panel degrades to a read-only view of the same fields.
-const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
+const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, onChange, onSetDefault, onRename, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -1369,11 +1442,25 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const [editorSeedRevision, setEditorSeedRevision] = useState(0);
   const editorDraftRef = useRef(agent.system_prompt ?? '');
   const editorDirtyRef = useRef(false);
+  const editorClosingRef = useRef(false);
   const editorBaselineRef = useRef(agent.system_prompt ?? '');
-  type EditableField = 'description' | 'model' | 'effort' | 'systemPrompt';
-  const fieldRevisionRef = useRef<Record<EditableField, number>>({ description: 0, model: 0, effort: 0, systemPrompt: 0 });
-  const submittedRevisionRef = useRef<Record<EditableField, number>>({ description: 0, model: 0, effort: 0, systemPrompt: 0 });
+  type EditableField = 'name' | 'description' | 'model' | 'effort' | 'systemPrompt';
+  const fieldRevisionRef = useRef<Record<EditableField, number>>({
+    name: 0,
+    description: 0,
+    model: 0,
+    effort: 0,
+    systemPrompt: 0,
+  });
+  const submittedRevisionRef = useRef<Record<EditableField, number>>({
+    name: 0,
+    description: 0,
+    model: 0,
+    effort: 0,
+    systemPrompt: 0,
+  });
   const pendingRevisionRef = useRef<Record<EditableField, number | null>>({
+    name: null,
     description: null,
     model: null,
     effort: null,
@@ -1414,9 +1501,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       systemPrompt: agent.system_prompt ?? '',
     };
     if (previous.id !== next.id) {
-      fieldRevisionRef.current = { description: 0, model: 0, effort: 0, systemPrompt: 0 };
-      submittedRevisionRef.current = { description: 0, model: 0, effort: 0, systemPrompt: 0 };
-      pendingRevisionRef.current = { description: null, model: null, effort: null, systemPrompt: null };
+      fieldRevisionRef.current = { name: 0, description: 0, model: 0, effort: 0, systemPrompt: 0 };
+      submittedRevisionRef.current = { name: 0, description: 0, model: 0, effort: 0, systemPrompt: 0 };
+      pendingRevisionRef.current = { name: null, description: null, model: null, effort: null, systemPrompt: null };
       setName(next.name);
       setDescription(next.description);
       setModel(next.model);
@@ -1424,6 +1511,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       setSystemPrompt(next.systemPrompt);
       setSystemPromptOpen(false);
       setEditorOpen(false);
+      editorClosingRef.current = false;
       editorDraftRef.current = next.systemPrompt;
       editorBaselineRef.current = next.systemPrompt;
       editorDirtyRef.current = false;
@@ -1437,6 +1525,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       const revisions = fieldRevisionRef.current;
       const submitted = submittedRevisionRef.current;
       const pending = pendingRevisionRef.current;
+      if (pending.name === null && revisions.name <= submitted.name) setName(next.name);
       if (pending.description === null && revisions.description <= submitted.description) setDescription(next.description);
       if (pending.model === null && revisions.model <= submitted.model) setModel(next.model);
       if (pending.effort === null && revisions.effort <= submitted.effort) setEffort(next.effort);
@@ -1491,13 +1580,25 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const markFieldSubmitted = (field: keyof typeof submittedRevisionRef.current) => {
     submittedRevisionRef.current[field] = fieldRevisionRef.current[field];
   };
-  const submitFields = (patch: VibeAgentUpdatePayload, fields: EditableField[]) => {
+  const cancelFieldEdit = (field: EditableField, value: string) => {
+    const revision = fieldRevisionRef.current[field];
+    pendingRevisionRef.current[field] = null;
+    submittedRevisionRef.current[field] = revision;
+    if (fieldRevisionRef.current[field] === revision) {
+      if (field === 'name') setName(value);
+      if (field === 'description') setDescription(value);
+      if (field === 'model') setModel(value);
+      if (field === 'effort') setEffort(value);
+      if (field === 'systemPrompt') setSystemPrompt(value);
+    }
+  };
+  const submitFields = (patch: VibeAgentUpdatePayload, fields: EditableField[]): Promise<void> => {
     const revisions = fields.map((field) => {
       const revision = fieldRevisionRef.current[field];
       pendingRevisionRef.current[field] = revision;
       return { field, revision };
     });
-    void onChange(patch).then(() => {
+    return onChange(patch).then(() => {
       for (const { field, revision } of revisions) {
         if (pendingRevisionRef.current[field] !== revision) continue;
         pendingRevisionRef.current[field] = null;
@@ -1525,21 +1626,25 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const commitRename = async () => {
     const trimmed = name.trim();
     if (!trimmed || trimmed === agent.name) {
-      setName(agent.name);
+      cancelFieldEdit('name', serverSnapshotRef.current.name);
       return;
     }
     if (locked) {
-      setName(agent.name);
+      cancelFieldEdit('name', serverSnapshotRef.current.name);
       return;
     }
+    const revision = fieldRevisionRef.current.name;
+    pendingRevisionRef.current.name = revision;
+    submittedRevisionRef.current.name = revision;
     setRenaming(true);
     try {
-      await api.updateVibeAgent(agent.name, { name: trimmed });
+      await onRename(trimmed);
+      pendingRevisionRef.current.name = null;
+      if (fieldRevisionRef.current.name === revision) setName(trimmed);
       showToast(t('agents.renameSuccess'), 'success');
-      onRenamed(trimmed);
     } catch (err) {
       showToast(errorMessage(err) ?? String(err), 'error');
-      setName(agent.name);
+      cancelFieldEdit('name', serverSnapshotRef.current.name);
     } finally {
       setRenaming(false);
     }
@@ -1642,7 +1747,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         <div className="flex items-center gap-2 rounded-lg border border-border-strong bg-surface-2 px-3 py-2">
           <input
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              markFieldEdit('name');
+              setName(e.target.value);
+            }}
             onBlur={commitRename}
             onKeyDown={(e) => {
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
@@ -1807,7 +1915,13 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               variant="ghost"
               size="icon"
               className="size-9 shrink-0 text-muted hover:text-foreground"
-              onClick={() => setEditorOpen(true)}
+              onClick={() => {
+                editorClosingRef.current = false;
+                editorDirtyRef.current = false;
+                editorDraftRef.current = systemPrompt;
+                editorBaselineRef.current = systemPrompt;
+                setEditorOpen(true);
+              }}
               aria-label={t('agents.detail.systemPromptExpand')}
               title={t('agents.detail.systemPromptExpand')}
             >
@@ -1827,7 +1941,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                 const canonical = systemPrompt.trim();
                 setSystemPrompt(canonical);
                 markFieldSubmitted('systemPrompt');
-                onChange({ system_prompt: canonical || null });
+                void submitFields({ system_prompt: canonical || null }, ['systemPrompt']);
               }
             }}
             readOnly={!canEdit}
@@ -1883,6 +1997,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         key={`${agent.id}:${editorSeedRevision}`}
         open={canEdit && editorOpen}
         onClose={() => {
+          editorClosingRef.current = true;
           editorDraftRef.current = systemPrompt;
           editorBaselineRef.current = systemPrompt;
           editorDirtyRef.current = false;
@@ -1893,25 +2008,22 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         value={systemPrompt}
         placeholder={t('agents.create.systemPromptPlaceholder')}
         footerHint={(draft) => {
-          if (draft !== editorDraftRef.current) {
-            markFieldEdit('systemPrompt');
-            editorDraftRef.current = draft;
-            editorDirtyRef.current = true;
-          }
+          if (!editorClosingRef.current) editorDirtyRef.current = draft !== editorBaselineRef.current;
           editorDraftRef.current = draft;
           return t('agents.detail.systemPromptCount', { count: estimateTokens(draft) });
         }}
         onSave={(next) => {
           const canonical = next.trim();
-            markFieldEdit('systemPrompt');
-            markFieldSubmitted('systemPrompt');
+          markFieldEdit('systemPrompt');
+          markFieldSubmitted('systemPrompt');
           setSystemPrompt(canonical);
           editorDraftRef.current = canonical;
           editorBaselineRef.current = canonical;
           editorDirtyRef.current = false;
           if (canonical !== (agent.system_prompt ?? '') || pendingRevisionRef.current.systemPrompt !== null) {
-            submitFields({ system_prompt: canonical || null }, ['systemPrompt']);
+            return submitFields({ system_prompt: canonical || null }, ['systemPrompt']);
           }
+          return;
         }}
       />
     </div>
