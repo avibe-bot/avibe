@@ -951,7 +951,8 @@
       "compactionSkipped": "Compaction skipped: too little would be reclaimed.",
       "leaseLost": "This pass lost its lease to another retention run; deletion stopped partway and no completion was recorded. Retry once the other run finishes.",
       "notDue": "Retention already ran within the last day; nothing to do.",
-      "busy": "Another retention run is active; try again later."
+      "busy": "Another retention run is active; try again later.",
+      "cancelled": "Retention stopped at a batch boundary; no completion was recorded."
     }
   }
 }

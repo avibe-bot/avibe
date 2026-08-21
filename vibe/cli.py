@@ -361,11 +361,14 @@ def _print_cli_payload(kind: str, **fields) -> None:
 
 
 def _configured_trace_retention_days(language: str) -> int:
-    """The persisted retention window for help text; default on any failure."""
+    """Read the persisted window for help text without loading/migrating config."""
     from storage import agent_events_retention as _retention
 
     try:
-        value = getattr(V2Config.load().runtime, "agent_events_trace_retention_days", None)
+        config_path = paths.get_config_path()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        runtime = payload.get("runtime") if isinstance(payload, dict) else None
+        value = runtime.get("agent_events_trace_retention_days") if isinstance(runtime, dict) else None
         if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
             return value
     except Exception:
@@ -6787,50 +6790,25 @@ def cmd_data_retention(args):
         # A recovered/unreadable config must not silently run with substituted
         # defaults: deletion is irreversible, so the run refuses unless the
         # user supplies an explicit --days window.
-        retention_days = agent_events_retention.DEFAULT_RETENTION_DAYS
-        config_recovered = False
+        policy = agent_events_retention.RetentionPolicy(
+            enabled=False,
+            days=agent_events_retention.DEFAULT_RETENTION_DAYS,
+            recovered=True,
+        )
         try:
             config = V2Config.load()
-            load_warnings = getattr(config, "load_warnings", None) or []
-            if any(
-                ("recovery defaults" in str(w) or "could not be recovered" in str(w))
-                or "Recovered invalid config section 'runtime'" in str(w)
-                for w in load_warnings
-            ):
-                config_recovered = True
-                # Recovery that replaced the retention policy carries
-                # enabled=True defaults, but the controller fails closed on
-                # them; the status view must agree. Recovered unrelated
-                # sections and migration notes leave a valid policy active.
-                enabled = False
-            runtime_cfg = getattr(config, "runtime", None)
-            days_value = getattr(runtime_cfg, "agent_events_trace_retention_days", None)
-            if isinstance(days_value, bool) or not isinstance(days_value, int) or days_value < 1:
-                # Any malformed persisted window (boolean, non-int, < 1) must
-                # refuse deletion (fail closed), matching the controller:
-                # normalize_retention_days would silently coerce it to 30 or 1.
-                config_recovered = True
-                # The controller refuses automatic retention for this shape;
-                # the status view must show the policy as disabled too.
-                enabled = False
-            else:
-                retention_days = days_value
-            enabled_value = getattr(runtime_cfg, "agent_events_trace_retention_enabled", True)
-            if isinstance(enabled_value, bool) and not config_recovered:
-                enabled = enabled_value
-            else:
-                # A malformed opt-out — or any earlier recovery/malformed
-                # window that made the controller refuse the policy — must
-                # keep the status view disabled; a valid-looking recovered
-                # default must not overwrite that.
-                enabled = False
-                if not isinstance(enabled_value, bool):
-                    config_recovered = True
+            policy = agent_events_retention.resolve_policy(config)
         except Exception:
             # Unreadable/missing config: the controller disables the
             # automatic pass, so the status must not claim it is enabled.
-            enabled = False
-            config_recovered = True
+            policy = agent_events_retention.RetentionPolicy(
+                enabled=False,
+                days=agent_events_retention.DEFAULT_RETENTION_DAYS,
+                recovered=True,
+            )
+        retention_days = policy.days
+        enabled = policy.enabled
+        config_recovered = policy.recovered
         if days_override is not None:
             retention_days = int(days_override)
             if retention_days < agent_events_retention.MIN_RETENTION_DAYS:
@@ -6859,7 +6837,7 @@ def cmd_data_retention(args):
                 compact=bool(getattr(args, "compact", False)),
             )
             run_status = str(payload.get("status"))
-            if run_status in {"busy", "lease_lost"}:
+            if run_status in {"busy", "lease_lost", "cancelled"}:
                 # busy: nothing deleted; lease_lost: partial deletion without
                 # completion marker — automation must retry both, not record
                 # success.
@@ -6940,6 +6918,8 @@ def _print_data_retention_human(payload: dict, language: str) -> None:
         print(i18n_t("data.retention.busy", language))
     elif status == "lease_lost":
         print(i18n_t("data.retention.leaseLost", language))
+    elif status == "cancelled":
+        print(i18n_t("data.retention.cancelled", language))
     elif status == "ok_with_contested_compaction":
         print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
         print(i18n_t("data.retention.compactionDeferred", language, reason=i18n_t("data.retention.compactionReasonOther", language)))

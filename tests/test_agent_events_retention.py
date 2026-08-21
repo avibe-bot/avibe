@@ -11,6 +11,7 @@ between delete batches.
 from __future__ import annotations
 
 import sys
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ _NOW = datetime(2026, 8, 17, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _iso(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _seed_event(
@@ -153,6 +154,31 @@ def test_concurrent_appends_between_batches_survive(state) -> None:
     assert len(remaining) == 3  # one fresh row per committed batch gap
 
 
+def test_run_retention_stops_at_batch_boundary_when_cancelled(state) -> None:
+    engine = state
+    old = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    for i in range(3):
+        _seed_event(engine, event_id=f"old-{i}", created_at=old)
+    cancel_event = threading.Event()
+
+    def _cancel_after_batch() -> None:
+        cancel_event.set()
+
+    result = agent_events_retention.run_retention(
+        engine,
+        retention_days=30,
+        batch_rows=1,
+        between_batches=_cancel_after_batch,
+        now=_NOW,
+        cancel_event=cancel_event,
+    )
+
+    assert result["cancelled"] is True
+    assert result["deleted_rows"] == 1
+    with engine.connect() as conn:
+        assert conn.execute(select(agent_events.c.id)).fetchall()
+
+
 def test_plan_reports_counts_and_logical_bytes(state) -> None:
     engine = state
     payload = "y" * 50
@@ -182,7 +208,9 @@ def test_run_once_is_idempotent_and_records_marker(state) -> None:
     # Cadence gate: without force, a same-day follow-up is not due.
     with engine.connect() as conn:
         assert agent_events_retention.should_run(conn, now=_NOW + timedelta(hours=2)) is False
-        assert agent_events_retention.should_run(conn, now=_NOW + timedelta(hours=25)) is True
+        # The marker retains completion microseconds; avoid asserting on the
+        # exact 24-hour boundary when the test run itself takes a few ms.
+        assert agent_events_retention.should_run(conn, now=_NOW + timedelta(hours=25, seconds=1)) is True
 
 
 def test_lease_blocks_concurrent_run_once(state) -> None:
@@ -238,12 +266,12 @@ def test_maybe_compact_vacuums_when_safe(state) -> None:
 
 
 def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None:
-    """Legacy fractional timestamps must not lexically precede the cutoff.
+    """Fixed-width cutoffs keep legacy fractional timestamps chronological.
 
-    The hazard: a row stamped ``...12:00:00.500000+00:00`` is 0.5s NEWER than
-    ``...12:00:00Z`` but sorts BEFORE it lexically. The 0060 migration
-    canonicalizes released rows; this test pins both halves — the hazard is
-    real in raw form, and the canonical form is safe.
+    A row stamped ``...12:00:00.500000+00:00`` is 0.5s newer than the cutoff.
+    The retention cutoff and migration form both use fixed-width microseconds,
+    so the raw legacy offset form is already ordered correctly and migration
+    preserves the fraction.
     """
     engine = state
     cutoff = _NOW - timedelta(days=30)
@@ -256,14 +284,11 @@ def test_cutoff_is_chronological_for_normalized_legacy_timestamps(state) -> None
 
     with engine.connect() as conn:
         raw = agent_events_retention.plan(conn, retention_days=30, now=_NOW)
-    assert raw["eligible_count"] == 1  # demonstrates the lexical hazard exists
+    assert raw["eligible_count"] == 0
 
     # Canonical form of the same instant (what migration 0060 produces).
     with engine.begin() as conn:
-        conn.exec_driver_sql(
-            "update agent_events set created_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at) "
-            "where id = 'legacy'"
-        )
+        conn.exec_driver_sql("update agent_events set created_at = '2026-07-18T12:00:00.500000Z' where id = 'legacy'")
     with engine.connect() as conn:
         canonical = agent_events_retention.plan(conn, retention_days=30, now=_NOW)
     assert canonical["eligible_count"] == 0  # normalized: not eligible, correctly
@@ -299,7 +324,7 @@ def test_migration_0060_leaves_non_retention_events_untouched(tmp_path, monkeypa
     trace_stamp = conn.execute("select created_at from agent_events where id='trace-row'").fetchone()[0]
     terminal_stamp = conn.execute("select created_at from agent_events where id='terminal-row'").fetchone()[0]
     conn.close()
-    assert trace_stamp == "2026-07-18T12:00:00Z"  # retention subject canonicalized
+    assert trace_stamp == "2026-07-18T12:00:00.500000Z"  # retention subject canonicalized
     assert terminal_stamp == "2026-07-18T12:00:00.950000+00:00"  # ordering anchor preserved
 
 
@@ -352,7 +377,7 @@ def test_maybe_compact_reports_lease_loss_during_vacuum(state) -> None:
 
 
 def test_migration_0060_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypatch) -> None:
-    """The migration rewrites offset/fractional stamps to whole-second Z."""
+    """The migration rewrites offset/fractional stamps to fixed-width UTC."""
     import sqlite3
 
     from alembic import command
@@ -377,7 +402,7 @@ def test_migration_0060_canonicalizes_legacy_trace_timestamps(tmp_path, monkeypa
     stamp = conn.execute("select created_at from agent_events where id = 'legacy-row'").fetchone()[0]
     version = conn.execute("select version_num from alembic_version").fetchone()[0]
     conn.close()
-    assert stamp == "2026-07-18T12:00:00Z"
+    assert stamp == "2026-07-18T12:00:00.500000Z"
     assert version == "20260821_0060"
 def test_plan_measures_utf8_bytes_not_characters(state) -> None:
     engine = state

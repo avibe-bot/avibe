@@ -19,7 +19,10 @@ INDEX_NAME = "ix_agent_events_trace_retention"
 # Keep byte-for-byte in sync with the predicate in storage/models.py; the
 # retention service (storage/agent_events_retention.py) owns the matching
 # row-eligibility property.
-PREDICATE = "event_type = 'tool_call' and visibility = 'trace'"
+PREDICATE = (
+    "event_type = 'tool_call' and visibility = 'trace' "
+    "and datetime(created_at) is not null"
+)
 
 
 def _indexes() -> set[str]:

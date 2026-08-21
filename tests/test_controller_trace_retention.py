@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +120,25 @@ def test_retention_config_disables_on_recovered_runtime_section(monkeypatch) -> 
     assert controller._agent_events_retention_config() is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("agent_events_trace_retention_enabled", "false"),
+        ("agent_events_trace_retention_enabled", 1),
+        ("agent_events_trace_retention_days", "90"),
+        ("agent_events_trace_retention_days", 0),
+        ("agent_events_trace_retention_days", -1),
+        ("agent_events_trace_retention_days", True),
+    ],
+)
+def test_runtime_config_rejects_malformed_retention_values(field, value) -> None:
+    from config.v2_config import RuntimeConfig
+
+    kwargs = {"default_cwd": "/tmp", field: value}
+    with pytest.raises(ValueError, match="Config 'runtime\\."):
+        RuntimeConfig(**kwargs)
+
+
 def test_retention_pass_never_vacuums(monkeypatch) -> None:
     controller = Controller.__new__(Controller)
     captured: dict = {}
@@ -146,7 +167,7 @@ def test_retention_loop_checks_before_first_sleep(monkeypatch) -> None:
     controller = Controller.__new__(Controller)
     calls: list[str] = []
 
-    def _pass(self) -> dict:
+    def _pass(self, cancel_event=None) -> dict:
         calls.append("pass")
         return {"status": "not_due"}
 
@@ -166,6 +187,37 @@ def test_retention_loop_checks_before_first_sleep(monkeypatch) -> None:
 
     asyncio.run(_run())
     assert calls == ["pass"]  # ran before any sleep
+
+
+def test_retention_loop_cancellation_reaches_worker(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def _pass(self, cancel_event=None) -> dict:
+        started.set()
+        while cancel_event is None or not cancel_event.is_set():
+            time.sleep(0.005)
+        stopped.set()
+        return {"status": "cancelled"}
+
+    monkeypatch.setattr(Controller, "_run_agent_events_retention_pass", _pass)
+    monkeypatch.setattr(Controller, "_AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS", 3600)
+
+    async def _run() -> None:
+        task = asyncio.create_task(controller._agent_events_retention_loop())
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert started.is_set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert stopped.is_set()
+    assert controller._trace_retention_executor is None
 
 
 def test_retention_loop_shutdown_joins_executor(monkeypatch) -> None:

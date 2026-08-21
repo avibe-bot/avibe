@@ -506,7 +506,10 @@ agent_events = Table(
     Index(
         "ix_agent_events_trace_retention",
         "created_at",
-        sqlite_where=text("event_type = 'tool_call' and visibility = 'trace'"),
+        sqlite_where=text(
+            "event_type = 'tool_call' and visibility = 'trace' "
+            "and datetime(created_at) is not null"
+        ),
     ),
 )
 

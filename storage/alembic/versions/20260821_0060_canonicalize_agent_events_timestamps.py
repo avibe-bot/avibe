@@ -7,6 +7,8 @@ Create Date: 2026-08-21
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -16,15 +18,24 @@ branch_labels = None
 depends_on = None
 
 # Rows produced before this normalization (e.g. events migrated from legacy
-# message timestamps at 20260801_0044) may carry offset or fractional forms
-# such as 2026-07-18T12:00:00.500000+00:00. Lexical comparison against the
-# whole-second ...Z cutoff used by the retention scan (and its partial index)
-# is not chronological for those shapes: this rewrite canonicalizes every
-# agent_events timestamp to YYYY-MM-DDTHH:MM:SSZ so the string comparison the
-# retention service relies on is safe for released data.
-_CANONICAL_GLOB = (
-    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z"
-)
+# message timestamps at 20260801_0044) may carry offset or fractional forms.
+# Fixed-width UTC microseconds make lexical comparison chronological without
+# throwing away the sub-second ordering used by activity reconstruction.
+
+
+def _canonical_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _canonicalize(bind, column: str) -> None:
@@ -33,20 +44,28 @@ def _canonicalize(bind, column: str) -> None:
     # migrated silent_terminal timestamps act as ordering anchors for
     # session fork, where truncating sub-second precision could reorder a
     # terminal against its source message.
-    bind.execute(
+    rows = bind.execute(
         sa.text(
             f"""
-            update agent_events
-            set {column} = strftime('%Y-%m-%dT%H:%M:%SZ', {column})
+            select id, {column}
+            from agent_events
             where event_type = 'tool_call'
               and visibility = 'trace'
               and {column} is not null
               and {column} != ''
-              and {column} not glob '{_CANONICAL_GLOB}'
-              and datetime({column}) is not null
             """
         )
-    )
+    ).fetchall()
+    updates = []
+    for event_id, value in rows:
+        canonical = _canonical_timestamp(value)
+        if canonical is not None and canonical != value:
+            updates.append({"id": event_id, "value": canonical})
+    if updates:
+        bind.execute(
+            sa.text(f"update agent_events set {column} = :value where id = :id"),
+            updates,
+        )
 
 
 def upgrade() -> None:
@@ -55,6 +74,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Canonical whole-second UTC timestamps are strictly more portable than
-    # the legacy shapes; nothing to restore.
+    # Canonical UTC timestamps are not reversible to the original offset shape.
     pass

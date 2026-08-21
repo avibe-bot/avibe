@@ -67,6 +67,21 @@ def _write_alembic_revision(db_path: Path, revision: str) -> None:
         conn.execute("insert into alembic_version values (?)", (revision,))
 
 
+def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"runtime": {"agent_events_trace_retention_days": 90}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+
+    def _load_should_not_run(*_args, **_kwargs):
+        raise AssertionError("help construction must not load or migrate V2Config")
+
+    monkeypatch.setattr(cli.V2Config, "load", _load_should_not_run)
+    assert cli._configured_trace_retention_days("en") == 90
+
+
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):
     _make_fake_uv_tool(tmp_path, revisions=["20260606_0018"])
     db_path = tmp_path / "state" / "vibe.sqlite"

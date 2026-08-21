@@ -4,8 +4,9 @@ This module is the single owner of ``agent_events`` deletion policy. The
 eligibility property, defined once here and shared by planning, execution,
 and tests:
 
-    Only rows with ``event_type='tool_call'`` AND ``visibility='trace'`` AND
-    ``created_at`` strictly older than the retention cutoff are ever removable.
+    Only parseable rows with ``event_type='tool_call'`` AND
+    ``visibility='trace'`` AND ``created_at`` strictly older than the retention
+    cutoff are ever removable. Unparseable timestamps are preserved.
 
 Everything else — user messages (a separate table), message deliveries,
 session/run records, Vault audit data, non-trace events, and newer traces —
@@ -61,18 +62,77 @@ RETENTION_MARKER_KEY = "agent_events_trace_retention.last_run"
 RETENTION_LEASE_KEY = "agent_events_trace_retention.lease"
 
 
+@dataclass(frozen=True)
+class RetentionPolicy:
+    """The validated policy used by every retention entry point.
+
+    ``recovered`` means that the persisted policy could not be trusted.  A
+    recovered policy is always disabled for automatic deletion; the CLI may
+    still run an explicitly supplied ``--days`` window.
+    """
+
+    enabled: bool
+    days: int
+    recovered: bool = False
+
+
+def _warning_replaces_retention_policy(warning: object) -> bool:
+    text = str(warning)
+    if "recovery defaults" in text or "could not be recovered" in text:
+        return True
+    # Field-scoped recovery warnings are rendered as
+    # ``runtime.agent_events_trace_retention_days``; both that form and the
+    # older whole-section form replace the policy we are about to use.
+    return "Recovered invalid config section 'runtime" in text
+
+
+def resolve_policy(config: Any) -> RetentionPolicy:
+    """Validate a loaded config without coercing destructive values.
+
+    This is deliberately independent of ``V2Config`` so controller, CLI, and
+    tests share one policy owner without introducing a config/storage import
+    cycle.  Invalid values fail closed instead of being normalized to a
+    shorter retention window.
+    """
+
+    warnings = getattr(config, "load_warnings", ()) if config is not None else ()
+    recovered = any(_warning_replaces_retention_policy(warning) for warning in (warnings or ()))
+    runtime = getattr(config, "runtime", None) if config is not None else None
+    if runtime is None:
+        return RetentionPolicy(False, DEFAULT_RETENTION_DAYS, True)
+
+    enabled = getattr(runtime, "agent_events_trace_retention_enabled", None)
+    days = getattr(runtime, "agent_events_trace_retention_days", None)
+    if not isinstance(enabled, bool):
+        return RetentionPolicy(False, DEFAULT_RETENTION_DAYS, True)
+    if not isinstance(days, int) or isinstance(days, bool) or days < MIN_RETENTION_DAYS:
+        return RetentionPolicy(False, DEFAULT_RETENTION_DAYS, True)
+    if recovered:
+        return RetentionPolicy(False, days, True)
+    return RetentionPolicy(enabled, days, False)
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def _iso(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_iso(value: str) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
-        return parsed.replace(tzinfo=timezone.utc)
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except (TypeError, ValueError):
         return None
 
@@ -94,13 +154,14 @@ def cutoff_iso(retention_days: int, *, now: Optional[datetime] = None) -> str:
 def eligible_filter(cutoff: str):
     """The single eligibility predicate shared by plan and delete.
 
-    Keep byte-for-byte compatible with the partial index
-    ``ix_agent_events_trace_retention`` (storage/models.py and the alembic
-    migration) so the scan stays bounded.
+    Keep the scope and parseability clauses byte-for-byte compatible with the
+    partial index ``ix_agent_events_trace_retention`` (storage/models.py and
+    the alembic migration) so the scan stays bounded.
     """
     return (
         (agent_events.c.event_type == "tool_call")
         & (agent_events.c.visibility == "trace")
+        & func.datetime(agent_events.c.created_at).is_not(None)
         & (agent_events.c.created_at < cutoff)
     )
 
@@ -181,6 +242,7 @@ def run_retention(
     between_batches: Optional[Callable[[], None]] = None,
     now: Optional[datetime] = None,
     lease_token: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, Any]:
     """Delete eligible rows in bounded batches, one transaction per batch.
 
@@ -192,7 +254,11 @@ def run_retention(
     deleted_rows = 0
     batches = 0
     lease_lost = False
+    cancelled = False
     while max_batches is None or batches < max_batches:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
         ownership = True
         with engine.begin() as conn:
             removed = _delete_batch(conn, cutoff, batch_rows)
@@ -209,6 +275,9 @@ def run_retention(
         if removed == 0:
             break
         deleted_rows += removed
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
         if between_batches is not None:
             between_batches()
     return {
@@ -216,6 +285,7 @@ def run_retention(
         "deleted_rows": deleted_rows,
         "batches": batches,
         **({"lease_lost": True} if lease_lost else {}),
+        **({"cancelled": True} if cancelled and not lease_lost else {}),
     }
 
 
@@ -457,6 +527,7 @@ def run_once(
     compact: bool = True,
     db_path: Optional[Path] = None,
     now: Optional[datetime] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, Any]:
     """One full maintenance pass: gate -> lease -> batched delete -> marker -> compact."""
     moment = now or _utc_now()
@@ -491,6 +562,15 @@ def run_once(
             return {
                 "status": "lease_lost",
                 "deleted_rows": result["deleted_rows"],
+                "cutoff": result["cutoff"],
+            }
+        if result.get("cancelled") or (cancel_event is not None and cancel_event.is_set()):
+            # Cancellation is cooperative: the last committed batch remains
+            # durable, but no marker or compaction claims a complete pass.
+            return {
+                "status": "cancelled",
+                "deleted_rows": result["deleted_rows"],
+                "batches": result["batches"],
                 "cutoff": result["cutoff"],
             }
         finished = moment + timedelta(seconds=round(time.monotonic() - started, 3))

@@ -2513,6 +2513,23 @@ class RuntimeConfig:
     agent_events_trace_retention_enabled: bool = True
     agent_events_trace_retention_days: int = 30
 
+    def __post_init__(self) -> None:
+        # These values control irreversible deletion.  Dataclass annotations do
+        # not validate JSON payloads, and coercing a string/bool here could turn
+        # a malformed config into a shorter retention window.
+        if not isinstance(self.agent_events_trace_retention_enabled, bool):
+            raise ValueError(
+                "Config 'runtime.agent_events_trace_retention_enabled' must be a boolean"
+            )
+        if (
+            not isinstance(self.agent_events_trace_retention_days, int)
+            or isinstance(self.agent_events_trace_retention_days, bool)
+            or self.agent_events_trace_retention_days < 1
+        ):
+            raise ValueError(
+                "Config 'runtime.agent_events_trace_retention_days' must be an integer >= 1"
+            )
+
 
 @dataclass
 class OpenCodeConfig:
