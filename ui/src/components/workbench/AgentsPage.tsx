@@ -90,12 +90,15 @@ type SelectedMutationBatch = {
   version: number;
   errorGeneration: number;
   failures: unknown[];
+  waiters: Array<() => void>;
 };
 
 type SelectedReconciliationDebt = {
   version: number;
   scheduled: boolean;
 };
+
+type AutoSelectReason = 'initial' | 'replacement';
 
 type SelectedCoordinator = {
   desiredName: string | null;
@@ -108,6 +111,8 @@ type SelectedCoordinator = {
   mutations: Map<string, SelectedMutationBatch>;
   reconciliationDebt: Map<string, SelectedReconciliationDebt>;
   retired: Set<string>;
+  autoSelectReason: AutoSelectReason | null;
+  autoSelectDismissed: boolean;
 };
 
 const createSelectedCoordinator = (): SelectedCoordinator => ({
@@ -121,6 +126,8 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
   mutations: new Map(),
   reconciliationDebt: new Map(),
   retired: new Set(),
+  autoSelectReason: 'initial',
+  autoSelectDismissed: false,
 });
 
 const advanceSelectedRead = (coordinator: SelectedCoordinator, identity: string): number => {
@@ -214,6 +221,7 @@ export const AgentsPage: React.FC = () => {
   const definitionsVersionRef = useRef(createAgentRequestVersion());
   const onboardingVersionRef = useRef(createAgentRequestVersion());
   const selectedCoordinatorRef = useRef(createSelectedCoordinator());
+  const selectedMountedRef = useRef(true);
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -251,6 +259,7 @@ export const AgentsPage: React.FC = () => {
   }, []);
 
   const refreshOnboarding = useCallback(async () => {
+    if (!selectedMountedRef.current) return;
     if (!canOnboardAgents) {
       setOnboardingInventory(null);
       return;
@@ -258,11 +267,25 @@ export const AgentsPage: React.FC = () => {
     const token = onboardingVersionRef.current.begin();
     try {
       const result = await api.getVibeAgentOnboarding();
-      if (onboardingVersionRef.current.isCurrent(token)) publishOnboarding(result);
+      if (selectedMountedRef.current && onboardingVersionRef.current.isCurrent(token)) publishOnboarding(result);
     } catch {
-      if (onboardingVersionRef.current.isCurrent(token)) publishOnboarding(null);
+      if (selectedMountedRef.current && onboardingVersionRef.current.isCurrent(token)) publishOnboarding(null);
     }
   }, [api, canOnboardAgents, publishOnboarding]);
+
+  useEffect(() => {
+    return () => {
+      selectedMountedRef.current = false;
+      definitionsVersionRef.current.invalidate();
+      onboardingVersionRef.current.invalidate();
+      const coordinator = selectedCoordinatorRef.current;
+      for (const identity of coordinator.readGenerations.keys()) advanceSelectedRead(coordinator, identity);
+      for (const batch of coordinator.mutations.values()) {
+        for (const resolve of batch.waiters.splice(0)) resolve();
+      }
+      coordinator.mutations.clear();
+    };
+  }, []);
 
   const scheduleSelectedReadRef = useRef<
     ((identity: string, options?: { expectedCodes?: readonly string[]; debtOnly?: boolean }) => Promise<'published' | 'failed' | 'stale'> | null)
@@ -286,7 +309,11 @@ export const AgentsPage: React.FC = () => {
       advanceSelectedRead(coordinator, coordinator.desiredName);
     }
     if (identity) advanceSelectedRead(coordinator, identity);
-    if (identity && !options.auto) coordinator.retired.delete(identity);
+    if (identity && !options.auto) {
+      coordinator.retired.delete(identity);
+      coordinator.autoSelectDismissed = false;
+      coordinator.autoSelectReason = null;
+    }
     const debt = identity ? coordinator.reconciliationDebt.get(identity) : null;
     if (debt) debt.scheduled = false;
     coordinator.intentGeneration += 1;
@@ -365,6 +392,9 @@ export const AgentsPage: React.FC = () => {
         coordinator.desiredName = null;
       }
       if (coordinator.accepted?.name === identity) commitSelected(null);
+      if (!coordinator.desiredName && !coordinator.accepted && !coordinator.autoSelectDismissed) {
+        coordinator.autoSelectReason = 'replacement';
+      }
       clearResourceError('selection');
       if (options.refreshDefinitions !== false) {
         definitionsVersionRef.current.invalidate();
@@ -386,6 +416,7 @@ export const AgentsPage: React.FC = () => {
     }): Promise<'published' | 'failed' | 'stale'> => {
       const coordinator = selectedCoordinatorRef.current;
       const isCurrent = () =>
+        selectedMountedRef.current &&
         selectedReadIsCurrent(coordinator, options.identity, options.readGeneration) &&
         coordinator.desiredName === options.identity &&
         !coordinator.retired.has(options.identity) &&
@@ -407,13 +438,15 @@ export const AgentsPage: React.FC = () => {
           finishDebt(true);
           return 'published';
         }
-        rollbackSelectedIntent();
+        const rollback = rollbackSelectedIntent();
         setResourceError('selection', errorMessage(result) || tRef.current('errorBoundary.title'));
         finishDebt(false);
-        void scheduleSelectedReadRef.current?.(coordinator.desiredName ?? '', {
-          debtOnly: true,
-          expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
-        });
+        if (rollback.identity && rollback.identity !== options.identity) {
+          void scheduleSelectedReadRef.current?.(rollback.identity, {
+            debtOnly: true,
+            expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
+          });
+        }
         return 'failed';
       } catch (err) {
         if (!isCurrent()) return 'stale';
@@ -422,13 +455,15 @@ export const AgentsPage: React.FC = () => {
           finishDebt(false);
           return 'failed';
         }
-        rollbackSelectedIntent();
+        const rollback = rollbackSelectedIntent();
         setResourceError('selection', errorMessage(err) || tRef.current('errorBoundary.title'));
         finishDebt(false);
-        void scheduleSelectedReadRef.current?.(coordinator.desiredName ?? '', {
-          debtOnly: true,
-          expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
-        });
+        if (rollback.identity && rollback.identity !== options.identity) {
+          void scheduleSelectedReadRef.current?.(rollback.identity, {
+            debtOnly: true,
+            expectedCodes: options.expectedCodes ?? SELECTED_DISAPPEARANCE_CODES,
+          });
+        }
         return 'failed';
       }
     },
@@ -440,7 +475,7 @@ export const AgentsPage: React.FC = () => {
       identity: string,
       options: { expectedCodes?: readonly string[]; debtOnly?: boolean } = {},
     ): Promise<'published' | 'failed' | 'stale'> | null => {
-      if (!identity) return null;
+      if (!selectedMountedRef.current || !identity) return null;
       const coordinator = selectedCoordinatorRef.current;
       if (coordinator.retired.has(identity) || coordinator.desiredName !== identity) return null;
       // User selection is an explicit intent and may read immediately even
@@ -483,6 +518,7 @@ export const AgentsPage: React.FC = () => {
         version: ++coordinator.nextMutationVersion,
         errorGeneration: 0,
         failures: [],
+        waiters: [],
       };
       coordinator.mutations.set(identity, batch);
     }
@@ -497,13 +533,16 @@ export const AgentsPage: React.FC = () => {
   }, [beginResourceError]);
 
   const settleSelectedMutation = useCallback(
-    (operation: { id: number; identity: string }, failure?: unknown) => {
+    (operation: { id: number; identity: string }, failure?: unknown): Promise<void> => {
+      if (!selectedMountedRef.current) return Promise.resolve();
       const coordinator = selectedCoordinatorRef.current;
       const batch = coordinator.mutations.get(operation.identity);
-      if (!batch || batch.id !== operation.id) return;
+      if (!batch || batch.id !== operation.id) return Promise.resolve();
       if (failure) batch.failures.push(failure);
       batch.pending = Math.max(0, batch.pending - 1);
-      if (batch.pending !== 0) return;
+      if (batch.pending !== 0) {
+        return new Promise<void>((resolve) => batch.waiters.push(resolve));
+      }
 
       const identity = operation.identity;
       const version = batch.version;
@@ -517,7 +556,14 @@ export const AgentsPage: React.FC = () => {
         coordinator.reconciliationDebt.set(identity, { version, scheduled: false });
       }
       void refreshRef.current();
-      void scheduleSelectedReadRef.current?.(identity, { debtOnly: true, expectedCodes: SELECTED_DISAPPEARANCE_CODES });
+      const drain = scheduleSelectedReadRef.current?.(identity, {
+        debtOnly: true,
+        expectedCodes: SELECTED_DISAPPEARANCE_CODES,
+      });
+      const completion = drain?.then(() => undefined) ?? Promise.resolve();
+      const waiters = batch.waiters.splice(0);
+      for (const resolve of waiters) void completion.then(resolve);
+      return completion;
     },
     [setResourceError, t],
   );
@@ -526,10 +572,12 @@ export const AgentsPage: React.FC = () => {
     const coordinator = selectedCoordinatorRef.current;
     const identity = coordinator.desiredName;
     if (!identity) return;
+    if (coordinator.mutations.has(identity)) return;
     await scheduleSelectedReadRef.current?.(identity, { expectedCodes: SELECTED_DISAPPEARANCE_CODES });
   }, []);
 
   useEffect(() => {
+    selectedMountedRef.current = true;
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -543,9 +591,17 @@ export const AgentsPage: React.FC = () => {
   // that confused users on first visit.
   useEffect(() => {
     const coordinator = selectedCoordinatorRef.current;
-    if (selected || coordinator.accepted || coordinator.desiredName || agents.length === 0) return;
+    if (
+      !coordinator.autoSelectReason ||
+      coordinator.autoSelectDismissed ||
+      selected ||
+      coordinator.accepted ||
+      coordinator.desiredName ||
+      agents.length === 0
+    ) return;
     const available = agents.filter((agent) => !coordinator.retired.has(agent.name));
     const target = (defaultName && available.find((a) => a.name === defaultName)) || available[0];
+    coordinator.autoSelectReason = null;
     if (target) void selectAgent(target.name, false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultName, agents]);
@@ -671,6 +727,15 @@ export const AgentsPage: React.FC = () => {
     [beginSelectedIntent, clearResourceError],
   );
 
+  const dismissSelected = useCallback(() => {
+    const coordinator = selectedCoordinatorRef.current;
+    beginSelectedIntent(null);
+    coordinator.autoSelectDismissed = true;
+    coordinator.autoSelectReason = null;
+    commitSelected(null);
+    setDetailOpen(false);
+  }, [beginSelectedIntent, commitSelected]);
+
   // Apply text search + backend filter; backend grouping is a layout
   // concern that operates on the filtered set.
   const filtered = useMemo(() => {
@@ -703,15 +768,15 @@ export const AgentsPage: React.FC = () => {
   };
 
 
-  const updateField = async (patch: VibeAgentUpdatePayload) => {
+  const updateField = async (patch: VibeAgentUpdatePayload): Promise<void> => {
     if (!selected) return;
     const name = selected.name;
     const operation = beginSelectedMutation(name);
     try {
       const result = await api.updateVibeAgent(name, patch);
-      settleSelectedMutation(operation, result.ok ? undefined : result);
+      await settleSelectedMutation(operation, result.ok ? undefined : result);
     } catch (err) {
-      settleSelectedMutation(operation, err);
+      await settleSelectedMutation(operation, err);
     }
   };
 
@@ -999,11 +1064,7 @@ export const AgentsPage: React.FC = () => {
               onSetDefault={onSetDefault}
               onRenamed={onRenamed}
               onDelete={onDelete}
-              onClose={() => {
-                beginSelectedIntent(null);
-                commitSelected(null);
-                setDetailOpen(false);
-              }}
+              onClose={dismissSelected}
             />
           </div>
         )}
@@ -1276,7 +1337,7 @@ interface DetailProps {
   isDefault: boolean;
   /** False on remote instances, where every mutating control is unavailable. */
   canEdit: boolean;
-  onChange: (patch: VibeAgentUpdatePayload) => void;
+  onChange: (patch: VibeAgentUpdatePayload) => Promise<void>;
   onSetDefault: () => Promise<void>;
   onRenamed: (newName: string) => void;
   onDelete: () => void;
@@ -1308,6 +1369,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const [editorSeedRevision, setEditorSeedRevision] = useState(0);
   const editorDraftRef = useRef(agent.system_prompt ?? '');
   const editorDirtyRef = useRef(false);
+  const editorBaselineRef = useRef(agent.system_prompt ?? '');
+  type EditableField = 'description' | 'model' | 'effort' | 'systemPrompt';
+  const fieldRevisionRef = useRef<Record<EditableField, number>>({ description: 0, model: 0, effort: 0, systemPrompt: 0 });
+  const submittedRevisionRef = useRef<Record<EditableField, number>>({ description: 0, model: 0, effort: 0, systemPrompt: 0 });
+  const pendingRevisionRef = useRef<Record<EditableField, number | null>>({
+    description: null,
+    model: null,
+    effort: null,
+    systemPrompt: null,
+  });
   const [modelCatalogs, setModelCatalogs] = useState<
     Record<
       string,
@@ -1343,6 +1414,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       systemPrompt: agent.system_prompt ?? '',
     };
     if (previous.id !== next.id) {
+      fieldRevisionRef.current = { description: 0, model: 0, effort: 0, systemPrompt: 0 };
+      submittedRevisionRef.current = { description: 0, model: 0, effort: 0, systemPrompt: 0 };
+      pendingRevisionRef.current = { description: null, model: null, effort: null, systemPrompt: null };
       setName(next.name);
       setDescription(next.description);
       setModel(next.model);
@@ -1351,24 +1425,31 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       setSystemPromptOpen(false);
       setEditorOpen(false);
       editorDraftRef.current = next.systemPrompt;
+      editorBaselineRef.current = next.systemPrompt;
       editorDirtyRef.current = false;
       setEditorSeedRevision((revision) => revision + 1);
     } else {
-      // Same-identity reconciliation updates clean inline fields while leaving
-      // dirty work and the modal's private draft untouched.
-      if (name === previous.name) setName(next.name);
-      if (description === previous.description) setDescription(next.description);
-      if (model === previous.model) setModel(next.model);
-      if (effort === previous.effort) setEffort(next.effort);
-      if (systemPrompt === previous.systemPrompt || systemPrompt === next.systemPrompt) setSystemPrompt(next.systemPrompt);
-      if (editorDraftRef.current === previous.systemPrompt || editorDraftRef.current === next.systemPrompt) {
+      // Same-identity reconciliation follows explicit local/submitted
+      // revisions. A field with an in-flight mutation remains local until its
+      // mutation batch's authoritative drain completes; an older drain cannot
+      // overwrite a newer edit. Once no submission is pending, clean fields
+      // follow the accepted server snapshot.
+      const revisions = fieldRevisionRef.current;
+      const submitted = submittedRevisionRef.current;
+      const pending = pendingRevisionRef.current;
+      if (pending.description === null && revisions.description <= submitted.description) setDescription(next.description);
+      if (pending.model === null && revisions.model <= submitted.model) setModel(next.model);
+      if (pending.effort === null && revisions.effort <= submitted.effort) setEffort(next.effort);
+      if (pending.systemPrompt === null && revisions.systemPrompt <= submitted.systemPrompt) setSystemPrompt(next.systemPrompt);
+      if (!editorDirtyRef.current && editorOpen) {
         editorDraftRef.current = next.systemPrompt;
+        editorBaselineRef.current = next.systemPrompt;
         editorDirtyRef.current = false;
-        if (editorOpen) setEditorSeedRevision((revision) => revision + 1);
+        setEditorSeedRevision((revision) => revision + 1);
       }
     }
     serverSnapshotRef.current = next;
-  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, description, effort, model, name, systemPrompt, editorOpen]);
+  }, [agent.id, agent.name, agent.description, agent.model, agent.reasoning_effort, agent.system_prompt, editorOpen]);
 
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the
@@ -1403,6 +1484,41 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
+  const markFieldEdit = (field: keyof typeof fieldRevisionRef.current) => {
+    fieldRevisionRef.current[field] += 1;
+    return fieldRevisionRef.current[field];
+  };
+  const markFieldSubmitted = (field: keyof typeof submittedRevisionRef.current) => {
+    submittedRevisionRef.current[field] = fieldRevisionRef.current[field];
+  };
+  const submitFields = (patch: VibeAgentUpdatePayload, fields: EditableField[]) => {
+    const revisions = fields.map((field) => {
+      const revision = fieldRevisionRef.current[field];
+      pendingRevisionRef.current[field] = revision;
+      return { field, revision };
+    });
+    void onChange(patch).then(() => {
+      for (const { field, revision } of revisions) {
+        if (pendingRevisionRef.current[field] !== revision) continue;
+        pendingRevisionRef.current[field] = null;
+        submittedRevisionRef.current[field] = revision;
+        if (fieldRevisionRef.current[field] !== revision) continue;
+        const snapshot = serverSnapshotRef.current;
+        if (field === 'description') setDescription(snapshot.description ?? '');
+        if (field === 'model') setModel(snapshot.model ?? '');
+        if (field === 'effort') setEffort(snapshot.effort ?? 'medium');
+        if (field === 'systemPrompt') {
+          const value = snapshot.systemPrompt ?? '';
+          setSystemPrompt(value);
+          if (!editorDirtyRef.current && editorOpen) {
+            editorDraftRef.current = value;
+            editorBaselineRef.current = value;
+            setEditorSeedRevision((seed) => seed + 1);
+          }
+        }
+      }
+    });
+  };
 
   // Only user Agents can be renamed; the backend moves every durable name
   // reference in the same transaction.
@@ -1546,12 +1662,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       <Field label={t('agents.detail.description')}>
         <Textarea
           value={description}
-          onChange={(e) => setDescription(e.target.value)}
+          onChange={(e) => {
+            markFieldEdit('description');
+            setDescription(e.target.value);
+          }}
           onBlur={() => {
-            if (!locked && description !== (agent.description ?? '')) {
+            if (!locked && (description !== (agent.description ?? '') || pendingRevisionRef.current.description !== null)) {
               const canonical = description.trim();
               setDescription(canonical);
-              onChange({ description: canonical || null });
+              markFieldSubmitted('description');
+              submitFields({ description: canonical || null }, ['description']);
             }
           }}
           disabled={locked}
@@ -1595,6 +1715,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
             onValueChange={(next) => {
               const value = next.trim();
               if (!value) return;
+              markFieldEdit('model');
+              markFieldSubmitted('model');
               setModel(value);
               const patch: Partial<VibeAgentFull> = { model: value };
               // If the new model can't use the current effort, fall back to a
@@ -1604,11 +1726,13 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
               if (effort && !opts.includes(effort)) {
                 const fallback = opts.includes('medium') ? 'medium' : opts[0];
                 if (fallback) {
+                  markFieldEdit('effort');
+                  markFieldSubmitted('effort');
                   setEffort(fallback);
                   patch.reasoning_effort = fallback;
                 }
               }
-              onChange(patch);
+              submitFields(patch, patch.reasoning_effort ? ['model', 'effort'] : ['model']);
             }}
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
@@ -1632,8 +1756,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
                 disabled={!canEdit}
                 title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
                 onClick={() => {
+                  markFieldEdit('effort');
+                  markFieldSubmitted('effort');
                   setEffort(opt);
-                  onChange({ reasoning_effort: opt });
+                  submitFields({ reasoning_effort: opt }, ['effort']);
                 }}
                 className={clsx(
                   'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',
@@ -1692,11 +1818,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         {systemPromptOpen && (
           <Textarea
             value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
+            onChange={(e) => {
+              markFieldEdit('systemPrompt');
+              setSystemPrompt(e.target.value);
+            }}
             onBlur={() => {
               if (canEdit && systemPrompt !== (agent.system_prompt ?? '')) {
                 const canonical = systemPrompt.trim();
                 setSystemPrompt(canonical);
+                markFieldSubmitted('systemPrompt');
                 onChange({ system_prompt: canonical || null });
               }
             }}
@@ -1752,23 +1882,35 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
       <EditorDialog
         key={`${agent.id}:${editorSeedRevision}`}
         open={canEdit && editorOpen}
-        onClose={() => setEditorOpen(false)}
+        onClose={() => {
+          editorDraftRef.current = systemPrompt;
+          editorBaselineRef.current = systemPrompt;
+          editorDirtyRef.current = false;
+          setEditorOpen(false);
+        }}
         title={t('agents.detail.systemPrompt')}
         description={t('agents.detail.systemPromptEditorHint')}
         value={systemPrompt}
         placeholder={t('agents.create.systemPromptPlaceholder')}
         footerHint={(draft) => {
+          if (draft !== editorDraftRef.current) {
+            markFieldEdit('systemPrompt');
+            editorDraftRef.current = draft;
+            editorDirtyRef.current = true;
+          }
           editorDraftRef.current = draft;
-          editorDirtyRef.current = draft !== systemPrompt;
           return t('agents.detail.systemPromptCount', { count: estimateTokens(draft) });
         }}
         onSave={(next) => {
           const canonical = next.trim();
+            markFieldEdit('systemPrompt');
+            markFieldSubmitted('systemPrompt');
           setSystemPrompt(canonical);
           editorDraftRef.current = canonical;
+          editorBaselineRef.current = canonical;
           editorDirtyRef.current = false;
-          if (canonical !== (agent.system_prompt ?? '')) {
-            onChange({ system_prompt: canonical || null });
+          if (canonical !== (agent.system_prompt ?? '') || pendingRevisionRef.current.systemPrompt !== null) {
+            submitFields({ system_prompt: canonical || null }, ['systemPrompt']);
           }
         }}
       />

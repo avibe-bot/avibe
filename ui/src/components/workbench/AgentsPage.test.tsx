@@ -25,6 +25,12 @@ const apiRef = vi.hoisted(() => ({ current: null as FakeApi | null }));
 const showToast = vi.hoisted(() => vi.fn());
 let handlers: WorkbenchEventHandlers | null = null;
 
+vi.stubGlobal('ResizeObserver', class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+});
+
 vi.mock('../../context/ApiContext', async () => {
   const actual = await vi.importActual<typeof import('../../context/ApiContext')>('../../context/ApiContext');
   return { ...actual, useApi: () => apiRef.current };
@@ -217,6 +223,79 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(listVibeAgents).toHaveBeenCalledTimes(2);
   });
 
+  it('does not retry a failed reconciliation debt until the next reconnect edge', async () => {
+    const agent = brief('agent-a', 'A');
+    const update = vi.fn().mockResolvedValue(fullAgent(agent, 'ack'));
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial'))
+      .mockRejectedValueOnce({ code: 'agent_backend_unavailable', message: 'temporary failure' })
+      .mockResolvedValueOnce(fullAgent({ ...agent, description: 'after reconnect' }, 'after reconnect'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, update);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('A'), { target: { value: 'A edited' } });
+    fireEvent.blur(screen.getByDisplayValue('A edited'));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText('temporary failure')).toBeTruthy());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    expect(getVibeAgent).toHaveBeenNthCalledWith(3, 'agent-a', {
+      cache: false,
+      expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
+    });
+    await waitFor(() => expect(screen.getByDisplayValue('after reconnect')).toBeTruthy());
+  });
+
+  it('does not create a follow-on reconciliation request after unmount', async () => {
+    const agent = brief('agent-a', 'A');
+    const pending = deferred<ReturnType<typeof fullAgent>>();
+    const update = vi.fn().mockResolvedValue(fullAgent(agent, 'ack'));
+    const getVibeAgent = vi.fn().mockResolvedValueOnce(fullAgent(agent, 'initial')).mockReturnValueOnce(pending.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, update);
+    const view = renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue('A'), { target: { value: 'A edited' } });
+    fireEvent.blur(screen.getByDisplayValue('A edited'));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    view.unmount();
+    act(() => pending.reject({ code: 'agent_backend_unavailable', message: 'unmounted failure' }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an explicit detail dismissal closed across reconnect list publication', async () => {
+    const agent = brief('agent-a', 'A');
+    const listVibeAgents = vi.fn().mockResolvedValue(listResult(agent));
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial'))
+      .mockResolvedValueOnce(fullAgent(agent, 'explicit selection'));
+    const api = makeApi(listVibeAgents, getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'common.close' }));
+    expect(screen.queryByDisplayValue('A')).toBeNull();
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(listVibeAgents).toHaveBeenCalledTimes(2));
+    expect(screen.queryByDisplayValue('A')).toBeNull();
+    expect(getVibeAgent).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByText('agent-a').closest('button')!);
+    await waitFor(() => expect(screen.getByDisplayValue('A')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps an older pre-gap read from overwriting the post-gap definition snapshot', async () => {
     const stale = brief('stale-agent', 'before the gap');
     const fresh = brief('fresh-agent', 'changed during the gap');
@@ -365,7 +444,7 @@ describe('AgentsPage reconnect reconciliation', () => {
 
     act(() => drainRead.resolve(fullAgent(server, 'authoritative prompt')));
     await waitFor(() => expect(screen.getByRole('combobox', { hidden: true }).textContent).toContain('server-model'));
-    expect(screen.getByDisplayValue('local patch')).toBeTruthy();
+    expect(screen.getByDisplayValue('server description')).toBeTruthy();
   });
 
   it('uses operation epochs to suppress an old A -> B -> A selection response', async () => {
@@ -559,7 +638,7 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.getByText('agents.detail.systemPrompt').closest('button')).toBeTruthy());
     fireEvent.click(screen.getByText('agents.detail.systemPrompt').closest('button')!);
     await waitFor(() => expect(screen.getByDisplayValue('final prompt')).toBeTruthy());
-    expect(screen.getByDisplayValue('local A')).toBeTruthy();
+    expect(screen.getByDisplayValue('final A')).toBeTruthy();
     expect(getVibeAgent).toHaveBeenCalledTimes(4);
   });
 
@@ -627,6 +706,82 @@ describe('AgentsPage reconnect reconciliation', () => {
     act(() => handlers?.onConnected?.());
     await waitFor(() => expect(screen.getByDisplayValue('external description')).toBeTruthy());
     expect(screen.getByDisplayValue('external description')).toBeTruthy();
+  });
+
+  it.each(['model', 'effort'] as const)('restores the authoritative value after a failed %s mutation', async (field) => {
+    const initial = {
+      ...brief('agent-a', 'description'),
+      model: 'old-model',
+      reasoning_effort: 'medium' as const,
+    };
+    const update = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(initial, 'initial prompt'))
+      .mockResolvedValueOnce(fullAgent(initial, 'authoritative prompt'));
+    const updateVibeAgent = vi.fn().mockReturnValue(update.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    if (field === 'model') {
+      fireEvent.click(screen.getByRole('combobox'));
+      fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'new-model' } });
+      fireEvent.click(screen.getByText('Use "new-model"'));
+      await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { model: 'new-model' }));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'high', exact: true }));
+      await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { reasoning_effort: 'high' }));
+    }
+
+    act(() => update.reject({ message: `${field} failed` }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    if (field === 'model') {
+      await waitFor(() => expect(screen.getByRole('combobox', { hidden: true }).textContent).toContain('old-model'));
+    } else {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'medium', exact: true }).className).toContain('bg-mint-soft'));
+    }
+    expect(screen.queryByText(`${field} failed`)).toBeTruthy();
+  });
+
+  it('preserves a newer model edit when an older mutation drain settles', async () => {
+    const initial = { ...brief('agent-a', 'description'), model: 'old-model', reasoning_effort: 'medium' as const };
+    const firstPatch = deferred<ReturnType<typeof fullAgent>>();
+    const secondPatch = deferred<ReturnType<typeof fullAgent>>();
+    const firstDrain = deferred<ReturnType<typeof fullAgent>>();
+    const secondDrain = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(initial, 'initial prompt'))
+      .mockReturnValueOnce(firstDrain.promise)
+      .mockReturnValueOnce(secondDrain.promise);
+    const updateVibeAgent = vi.fn()
+      .mockReturnValueOnce(firstPatch.promise)
+      .mockReturnValueOnce(secondPatch.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    const chooseModel = (value: string) => {
+      fireEvent.click(screen.getByRole('combobox'));
+      fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value } });
+      fireEvent.click(screen.getByText(`Use "${value}"`));
+    };
+    chooseModel('model-one');
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { model: 'model-one' }));
+    act(() => firstPatch.resolve(fullAgent({ ...initial, model: 'model-one' }, 'first acknowledgement')));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    chooseModel('model-two');
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { model: 'model-two' }));
+    act(() => firstDrain.resolve(fullAgent({ ...initial, model: 'model-one' }, 'first drain')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('combobox', { hidden: true }).textContent).toContain('model-two');
+
+    act(() => secondPatch.reject({ message: 'second failed' }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+    act(() => secondDrain.resolve(fullAgent(initial, 'final authoritative')));
+    await waitFor(() => expect(screen.getByRole('combobox', { hidden: true }).textContent).toContain('old-model'));
   });
 
   it('reseeds an untouched open prompt editor but preserves an edited modal draft', async () => {
@@ -867,7 +1022,7 @@ describe('AgentsPage reconnect reconciliation', () => {
       expectedCodes: ['agent_not_found', 'agent_access_forbidden'],
     });
     act(() => rollbackA.resolve(fullAgent({ ...agentA, description: 'A after patch' }, 'A reconciled')));
-    await waitFor(() => expect(screen.getByDisplayValue('A local')).toBeTruthy());
+    await waitFor(() => expect(screen.getByDisplayValue('A after patch')).toBeTruthy());
     fireEvent.click(screen.getByText('agents.detail.systemPrompt').closest('button')!);
     expect(screen.getByDisplayValue('A reconciled')).toBeTruthy();
     expect(screen.getByText('A mutation failed')).toBeTruthy();
