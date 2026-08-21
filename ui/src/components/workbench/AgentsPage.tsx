@@ -120,6 +120,8 @@ type SelectedReadPurpose = 'selection' | 'reconcile' | 'continuation' | 'debt';
 type SelectedReadStage = {
   key: string;
   identity: string;
+  identityEpoch: number;
+  causalFloor: number;
   intentGeneration: number;
   readGeneration: number;
   debtVersion?: number;
@@ -154,6 +156,7 @@ type SelectedCoordinator = {
   desiredName: string | null;
   desiredOpenDetail: boolean;
   desiredSource: 'user' | 'auto' | 'passive';
+  identityEpoch: number;
   intentGeneration: number;
   readGenerations: Map<string, number>;
   accepted: VibeAgentFull | null;
@@ -188,6 +191,7 @@ const createSelectedCoordinator = (): SelectedCoordinator => ({
   desiredName: null,
   desiredOpenDetail: false,
   desiredSource: 'passive',
+  identityEpoch: 0,
   intentGeneration: 0,
   readGenerations: new Map(),
   accepted: null,
@@ -425,6 +429,7 @@ export const AgentsPage: React.FC = () => {
     ((identity: string, options?: {
       expectedCodes?: readonly string[];
       debtOnly?: boolean;
+      causalFloor?: number;
       refreshDefinitions?: boolean;
       rollbackOnFailure?: boolean;
       clearSelectionError?: boolean;
@@ -465,19 +470,19 @@ export const AgentsPage: React.FC = () => {
       options: { auto?: boolean; openDetail?: boolean; source?: 'user' | 'auto' | 'passive' } = {},
     ) => {
       const coordinator = selectedCoordinatorRef.current;
-      if (coordinator.desiredName && coordinator.desiredName !== identity) {
+      const identityChanged = coordinator.desiredName !== identity;
+      if (coordinator.desiredName && identityChanged) {
         releaseSelectedDebtWaiters(coordinator, coordinator.desiredName);
         advanceSelectedRead(coordinator, coordinator.desiredName);
       }
-      if (identity) advanceSelectedRead(coordinator, identity);
+      if (identity && identityChanged) advanceSelectedRead(coordinator, identity);
       if (identity && !options.auto) {
         coordinator.retired.delete(identity);
         coordinator.retiredAtDefinitionsVersion.delete(identity);
         coordinator.autoSelectDismissed = false;
         coordinator.autoSelectReason = null;
       }
-      const debt = identity ? coordinator.reconciliationDebt.get(identity) : null;
-      if (debt) debt.scheduled = false;
+      if (identityChanged) coordinator.identityEpoch += 1;
       coordinator.intentGeneration += 1;
       coordinator.desiredName = identity;
       coordinator.desiredOpenDetail = Boolean(identity && options.openDetail);
@@ -568,6 +573,7 @@ export const AgentsPage: React.FC = () => {
                 clearSelectionError: false,
                 purpose: 'continuation',
                 obligationId: catchUpEpochRef.current || token.version,
+                causalFloor: catchUpEpochRef.current || token.version,
               });
             }
           }
@@ -615,15 +621,13 @@ export const AgentsPage: React.FC = () => {
         waiter.resolve({ ok: false, error: options.cause ?? { code: 'agent_not_found' } });
       }
       if (pendingIdentity) {
-        coordinator.intentGeneration += 1;
         // A pending selection can disappear without invalidating the accepted
         // entity. Keep that accepted entity eligible for reconnect/debt
         // reconciliation instead of leaving visible A with no desired A.
-        coordinator.desiredName = acceptedCanResume ? acceptedIdentity : null;
-        // A vanished pending selection must not transfer its mobile drill-down
-        // request to the fallback identity.
-        coordinator.desiredOpenDetail = false;
-        coordinator.desiredSource = 'passive';
+        beginSelectedIntent(acceptedCanResume ? acceptedIdentity : null, {
+          source: 'passive',
+          openDetail: false,
+        });
       }
       if (coordinator.accepted?.name === identity) {
         coordinator.desiredOpenDetail = false;
@@ -648,7 +652,7 @@ export const AgentsPage: React.FC = () => {
         intentGeneration: coordinator.intentGeneration,
       };
     },
-    [clearResourceError, commitSelected],
+    [beginSelectedIntent, clearResourceError, commitSelected],
   );
   retireSelectedIdentityRef.current = retireSelectedIdentity;
 
@@ -680,6 +684,7 @@ export const AgentsPage: React.FC = () => {
         coordinator.mutations.set(newName, oldBatch);
       }
 
+      coordinator.identityEpoch += 1;
       coordinator.intentGeneration += 1;
       if (desiredMatches) coordinator.desiredName = newName;
       if (acceptedMatches && accepted) {
@@ -693,6 +698,8 @@ export const AgentsPage: React.FC = () => {
   const launchSelectedRead = useCallback(
     async (options: {
       identity: string;
+      identityEpoch: number;
+      causalFloor: number;
       readGeneration: number;
       intentGeneration?: number;
       expectedCodes?: readonly string[];
@@ -705,9 +712,9 @@ export const AgentsPage: React.FC = () => {
       const isCurrent = () =>
         selectedMountedRef.current &&
         selectedReadIsCurrent(coordinator, options.identity, options.readGeneration) &&
+        coordinator.identityEpoch === options.identityEpoch &&
         coordinator.desiredName === options.identity &&
-        !coordinator.retired.has(options.identity) &&
-        (options.intentGeneration === undefined || coordinator.intentGeneration === options.intentGeneration);
+        !coordinator.retired.has(options.identity);
       const finishDebt = (published: boolean, error?: unknown) => {
         if (options.debtVersion === undefined) return;
         const debt = coordinator.reconciliationDebt.get(options.identity);
@@ -786,6 +793,7 @@ export const AgentsPage: React.FC = () => {
       options: {
         expectedCodes?: readonly string[];
         debtOnly?: boolean;
+        causalFloor?: number;
         refreshDefinitions?: boolean;
         rollbackOnFailure?: boolean;
         clearSelectionError?: boolean;
@@ -800,8 +808,14 @@ export const AgentsPage: React.FC = () => {
       const debt = coordinator.reconciliationDebt.get(identity);
       if (options.debtOnly && !debt) return null;
       if (coordinator.mutations.has(identity) && options.debtOnly) return null;
-      const debtVersion = options.debtOnly ? debt?.version : undefined;
-      if (debtVersion !== undefined) debt!.scheduled = true;
+      // A selected-detail stage is the physical producer. Its purpose and
+      // obligation are consumer metadata; the scheduler derives the causal
+      // floor from the current identity debt so a same-agent selection can
+      // join a live debt read instead of creating a debt-blind replacement.
+      const debtVersion = debt?.version;
+      const identityEpoch = coordinator.identityEpoch;
+      const causalFloor = options.causalFloor ?? 0;
+      const currentReadGeneration = coordinator.readGenerations.get(identity) ?? 0;
       const obligationId = options.obligationId ?? ++coordinator.nextObligationId;
       const intentGeneration = coordinator.intentGeneration;
       const existing = [...coordinator.stages.values()].find(
@@ -809,18 +823,22 @@ export const AgentsPage: React.FC = () => {
           !stage.invalidated &&
           !stage.settled &&
           stage.identity === identity &&
-          stage.intentGeneration === intentGeneration &&
-          stage.debtVersion === debtVersion &&
-          stage.purpose === purpose &&
-          stage.obligationId === obligationId,
+          stage.identityEpoch === identityEpoch &&
+          stage.readGeneration === currentReadGeneration &&
+          stage.causalFloor >= causalFloor &&
+          (stage.debtVersion ?? 0) >= (debtVersion ?? 0),
       );
-      if (existing) return existing.promise;
+      if (existing) {
+        if (debtVersion !== undefined) debt!.scheduled = true;
+        return existing.promise;
+      }
 
-      // A new compatible stage is the only place that advances an identity's
-      // read generation. This invalidates every older stage, including a
-      // promise that was already started before a newer selection intent.
+      // A new producer is the only place that advances an identity's read
+      // generation. This invalidates every older stage, including a lower-floor
+      // read that started before a newer mutation created reconciliation debt.
       const nextReadGeneration = advanceSelectedRead(coordinator, identity);
-      const key = [identity, intentGeneration, nextReadGeneration, debtVersion ?? '-', purpose, obligationId].join('::');
+      if (debtVersion !== undefined) debt!.scheduled = true;
+      const key = [identity, identityEpoch, nextReadGeneration, causalFloor, debtVersion ?? '-', purpose, obligationId].join('::');
       let resolveStage!: (outcome: SelectedReadOutcome) => void;
       const promise = new Promise<SelectedReadOutcome>((resolve) => {
         resolveStage = resolve;
@@ -828,6 +846,8 @@ export const AgentsPage: React.FC = () => {
       const stage: SelectedReadStage = {
         key,
         identity,
+        identityEpoch,
+        causalFloor,
         intentGeneration,
         readGeneration: nextReadGeneration,
         debtVersion,
@@ -867,6 +887,8 @@ export const AgentsPage: React.FC = () => {
       void (async () => {
         const outcome = await launchSelectedRead({
           identity: stage.identity,
+          identityEpoch: stage.identityEpoch,
+          causalFloor: stage.causalFloor,
           readGeneration: stage.readGeneration,
           intentGeneration: stage.intentGeneration,
           expectedCodes: stage.expectedCodes,
@@ -908,6 +930,7 @@ export const AgentsPage: React.FC = () => {
             clearSelectionError: false,
             purpose: 'continuation',
             obligationId: stage.obligationId,
+            causalFloor: stage.causalFloor,
           });
         }
         drainSelectedStagesRef.current?.();
@@ -1034,7 +1057,7 @@ export const AgentsPage: React.FC = () => {
     [publishMutationError],
   );
 
-  const reconcileSelected = useCallback(async (edgeEpoch?: number) => {
+  const reconcileSelected = useCallback(async (edgeEpoch?: number, causalFloor = 0) => {
     const coordinator = selectedCoordinatorRef.current;
     const identity = coordinator.desiredName;
     if (!identity || coordinator.mutations.has(identity)) return;
@@ -1046,7 +1069,8 @@ export const AgentsPage: React.FC = () => {
           !stage.invalidated &&
           !stage.settled &&
           stage.identity === identity &&
-          stage.obligationId === edgeEpoch,
+          stage.obligationId === edgeEpoch &&
+          stage.causalFloor >= causalFloor,
       )
     ) return;
     const debt = coordinator.reconciliationDebt.get(identity);
@@ -1057,6 +1081,7 @@ export const AgentsPage: React.FC = () => {
       debtOnly: Boolean(debt),
       purpose: 'reconcile',
       obligationId: edgeEpoch ?? ++coordinator.nextObligationId,
+      causalFloor,
     });
   }, []);
 
@@ -1064,7 +1089,7 @@ export const AgentsPage: React.FC = () => {
     const edgeEpoch = ++catchUpEpochRef.current;
     const applied = await refreshRef.current();
     if (!applied || !selectedMountedRef.current || catchUpEpochRef.current !== edgeEpoch) return;
-    await reconcileSelected(edgeEpoch);
+    await reconcileSelected(edgeEpoch, edgeEpoch);
   }, [reconcileSelected]);
 
   useEffect(() => {

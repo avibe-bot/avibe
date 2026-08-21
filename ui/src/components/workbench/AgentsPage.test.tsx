@@ -583,6 +583,134 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.getByDisplayValue('B after reconnect')).toBeTruthy();
   });
 
+  it('joins the live debt producer when selecting the current Agent again', async () => {
+    const agent = brief('agent-a', 'description');
+    const debtRead = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial prompt'))
+      .mockReturnValueOnce(debtRead.promise);
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.systemPromptPlaceholder'), {
+      target: { value: 'saved prompt' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'common.save' }));
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    const row = screen.getAllByText('agent-a').find((node) => node.closest('button'))?.closest('button');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+
+    act(() => debtRead.resolve(fullAgent({ ...agent, description: 'after debt' }, 'saved prompt')));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(api.listVibeAgents).toHaveBeenCalledTimes(2));
+    expect(screen.getByDisplayValue('after debt')).toBeTruthy();
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it('joins a pending reconnect producer when selecting the current Agent again', async () => {
+    const agent = brief('agent-a', 'before');
+    const reconnectRead = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial prompt'))
+      .mockReturnValueOnce(reconnectRead.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent);
+    renderPage(api);
+
+    await waitFor(() => expect(screen.getByDisplayValue('before')).toBeTruthy());
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    const row = screen.getAllByText('agent-a').find((node) => node.closest('button'))?.closest('button');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+
+    act(() => reconnectRead.resolve(fullAgent({ ...agent, description: 'after reconnect' }, 'fresh prompt')));
+    await waitFor(() => expect(screen.getByDisplayValue('after reconnect')).toBeTruthy());
+    const detail = screen.getByDisplayValue('after reconnect').closest('.self-start');
+    expect(detail?.className).not.toContain('max-lg:hidden');
+  });
+
+  it('does not let a lower-floor selection read satisfy later mutation debt', async () => {
+    const agent = brief('agent-a', 'before');
+    const selectionRead = deferred<ReturnType<typeof fullAgent>>();
+    const debtRead = deferred<ReturnType<typeof fullAgent>>();
+    const patch = deferred<unknown>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial prompt'))
+      .mockReturnValueOnce(selectionRead.promise)
+      .mockReturnValueOnce(debtRead.promise);
+    const updateVibeAgent = vi.fn().mockReturnValue(patch.promise);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('before')).toBeTruthy());
+    const row = screen.getAllByText('agent-a').find((node) => node.closest('button'))?.closest('button');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+
+    const description = screen.getByDisplayValue('before');
+    fireEvent.change(description, { target: { value: 'local mutation' } });
+    fireEvent.blur(description);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { description: 'local mutation' }));
+    act(() => patch.resolve({ ok: true }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(3));
+
+    act(() => selectionRead.resolve(fullAgent({ ...agent, description: 'stale selection' }, 'stale prompt')));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByDisplayValue('local mutation')).toBeTruthy();
+
+    act(() => debtRead.resolve(fullAgent({ ...agent, description: 'authoritative mutation' }, 'fresh prompt')));
+    await waitFor(() => expect(screen.getByDisplayValue('authoritative mutation')).toBeTruthy());
+    expect(getVibeAgent).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    { label: 'rejected debt read', rejected: true },
+    { label: 'ok-false debt read', rejected: false },
+  ])('settles every same-agent consumer when the joined stage has a $label', async ({ rejected }) => {
+    const agent = brief('agent-a', 'description');
+    const debtRead = deferred<ReturnType<typeof fullAgent>>();
+    const getVibeAgent = vi.fn()
+      .mockResolvedValueOnce(fullAgent(agent, 'initial prompt'))
+      .mockReturnValueOnce(debtRead.promise);
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(agent)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'agents.detail.systemPromptExpand' }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.systemPromptPlaceholder'), {
+      target: { value: 'joined prompt' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'common.save' }));
+    await waitFor(() => expect(getVibeAgent).toHaveBeenCalledTimes(2));
+    const row = screen.getAllByText('agent-a').find((node) => node.closest('button'))?.closest('button');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+    expect(getVibeAgent).toHaveBeenCalledTimes(2);
+
+    if (rejected) {
+      act(() => debtRead.reject({ message: 'joined debt failed' }));
+    } else {
+      act(() => debtRead.resolve({ ok: false, message: 'joined debt failed' } as never));
+    }
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeTruthy());
+    expect(screen.getByText('joined debt failed')).toBeTruthy();
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+  });
+
   it('lets a successful PATCH win over a reconnect GET that settles later', async () => {
     const initial = { ...brief('agent-a', 'before patch'), model: 'old-model' };
     const server = { ...initial, description: 'server description', model: 'server-model' };
