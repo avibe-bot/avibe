@@ -440,6 +440,16 @@ def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):
     assert "avibe-os 9.9.9" in version_result.stdout
 
 
+def test_installers_attempt_show_runtime_prepare():
+    shell = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
+
+    assert 'if "$vibe_cmd" runtime prepare --strict; then' in shell
+    assert "    prepare_show_runtime\n" in shell
+    assert 'Invoke-NativeCommand -FilePath "vibe" -Arguments @("runtime", "prepare", "--strict")' in powershell
+    assert "    Prepare-ShowRuntime\n" in powershell
+
+
 def test_install_script_prefers_new_bin_over_stale_local_bin(tmp_path):
     home_dir = tmp_path / "home"
     home_dir.mkdir()

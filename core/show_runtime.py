@@ -43,8 +43,8 @@ from storage.lock import (
 
 from config import paths
 from core.dependency_network import dependency_error_details, fetch_bytes, fetch_to_path, probe_url, redact_url
-from core.show_pages import SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from core.show_runtime_failures import ShowRuntimeFailureClass, classify_show_runtime_failure
 
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,9 @@ SHOW_RUNTIME_CONTEXT_KEY_FEATURE = "show-context-key-v1"
 _CAPABILITY_RETRY_BASE_SECONDS = 0.25
 _CAPABILITY_RETRY_MAX_SECONDS = 5.0
 _CAPABILITY_RETRYABLE_STATUS_CODES = {408, 429}
+_INSTALL_RETRY_BASE_SECONDS = 5.0
+_INSTALL_RETRY_MAX_SECONDS = 5 * 60.0
+SHOW_RUNTIME_CLI_FALLBACK_DELAY_SECONDS = 30
 _MISSING = object()
 
 
@@ -160,6 +163,12 @@ class ShowRuntimeResult:
     available: bool
     base_url: str | None = None
     reason: str | None = None
+
+
+class ShowRuntimeUnavailableError(RuntimeError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -237,7 +246,8 @@ class ShowRuntimeManager:
         self.stderr_path = self.runtime_dir / "stderr.log"
         self.install_log_path = self.runtime_dir / "install.log"
         self.cache_root = self.runtime_dir / "vite-cache"
-        self._install_attempted = False
+        self._install_retry_deadline = 0.0
+        self._install_retry_attempt = 0
         self._install_reason: str | None = None
         self._download_error: dict[str, Any] | None = None
         self._managed_command: list[str] | None = None
@@ -296,7 +306,7 @@ class ShowRuntimeManager:
                         "--port",
                         "0",
                         "--fallback-delay-seconds",
-                        str(SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS),
+                        str(SHOW_RUNTIME_CLI_FALLBACK_DELAY_SECONDS),
                     ],
                     stdout=stdout,
                     stderr=stderr,
@@ -321,7 +331,7 @@ class ShowRuntimeManager:
     ) -> httpx.Response:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
-            raise RuntimeError(ready.reason or "show runtime unavailable")
+            raise ShowRuntimeUnavailableError(ready.reason or "runtime_unavailable")
         await self._negotiate_context_key_capability(ready.base_url)
         request_headers = {
             key: value
@@ -349,7 +359,7 @@ class ShowRuntimeManager:
         """Request a capability-independent Runtime resource without an app context."""
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
-            raise RuntimeError(ready.reason or "show runtime unavailable")
+            raise ShowRuntimeUnavailableError(ready.reason or "runtime_unavailable")
         blocked = {
             SHOW_RUNTIME_PROTOCOL_HEADER.lower(),
             SHOW_RUNTIME_CONTEXT_HEADER.lower(),
@@ -442,7 +452,7 @@ class ShowRuntimeManager:
     ) -> ShowRuntimeWebSocketTarget:
         ready = await self.ensure()
         if not ready.available or not ready.base_url:
-            raise RuntimeError(ready.reason or "show runtime unavailable")
+            raise ShowRuntimeUnavailableError(ready.reason or "runtime_unavailable")
         await self._negotiate_context_key_capability(ready.base_url)
         url = f"{ready.base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
         return ShowRuntimeWebSocketTarget(url=url, headers=envelope.headers())
@@ -586,27 +596,27 @@ class ShowRuntimeManager:
             self._install_reason = "runtime_command_missing"
             return None
         if self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
-            command = None if self.force_install else self._installed_manifest_runtime_command()
+            install_due = self._managed_install_due()
+            command = (
+                None
+                if self.force_install or (self.manifest_url and self.auto_install)
+                else self._installed_manifest_runtime_command()
+            )
             if command:
                 self._managed_command = command
+                self._record_managed_install_outcome(command)
                 return command
-            if self.auto_install and not self._install_attempted:
-                self._install_attempted = True
-                command = await asyncio.to_thread(self._install_managed_runtime)
+            if self.auto_install and install_due:
+                command = await self._attempt_managed_install()
                 if command:
                     self._managed_command = command
                     return command
-            command = self._installed_manifest_runtime_command()
-            if command:
-                self._managed_command = command
-                return command
             if self._managed_command:
                 return self._managed_command
             return None
         if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
-            if self.auto_install and not self._install_attempted:
-                self._install_attempted = True
-                command = await asyncio.to_thread(self._install_managed_runtime)
+            if self.auto_install and self._managed_install_due():
+                command = await self._attempt_managed_install()
                 if command:
                     self._managed_command = command
                     return command
@@ -631,13 +641,42 @@ class ShowRuntimeManager:
         if not self.auto_install:
             self._install_reason = "runtime_command_missing"
             return None
-        if self._install_attempted:
+        if not self._managed_install_due():
             return None
-        self._install_attempted = True
-        command = await asyncio.to_thread(self._install_managed_runtime)
+        command = await self._attempt_managed_install()
         if command:
             self._managed_command = command
         return command
+
+    def _managed_install_due(self) -> bool:
+        return time.monotonic() >= self._install_retry_deadline
+
+    async def _attempt_managed_install(self) -> list[str] | None:
+        command = await asyncio.to_thread(self._install_managed_runtime)
+        self._record_managed_install_outcome(command)
+        return command
+
+    def _record_managed_install_outcome(self, command: list[str] | None) -> None:
+        if command:
+            self._install_reason = None
+            self._install_retry_deadline = 0.0
+            self._install_retry_attempt = 0
+            return
+
+        reason = self._install_reason or "runtime_install_failed"
+        self._install_reason = reason
+        failure_class = classify_show_runtime_failure(reason)
+        if failure_class is ShowRuntimeFailureClass.CONFIGURED:
+            self._install_retry_deadline = 0.0
+            self._install_retry_attempt = 0
+            return
+        self._install_retry_attempt += 1
+        if failure_class is ShowRuntimeFailureClass.PERMANENT:
+            self._install_retry_deadline = float("inf")
+            return
+        self._install_retry_deadline = time.monotonic() + _show_runtime_install_retry_delay(
+            self._install_retry_attempt
+        )
 
     def _install_managed_runtime(self) -> list[str] | None:
         command: list[str] | None
@@ -1617,6 +1656,7 @@ class ShowRuntimeManager:
                 self._install_reason = None if command else "runtime_command_missing"
             else:
                 command = self._install_managed_runtime()
+                self._record_managed_install_outcome(command)
             return {
                 "ok": command is not None,
                 "provider": self.runtime_source,
@@ -1824,14 +1864,14 @@ class ShowRuntimeManager:
             node,
         )
         if verified_existing_command and not self.force_install:
-            verified_install_dir = next(
-                iter(self._manifest_install_dirs_for_command(verified_existing_command)),
-                None,
-            )
+            install_dirs = self._manifest_install_dirs_for_command(verified_existing_command)
+            verified_install_dir = min(install_dirs, key=lambda path: str(path)) if install_dirs else None
             if verified_install_dir is None:
-                self._install_reason = "runtime_install_failed"
-                return None
-            self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
+                logger.warning(
+                    "Verified Show Runtime command has no discoverable install directory; skipping current pointer update"
+                )
+            else:
+                self._write_current_manifest_pointer(manifest, archive, verified_install_dir)
             self._install_reason = None
             return verified_existing_command
         archive_path = self._resolve_manifest_archive(archive)
@@ -2650,6 +2690,12 @@ def _join_show_runtime_prewarm_path(runtime_path: str, asset_path: str, separato
 def _show_runtime_capability_retry_delay(attempt: int) -> float:
     exponent = max(0, min(attempt - 1, 16))
     ceiling = min(_CAPABILITY_RETRY_MAX_SECONDS, _CAPABILITY_RETRY_BASE_SECONDS * (2**exponent))
+    return ceiling * (0.5 + random.random() * 0.5)
+
+
+def _show_runtime_install_retry_delay(attempt: int) -> float:
+    exponent = max(0, min(attempt - 1, 16))
+    ceiling = min(_INSTALL_RETRY_MAX_SECONDS, _INSTALL_RETRY_BASE_SECONDS * (2**exponent))
     return ceiling * (0.5 + random.random() * 0.5)
 
 

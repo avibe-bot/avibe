@@ -8614,10 +8614,12 @@ def reconcile_startup_dependencies() -> dict:
             }
 
             if node_ok:
+                prepared = manager.prepare(force=False)
+                runtime_ok = bool(prepared.get("ok"))
                 result["show_runtime"] = {
-                    "ok": True,
-                    "status": "pending_prewarm",
-                    "reason": None,
+                    "ok": runtime_ok,
+                    "status": "ready" if runtime_ok else "failed",
+                    "reason": None if runtime_ok else prepared.get("reason") or "runtime_install_failed",
                 }
             else:
                 result["show_runtime"] = {

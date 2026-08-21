@@ -1289,7 +1289,7 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     assert by["node"]["installed"] is False and by["node"]["status"] == "missing"
 
 
-def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepare(monkeypatch):
+def test_reconcile_startup_dependencies_installs_askill_and_prepares_runtime(monkeypatch):
     askill_calls = []
     avault_calls = []
 
@@ -1332,9 +1332,39 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
     assert out["ok"] is True
     assert askill_calls == [False]
     assert avault_calls == [False]
-    assert manager.prepared == []
+    assert manager.prepared == [False]
     assert out["node"]["status"] == "ready"
-    assert out["show_runtime"] == {"ok": True, "status": "pending_prewarm", "reason": None}
+    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
+
+
+def test_reconcile_startup_dependencies_reports_runtime_prepare_failure(monkeypatch):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self):
+            return {
+                "installed": False,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False):
+            return {"ok": False, "reason": "runtime_archive_download_failed"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["ok"] is False
+    assert out["show_runtime"] == {
+        "ok": False,
+        "status": "failed",
+        "reason": "runtime_archive_download_failed",
+    }
 
 
 def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(monkeypatch):
