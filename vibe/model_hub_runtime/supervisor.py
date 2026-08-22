@@ -109,6 +109,7 @@ class _BoundedStartupOutput:
         self._source_exceeded_limit = False
         self._tail_truncated = False
         self._retaining = True
+        self._eof_observed = False
         self._lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._drain,
@@ -123,6 +124,10 @@ class _BoundedStartupOutput:
             while True:
                 chunk = reader(4096)
                 if not chunk:
+                    with self._lock:
+                        self._eof_observed = True
+                        if self._retaining:
+                            self._flush_pending_locked(final=True)
                     return
                 if not isinstance(chunk, bytes):
                     chunk = str(chunk).encode("utf-8", "replace")
@@ -156,15 +161,29 @@ class _BoundedStartupOutput:
             self._tail_truncated = True
         self._tail.extend(redacted)
 
-    def snapshot(self) -> tuple[bytes, bool, bool]:
+    def snapshot_live(self) -> tuple[bytes, bool, bool]:
+        """Freeze a live stream without publishing unproven overlap bytes."""
+
         with self._lock:
-            self._flush_pending_locked(final=True)
+            self._pending.clear()
             self._retaining = False
-            return (
-                bytes(self._tail),
-                self._source_exceeded_limit or self._tail_truncated,
-                self._tail_truncated,
-            )
+            return self._snapshot_locked()
+
+    def snapshot_terminal(self) -> tuple[bytes, bool, bool]:
+        """Freeze a stopped stream; only the drain may commit bytes at EOF."""
+
+        with self._lock:
+            if not self._eof_observed:
+                self._pending.clear()
+            self._retaining = False
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> tuple[bytes, bool, bool]:
+        return (
+            bytes(self._tail),
+            self._source_exceeded_limit or self._tail_truncated,
+            self._tail_truncated,
+        )
 
     def join(self, timeout: float = 1.0) -> None:
         self._thread.join(timeout=timeout)
@@ -412,7 +431,7 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
-                raw_output, output_truncated, partial_line = output.snapshot()
+                raw_output, output_truncated, partial_line = output.snapshot_live()
                 diagnostic, output_truncated = _sanitize_startup_output(
                     raw_output,
                     exact_values=startup_redaction_values,
@@ -430,7 +449,7 @@ class EngineSupervisor:
                 return connection
             time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         self._stop_locked()
-        raw_output, output_truncated, partial_line = output.snapshot()
+        raw_output, output_truncated, partial_line = output.snapshot_terminal()
         diagnostic, output_truncated = _sanitize_startup_output(
             raw_output,
             exact_values=startup_redaction_values,

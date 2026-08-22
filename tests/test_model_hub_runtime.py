@@ -57,6 +57,7 @@ from vibe.model_hub_runtime.state import (
 )
 from vibe.model_hub_runtime.supervisor import (
     MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
+    _BoundedStartupOutput,
     EngineSupervisor,
     EngineUnavailableError,
 )
@@ -1337,10 +1338,12 @@ def _write_mock_engine(
     startup_delay: float = 0.0,
     startup_output: str = "",
     echo_runtime_secrets: bool = False,
+    split_runtime_secret_after_ready: bool = False,
 ) -> None:
     script = f"""#!{sys.executable}
 import json
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -1356,7 +1359,14 @@ if startup_output:
     print(startup_output, file=sys.stderr, flush=True)
 if {echo_runtime_secrets!r}:
     print(f'management-key={{management}} gateway-token={{gateway}}', file=sys.stderr, flush=True)
+split_runtime_secret_after_ready = {split_runtime_secret_after_ready!r}
+if split_runtime_secret_after_ready:
+    secret_midpoint = len(management) // 2
+    print(management[:secret_midpoint], end='', file=sys.stderr, flush=True)
+    time.sleep(0.1)
 time.sleep({startup_delay!r})
+health_surfaces = set()
+health_complete = threading.Event()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -1372,9 +1382,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/v1/models' and self.headers.get('Authorization') == f'Bearer {{gateway}}':
+            health_surfaces.add('gateway')
+            if len(health_surfaces) == 2:
+                health_complete.set()
             self._json(200, {{'object': 'list', 'data': []}})
             return
         if self.path == '/v0/management/config' and self.headers.get('X-Management-Key') == management:
+            health_surfaces.add('management')
+            if len(health_surfaces) == 2:
+                health_complete.set()
             self._json(200, {{'host': config['host']}})
             return
         if self.path.startswith('/v0/management/auth-files/models'):
@@ -1455,7 +1471,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {{'id': 'response-1', 'model': payload['model']}})
 
-HTTPServer((config['host'], config['port']), Handler).serve_forever()
+server = HTTPServer((config['host'], config['port']), Handler)
+if split_runtime_secret_after_ready:
+    def finish_secret_output():
+        health_complete.wait()
+        time.sleep(0.75)
+        print(management[secret_midpoint:], file=sys.stderr, flush=True)
+        with open('split-secret-output-complete', 'w', encoding='utf-8') as handle:
+            handle.write('complete')
+
+    threading.Thread(target=finish_secret_output, daemon=True).start()
+server.serve_forever()
 """
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
@@ -1505,6 +1531,7 @@ def _fixture_supervisor(
     startup_delay: float = 0.0,
     startup_output: str = "",
     echo_runtime_secrets: bool = False,
+    split_runtime_secret_after_ready: bool = False,
 ) -> tuple[EngineSupervisor, EngineStateStore]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "mock-engine"
@@ -1513,6 +1540,7 @@ def _fixture_supervisor(
         startup_delay=startup_delay,
         startup_output=startup_output,
         echo_runtime_secrets=echo_runtime_secrets,
+        split_runtime_secret_after_ready=split_runtime_secret_after_ready,
     )
     installer = _FixtureInstaller(binary, tmp_path / "versions" / "install-1")
     store = EngineStateStore(tmp_path / "state")
@@ -1662,22 +1690,73 @@ def test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budg
 
     assert MODEL_HUB_STARTUP_TIMEOUT_SECONDS == 30.0
     caplog.set_level(logging.INFO, logger="vibe.model_hub_runtime.supervisor")
-    supervisor, _ = _fixture_supervisor(
+    safe_diagnostic = "cold-start phase=loading-runtime " + "safe-context " * 12
+    supervisor, store = _fixture_supervisor(
         tmp_path,
         startup_timeout=3.0,
         startup_delay=0.25,
-        startup_output="cold-start phase=loading-runtime",
+        startup_output=safe_diagnostic,
+        split_runtime_secret_after_ready=True,
     )
 
     started_at = time.monotonic()
     connection = supervisor.ensure_running()
     elapsed = time.monotonic() - started_at
+    runtime_secrets = store.prepare_instance("install-1", rotate=False)[1]
+    secret_midpoint = len(runtime_secrets.management_key) // 2
+    split_output_marker = store.root / "instances" / "install-1" / "split-secret-output-complete"
+    ready_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if "startup outcome=ready" in record.getMessage()
+    )
 
     assert connection.base_url.startswith("http://127.0.0.1:")
     assert 0.2 <= elapsed < 3.0
-    assert "startup outcome=ready" in caplog.text
-    assert "cold-start phase=loading-runtime" in caplog.text
+    assert "cold-start phase=loading-runtime" in ready_log
+    assert runtime_secrets.management_key[:secret_midpoint] not in ready_log
+    assert runtime_secrets.management_key[secret_midpoint:] not in ready_log
+    assert not split_output_marker.exists()
+    marker_deadline = time.monotonic() + 2.0
+    while not split_output_marker.exists() and time.monotonic() < marker_deadline:
+        time.sleep(0.01)
+    assert split_output_marker.read_text(encoding="utf-8") == "complete"
     supervisor.stop()
+
+
+def test_terminal_snapshot_without_observed_eof_discards_unproven_secret_prefix() -> None:
+    """A stopped or joined reader cannot authorize a final flush without pipe EOF."""
+
+    exact_secret = "arbitrary-property-secret-with-two-distinct-halves-0123456789"
+    prefix = exact_secret[: len(exact_secret) // 2].encode()
+    reader_blocked = threading.Event()
+    release_reader = threading.Event()
+
+    class BlockingStream:
+        reads = 0
+
+        def read(self, _size: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return prefix
+            reader_blocked.set()
+            release_reader.wait(timeout=2)
+            return b""
+
+    output = _BoundedStartupOutput(
+        BlockingStream(),
+        exact_values=(exact_secret,),
+    )
+    try:
+        assert reader_blocked.wait(timeout=1)
+        output.join(timeout=0.01)
+        tail, _truncated, _partial_line = output.snapshot_terminal()
+    finally:
+        release_reader.set()
+        output.join(timeout=1)
+
+    assert prefix not in tail
+    assert tail == b""
 
 
 def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
