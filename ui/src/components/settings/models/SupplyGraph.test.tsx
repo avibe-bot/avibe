@@ -54,6 +54,9 @@ describe('SupplyGraph', () => {
       expect(element).not.toBeNull();
       return element as SVGPathElement;
     });
+    const svg = view.container.querySelector('svg');
+    expect(svg?.classList.contains('overflow-hidden')).toBe(true);
+    expect(svg?.classList.contains('overflow-visible')).toBe(false);
     expect(path.getAttribute('d')).toContain('M 30 15');
 
     sourceTop = 30;
