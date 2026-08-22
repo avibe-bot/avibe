@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowLeft, Gauge, LoaderCircle, Route } from 'lucide-react';
+import { ArrowLeft, Gauge, LoaderCircle, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -9,7 +9,6 @@ import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
-import { AdvancedRow } from './AdvancedRow';
 import { EnableGatewayDialog } from './EnableGatewayDialog';
 import { GatewayModule } from './GatewayModule';
 import { InstallGatewayDialog } from './InstallGatewayDialog';
@@ -224,14 +223,16 @@ const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => vo
   );
 };
 
-const HubTabs: React.FC<{ tab: 'sources' | 'usage'; onChange: (tab: 'sources' | 'usage') => void }> = ({ tab, onChange }) => {
+type HubTab = 'sources' | 'usage' | 'logs';
+
+const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
   const { t } = useTranslation();
   return (
     <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
-      {(['sources', 'usage'] as const).map((id) => (
+      {(['sources', 'usage', 'logs'] as const).map((id) => (
         <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
-          {id === 'sources' ? <Route className="size-3.5" /> : <Gauge className="size-3.5" />}
-          {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : 'usage'}`)}
+          {id === 'sources' ? <Route className="size-3.5" /> : id === 'usage' ? <Gauge className="size-3.5" /> : <ScrollText className="size-3.5" />}
+          {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : id}`)}
         </button>
       ))}
     </div>
@@ -294,7 +295,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [runtimeRead, setRuntimeRead] = React.useState<RegionRead<RuntimeDependency>>(loadingRegion);
   const [eventsRead, setEventsRead] = React.useState<RegionRead<EventFeed>>(loadingRegion);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
-  const [tab, setTab] = React.useState<'sources' | 'usage'>('sources');
+  const [tab, setTab] = React.useState<HubTab>('sources');
   const [usageRead, setUsageRead] = React.useState<RegionRead<UsageSummary>>(loadingRegion);
   const [usageWindow, setUsageWindow] = React.useState<UsageWindowOption>(USAGE_DEFAULT_WINDOW_DAYS);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
@@ -564,6 +565,11 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [eventReadAuthority]);
 
+  React.useEffect(() => {
+    if (tab !== 'logs') return;
+    void refreshEventHead();
+  }, [refreshEventHead, tab]);
+
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<AuthorizedSurfaceLanding>(({ landing, sourceSnapshot }) => {
     if (!aliveRef.current) return;
     const freshSources = foldRegionRead<Source[], Source[] | null>(landing.sources, {
@@ -586,7 +592,6 @@ export const SettingsModelsPage: React.FC = () => {
   const refresh = React.useCallback(async (
     affectedChains: ModelChainRequest[] = [],
   ): Promise<SourceMutationLanding> => {
-    void refreshEventHead();
     const outcome: { landing: SourceMutationLandingReads | null } = { landing: null };
     const result = await refreshAuthority.run(async () => {
       const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
@@ -607,7 +612,7 @@ export const SettingsModelsPage: React.FC = () => {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
     return landing;
-  }, [agentCollectionReads, refreshAffectedChains, refreshAuthority, refreshEventHead, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
+  }, [agentCollectionReads, refreshAffectedChains, refreshAuthority, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
 
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
@@ -1060,15 +1065,13 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : <div className="space-y-[22px]">
                   {/* The tab strip belongs to the Hub, not to the source
-                      inventory. The ledger outlives the Sources it metered — it
-                      retains its window and the report names a deleted Source by
-                      its id — so deleting the last one may not take the only route
-                      to that history with it. Frame 09 is drawn without tabs
-                      because it predates this tab, not because usage stops
-                      existing once the inventory is empty; what the frame decides
-                      is the body of `sources`, which is still Frame 09 there. */}
+                      inventory. Usage and switch history both outlive the Sources
+                      they name, so deleting the last Source may not remove the only
+                      route to either record. Frame 09 predates these tabs; it still
+                      owns the direct-only body of `sources`. */}
                   <HubTabs tab={tab} onChange={setTab} />
                   {tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
+                    : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
@@ -1164,8 +1167,6 @@ export const SettingsModelsPage: React.FC = () => {
                       </div>
                       <SupplyLegend relations={supplyRelations} />
                     </div>
-                    <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    <AdvancedRow />
                   </div>}
                 </div>}
       <SourceMutationReport

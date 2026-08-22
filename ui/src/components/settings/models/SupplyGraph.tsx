@@ -20,7 +20,7 @@ export const SupplyGraph: React.FC<{
 }> = ({ containerRef, relations }) => {
   const [drawing, setDrawing] = React.useState<{ width: number; height: number; railX: number; wires: DrawnRelation[] } | null>(null);
 
-  React.useLayoutEffect(() => {
+  React.useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
     const measure = () => {

@@ -657,7 +657,8 @@
         },
         "tab": {
           "hub": "来源与网关",
-          "usage": "用量"
+          "usage": "用量",
+          "logs": "日志"
         }
       },
       "direct": {
@@ -1098,11 +1099,6 @@
         "yesterday": "昨天",
         "empty": "暂无切换记录",
         "deletedSource": "已删除"
-      },
-      "advanced": {
-        "title": "高级",
-        "detail": "跨厂商自动顶替（默认关）· 请求日志 · 诊断",
-        "comingSoon": "高级设置即将上线"
       },
       "addKey": {
         "title": "添加 API Key",

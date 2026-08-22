@@ -657,7 +657,8 @@
         },
         "tab": {
           "hub": "Sources & gateway",
-          "usage": "Usage"
+          "usage": "Usage",
+          "logs": "Logs"
         }
       },
       "direct": {
@@ -1098,11 +1099,6 @@
         "yesterday": "Yesterday",
         "empty": "No switches yet",
         "deletedSource": "deleted"
-      },
-      "advanced": {
-        "title": "Advanced",
-        "detail": "Cross-vendor auto-substitution (off) · Request log · Diagnostics",
-        "comingSoon": "Advanced settings are coming soon"
       },
       "addKey": {
         "title": "Add API key",
