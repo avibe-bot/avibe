@@ -43,6 +43,9 @@ FOUNDATION_SCHEMAS = (
 )
 V1_SCHEMA = Path(__file__).with_name("fixtures") / "memory_foundation_v1.sql"
 V2_SCHEMA = Path(__file__).with_name("fixtures") / "memory_foundation_v2.sql"
+OWNER_SPLIT_COMPATIBILITY_FIXTURE = (
+    Path(__file__).with_name("fixtures") / "memory" / "owner_split_compatibility.json"
+)
 
 
 def _dt(value: str) -> datetime:
@@ -269,6 +272,11 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
     tmp_path: Path,
     foundation_schema: Path,
 ) -> None:
+    compatibility = json.loads(
+        OWNER_SPLIT_COMPATIBILITY_FIXTURE.read_text(encoding="utf-8")
+    )
+    released_ref = compatibility["released_provider_session_ref"]
+    pre_split_row = compatibility["pre_owner_split_queue_row"]
     database = _store_path(tmp_path / foundation_schema.stem)
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
@@ -284,12 +292,9 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
         queue_columns = {
             row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")
         }
-        principal_id = "u-11111111111111111111111111111111"
-        provider_ref = ProviderSessionRef(
-            principal_id=principal_id,
-            epoch=0,
-            project_ref=LEGACY_PROJECT,
-            session_id="src--4f619a27f96acb8854d2c1f4d2b301263832544740e2c0b176d1a1a05f5b997d--e0",
+        principal_id = str(released_ref["principal_id"])
+        provider_ref = ProviderSessionRef.deserialize(
+            json.dumps(released_ref, sort_keys=True, separators=(",", ":"))
         ).serialize()
         provider_column = (
             ", provider_session_ref" if "provider_session_ref" in queue_columns else ""
@@ -328,6 +333,37 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
             if provider_column
             else ("legacy-delivered", principal_id, LEGACY_PROJECT),
         )
+        conn.execute(
+            f"""
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id{provider_column},
+                principal_id, project_ref, provenance, payload_text,
+                occurred_at_ms, provider_timestamp_ms, state, created_at
+            ) VALUES (?, 0, ?{provider_value}, ?, ?, ?, ?, ?, ?, 'pending', 'now')
+            """,
+            (
+                pre_split_row["source_message_digest"],
+                pre_split_row["session_id"],
+                provider_ref,
+                pre_split_row["principal_id"],
+                pre_split_row["project_ref"],
+                pre_split_row["provenance"],
+                pre_split_row["payload_text"],
+                pre_split_row["occurred_at_ms"],
+                pre_split_row["provider_timestamp_ms"],
+            )
+            if provider_column
+            else (
+                pre_split_row["source_message_digest"],
+                pre_split_row["session_id"],
+                pre_split_row["principal_id"],
+                pre_split_row["project_ref"],
+                pre_split_row["provenance"],
+                pre_split_row["payload_text"],
+                pre_split_row["occurred_at_ms"],
+                pre_split_row["provider_timestamp_ms"],
+            ),
+        )
 
     store = MemoryStore(database)
 
@@ -358,6 +394,20 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
             """
         ).fetchone()
         assert receipt_row == ("legacy-delivered", "add-legacy", "extracted", "delivered")
+        pre_split = conn.execute(
+            """
+            SELECT principal_id, provenance, provider_session_ref, payload_text, state
+            FROM memory_capture_queue
+            WHERE source_message_digest = 'legacy-agent-pending'
+            """
+        ).fetchone()
+        assert pre_split == (
+            principal_id,
+            "agent",
+            provider_ref,
+            "legacy agent payload",
+            "pending",
+        )
         settlement = conn.execute(
             """
             SELECT observation, request_id, confirmed_watermark_ms
@@ -384,6 +434,26 @@ def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
         assert {
             row[1] for row in conn.execute("PRAGMA table_info('memory_session_flush_state')")
         } >= {"provider_session_ref", "open_generation", "target_generation"}
+
+    delivered_pre_split = False
+    for index in range(2):
+        claimed = store.claim_due(
+            lease_owner="compatibility-worker",
+            now=f"2026-01-01T00:00:0{index}.000Z",
+        )
+        assert claimed is not None
+        if claimed.source_message_digest == pre_split_row["source_message_digest"]:
+            delivered_pre_split = True
+            assert claimed.provenance == "agent"
+            assert claimed.principal_id == principal_id
+            assert claimed.provider_session_ref.principal_id == principal_id
+        assert store.settle(
+            claimed,
+            Delivered(add_request_id=f"compatibility-add-{index}"),
+            lease_owner="compatibility-worker",
+            now=_dt(f"2026-01-01T00:00:1{index}.000Z"),
+        ).settled
+    assert delivered_pre_split
 
 
 def test_store_rejects_unknown_nonempty_version_zero_without_mutating_file(
@@ -1256,6 +1326,111 @@ def test_assistant_owner_derivation_and_read_session_refs_are_stable_and_disjoin
         "epoch",
         "project_ref",
         "session_id",
+    }
+
+
+def test_capture_provenance_routes_provider_owner_without_changing_caller_audit_scope(
+    tmp_path: Path,
+) -> None:
+    """Scenarios: MEMORY-SEARCH-011, MEMORY-SEARCH-015."""
+
+    store = MemoryStore(_store_path(tmp_path))
+    other_principal = "u-22222222222222222222222222222222"
+    user = store.enqueue_request(
+        source_message_id="user-owner-routing",
+        session_id="shared-owner-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="user-owned",
+        occurred_at_ms=1,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    agent = store.enqueue_request(
+        source_message_id="agent-owner-routing",
+        session_id="shared-owner-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="agent",
+        payload_text="assistant-owned",
+        occurred_at_ms=2,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    other_agent = store.enqueue_request(
+        source_message_id="other-agent-owner-routing",
+        session_id="shared-owner-session",
+        principal_id=other_principal,
+        project_ref=PROJECT,
+        provenance="agent",
+        payload_text="other-assistant-owned",
+        occurred_at_ms=3,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+
+    assert user.row is not None and agent.row is not None and other_agent.row is not None
+    assert user.row.principal_id == agent.row.principal_id
+    assert user.row.provider_session_ref.principal_id == user.row.principal_id
+    assert agent.row.provider_session_ref.principal_id == derive_assistant_memory_owner_id(
+        agent.row.principal_id
+    )
+    assert user.row.provider_session_ref.session_id != agent.row.provider_session_ref.session_id
+    assert other_agent.row.provider_session_ref.principal_id == derive_assistant_memory_owner_id(
+        other_principal
+    )
+    assert (
+        other_agent.row.provider_session_ref.principal_id
+        != agent.row.provider_session_ref.principal_id
+    )
+
+
+def test_owner_scoped_session_recovery_returns_trusted_caller_scope_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-SEARCH-012."""
+
+    store_path = _store_path(tmp_path)
+    principal = "u-11111111111111111111111111111111"
+    store = MemoryStore(store_path)
+    for provenance in ("user_input", "agent"):
+        result = store.enqueue_request(
+            source_message_id=f"recovery-{provenance}",
+            session_id="owner-recovery-session",
+            principal_id=principal,
+            project_ref=PROJECT,
+            provenance=provenance,
+            payload_text=provenance,
+            occurred_at_ms=1 if provenance == "user_input" else 2,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert result.row is not None
+
+    reopened = MemoryStore(store_path)
+
+    assert reopened.resolve_current_session_scopes("owner-recovery-session") == (
+        (principal, PROJECT),
+    )
+    rows = reopened.list_queue_rows()
+    assert {row.provider_session_ref.principal_id for row in rows} == {
+        principal,
+        derive_assistant_memory_owner_id(principal),
+    }
+    delivered_owners: set[str] = set()
+    for index in range(2):
+        claimed = reopened.claim_due(
+            lease_owner="recovery-worker",
+            now=f"2026-01-01T00:00:0{index}.000Z",
+        )
+        assert claimed is not None
+        delivered_owners.add(claimed.provider_session_ref.principal_id)
+        assert reopened.settle(
+            claimed,
+            Delivered(add_request_id=f"recovery-add-{index}"),
+            lease_owner="recovery-worker",
+            now=_dt(f"2026-01-01T00:00:1{index}.000Z"),
+        ).settled
+    assert delivered_owners == {
+        principal,
+        derive_assistant_memory_owner_id(principal),
     }
 
 

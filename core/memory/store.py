@@ -293,6 +293,8 @@ def _legacy_provider_ref(
         str(row["project_ref"]),
         str(row["session_id"]),
     )
+    # Every v0 capture predates owner splitting, including agent provenance.
+    # Its persisted principal therefore remains both caller and memory owner.
     derived_session_id = _provider_session_ref(
         scope_key,
         values[0],
@@ -1125,9 +1127,12 @@ class MemoryStore:
                 return None
             if (
                 ref.epoch != meta.epoch
-                or not is_principal_id(ref.principal_id)
+                or not is_memory_owner_id(ref.principal_id)
                 or not is_project_id(ref.project_ref)
             ):
+                return None
+            caller_principal_id = _caller_principal_for_memory_owner(ref.principal_id)
+            if caller_principal_id is None:
                 return None
             expected_session_id = _provider_session_ref(
                 meta.scope_key,
@@ -1137,8 +1142,61 @@ class MemoryStore:
                 meta.epoch,
             )
             if hmac.compare_digest(ref.session_id, expected_session_id):
-                matches.add((ref.principal_id, ref.project_ref))
+                matches.add((caller_principal_id, ref.project_ref))
         return tuple(sorted(matches))
+
+    def provider_session_refs_with_capture_state(
+        self,
+        *,
+        principal_id: str,
+        project_ref: str,
+        session_id: str,
+    ) -> tuple[ProviderSessionRef, ...]:
+        """Return current owner sessions backed by capture state for one caller scope."""
+
+        if not is_principal_id(principal_id) or not is_project_id(project_ref):
+            raise ValueError("invalid Memory scope")
+        if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
+            raise ValueError("invalid Memory session")
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return ()
+            if meta.clear_in_progress:
+                raise RuntimeError("Memory clear is in progress")
+            candidates = tuple(
+                ProviderSessionRef(
+                    principal_id=owner_id,
+                    epoch=meta.epoch,
+                    project_ref=project_ref,
+                    session_id=_provider_session_ref(
+                        meta.scope_key,
+                        owner_id,
+                        project_ref,
+                        session_id,
+                        meta.epoch,
+                    ),
+                )
+                for owner_id in (
+                    principal_id,
+                    derive_assistant_memory_owner_id(principal_id),
+                )
+            )
+            serialized = tuple(candidate.serialize() for candidate in candidates)
+            rows = conn.execute(
+                """
+                SELECT provider_session_ref
+                FROM memory_session_flush_state
+                WHERE epoch = ? AND provider_session_ref IN (?, ?)
+                """,
+                (meta.epoch, *serialized),
+            ).fetchall()
+        captured = {str(row["provider_session_ref"]) for row in rows}
+        return tuple(
+            candidate
+            for candidate, serialized_ref in zip(candidates, serialized, strict=True)
+            if serialized_ref in captured
+        )
 
     def get_meta(self) -> MemoryMeta | None:
         """Return the metadata row without creating Memory state."""
@@ -1272,15 +1330,20 @@ class MemoryStore:
                     if named_count >= MAX_NAMED_MEMORY_PROJECTS:
                         return EnqueueResult(outcome="project_limit")
 
+            memory_owner_id = (
+                principal_id
+                if provenance == "user_input"
+                else derive_assistant_memory_owner_id(principal_id)
+            )
             session_id_ref = _provider_session_ref(
                 meta.scope_key,
-                principal_id,
+                memory_owner_id,
                 project_ref,
                 session_id,
                 meta.epoch,
             )
             provider_session_ref = ProviderSessionRef(
-                principal_id=principal_id,
+                principal_id=memory_owner_id,
                 epoch=meta.epoch,
                 project_ref=project_ref,
                 session_id=session_id_ref,
@@ -3956,6 +4019,19 @@ def is_memory_owner_id(value: object) -> bool:
         isinstance(value, str)
         and value.endswith("-agent")
         and is_principal_id(value[:-6])
+    )
+
+
+def _caller_principal_for_memory_owner(memory_owner_id: str) -> str | None:
+    if is_principal_id(memory_owner_id):
+        return memory_owner_id
+    if not is_memory_owner_id(memory_owner_id):
+        return None
+    caller_principal_id = memory_owner_id[: -len("-agent")]
+    return (
+        caller_principal_id
+        if derive_assistant_memory_owner_id(caller_principal_id) == memory_owner_id
+        else None
     )
 
 
