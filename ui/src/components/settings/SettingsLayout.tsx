@@ -165,7 +165,7 @@ export const SettingsLayout: React.FC = () => {
         <nav
           aria-label={t('settings.navigationLabel')}
           className={clsx(
-            'min-h-0 shrink-0 overflow-y-auto border-r border-border bg-surface/70 px-2 py-3',
+            'min-h-0 shrink-0 overflow-y-auto border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
             'w-full md:flex md:w-14 md:flex-col lg:w-[196px]',
             !atRoot && 'hidden',
           )}
@@ -205,7 +205,7 @@ export const SettingsLayout: React.FC = () => {
         </nav>
 
         <section className={clsx('min-w-0 flex-1 overflow-y-auto', atRoot && 'hidden md:block')}>
-          <div className="mx-auto w-full max-w-[1180px] px-4 py-5 md:px-6 md:py-7 lg:px-8">
+          <div className="mx-auto w-full max-w-[1180px] px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-5 md:px-6 md:pb-7 md:pt-7 lg:px-8">
             {!atRoot && (
               <NavLink
                 to="/settings"

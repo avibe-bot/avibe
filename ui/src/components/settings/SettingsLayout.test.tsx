@@ -114,4 +114,15 @@ describe('SettingsLayout', () => {
 
     expect(screen.getByRole('banner').className).toContain('pt-[env(safe-area-inset-top)]');
   });
+
+  it('keeps mobile navigation and detail controls above the bottom safe-area inset', () => {
+    renderLayout('/settings/replies');
+
+    expect(screen.getByRole('navigation', { name: 'settings.navigationLabel' }).className).toContain(
+      'env(safe-area-inset-bottom)',
+    );
+    expect(screen.getByText('replies-body').closest('section')?.firstElementChild?.className).toContain(
+      'env(safe-area-inset-bottom)',
+    );
+  });
 });
