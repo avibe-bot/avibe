@@ -23,6 +23,7 @@ import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
 import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
 import { useModelHubCapability } from '../models/useModelHubCapability';
 import { SegmentedRadio } from '../shared/SegmentedRadio';
+import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOAuthFlowLock } from '../shared/useOAuthFlowLock';
 import { useApi } from '@/context/ApiContext';
@@ -180,6 +181,7 @@ export const ClaudeProviderConfig: React.FC<{
       } else {
         showToast(t('settings.backends.claudeApiKeyRemoved'), 'success');
       }
+      surfaceBackendNotices(result.notices, showToast, t);
     } catch (err) {
       showToast(
         t('settings.backends.claudeApiKeyRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
