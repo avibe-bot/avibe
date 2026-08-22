@@ -924,5 +924,35 @@
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
       "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed."
     }
+  },
+  "data": {
+    "helpCommand": "Inspect Avibe data, and run explicit trace-retention maintenance",
+    "helpDescription": "Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
+    "retention": {
+      "invalidDays": "--days must be between {minimum} and {maximum}; refusing to run instead of silently clamping the window.",
+      "helpCommand": "Show or run bounded retention for internal agent trace events",
+      "helpDescription": "Status and manual control for the agent_events trace retention policy: tool_call trace rows older than the retention window are deleted; messages, non-trace events, and newer traces are never touched.",
+      "helpRun": "Run one retention pass now (bypasses the daily cadence gate, still respects the lease).",
+      "helpDays": "Retention window override in days (default: the configured value, currently {current}).",
+      "helpCompact": "Also physically compact the database (VACUUM) when safe; implies --run. Off by default: VACUUM holds the database's sole writer lock and can stall the running service's writes; run it during a maintenance window or with the service stopped.",
+      "configRecovered": "The Avibe config could not be read (recovery defaults active); the retention policy is unknown. Re-run with an explicit --days window to delete anything.",
+      "compactionReasonCheckpointBusy": "the database is busy with concurrent readers/writers",
+      "compactionReasonFreeSpace": "there is not enough free disk space to rewrite the database safely",
+      "compactionReasonOther": "compaction was not safe to run",
+      "error": "Trace retention command failed: {error}",
+      "plan": "{count} trace row(s) older than {days} day(s) are eligible ({size} of payload text).",
+      "lastRun": "Last retention run: {at}, deleted {rows} row(s).",
+      "neverRun": "No retention run has completed yet.",
+      "disabled": "Trace retention is disabled in runtime config; the daily task will not delete anything.",
+      "compaction": "Reclaimable inside the database right now: {size}.",
+      "ran": "Retention pass deleted {rows} trace row(s).",
+      "compacted": "Database compacted; {size} returned to disk.",
+      "compactionDeferred": "Compaction deferred ({reason}); rows are deleted, disk space returns on a later safe pass.",
+      "compactionSkipped": "Compaction skipped: too little would be reclaimed.",
+      "leaseLost": "This pass lost its lease to another retention run; deletion stopped partway and no completion was recorded. Retry once the other run finishes.",
+      "notDue": "Retention already ran within the last day; nothing to do.",
+      "busy": "Another retention run is active; try again later.",
+      "cancelled": "Retention stopped at a batch boundary; no completion was recorded."
+    }
   }
 }

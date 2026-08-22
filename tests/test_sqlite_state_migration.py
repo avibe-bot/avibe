@@ -35,7 +35,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260820_0058"
+HEAD_REVISION = "20260821_0060"
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
 # Alembic cannot re-emit them when batch mode recreates a table. Every migration that
 # rebuilds one therefore passes this convention; the rebuild simulated below has to pass

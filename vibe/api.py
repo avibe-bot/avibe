@@ -1344,6 +1344,10 @@ def config_to_payload(
             "harness_run_orphan_grace_seconds": config.runtime.harness_run_orphan_grace_seconds,
             "harness_run_queued_ttl_seconds": config.runtime.harness_run_queued_ttl_seconds,
             "harness_run_hold_ttl_seconds": config.runtime.harness_run_hold_ttl_seconds,
+            # Same round-trip contract as the Harness knobs above: omitting these
+            # here would revert a user's retention opt-out on unrelated saves.
+            "agent_events_trace_retention_enabled": config.runtime.agent_events_trace_retention_enabled,
+            "agent_events_trace_retention_days": config.runtime.agent_events_trace_retention_days,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,
