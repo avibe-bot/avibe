@@ -273,7 +273,7 @@ half named in its Missing cell has an owner.
 | G-22 | 06 for a source just added — the add flow's terminal, reached from §1.4's *Awaiting sign-in* and §1.5's ② | an element that renders `added_to` | **The contract answers a question no frame asks.** `POST /api/models/sources` and the `create` OAuth terminal both return `added_to: AddedTo[]`, an entry naming `backend`, `menu_model`, `source_id`, `model_id` and `position`, the last one-based in the persisted Route chain after commit `[contract]`. Add-time placement (`model-hub.md` §4.2) is what makes it worth showing: the source the user just added has been written into chains they did not open, and this array is the only statement of where. Unlike persisted `Source.adopted_by`, `added_to` has one-response lifetime: later Source and Agent reads carry no placement report, so the landing cannot be recovered by a later read. Nothing in this document claims to render it; §1.3 names this number rather than specifying an element, because §0.2 leaves drawing to the frame |
 | G-23 | `Qp6FI`, the shared guarded-change confirm — both callers, §1.6's *Refetch refused* and *Guard refused* | a body block that lists `would_interrupt` | **The refusal carries a list and the dialog draws a sentence.** `would_interrupt` is `SupplyGap[]`, each entry `{backend, model_id, agents}` with `model_id` the protected **menu** model and `agents` the enabled named Vibe Agents that pinned it `[contract]`, and `model-hub.md` requires that 「the confirm copy names affected Agents when any exist」. `Qp6FI` as measured has exactly one label, one count pill, one row list and one hint line, and all four are the `would_remove_hops` side; the only rendering of the gap array is `guard.hint.interrupt`, one sentence that reports the array is non-empty. The strings are specified — `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, with `gateway.modelCount` as the pill — because copy is this document's register and an authority requires these; the block that holds them is drawing, so it is a gap rather than an invention. The same absence makes `source_last_supplier` unrenderable: its `api.md` example carries `would_remove_hops: []` beside a populated `would_interrupt`, which this dialog would draw as an empty list under a bare sentence |
 | G-24 | 01 run pill, *Unsupported host* — **registered against RuntimeDependency** | ~~a host-platform or installability discriminator in the runtime payload~~ nothing | Every runtime response now carries server-authoritative `host_platform`; an exact match in `manifest.assets[].platform` is the support predicate. §1.0 never substitutes the browser platform. |
-| G-25 | 01 gateway group, the collapse predicate and unavailable marker — **registered against AgentSupply model supply** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it at page grain to protect every non-runnable row from collapse. A nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. |
+| G-25 | 01 gateway group, the unavailable marker — **registered against AgentSupply model supply; collapse ownership retired 2026-08-23** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it only to choose the row marker: a nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. The six-row prefix owns collapse independently of this field. |
 | G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` consumes the current Source-order sequence with a stable total sort over every stored Route. The order PUT remains chain-byte-identical; invocation is explicit and separate. |
 | G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol_order`, `client_nonce` and `accept_unavailable_inventory` `[contract]`. The client submits no protocol conclusion or discovered inventory; the server observes both. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to prove the protocol before a failed inventory may commit. |
 | G-28 | `Qp6FI` guarded-change hop rows — **registered against `RouteHopRef.position`** | ~~the hop's position, on the reference the refusal returns~~ nothing | `guard-refusal.schema.json` carries one-based pre-mutation `position` on every `RouteHopRef`. §1.6 and §1.10 render it directly and issue no per-chain lookup. |
@@ -341,10 +341,11 @@ a chain references that no source supplies any more must be visibly marked on th
 menu, and must never be silently skipped.** The original ruling landed on the retained
 hop's live non-runnable reason and the empty-route case. The closed
 `model_supply.has_runnable_hop` projection now makes the same rule total at page grain:
-false keeps the row visible. A nonempty chain renders its explicit unavailable marker;
+false keeps the row in the backend menu and gives it a marker when rendered, including
+after the user expands the six-row prefix. A nonempty chain renders its explicit unavailable marker;
 the forced-false `chain_length: 0` subset is visibly structural and therefore uses the
 existing `models.launch.route_unconfigured` treatment instead. §1.6 states the rule,
-while G-25 records the fields that carry it.
+while G-25 records the fields that carry the marker.
 
 **What that ruling costs, stated plainly.** The requirement moved to the menu, so the
 *source page* loses the story. Frame 06's inventory is the discovered set and stays the
@@ -4049,8 +4050,10 @@ Five rules:
 
   What survives unchanged is the rule the earlier text was written to protect, and it was
   never about hops: **一条链引用的型号,若在所有来源上都不再供应,必须在型号菜单上可见地
-  标出,不得静默跳过。** §4.4's `model_supply.has_runnable_hop: false` makes that row
-  non-nominal on frame 01. A nonempty chain renders `legend.unavailable` in its existing
+  标出,不得静默跳过。** The row remains in frame 01's ordered model list and the explicit
+  disclosure keeps it reachable beyond the six-row prefix. §4.4's
+  `model_supply.has_runnable_hop: false` selects its marker rather than its collapse
+  position. A nonempty chain renders `legend.unavailable` in its existing
   current-text slot; `chain_length: 0` branches first to the existing
   `models.launch.route_unconfigured` family. The projection
   is reached both by the retained-hop path and by a confirmed cascade that empties a route
@@ -5324,18 +5327,16 @@ than the backend because a gateway-mode backend can perfectly well be supplied b
 native source — cyan into a 网关 group is a normal picture, and a build that reads cyan
 as "this backend is 直连" will draw the wrong thing on that row (E-4, D-24).
 
-**D-7 — A collapse never swallows an active state.** Every non-nominal model row
-is visible even if that pushes the group past three rows. §1.1 defines non-nominal as
-`model_supply.has_runnable_hop: false`; a structurally empty Route is the forced
-`chain_length: 0` subset. That structural subset renders
-`models.launch.route_unconfigured`; a nonempty false row renders the explicit
-`legend.unavailable` marker, so visibility is never mistaken for the state indication.
-The definition lives there because that is where the payload it has to be readable from
-is stated.
-*Why:* a collapse exists to hide the boring. A row with no runnable hop is a current
-service interruption whether its next step is a later payload or user action, so its own
-state must remain visible. A taken-over row still has a runnable later hop and may stay
-nominal for collapse; a row with `has_runnable_hop: false` may not.
+**D-7 — A collapsed backend group shows at most the first six models.** The prefix is
+selected only by backend menu order; row state never expands it implicitly. Every
+remaining model stays reachable through the counted disclosure row, and expanding keeps
+the same total order. `model_supply.has_runnable_hop` still selects the state indication:
+a structurally empty Route renders `models.launch.route_unconfigured`, while a nonempty
+false row renders `legend.unavailable` when that row is visible.
+*Why:* the overview is a scanning surface, and an unbounded exception rule lets a backend
+with many unavailable models consume the entire graph track and push later sections out
+of view. Six rows keep the group bounded without deleting or reordering any model; the
+explicit disclosure is the route to every state beyond the prefix.
 
 **D-8 — The user does not perceive the supply mechanism.** Protocol, channel and
 injection are never *displayed*: no surface reports which one is in use, and none offers
