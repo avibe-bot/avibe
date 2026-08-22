@@ -156,15 +156,16 @@ though the boxes do.
 | --- | --- |
 | F1 | `.model-hub-model-current` is `min-w-0 flex-1 truncate` with no `text-right`. The frame right-aligns it against the chevron (x=1233, w=111); live leaves it at x=1077, w=268, so short values such as `—` float mid-row. |
 
-## G — Data-state differences, not defects
+## G — Data-state differences and superseded behavior
 
 Verified against the spec and the code; the regression fixture has zero supply
 relations and no runnable hops.
 
 - Supply legend absent — `SupplyGraph.tsx:88-89` returns `null` at zero relations.
 - Rail wires absent — same cause.
-- All 18 model rows uncollapsed — G-25 plus `has_runnable_hop` false everywhere
-  (`AgentCard.tsx:118`).
+- The captured build showed all 18 model rows because the former G-25/D-7 rule expanded
+  every non-runnable row. The 2026-08-23 owner decision supersedes that behavior with a
+  strict six-row prefix plus the counted disclosure.
 - 「没有可用来源」 line present; `—` in the current-source slot.
 - Neutral (not cyan/mint) tiles; 20 table rows against the frame's 12.
 - 「未设置档位 + 添加档位」 in the tier column **is** the designed empty state —

@@ -772,8 +772,7 @@
         "modelCount_other": "{{count}} 个型号",
         "moreModels_one": "还有 {{count}} 个型号",
         "moreModels_other": "还有 {{count}} 个型号",
-        "collapse_one": "还有 {{count}} 个型号",
-        "collapse_other": "还有 {{count}} 个型号",
+        "collapse": "收起",
         "retry": "重试",
         "supply": {
           "none": "没有可用来源",

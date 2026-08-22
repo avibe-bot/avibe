@@ -772,8 +772,7 @@
         "modelCount_other": "{{count}} models",
         "moreModels_one": "{{count}} more model",
         "moreModels_other": "{{count}} more models",
-        "collapse_one": "{{count}} more model",
-        "collapse_other": "{{count}} more models",
+        "collapse": "Collapse",
         "retry": "Retry",
         "supply": {
           "none": "No usable source",
