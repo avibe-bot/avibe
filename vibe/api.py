@@ -8438,10 +8438,15 @@ def dependencies_status(*, offline: bool = False) -> dict:
         srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
         srt = srt_manager.status()
     except Exception as exc:  # noqa: BLE001
-        srt = {"installed": False, "node_available": None, "node_version": None, "reason": str(exc)}
+        srt = {
+            "install": {"state": "absent", "runtime_version": None, "matches_manifest": None},
+            "node_available": None,
+            "node_version": None,
+            "reason": str(exc),
+        }
     manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
     install = srt.get("install") if isinstance(srt.get("install"), dict) else {}
-    srt_installed = bool(srt.get("installed"))
+    srt_installed = install.get("state") == "installed"
     installed_matches_manifest = install.get("matches_manifest")
     deps.append(
         {
@@ -8556,8 +8561,8 @@ def _prepare_show_runtime_job() -> dict:
 
         payload = get_show_runtime_manager().prepare(force=True)
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
-        ok = install.get("state") == "installed"
-        reason = install.get("reason") or payload.get("reason")
+        ok = bool(payload.get("ok"))
+        reason = payload.get("reason") or install.get("reason")
         result = {
             "ok": ok,
             "message": (

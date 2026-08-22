@@ -1173,8 +1173,7 @@ def test_dependencies_status_shape(monkeypatch):
     class _Mgr:
         def status(self):
             return {
-                "installed": True,
-                "install": {"runtime_version": "1.4.0", "matches_manifest": True},
+                "install": {"state": "installed", "runtime_version": "1.4.0", "matches_manifest": True},
                 "manifest": {"runtime_version": "1.4.0"},
                 "node_available": True,
                 "node_version": "20.11",
@@ -1225,8 +1224,7 @@ def test_dependencies_status_shape(monkeypatch):
         pytest.param(
             {
                 "provider": "manifest-cache",
-                "installed": True,
-                "install": {"runtime_version": "runtime-installed", "matches_manifest": False},
+                "install": {"state": "installed", "runtime_version": "runtime-installed", "matches_manifest": False},
                 "manifest": {"runtime_version": "runtime-selected"},
                 "node_available": True,
                 "node_supported": True,
@@ -1238,8 +1236,7 @@ def test_dependencies_status_shape(monkeypatch):
         pytest.param(
             {
                 "provider": "github-source",
-                "installed": True,
-                "install": {"runtime_version": None, "matches_manifest": None},
+                "install": {"state": "installed", "runtime_version": None, "matches_manifest": None},
                 "manifest": None,
                 "node_available": True,
                 "node_supported": True,
@@ -1552,6 +1549,31 @@ def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):
     assert result["reason"] == "runtime_archive_download_failed"
     assert result["download_error"]["attempts"] == 3
     assert "after 3 attempts" in result["message"]
+
+
+def test_prepare_show_runtime_job_reports_failed_replacement_with_old_install(monkeypatch):
+    import core.show_runtime as show_runtime
+
+    manager = Mock()
+    manager.prepare.return_value = {
+        "ok": False,
+        "reason": "runtime_archive_download_failed",
+        "install": {
+            "state": "installed",
+            "reason": None,
+        },
+        "status": {
+            "installed": True,
+            "command": ["node", "runtime-cli.js"],
+        },
+    }
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    result = api._prepare_show_runtime_job()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert "runtime_archive_download_failed" in result["message"]
 
 
 def test_start_dependency_install_job_runs_askill(monkeypatch):

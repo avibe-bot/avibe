@@ -759,12 +759,11 @@ determine" is never reported as `runtime_start_failed`; it carries
 failure nobody observed is the same lie as claiming a replacement nobody
 performed.
 
-**The destructive transition is itself a boundary, and it owns three things.**
-Making replacement structural moved real destruction into the install path, and the
-code around it still assumed nothing is ever removed. Three findings landed on the
-same seam — a stale cache, unverified build inputs, and delegate failures escaping —
-so the boundary that performs the destruction owns all three rather than each
-provider handling its own.
+**The destructive transition is itself a boundary.** Making replacement structural
+moved real destruction into the install path, and the code around it still assumed
+nothing is ever removed. The shipped boundary owns cache invalidation and delegate
+failures; authorization to move a developer-visible checkout leaves for the successor
+section below.
 
 *Invalidate before destroying.* `_managed_command` is a manager-level cache read at
 seven sites as proof that installed bytes exist, including `ensure()`'s spawn fast
@@ -777,6 +776,17 @@ same insight one level up, which is where every fix in this section has ended up
 **A cached path is not evidence of bytes: any state that stands in for the artifact
 is invalidated before the artifact is destroyed, not after the replacement is
 judged.**
+
+#### Successor: protect the managed GitHub checkout
+
+The baseline this successor must replace is deliberately named rather than implied.
+Once the cheap build-marker short-circuit stops matching, master runs
+`git checkout FETCH_HEAD` without authorization. A developer with local commits in the
+managed checkout can therefore have them displaced by any `/show/` request. Removing
+checkout ownership from 2b′ does not introduce that hazard because none of this work
+has merged, but it does leave the known pre-existing behavior unfixed. Protecting the
+managed checkout is the successor's headline; a three-valued decision type is the
+means, not the project.
 
 *Refuse rather than coerce.* Deleting the build output proves the build wrote output;
 it says nothing about what the build was fed. `git checkout FETCH_HEAD` keeps local
@@ -929,11 +939,139 @@ a stale record and a clean directory would let a loose assertion pass on the bro
 code. If a fourth head lands another exit-invariant violation, the remedy stops being a
 move and becomes one update-outcome owner that cannot be bypassed.
 
+The fourth findings-bearing head exposed two remaining boundaries and closes this
+class with two rules whose enforcement is structural rather than conventional.
+First, an unknown revision is absence of evidence, not a value that may compare
+equal to another unknown. `_git_revision` failure becomes a structured source-update
+failure before any checkout-record comparison. Revision comparisons live only on the
+checkout-record type, whose authorization methods accept a proven string revision;
+callers do not compare `revision` or `pending` fields directly. This makes a normal
+stable record with `pending = null` incapable of authorizing an unreadable `HEAD`.
+
+Second, checkout creation and ownership publication are one transition. Avibe clones
+into a same-parent staging directory, writes the schema-versioned ownership record
+inside that checkout, and only then renames the complete directory to `source_dir`.
+Therefore an Avibe-published `source_dir` is never externally reachable without its
+ownership evidence. Best-effort staging cleanup is hygiene rather than correctness:
+if cloning, revision inspection, record persistence, or publication fails, the final
+path was never exposed and the next attempt can retry without adopting or deleting an
+unverified checkout. Existing unverified directories remain user-owned evidence and
+are not mutated by a healing shortcut.
+
+This is the final in-PR consolidation for checkout evidence and the destructive
+boundary. If a fifth findings-bearing head produces another instance of this class,
+the two-valued record model itself must be reconsidered; another exit guard is not an
+acceptable remedy.
+
+The fifth head fired that tripwire, so the promise is discharged here: the
+two-valued record was reconsidered and the evidence exonerates it. No finding
+on any of five heads has been about `revision` / `pending` semantics. The
+tripwire fired on the wrong axis because it bounded an artifact — "the record"
+— when the property at risk was every piece of evidence about the checkout,
+wherever it is stored. A governance rule that names an artifact instead of a
+property is the same inadequate-proxy defect this document is about, one level
+up.
+
+What head five actually showed is cheaper to state: each of its three findings
+is a rule already written above, applied at the site a reviewer named rather
+than owned by a module. An unowned rule buys exactly one more review round, so
+three unowned rules bought this one. The closing rules therefore name owners.
+Checkout evidence lives inside the checkout it describes, so a successful
+publish retires it by rename and no deletion is a transaction boundary. A
+dimension of state has no flat mirror beside its structured payload, so a
+consumer cannot reach a location without holding the state that makes the
+location meaningful. Artifact provenance is published from the build marker and
+cited from nowhere else, so a revision claim cannot be satisfied by checkout
+identity. Each remedy removes a mechanism or publishes an owner that already
+existed; none adds a branch.
+
+New boundary, stated as a property rather than an artifact: a rule enters this
+document with the name of the module that makes violating it impossible. If a
+sixth head returns either a rule with no named owner or a payload field whose
+meaning depends on a sibling field, the update record and the status payload
+leave this PR and become their own change.
+
+The sixth head fired that boundary. The persisted update record used
+`state = "skipped"` for both a known target that checkout takeover refused and
+a fetch or revision-inspection failure whose target might not exist. A consumer
+could interpret that field only by pairing it with `reason` and the nullable
+`target_revision`, so the state was another inadequate proxy. The record, its
+`github_source.update` status member, and the prepare/status copy leave this PR
+rather than acquiring a failure-specific consumer branch.
+
+The install dimension stays. Its location is a different member of the status
+payload, its flat mirrors were removed on head five, and no later finding has
+implicated its owner or consumers. The checkout record, build-marker
+provenance, and operation outcome contract stay for the same reason: the sixth
+finding disproves none of them. This is a split by the property that recurred,
+not a rollback of adjacent owners that have held.
+
+The follow-up starts from the reason the update record existed, not from its
+schema. Doctor can already report a failed managed update from the immediate
+operation reason, but an ordinary prepare may still succeed by reusing the old
+runtime and therefore clears that top-level failure. The record persisted that
+degraded side effect so a later status call could repeat it. That past event is
+not current state: `vibe runtime status` performs no network I/O and cannot know
+whether an update is available. The leading design is therefore for the
+operation to report its degraded side effect in band to the caller that just
+performed the fetch, while status makes no update claim it cannot verify. The
+follow-up may depart from that design only with a stated reason.
+
+The next boundary is again a property: if a seventh findings-bearing head
+returns a finding against one of the remaining owners -- checkout evidence,
+the install dimension, build provenance, or the operation outcome contract --
+that owner leaves this PR as its own change. Another site-level patch is not an
+acceptable remedy.
+
 The reason this one predicate absorbed seven probes is worth naming even though it is
 out of scope here: one directory is both Avibe's build input and a place a developer
 may work, so every rule about it has to infer which role it is in. An eighth input
 would be another inference. If the predicate needs narrowing again, the answer is to
 stop conflating the two roles, not to add a term.
+
+The seventh findings-bearing head fired that boundary, but on a different axis than
+the artifact and owner boundaries above. One two-valued type repeatedly carried a
+three-valued reality, and every consumer promoted "cannot determine" to one of the two
+definite answers:
+
+| Type | Two represented values | The third value it could not represent |
+| --- | --- | --- |
+| `ok: bool` | available / unavailable | the requested operation did not run |
+| raw `revision` / `pending` comparison | equal / different | neither revision is known |
+| update `state = "skipped"` | skipped / absent | fetch never produced a target |
+| takeover `allowed: bool` | permitted / refused | ownership could not be determined |
+| `install_dir` beside `installed` | present / absent | intended, not achieved |
+| `current_revision` used as provenance | a revision / none | checked out but never built |
+
+The governance boundary named the wrong axis twice. Head five bounded the update
+record when the property covered every piece of checkout evidence; head six bounded
+owners when the recurring risk lived in the two-valued type those owners shared. The
+seventh finding made the consequence concrete: a failed legacy ownership-record write
+returned `allowed = false`; the automatic consumer treated that as developer-owned,
+skipped the checkout, cleared the released build marker, and used the same boolean to
+decide not to restore it. One boolean gated both moving the checkout and destroying
+build evidence even though those actions have different safety conditions.
+
+That gate and its ownership-record subgraph leave 2b′. The finding disappears with
+the gate: the retained path returns to master's unconditional build-marker restoration,
+so there is no site-level branch to patch. The successor takes the takeover decision,
+its consumers, and ownership-record transactionality. It starts with a named outcome
+of **proven / refused / undetermined** and structurally separates "may move this
+checkout" from "may destroy build evidence". Undetermined answers no to both. A write
+failure while adopting legacy evidence therefore returns the existing command
+untouched, preserves the marker, and recovers when permissions recover. Departing from
+that shape requires a stated reason.
+
+2b′ keeps the install dimension, build-marker provenance, the operation outcome
+contract, provider replacement evidence, destructive cache invalidation and delegate
+failure normalization, and Doctor's first-install/reinstall copy split. These owners
+have drawn no finding for two heads, and 2c depends on the operation contract rather
+than checkout ownership. The successor may consume the shipped `_github_install_attempt`,
+generic update-failure reason, `_git_revision`, and `_read_github_build_marker`; those
+are one-way dependencies on retained contracts, not checkout ownership leaking back
+into 2b′.
+
+#### Shipped in 2b′
 
 *One execution boundary for delegated work.* The shared install-command helper
 already passed a five-minute timeout and let `TimeoutExpired` escape — someone
@@ -1170,7 +1308,8 @@ exposure predates these PRs and shipping the truthful row strictly reduces it.
 | 1 | W2 | avibe | Small, surgical, unit-testable. Start here. |
 | 2a | W4 admission outcome | avibe | The policy/install/runtime contract and every consumer projecting from it. |
 | 2b | W5 readiness proof | avibe | `ensure()` health-probes a fresh start; `doctor` inherits it. Independent of 2a. Bounded retry plus Doctor's three-state startability; claims nothing about replacement. |
-| 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, and the destructive boundary. Split out of 2b after six findings-bearing heads. |
+| 2b′ | W4 replacement operation contract | avibe | What `prepare()` claims, what a provider must prove, install-state ownership, build provenance, and destructive cache/delegate boundaries. Split out of 2b after six findings-bearing heads; checkout ownership is not shipped here. |
+| 2b″ | Protect the managed GitHub checkout | avibe | Replace master's unconditional checkout takeover with a three-valued decision that keeps undetermined ownership away from both checkout movement and build-evidence destruction. |
 | 2c | W4 retry + W5 page | avibe | Retry classification and the recovery page/poll, on top of 2a's reason. |
 | 3 | W1 | vibe-show-runtime | Independent; effect appears at the next runtime release. |
 | 4 | W3.1 | avibe | Source ladder. Valuable on its own — removes the single point of failure using only tiers that exist today. |

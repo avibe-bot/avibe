@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import tarfile
 import threading
 import urllib.error
@@ -6632,7 +6634,7 @@ def test_show_runtime_manager_installs_from_prebuilt_archive(monkeypatch, tmp_pa
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False) == [
+    assert manager._install_managed_runtime_locked(force=False, offline=False).command == [
         "/bin/node",
         str(tmp_path / "runtime" / "prebuilt" / "current" / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"),
     ]
@@ -6664,8 +6666,9 @@ def test_show_runtime_manager_installs_prebuilt_archive_with_internal_symlinks(m
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
-    command = manager._install_managed_runtime_locked(force=False, offline=False)
+    command = manager._install_managed_runtime_locked(force=False, offline=False).command
 
+    assert command is not None
     assert command == [
         "/bin/node",
         str(tmp_path / "runtime" / "prebuilt" / "current" / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"),
@@ -6717,8 +6720,48 @@ def test_show_runtime_manager_reuses_installed_prebuilt_runtime_without_archive(
     )
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/bin/node", str(cli_path)]
+    assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
+
+
+def test_show_runtime_manager_forced_archive_fallback_reports_failed_operation_and_installed_state(
+    monkeypatch,
+    tmp_path,
+):
+    cli_path = (
+        tmp_path
+        / "runtime"
+        / "prebuilt"
+        / "current"
+        / "node_modules"
+        / "@avibe"
+        / "show-runtime"
+        / "dist"
+        / "cli.js"
+    )
+    cli_path.parent.mkdir(parents=True)
+    cli_path.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_path=tmp_path / "missing.tgz",
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_missing"
+    assert result["command"] == ["/bin/node", str(cli_path)]
+    assert result["install"]["state"] == "installed"
+    assert result["install"]["reason"] is None
+    assert result["status"]["install"]["state"] == "installed"
+    assert result["status"]["command"] == ["/bin/node", str(cli_path)]
+    assert result["status"]["reason"] is None
 
 
 def test_show_runtime_manager_archive_source_honors_offline_mode(monkeypatch, tmp_path):
@@ -6763,6 +6806,34 @@ def test_show_runtime_manager_refreshes_stale_prebuilt_archive(monkeypatch, tmp_
     assert installed_cli.read_text(encoding="utf-8") == "new runtime\n"
 
 
+def test_show_runtime_manager_force_refreshes_matching_prebuilt_archive(monkeypatch, tmp_path):
+    archive_root = tmp_path / "archive-root"
+    archive_cli = archive_root / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
+    archive_cli.parent.mkdir(parents=True)
+    archive_cli.write_text("healthy runtime\n", encoding="utf-8")
+    archive_path = tmp_path / "vibe-show-runtime-node.tgz"
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(archive_root / "node_modules", arcname="node_modules")
+
+    runtime_dir = tmp_path / "runtime"
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="archive",
+        archive_path=archive_path,
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: ["/bin/node"] if command == "node" else None)
+
+    first = manager.prepare()
+    installed_cli = Path(first["command"][1])
+    installed_cli.write_text("corrupt runtime\n", encoding="utf-8")
+
+    repaired = manager.prepare(force=True)
+
+    assert repaired["ok"] is True
+    assert installed_cli.read_text(encoding="utf-8") == "healthy runtime\n"
+
+
 def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path):
     archive_path = _write_runtime_archive(tmp_path)
     manifest_path = _write_runtime_manifest(tmp_path, archive_path)
@@ -6790,8 +6861,66 @@ def test_show_runtime_manager_installs_from_manifest_cache(monkeypatch, tmp_path
     assert metadata["manifest_sha256"] == manifest.digest
     assert metadata["archive_sha256"] == _sha256(archive_path)
     status = manager.status()
-    assert status["installed"] is True
-    assert status["installed_matches_manifest"] is True
+    assert status["install"]["state"] == "installed"
+    assert status["install"]["matches_manifest"] is True
+
+
+def test_show_runtime_manager_forced_manifest_fallback_reports_failed_operation_and_installed_state(
+    monkeypatch,
+    tmp_path,
+):
+    archive_path = _write_runtime_archive(tmp_path)
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = manager.prepare()
+    assert installed["ok"] is True
+
+    def fail_archive_resolution(*_args, **_kwargs):
+        manager._install_reason = "runtime_archive_download_failed"
+        return None
+
+    monkeypatch.setattr(manager, "_resolve_manifest_archive", fail_archive_resolution)
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["command"] == installed["command"]
+    assert result["install"]["state"] == "installed"
+    assert result["install"]["reason"] is None
+    assert result["status"]["install"]["state"] == "installed"
+    assert result["status"]["command"] == installed["command"]
+    assert result["status"]["reason"] is None
+
+
+def test_show_runtime_manager_force_refreshes_matching_manifest_install(monkeypatch, tmp_path):
+    archive_path = _write_runtime_archive(tmp_path, text="healthy runtime\n")
+    manifest_path = _write_runtime_manifest(tmp_path, archive_path)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        manifest_path=manifest_path,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/node"] if command == "node" else None,
+    )
+    installed = manager.prepare()
+    installed_cli = Path(installed["command"][1])
+    installed_cli.write_text("corrupt runtime\n", encoding="utf-8")
+
+    replaced = manager.prepare(force=True)
+
+    assert replaced["ok"] is True
+    assert installed_cli.read_text(encoding="utf-8") == "healthy runtime\n"
 
 
 def test_show_runtime_manager_preserves_structured_http_download_error(monkeypatch, tmp_path):
@@ -6975,7 +7104,7 @@ def test_show_runtime_manager_manifest_install_dir_includes_runtime_and_archive_
     assert new_cli != old_cli
     assert new_cli.read_text(encoding="utf-8") == "new runtime\n"
     assert old_cli.read_text(encoding="utf-8") == "old runtime\n"
-    assert new_manager.status()["installed_matches_manifest"] is True
+    assert new_manager.status()["install"]["matches_manifest"] is True
 
 
 def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_edits(monkeypatch, tmp_path):
@@ -7019,7 +7148,7 @@ def test_show_runtime_manager_manifest_install_identity_ignores_other_platform_e
 
     assert edited_result["ok"] is True
     assert edited_result["command"] == initial_result["command"]
-    assert edited_result["status"]["installed_matches_manifest"] is True
+    assert edited_result["status"]["install"]["matches_manifest"] is True
 
 
 def test_show_runtime_manager_adopts_previous_fingerprint_and_preserves_gc_protection(monkeypatch, tmp_path):
@@ -7402,6 +7531,35 @@ def test_show_runtime_prepare_with_explicit_command_does_not_clean_managed_insta
     assert local_bin.exists() is True
 
 
+def test_show_runtime_forced_prepare_refuses_explicit_command_replacement(monkeypatch, tmp_path):
+    local_bin = tmp_path / "development" / "show-runtime"
+    local_bin.parent.mkdir()
+    local_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        command=str(local_bin),
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr(
+        manager,
+        "_install_managed_runtime_locked",
+        lambda **_kwargs: pytest.fail("an explicit command must not enter managed replacement"),
+    )
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "VIBE_SHOW_RUNTIME_BIN"
+    assert result["policy"] == {
+        "state": "allowed",
+        "reason": None,
+    }
+    assert result["install"]["state"] == "installed"
+    assert result["install"]["command"] == [str(local_bin)]
+    assert result["status"]["install"]["state"] == "installed"
+
+
 def test_show_runtime_failed_prepare_does_not_clean_managed_installs(monkeypatch, tmp_path):
     runtime_dir = tmp_path / "runtime"
     install_dirs = [
@@ -7623,7 +7781,7 @@ def test_show_runtime_prepare_policy_truth_table(
     monkeypatch.setattr(
         manager,
         "_install_managed_runtime_locked",
-        lambda *, force, offline: calls.append((force, offline)) or command,
+        lambda *, force, offline, automatic: calls.append((force, offline, automatic)) or command,
     )
     monkeypatch.setattr(manager, "status", lambda **_kwargs: {})
 
@@ -7637,7 +7795,7 @@ def test_show_runtime_prepare_policy_truth_table(
     assert result["install"]["state"] == ("absent" if expected_skip else "installed")
     assert result["runtime"]["state"] == "unchecked"
     assert result["ok"] is (not expected_skip)
-    assert calls == ([] if expected_skip else [(force, False)])
+    assert calls == ([] if expected_skip else [(force, False, automatic)])
 
 
 def test_show_runtime_automatic_opt_out_does_not_fetch_remote_manifest(monkeypatch, tmp_path):
@@ -7681,8 +7839,8 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     assert skipped["install"]["state"] == "installed"
     assert skipped["runtime"]["state"] == "unchecked"
     assert skipped["command"] == command
-    assert skipped["status"]["installed"] is True
-    assert skipped["status"]["install_dir"] == str(install_dir)
+    assert skipped["status"]["install"]["state"] == "installed"
+    assert skipped["status"]["install"]["install_dir"] == str(install_dir)
 
     def fail_manifest_fetch(*_args, **_kwargs):
         raise OSError("manifest host unavailable")
@@ -7690,12 +7848,11 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     monkeypatch.setattr("core.show_runtime.fetch_bytes", fail_manifest_fetch)
     status = manager.status()
 
-    assert status["installed"] is True
     assert status["install"]["state"] == "installed"
     assert status["runtime"]["state"] == "unchecked"
     assert status["install"]["runtime_version"] == "runtime-test-ref"
     assert status["install"]["matches_manifest"] is None
-    assert status["installed_matches_manifest"] is None
+    assert status["install"]["matches_manifest"] is None
     assert status["command"] == command
     assert status["manifest"]["source"] == manifest_url
     assert status["reason"] == "runtime_manifest_download_failed"
@@ -7725,18 +7882,19 @@ def test_show_runtime_status_keeps_installed_identity_separate_from_selected_man
 
     status = manager.status()
 
-    assert status["installed"] is True
     assert status["install"] == {
         "state": "installed",
         "reason": None,
         "failure_class": None,
         "command": command,
+        "install_dir": str(install_dir),
         "runtime_version": "runtime-test-ref",
         "matches_manifest": False,
     }
-    assert status["installed_matches_manifest"] is False
     assert status["manifest"]["runtime_version"] == "runtime-selected-ref"
-    assert status["install_dir"] == str(install_dir)
+    assert "installed" not in status
+    assert "installed_matches_manifest" not in status
+    assert "install_dir" not in status
 
 
 def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_path):
@@ -7759,7 +7917,8 @@ def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_p
     assert result["install"]["state"] == "installed"
     assert result["install"]["command"] is None
     assert result["runtime"]["state"] == "unchecked"
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert result["reason"] == "VIBE_SHOW_RUNTIME_AUTO_INSTALL"
 
 
 @pytest.mark.parametrize(
@@ -7840,7 +7999,7 @@ def test_show_runtime_availability_classifies_install_failure(
         runtime_source="npm",
     )
 
-    def fail_install(*, force, offline):
+    def fail_install(*, force, offline, automatic):
         manager._install_reason = reason
         return None
 
@@ -7854,6 +8013,7 @@ def test_show_runtime_availability_classifies_install_failure(
         "reason": reason,
         "failure_class": expected_class,
         "command": None,
+        "install_dir": None,
         "runtime_version": None,
         "matches_manifest": None,
     }
@@ -7872,13 +8032,13 @@ def test_show_runtime_prepare_options_do_not_mutate_shared_manager_state(monkeyp
     monkeypatch.setattr(
         manager,
         "_install_managed_runtime_locked",
-        lambda *, force, offline: calls.append((force, offline)) or ["/tmp/runtime"],
+        lambda *, force, offline, automatic: calls.append((force, offline, automatic)) or ["/tmp/runtime"],
     )
 
     result = manager.prepare(force=True, offline=True)
 
     assert result["install"]["state"] == "installed"
-    assert calls == [(True, True)]
+    assert calls == [(True, True, False)]
     assert manager.force_install is False
     assert manager.offline is False
 
@@ -7894,8 +8054,8 @@ def test_show_runtime_prepare_and_request_share_one_install_admission(monkeypatc
     command = [str(tmp_path / "runtime" / "avibe-show-runtime")]
     calls = []
 
-    def install(*, force, offline):
-        calls.append((force, offline))
+    def install(*, force, offline, automatic):
+        calls.append((force, offline, automatic))
         entered.set()
         assert release.wait(timeout=5)
         return command
@@ -7915,7 +8075,7 @@ def test_show_runtime_prepare_and_request_share_one_install_admission(monkeypatc
     resolved = asyncio.run(resolve_during_prepare())
     prepare_thread.join(timeout=5)
 
-    assert calls == [(False, False)]
+    assert calls == [(False, False, False)]
     assert prepared[0]["install"]["state"] == "installed"
     assert resolved.install.value == "installed"
     assert resolved.command == command
@@ -7934,7 +8094,11 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
         bin_path.chmod(0o755)
         return [str(bin_path)]
 
-    monkeypatch.setattr(manager, "_install_managed_runtime_locked", lambda *, force, offline: fake_install())
+    monkeypatch.setattr(
+        manager,
+        "_install_managed_runtime_locked",
+        lambda *, force, offline, automatic: fake_install(),
+    )
     calls = []
 
     async def fake_to_thread(func, *args, **kwargs):
@@ -8007,28 +8171,31 @@ def test_show_runtime_manager_installs_from_github_source(monkeypatch, tmp_path)
         return True
 
     monkeypatch.setattr(manager, "_run_install_command", fake_run)
+    monkeypatch.setattr(manager, "_git_revision", lambda *_args: "0123456789abcdef")
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False) == [
+    attempt = manager._install_managed_runtime_locked(force=False, offline=False)
+
+    assert attempt.command == [
         "/bin/node",
         str(source_dir / "packages" / "runtime" / "dist" / "cli.js"),
     ]
-    assert commands == [
-        (
-            [
-                "/bin/git",
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                "main",
-                "https://github.com/avibe-bot/vibe-show-runtime.git",
-                str(source_dir),
-            ],
-            None,
-        ),
+    clone_command, clone_cwd = commands[0]
+    assert clone_command[:-1] == [
+        "/bin/git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        "main",
+        "https://github.com/avibe-bot/vibe-show-runtime.git",
+    ]
+    assert clone_cwd is None
+    assert Path(clone_command[-1]) == source_dir
+    assert commands[1:] == [
         (["/bin/npm", "ci"], source_dir),
         (["/bin/npm", "run", "build"], source_dir),
     ]
+    assert manager.status()["github_source"] == {"built_revision": "0123456789abcdef"}
 
 
 def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(monkeypatch, tmp_path):
@@ -8058,7 +8225,7 @@ def test_show_runtime_manager_reuses_installed_github_runtime_when_update_fails(
 
     monkeypatch.setattr(manager, "_run_install_command", fake_run)
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/bin/node", str(cli_path)]
+    assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
     assert commands == [
         (
@@ -8088,7 +8255,7 @@ def test_show_runtime_manager_reuses_installed_github_runtime_without_git(monkey
         lambda command: ["/bin/node"] if command == "node" else None,
     )
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/bin/node", str(cli_path)]
+    assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/bin/node", str(cli_path)]
     assert manager._install_reason is None
 
 
@@ -8137,10 +8304,154 @@ def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):
         runtime_source="npm",
     )
     called = []
-    monkeypatch.setattr(manager, "_install_npm_runtime", lambda: called.append("npm") or ["/tmp/avibe-show-runtime"])
+    monkeypatch.setattr(
+        manager,
+        "_install_npm_runtime",
+        lambda *, force: called.append(force) or ["/tmp/avibe-show-runtime"],
+    )
 
-    assert manager._install_managed_runtime_locked(force=False, offline=False) == ["/tmp/avibe-show-runtime"]
-    assert called == ["npm"]
+    assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/tmp/avibe-show-runtime"]
+    assert called == [False]
+
+
+def test_show_runtime_destructive_replacement_invalidates_cached_install_before_removal(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    managed_tree = runtime_dir / "package" / "node_modules"
+    managed_bin = managed_tree / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    manager._publish_install_availability(command=[str(managed_bin)])
+    real_rmtree = shutil.rmtree
+
+    def remove_after_observing_invalidated_state(path):
+        assert manager._managed_command is None
+        assert manager._availability.command is None
+        assert manager._availability.install.value == "absent"
+        real_rmtree(path)
+
+    monkeypatch.setattr("core.show_runtime.shutil.rmtree", remove_after_observing_invalidated_state)
+
+    assert manager._remove_managed_runtime_tree_for_replacement(managed_tree, label="test") is True
+
+
+def test_show_runtime_manager_forced_npm_replacement_fails_when_old_tree_remains(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    managed_bin.chmod(0o755)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    manager._managed_command = [str(managed_bin)]
+    install_calls = []
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/npm"] if command == "npm" else None,
+    )
+    monkeypatch.setattr("core.show_runtime.shutil.rmtree", lambda _path: None)
+    monkeypatch.setattr(
+        "core.show_runtime.subprocess.run",
+        lambda *_args, **_kwargs: install_calls.append(True) or SimpleNamespace(returncode=0),
+    )
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_install_failed"
+    assert result["status"]["install"]["state"] == "installed"
+    assert managed_bin.read_text(encoding="utf-8") == "old runtime\n"
+    assert install_calls == []
+
+
+def test_show_runtime_manager_forced_npm_replacement_removes_old_tree_before_install(monkeypatch, tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    managed_bin.chmod(0o755)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    manager._managed_command = [str(managed_bin)]
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/npm"] if command == "npm" else None,
+    )
+
+    def install_after_removal(*_args, **_kwargs):
+        assert not managed_bin.parent.parent.exists()
+        managed_bin.parent.mkdir(parents=True)
+        managed_bin.write_text("new runtime\n", encoding="utf-8")
+        managed_bin.chmod(0o755)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("core.show_runtime.subprocess.run", install_after_removal)
+
+    result = manager.prepare(force=True)
+
+    assert result["ok"] is True
+    assert managed_bin.read_text(encoding="utf-8") == "new runtime\n"
+
+
+@pytest.mark.parametrize(
+    "install_error",
+    (
+        OSError("npm spawn failed"),
+        subprocess.TimeoutExpired(cmd=["npm", "install"], timeout=180),
+    ),
+)
+def test_show_runtime_manager_forced_npm_replacement_reports_delegate_exception(
+    monkeypatch,
+    tmp_path,
+    install_error,
+):
+    runtime_dir = tmp_path / "runtime"
+    managed_bin = runtime_dir / "package" / "node_modules" / ".bin" / "avibe-show-runtime"
+    managed_bin.parent.mkdir(parents=True)
+    managed_bin.write_text("old runtime\n", encoding="utf-8")
+    managed_bin.chmod(0o755)
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="npm",
+    )
+    manager._managed_command = [str(managed_bin)]
+    monkeypatch.setattr(
+        "core.show_runtime._resolve_command",
+        lambda command: ["/bin/npm"] if command == "npm" else None,
+    )
+
+    install_calls = []
+
+    def fail_install(*_args, **_kwargs):
+        install_calls.append(True)
+        assert not managed_bin.parent.parent.exists()
+        raise install_error
+
+    monkeypatch.setattr("core.show_runtime.subprocess.run", fail_install)
+
+    result = manager.prepare(force=True)
+    retried = manager.prepare()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_install_failed"
+    assert result["install"]["state"] == "failed"
+    assert result["status"]["install"]["state"] == "absent"
+    assert retried["ok"] is False
+    assert retried["reason"] == "runtime_install_failed"
+    assert manager._managed_command is None
+    assert install_calls == [True, True]
+    assert managed_bin.exists() is False
 
 
 def test_show_runtime_shutdown_stops_manager():
