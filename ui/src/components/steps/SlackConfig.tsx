@@ -135,7 +135,6 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
       ...withSecretDrafts(data.slack, { bot_token: botToken, app_token: appToken }),
       proxy_url: proxyUrl || undefined,
     },
-    mode: 'self_host',
   });
 
   const handleApply = async () => {

@@ -16,6 +16,7 @@ import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState
 import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
+import { setConfigField } from '../../lib/configMutations';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
@@ -639,7 +640,7 @@ export const ChatPage: React.FC = () => {
       const next = !prev;
       // Optimistic; persist the minimal ui patch (save_config deep-merges). A failed
       // save leaves the local flag as the user set it for this session.
-      void api.saveConfig({ ui: { show_tool_calls: next } }).catch(() => {});
+      void api.mutateConfig([setConfigField(['ui', 'show_tool_calls'], next)]).catch(() => {});
       return next;
     });
   }, [api]);

@@ -90,6 +90,9 @@ When a picture beats a paragraph, your agent hands you a live web page — a flo
 
 In Chat, click **Visualize** to switch the current session to its Show Page. Hover the button to open the page in a new app window or browser tab. You can also drag the button downward and release to place a new app window at the pointer, or drop it on **Apps** to pin that Show Page to the Dock.
 
+See [Show Pages](docs/SHOW_PAGES.md) for synchronous API timeout behavior and
+guidance for longer background refreshes.
+
 <img src="assets/screenshots/v4/show-page-en.png" alt="Show Page review with anchored comments and Agent replies on the page" />
 
 ### 🔐 Vaults — secret values stay out of Vault responses

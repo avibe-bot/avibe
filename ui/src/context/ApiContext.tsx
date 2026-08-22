@@ -42,9 +42,14 @@ import {
 } from '../lib/sessionDraftPersistence';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
+import {
+  configMutationsToPayload,
+  type ConfigMutation,
+} from '../lib/configMutations';
 
 export type { InstanceCapabilities, SessionInfo };
 export type { ShowPageAccess };
+export type { ConfigMutation };
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -507,7 +512,7 @@ export type TunnelConnectivityDiagnostics = {
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
-  saveConfig: (payload: any) => Promise<any>;
+  mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
   saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
@@ -794,7 +799,10 @@ export type ApiContextType = {
   }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
   getVibeAgentOnboarding: () => Promise<VibeAgentOnboardingResult>;
   onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
-  getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
+  getVibeAgent: (
+    name: string,
+    params?: { cache?: boolean; handleError?: boolean; expectedCodes?: readonly string[] },
+  ) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
@@ -3590,7 +3598,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const value: ApiContextType = useMemo(() => ({
     getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
     getPlatformCatalog: () => getJson('/api/platforms'),
-    saveConfig: (payload) => postJson('/api/config', payload),
+    mutateConfig: (mutations) => postJson('/api/config', configMutationsToPayload(mutations)),
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),
     saveSettings: (payload, platform) => postJson('/api/settings', platform ? { ...payload, platform } : payload),
     saveThreadSettings: (platform, channelId, threadId, settings) => postJson('/api/settings/thread', {
@@ -4118,7 +4126,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getVibeAgentOnboarding: () => getJson('/api/agent-onboarding'),
     onboardVibeAgents: () => postJson('/api/agent-onboarding', {}),
-    getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
+    getVibeAgent: (name, params) => {
+      const path = `/api/agents/${encodeURIComponent(name)}`;
+      return params?.cache === false
+        ? getJson(path, { handleError: params.handleError, expectedCodes: params.expectedCodes })
+        : getCachedJson(path, 5_000, { handleError: params?.handleError });
+    },
     createVibeAgent: (payload) => postJson('/api/agents', payload),
     updateVibeAgent: async (name, payload) => {
       const { payloadJson } = await requestJson(`/api/agents/${encodeURIComponent(name)}`, {

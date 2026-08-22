@@ -11,10 +11,14 @@ import {
   type InstanceAuthorizationValue,
 } from '../../context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import {
+  configMutationsToPayload,
+  type ConfigMutation,
+} from '../../lib/configMutations';
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
-  saveConfig: vi.fn(),
+  mutateConfig: vi.fn(),
 }));
 
 const translate = vi.hoisted(() => (key: string) => key);
@@ -126,10 +130,17 @@ function renderPage(context: InstanceAuthorizationValue) {
   );
 }
 
+function mutationPayload(callIndex = 0) {
+  const mutations = api.mutateConfig.mock.calls[callIndex]?.[0] as
+    | readonly ConfigMutation[]
+    | undefined;
+  return mutations ? configMutationsToPayload(mutations) : undefined;
+}
+
 describe('SettingsMessagingPage locality gating', () => {
   beforeEach(() => {
     api.getConfig.mockResolvedValue(baseConfig);
-    api.saveConfig.mockResolvedValue(baseConfig);
+    api.mutateConfig.mockResolvedValue(baseConfig);
   });
 
   afterEach(() => {
@@ -207,7 +218,7 @@ describe('SettingsMessagingPage locality gating', () => {
     expect(toggle).toBeTruthy();
     await user.click(toggle!);
 
-    expect(api.saveConfig).toHaveBeenCalledWith({
+    expect(mutationPayload()).toEqual({
       audio_asr: { enabled: false, enabled_configured: true },
     });
   });
@@ -219,7 +230,7 @@ describe('SettingsMessagingPage locality gating', () => {
     const select = await screen.findByDisplayValue('dashboard.ackTyping');
     await user.selectOptions(select, 'message');
 
-    expect(api.saveConfig).toHaveBeenCalledWith({ ack_mode: 'message' });
+    expect(mutationPayload()).toEqual({ ack_mode: 'message' });
   });
 
   it('hides Slack preview controls from Editors when they cannot manage the instance', async () => {
@@ -245,17 +256,20 @@ describe('SettingsMessagingPage locality gating', () => {
     const row = screen.getByText('dashboard.slackLinkPreviews').closest('div.flex.flex-col.gap-3');
     await user.click(row?.querySelector('[role="switch"]') as HTMLButtonElement);
 
-    expect(api.saveConfig).toHaveBeenCalledWith({ slack: { disable_link_unfurl: true } });
+    expect(mutationPayload()).toEqual({ slack: { disable_link_unfurl: true } });
   });
 
-  it('never posts an empty patch from any control an Editor is offered', async () => {
+  it.each([
+    ['Editor', remoteEditor],
+    ['local Owner', localOwner],
+  ])('never posts an empty mutation from any control offered to a %s', async (_label, context) => {
     // The property, not today's control list: a field-specific save carries only
     // the control's own patch, so any control rendered without one posts ``{}``
     // — a save that reports success and loses the change on reload. Sweeping
     // whatever is rendered catches the next control added without a patch; an
     // enumeration of the current controls never would.
     const user = userEvent.setup();
-    renderPage(remoteEditor);
+    renderPage(context);
     await screen.findByText('dashboard.ackMode');
 
     const switches = () => screen.queryAllByRole('switch') as HTMLButtonElement[];
@@ -267,11 +281,13 @@ describe('SettingsMessagingPage locality gating', () => {
     // ``persist`` and posts nothing, and both look identical at the end of a
     // sweep once a later control's successful save has cleared the state.
     const recordInteraction = async (label: string, act: () => Promise<void>) => {
-      const before = api.saveConfig.mock.calls.length;
+      const before = api.mutateConfig.mock.calls.length;
       exercised.add(label);
       await act();
-      const patch = api.saveConfig.mock.calls[before]?.[0] as Record<string, unknown> | undefined;
-      if (!patch || Object.keys(patch).length === 0) unsaved.push(label);
+      const mutations = api.mutateConfig.mock.calls[before]?.[0] as
+        | readonly ConfigMutation[]
+        | undefined;
+      if (!mutations || mutations.length === 0) unsaved.push(label);
     };
 
     // Two rounds, re-querying every step: toggling a parent reveals a child

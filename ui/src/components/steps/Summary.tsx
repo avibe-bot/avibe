@@ -18,7 +18,7 @@ import { useStatus } from '../../context/StatusContext';
 import { useToast } from '../../context/ToastContext';
 import { copyTextToClipboard } from '../../lib/utils';
 import { getEnabledPlatforms } from '../../lib/platforms';
-import { withoutConfiguredSecretMarker, withSecretDraft, withSecretDrafts } from '../../lib/secretFields';
+import { buildWizardFinishMutations } from '../../lib/wizardConfigMutations';
 import { EyebrowBadge, WizardCard } from '../visual';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
@@ -49,25 +49,6 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     : Array.isArray(data.discord?.guild_allowlist)
       ? data.discord.guild_allowlist
       : [];
-  // ``require_mention`` is no longer toggled on the summary (it's configured in
-  // Settings); keep the data-derived defaults so buildConfigPayload still
-  // persists them. No setter — the value is read-only here.
-  const [requireMentionByPlatform] = useState<Record<string, boolean>>(
-    Object.fromEntries(
-      enabledPlatforms.map((platform) => [
-        platform,
-        platform === 'discord'
-          ? (data.discord?.require_mention || false)
-          : platform === 'telegram'
-            ? (data.telegram?.require_mention ?? true)
-            : platform === 'lark'
-              ? (data.lark?.require_mention || false)
-              : platform === 'wechat'
-                ? (data.wechat?.require_mention || false)
-                : (data.slack?.require_mention || false),
-      ])
-    )
-  );
   const [autoUpdate, setAutoUpdate] = useState(data.update?.auto_update ?? true);
   const navigate = useNavigate();
 
@@ -86,51 +67,29 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     setSaving(true);
     setError(null);
     try {
-      const updatedData = {
-        ...data,
-        // No user-facing primary platform: the backend derives its internal
-        // default from ``platforms.enabled``.
-        platforms: {
-          enabled: enabledPlatforms,
-        },
-        slack: {
-          ...data.slack,
-          require_mention: requireMentionByPlatform.slack ?? data.slack?.require_mention,
-        },
-        discord: {
-          ...data.discord,
-          require_mention: requireMentionByPlatform.discord ?? data.discord?.require_mention,
-        },
-        telegram: {
-          ...data.telegram,
-          require_mention: requireMentionByPlatform.telegram ?? data.telegram?.require_mention,
-        },
-        lark: {
-          ...data.lark,
-          require_mention: requireMentionByPlatform.lark ?? data.lark?.require_mention,
-        },
-        wechat: {
-          ...data.wechat,
-          require_mention: requireMentionByPlatform.wechat ?? data.wechat?.require_mention,
-        },
-        update: {
-          ...data.update,
-          auto_update: autoUpdate,
-        },
-      };
-      const configPayload = buildConfigPayload(updatedData);
-      await api.saveConfig(configPayload);
-      const settingsByPlatform = buildSettingsPayload(updatedData);
-      await Promise.all(
-        Object.entries(settingsByPlatform).map(([platform, payload]) => api.saveSettings(payload, platform))
-      );
+      // Platform credentials and channel/guild settings are persisted by their
+      // own wizard steps. Finish owns only completion and final list intent;
+      // replaying the accumulated settings snapshot here would overwrite
+      // changes made by another browser after those steps completed.
+      const savedConfig = await api.mutateConfig(buildWizardFinishMutations(data, autoUpdate));
+
+      // The wizard can contain a selected platform that was never persisted
+      // (for example, the user selected it and then used the global Skip
+      // action before entering credentials). The config response is the
+      // lock-fresh result after Finish, so use it for all post-save runtime
+      // decisions instead of routing from that stale local selection.
+      const committedData =
+        savedConfig && typeof savedConfig === 'object' && !Array.isArray(savedConfig)
+          ? { ...data, ...savedConfig }
+          : data;
+      const committedEnabledPlatforms = getEnabledPlatforms(committedData);
 
       await control('start');
 
       // ``enabledPlatforms`` only ever lists real IM platforms — the always-on
       // workbench is stripped by PlatformsConfig.validate() before any config
       // reaches the UI. An empty list is therefore a workbench-only setup.
-      if (enabledPlatforms.length === 0) {
+      if (committedEnabledPlatforms.length === 0) {
         // Workbench-only setup — there is no external bot to bind, so finish
         // instead of falling through to a bogus bind-code flow.
         setSaving(false);
@@ -139,7 +98,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         }, 1000);
         return;
       }
-      if (enabledPlatforms.every((platform) => platform === 'wechat')) {
+      if (committedEnabledPlatforms.every((platform) => platform === 'wechat')) {
         setSaving(false);
         showToast(t('wechat.setupComplete'));
         setTimeout(() => {
@@ -382,147 +341,3 @@ const countConfiguredChannels = (channelConfigsByPlatform: Record<string, Record
     (count, channels) => count + Object.values(channels || {}).filter((config: any) => config?.enabled).length,
     0
   );
-
-const buildConfigPayload = (data: any) => {
-  const agents = data.agents || {};
-  const enabledPlatforms = getEnabledPlatforms(data);
-  return {
-    // No user-facing primary platform: the backend derives its internal default
-    // from ``platforms.enabled``.
-    platforms: {
-      enabled: enabledPlatforms,
-    },
-    mode: data.mode || 'self_host',
-    version: 'v2',
-    slack: {
-      ...withSecretDrafts(data.slack, {
-        bot_token: data.slack?.bot_token,
-        app_token: data.slack?.app_token,
-      }),
-      require_mention: data.slack?.require_mention || false,
-    },
-    discord: {
-      ...withSecretDraft(data.discord, 'bot_token', data.discord?.bot_token),
-      require_mention: data.discord?.require_mention || false,
-    },
-    telegram: {
-      ...withSecretDraft(data.telegram, 'bot_token', data.telegram?.bot_token),
-      require_mention: data.telegram?.require_mention ?? true,
-      forum_auto_topic: data.telegram?.forum_auto_topic ?? true,
-      use_webhook: data.telegram?.use_webhook ?? false,
-    },
-    lark: (() => {
-      const lark = data.lark || {};
-      const appId = lark.app_id || '';
-      const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
-      const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
-      return {
-        ...withSecretDraft(base, 'app_secret', lark.app_secret),
-        app_id: appId,
-        domain: lark.domain || 'feishu',
-        require_mention: lark.require_mention || false,
-      };
-    })(),
-    wechat: {
-      ...withSecretDraft(data.wechat, 'bot_token', data.wechat?.bot_token),
-      base_url: data.wechat?.base_url || '',
-      require_mention: data.wechat?.require_mention || false,
-    },
-    runtime: {
-      ...data.runtime,
-      default_cwd: data.default_cwd || data.runtime?.default_cwd || '_tmp',
-    },
-    agents: {
-      opencode: {
-        ...agents.opencode,
-        enabled: agents.opencode?.enabled ?? true,
-        cli_path: agents.opencode?.cli_path || 'opencode',
-        default_agent: data.opencode_default_agent ?? agents.opencode?.default_agent ?? null,
-        default_reasoning_effort:
-          data.opencode_default_reasoning_effort ?? agents.opencode?.default_reasoning_effort ?? null,
-      },
-      claude: {
-        ...agents.claude,
-        enabled: agents.claude?.enabled ?? true,
-        cli_path: agents.claude?.cli_path || 'claude',
-      },
-      codex: {
-        ...agents.codex,
-        enabled: agents.codex?.enabled ?? false,
-        cli_path: agents.codex?.cli_path || 'codex',
-      },
-    },
-    gateway: data.gateway,
-    ui: {
-      ...data.ui,
-      setup_host: data.ui?.setup_host || '127.0.0.1',
-      setup_port: data.ui?.setup_port || 5123,
-    },
-    update: data.update
-      ? {
-          ...data.update,
-          auto_update: data.update.auto_update,
-        }
-      : undefined,
-    ack_mode: data.ack_mode,
-    show_duration: data.show_duration ?? false,
-    language: data.language,
-    // Finishing the wizard is the explicit signal that setup is complete. Set
-    // here (Summary's own payload, the one saved on Finish) rather than in
-    // Wizard.tsx's intermediate-step payload so the flag is only persisted once
-    // the user actually reaches and completes the final step (including the
-    // Skip → Summary → Finish path).
-    setup_completed: true,
-  };
-};
-
-const buildSettingsPayload = (data: any) => {
-  const channelConfigsByPlatform = data.channelConfigsByPlatform || {};
-  const discordGuildAllowlist = Array.isArray(data.discordGuildAllowlist)
-    ? data.discordGuildAllowlist
-    : Array.isArray(data.discord?.guild_allowlist)
-      ? data.discord.guild_allowlist
-      : [];
-  const shouldPersistDiscordGuilds =
-    discordGuildAllowlist.length > 0 || data.discordGuildAllowlistTouched === true;
-  return Object.fromEntries(
-    Object.entries(channelConfigsByPlatform).map(([platform, channels]: any) => [
-      platform,
-      {
-        channels: Object.fromEntries(
-          Object.entries(channels || {}).map(([id, cfg]: any) => [
-            id,
-            {
-              enabled: cfg.enabled,
-              show_message_types: cfg.show_message_types || [],
-              custom_cwd: cfg.custom_cwd || null,
-              require_mention: cfg.require_mention ?? null,
-              require_bind: cfg.require_bind ?? null,
-              routing: {
-                agent_name: cfg.routing?.agent_name || null,
-                model: cfg.routing?.model || null,
-                reasoning_effort: cfg.routing?.reasoning_effort || null,
-                opencode_agent: cfg.routing?.opencode_agent || null,
-                opencode_model: cfg.routing?.opencode_model || null,
-                opencode_reasoning_effort: cfg.routing?.opencode_reasoning_effort || null,
-                claude_agent: cfg.routing?.claude_agent || null,
-                claude_model: cfg.routing?.claude_model || null,
-                claude_reasoning_effort: cfg.routing?.claude_reasoning_effort || null,
-                codex_agent: cfg.routing?.codex_agent || null,
-                codex_model: cfg.routing?.codex_model || null,
-                codex_reasoning_effort: cfg.routing?.codex_reasoning_effort || null,
-              },
-            },
-          ])
-        ),
-        ...(platform === 'discord' && shouldPersistDiscordGuilds
-          ? {
-              guilds: Object.fromEntries(
-                discordGuildAllowlist.map((guildId: string) => [guildId, { enabled: true }])
-              ),
-            }
-          : {}),
-      },
-    ])
-  );
-};

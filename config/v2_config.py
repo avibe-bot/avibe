@@ -115,7 +115,7 @@ def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2
     from config import paths as _paths
 
     path = config_path or _paths.get_config_path()
-    with _memory_config_transaction(path):
+    with config_file_lock(path):
         try:
             config = V2Config.load(path)
         except FileNotFoundError:
@@ -160,6 +160,7 @@ def _contains_model_hub_credential_material(value: object) -> bool:
     return any(pattern.search(rendered) for pattern in _MODEL_HUB_CREDENTIAL_PATTERNS)
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
+DEFAULT_SHOW_PAGE_API_TIMEOUT_SECONDS = 90.0
 
 # Harness run staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.4).
 # How often the sweep may run at all — it rides the scheduler's existing 2 s tick, so
@@ -2481,6 +2482,10 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
 class RuntimeConfig:
     default_cwd: str
     log_level: str = "INFO"
+    # Synchronous handlers under /show/*/api and /p/*/api may depend on slower
+    # operational systems. Keep this separate from ordinary Runtime asset
+    # requests, which retain their shorter transport timeout.
+    show_page_api_timeout_seconds: float = DEFAULT_SHOW_PAGE_API_TIMEOUT_SECONDS
     # Linux/cgroup v2 best-effort resource governance for aggregate agent
     # workload. "auto" enables it only when Avibe can create and write the
     # delegated cgroup; unsupported systems silently fall back to legacy spawn.
@@ -2502,6 +2507,17 @@ class RuntimeConfig:
     # arrived as an answer to a question nobody in the channel could see. Off means
     # today's behavior (result only).
     harness_prompt_echo: bool = True
+
+    def __post_init__(self) -> None:
+        self.show_page_api_timeout_seconds = _named_value(
+            "runtime.show_page_api_timeout_seconds",
+            float,
+            self.show_page_api_timeout_seconds,
+        )
+        if self.show_page_api_timeout_seconds <= 0:
+            raise ValueError(
+                "Config 'runtime.show_page_api_timeout_seconds' must be greater than zero"
+            )
 
 
 @dataclass
@@ -4125,7 +4141,7 @@ class V2Config:
             )
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
-        with _memory_config_transaction(path):
+        with config_file_lock(path):
             try:
                 memory = type(self).load(path).memory
             except FileNotFoundError:
@@ -4159,6 +4175,7 @@ class V2Config:
             "runtime": {
                 "default_cwd": self.runtime.default_cwd,
                 "log_level": self.runtime.log_level,
+                "show_page_api_timeout_seconds": self.runtime.show_page_api_timeout_seconds,
                 "resource_governance": self.runtime.resource_governance,
                 "harness_run_sweep_interval_seconds": self.runtime.harness_run_sweep_interval_seconds,
                 "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
@@ -4241,7 +4258,7 @@ def atomic_update_memory(
 
     paths.ensure_data_dirs()
     path = config_path or paths.get_config_path()
-    with _memory_config_transaction(path):
+    with config_file_lock(path):
         config = V2Config.load(path)
         memory = mutator(deepcopy(config.memory))
         if not isinstance(memory, MemoryConfig):

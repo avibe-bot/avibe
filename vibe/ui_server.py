@@ -1527,7 +1527,20 @@ def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Confi
     if previous is None:
         return False
     platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
-    if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
+    # The list-operations verb mutates the enabled list without carrying a
+    # literal ``platforms`` section. Treat it as a platforms edit so
+    # enable/disable toggles still reach the comparison below, but do not
+    # infer a runtime change from the verb alone: Finish may replay an
+    # already-applied operation.
+    from vibe.api import _LIST_OPS_PAYLOAD_KEY
+
+    has_list_ops = _LIST_OPS_PAYLOAD_KEY in payload
+    if (
+        not has_list_ops
+        and "platforms" not in payload
+        and "platform" not in payload
+        and not any(key in payload for key in platform_config_keys)
+    ):
         return False
     return (
         set(previous.platforms.enabled) != set(current.platforms.enabled)
@@ -7520,29 +7533,40 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     if not isinstance(token, str) or not token.strip():
         return
 
+    from config.v2_config import config_file_lock
     from vibe import api as vibe_api
-    from core.services import settings as settings_service
 
-    config = settings_service.load_config(default_factory=settings_service.default_config)
-    current = vibe_api.config_to_payload(config, include_secrets=True)
-    wechat = dict(current.get("wechat") or {})
-    wechat["bot_token"] = token.strip()
+    new_bot_token = token.strip()
+    new_base_url = None
     if isinstance(result.get("base_url"), str) and result["base_url"].strip():
-        wechat["base_url"] = result["base_url"].strip()
-    elif not wechat.get("base_url"):
-        wechat["base_url"] = "https://ilinkai.weixin.qq.com"
-    current["wechat"] = wechat
+        new_base_url = result["base_url"].strip()
 
-    platforms = dict(current.get("platforms") or {})
-    enabled = list(platforms.get("enabled") or [])
-    if "wechat" not in enabled:
-        enabled.append("wechat")
-    platforms["enabled"] = enabled
-    if not platforms.get("primary") or platforms.get("primary") == "avibe":
-        platforms["primary"] = "wechat"
-    current["platforms"] = platforms
+    # Patch-write shape (#1458 stage ③): the whole compute-and-save runs
+    # under the config transaction — the wechat fields and the
+    # enabled-list mutation are derived from the lock-fresh snapshot, so
+    # a concurrent wechat/platform save between an earlier read and this
+    # write can no longer be overwritten by stale section values.
+    with config_file_lock():
+        try:
+            base = vibe_api.load_config()
+        except FileNotFoundError:
+            # Fresh install: seed the same default the settings loader
+            # uses, exactly like the previous default_factory path.
+            from core.services import settings as settings_service
 
-    vibe_api.save_config(current)
+            base = settings_service.default_config()
+        wechat = {"bot_token": new_bot_token}
+        if new_base_url:
+            wechat["base_url"] = new_base_url
+        elif not base.wechat.base_url:
+            wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+
+        vibe_api.save_config(
+            {
+                "wechat": wechat,
+                "__avibe_list_ops": {"platforms.enabled": {"add": ["wechat"]}},
+            }
+        )
 
 
 WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -7583,7 +7607,11 @@ async def wechat_qr_login_poll():
         user_id = result["user_id"]
 
         try:
-            _persist_wechat_qr_credentials(result)
+            # The persistence helper takes the cross-process config
+            # lock and does synchronous file/DB work — keep it off the
+            # ASGI event loop so other UI requests don't stall while it
+            # waits on the lock.
+            await asyncio.to_thread(_persist_wechat_qr_credentials, result)
         except Exception as exc:
             logger.error("Failed to persist WeChat QR credentials: %s", exc)
             return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
@@ -12637,10 +12665,11 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                 # Merge CWD into existing config (load → modify → save)
                 from vibe import api as vibe_api
 
-                current = vibe_api.config_to_payload(vibe_api.load_config())
-                current.setdefault("runtime", {})
-                current["runtime"]["default_cwd"] = modal_values.get("cwd", "/tmp")
-                result = vibe_api.save_config(current)
+                # Patch-write shape (#1458 stage ③): only the field
+                # this modal owns.
+                result = vibe_api.save_config(
+                    {"runtime": {"default_cwd": modal_values.get("cwd", "/tmp")}}
+                )
                 return jsonify({"ok": True, "action": action})
 
             elif action == "routing_submit":
@@ -12870,15 +12899,37 @@ def _show_page_runtime_unavailable_response():
     return jsonify({"error": "show_runtime_unavailable"}), 503
 
 
+def _show_page_runtime_timeout_response():
+    return jsonify({"error": "show_runtime_request_timeout"}), 504
+
+
+def _is_show_page_api_handler_path(asset_path: str) -> bool:
+    relative = (asset_path or "").strip("/")
+    return relative == "api" or relative.startswith("api/")
+
+
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
+    if _is_show_page_api_handler_path(asset_path):
+        return True
     if relative == "__show/annotation.js":
         return False
-    return relative == "api" or relative.startswith("api/") or relative == "__show" or relative.startswith("__show/")
+    return relative == "__show" or relative.startswith("__show/")
 
 
 def _is_show_annotation_asset(asset_path: str) -> bool:
     return (asset_path or "").strip("/") == "__show/annotation.js"
+
+
+def _show_page_runtime_error_response(asset_path: str, exc: Exception):
+    from core.show_runtime import ShowRuntimeRequestTimeoutError
+
+    if _is_show_page_api_handler_path(asset_path) and isinstance(
+        exc,
+        ShowRuntimeRequestTimeoutError,
+    ):
+        return _show_page_runtime_timeout_response()
+    return _show_page_runtime_unavailable_response()
 
 
 def _is_show_page_entry_asset(asset_path: str) -> bool:
@@ -14250,12 +14301,19 @@ async def _show_page_runtime_response(
     body = await starlette_request.body()
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
+    request_options: dict[str, float] = {}
+    if _is_show_page_api_handler_path(asset_path):
+        from core.services import settings as settings_service
+
+        config = await asyncio.to_thread(settings_service.load_config_or_default)
+        request_options["timeout_seconds"] = config.runtime.show_page_api_timeout_seconds
     proxied = await manager.request(
         starlette_request.method,
         runtime_path,
         envelope=envelope,
         headers=forwarded_headers,
         body=body or None,
+        **request_options,
     )
     proxy_duration_ms = int((time.monotonic() - request_started) * 1000)
     if (
@@ -14897,9 +14955,9 @@ async def serve_private_show_page(session_id, asset_path):
                     inject_show_config=request.method == "GET" and not _is_show_api_asset(asset_path),
                     show_authenticated=can_annotate,
                 )
-            except Exception:
+            except Exception as exc:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,
@@ -15398,9 +15456,9 @@ async def serve_public_show_page(share_id, asset_path):
                     show_config_session_id=share_id,
                     include_annotation_bootstrap=not limited_guest,
                 )
-            except Exception:
+            except Exception as exc:
                 if _is_show_api_asset(asset_path) or _is_show_annotation_asset(asset_path):
-                    return _show_page_runtime_unavailable_response()
+                    return _show_page_runtime_error_response(asset_path, exc)
                 response = _show_page_runtime_failure_response(
                     page_dir,
                     page.session_id,

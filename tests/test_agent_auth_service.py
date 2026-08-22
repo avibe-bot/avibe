@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,6 +29,12 @@ class _IsolatedClaudeConfigDirMixin:
         self._claude_config_dir_tmp = tempfile.TemporaryDirectory()
         self._previous_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self._claude_config_dir_tmp.name) / ".claude")
+        # V2Config writes go through the cross-process transaction, which
+        # resolves config.json from AVIBE_HOME — isolate it per test so
+        # no test touches the developer's real ~/.avibe.
+        self._avibe_home_tmp = tempfile.TemporaryDirectory()
+        self._previous_avibe_home = os.environ.get("AVIBE_HOME")
+        os.environ["AVIBE_HOME"] = self._avibe_home_tmp.name
 
     def tearDown(self):
         if self._previous_claude_config_dir is None:
@@ -35,6 +42,11 @@ class _IsolatedClaudeConfigDirMixin:
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = self._previous_claude_config_dir
         self._claude_config_dir_tmp.cleanup()
+        if self._previous_avibe_home is None:
+            os.environ.pop("AVIBE_HOME", None)
+        else:
+            os.environ["AVIBE_HOME"] = self._previous_avibe_home
+        self._avibe_home_tmp.cleanup()
         super().tearDown()
 
 
@@ -1338,9 +1350,17 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             timeout=service.setup_timeout_seconds,
         )
         cleanup.assert_called()
-        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
+        # The persisted write goes through the cross-process config
+        # transaction; the live mirror fires only for fields the
+        # transaction decided to change, computed from the lock-fresh
+        # snapshot. The stub claude starts without auth_mode_set, so the
+        # marker mirror applies; auth_mode itself is asserted on the
+        # persisted file (the fresh snapshot already said "oauth").
         self.assertTrue(controller.config.agents.claude.auth_mode_set)
-        self.assertEqual(controller.config.save_calls, 1)
+        from config.v2_config import V2Config as _V2
+
+        self.assertEqual(_V2.load().agents.claude.auth_mode, "oauth")
+        self.assertTrue(_V2.load().agents.claude.auth_mode_set)
         service._refresh_backend_runtime.assert_awaited_once_with("claude")
         service._disconnect_claude_client.assert_awaited_once_with(flow.claude_client)
         self.assertIn("login is active again", controller.im_client.sent_messages[0][1].lower())
@@ -1398,6 +1418,42 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(saved.agents.claude.auth_mode, "oauth")
         self.assertTrue(saved.agents.claude.auth_mode_set)
         self.assertTrue(controller.config.claude.auth_mode_set)
+
+    async def test_persist_backend_auth_mode_runs_config_transaction_off_event_loop(self):
+        controller = _StubController()
+        controller.config.agents.claude = SimpleNamespace(
+            auth_mode="api_key",
+            auth_mode_set=False,
+        )
+        service = AgentAuthService(controller)
+        service._clear_claude_settings_env_for_oauth = AsyncMock()
+
+        fresh_config = SimpleNamespace(
+            agents=SimpleNamespace(
+                claude=SimpleNamespace(auth_mode="api_key", auth_mode_set=False),
+            ),
+        )
+        transaction_thread = None
+
+        def fake_update_config_fields(mutator):
+            nonlocal transaction_thread
+            transaction_thread = threading.current_thread()
+            mutator(fresh_config)
+            return fresh_config
+
+        with patch(
+            "config.v2_config.update_config_fields",
+            side_effect=fake_update_config_fields,
+        ):
+            caller_thread = threading.current_thread()
+            await service._persist_backend_auth_mode("claude", "oauth")
+
+        self.assertIsNotNone(transaction_thread)
+        self.assertIsNot(transaction_thread, caller_thread)
+        self.assertEqual(fresh_config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(fresh_config.agents.claude.auth_mode_set)
+        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(controller.config.agents.claude.auth_mode_set)
 
     async def test_wait_for_claude_completion_reports_settings_cleanup_failure(self):
         controller = _StubController()
