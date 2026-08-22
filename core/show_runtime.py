@@ -3057,18 +3057,19 @@ class ShowRuntimeManager:
                 )
             takeover = self._github_checkout_takeover_decision(git, source_dir)
             if not takeover.allowed:
+                refusal_reason = takeover.reason or "runtime_install_failed"
+                self._record_github_source_update_skipped(
+                    source_dir,
+                    reason=refusal_reason,
+                    current_revision=takeover.current_revision,
+                    target_revision=fetched,
+                )
                 if replacement_required:
                     return self._github_install_attempt(
                         existing_command,
                         replacement_required=True,
                         operation_reason=takeover.reason,
                     )
-                self._record_github_source_update_skipped(
-                    source_dir,
-                    reason=takeover.reason or "runtime_install_failed",
-                    current_revision=takeover.current_revision,
-                    target_revision=fetched,
-                )
                 source_update_skipped = True
             else:
                 update_failure_reason = "runtime_github_source_update_failed"

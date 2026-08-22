@@ -230,6 +230,65 @@ def test_automatic_update_builds_local_commit_without_moving_the_checkout(tmp_pa
     assert automatic.manager.status()["github_source"]["update"] is None
 
 
+@pytest.mark.parametrize(
+    "refusal_reason",
+    [
+        "runtime_github_source_dirty",
+        "runtime_github_source_revision_changed",
+        "runtime_github_source_revision_unverified",
+    ],
+)
+@pytest.mark.parametrize("automatic", [False, True], ids=["forced", "automatic"])
+def test_checkout_refusal_records_current_evidence_before_applying_mode_remedy(
+    tmp_path: Path,
+    refusal_reason: str,
+    automatic: bool,
+) -> None:
+    upstream = make_upstream(tmp_path)
+    installed = Harness(tmp_path, upstream)
+    assert installed.manager.prepare()["ok"] is True
+    source_dir = installed.manager._github_source_dir()
+
+    if refusal_reason == "runtime_github_source_dirty":
+        (source_dir / "local.txt").write_text("uncommitted work\n", encoding="utf-8")
+    elif refusal_reason == "runtime_github_source_revision_changed":
+        (source_dir / "local.txt").write_text("committed work\n", encoding="utf-8")
+        git("add", "local.txt", cwd=source_dir)
+        git("commit", "-m", "local work", cwd=source_dir)
+    else:
+        installed.manager._github_checkout_marker_path(source_dir).unlink()
+        installed.manager._github_build_marker_path(source_dir).unlink()
+
+    current_revision = git("rev-parse", "HEAD", cwd=source_dir)
+    installed.manager._record_github_source_update_skipped(
+        source_dir,
+        reason="runtime_github_source_update_failed",
+        current_revision=current_revision,
+        target_revision="stale-target",
+    )
+    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
+    git("commit", "-am", "upstream update", cwd=upstream)
+    target_revision = git("rev-parse", "HEAD", cwd=upstream)
+    attempt = Harness(tmp_path, upstream)
+
+    result = attempt.manager.prepare(automatic=True) if automatic else attempt.manager.prepare(force=True)
+
+    assert git("rev-parse", "HEAD", cwd=source_dir) == current_revision
+    assert result["status"]["github_source"]["update"] == {
+        "state": "skipped",
+        "reason": refusal_reason,
+        "current_revision": current_revision,
+        "target_revision": target_revision,
+    }
+    if automatic:
+        assert result["ok"] is True
+        assert [command[1:] for command in attempt.npm_commands] == [["ci"], ["run", "build"]]
+    else:
+        assert result["ok"] is False
+        assert result["reason"] == refusal_reason
+        assert attempt.npm_commands == []
+
+
 def test_checkout_update_writes_pending_before_moving_head_and_heals_forward(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
