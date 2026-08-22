@@ -2983,7 +2983,7 @@ class ShowRuntimeManager:
         force: bool | None = None,
     ) -> _ManagedInstallAttempt:
         replacement_required = self.force_install if force is None else force
-        source_update_skipped = False
+        checkout_takeover_skipped = False
         node = _resolve_node_command()
         if not node:
             self._install_reason = "runtime_node_missing"
@@ -3011,17 +3011,10 @@ class ShowRuntimeManager:
                     None,
                     replacement_required=replacement_required,
                 )
-            self._clear_github_source_update(source_dir)
         else:
             if not self._run_install_command([*git, "-C", str(source_dir), "fetch", "--depth", "1", "origin", self.github_ref]):
                 self._install_reason = None
                 update_failure_reason = "runtime_github_source_update_failed"
-                self._record_github_source_update_skipped(
-                    source_dir,
-                    reason=update_failure_reason,
-                    current_revision=self._git_revision(git, source_dir, "HEAD"),
-                    target_revision=None,
-                )
                 return self._github_install_attempt(
                     existing_command,
                     replacement_required=replacement_required,
@@ -3031,12 +3024,6 @@ class ShowRuntimeManager:
             current_revision = self._git_revision(git, source_dir, "HEAD")
             if not fetched or not current_revision:
                 update_failure_reason = "runtime_github_source_update_failed"
-                self._record_github_source_update_skipped(
-                    source_dir,
-                    reason=update_failure_reason,
-                    current_revision=current_revision,
-                    target_revision=fetched,
-                )
                 return self._github_install_attempt(
                     existing_command,
                     replacement_required=replacement_required,
@@ -3057,39 +3044,25 @@ class ShowRuntimeManager:
                 # The runtime already on disk was built from exactly this
                 # commit, so `npm ci` and `npm run build` would spend a minute
                 # reproducing it byte for byte.
-                self._clear_github_source_update(source_dir)
                 return self._github_install_attempt(
                     existing_command,
                     replacement_required=False,
                 )
             takeover = self._github_checkout_takeover_decision(git, source_dir)
             if not takeover.allowed:
-                refusal_reason = takeover.reason or "runtime_install_failed"
-                self._record_github_source_update_skipped(
-                    source_dir,
-                    reason=refusal_reason,
-                    current_revision=takeover.current_revision,
-                    target_revision=fetched,
-                )
                 if replacement_required:
                     return self._github_install_attempt(
                         existing_command,
                         replacement_required=True,
                         operation_reason=takeover.reason,
                     )
-                source_update_skipped = True
+                checkout_takeover_skipped = True
             else:
                 update_failure_reason = "runtime_github_source_update_failed"
                 if not fetched or not self._write_github_checkout_record(
                     source_dir,
                     _GitHubCheckoutRecord(takeover.current_revision or "", pending=fetched),
                 ):
-                    self._record_github_source_update_skipped(
-                        source_dir,
-                        reason=update_failure_reason,
-                        current_revision=takeover.current_revision,
-                        target_revision=fetched,
-                    )
                     if replacement_required:
                         return self._github_install_attempt(
                             existing_command,
@@ -3103,12 +3076,6 @@ class ShowRuntimeManager:
                     )
                 elif not self._run_install_command([*git, "-C", str(source_dir), "checkout", "FETCH_HEAD"]):
                     self._install_reason = None
-                    self._record_github_source_update_skipped(
-                        source_dir,
-                        reason=update_failure_reason,
-                        current_revision=takeover.current_revision,
-                        target_revision=fetched,
-                    )
                     if replacement_required:
                         return self._github_install_attempt(
                             existing_command,
@@ -3123,12 +3090,6 @@ class ShowRuntimeManager:
                 else:
                     checked_out = self._git_revision(git, source_dir, "HEAD")
                     if checked_out != fetched:
-                        self._record_github_source_update_skipped(
-                            source_dir,
-                            reason=update_failure_reason,
-                            current_revision=checked_out,
-                            target_revision=fetched,
-                        )
                         return self._github_install_attempt(
                             existing_command,
                             replacement_required=replacement_required,
@@ -3140,7 +3101,6 @@ class ShowRuntimeManager:
                         source_dir,
                         _GitHubCheckoutRecord(fetched),
                     )
-                    self._clear_github_source_update(source_dir)
         # From here on the artifact the marker describes is being replaced:
         # ``npm ci`` empties node_modules and the build writes into dist. Drop
         # the marker first so a failure anywhere below leaves "unknown" rather
@@ -3172,7 +3132,7 @@ class ShowRuntimeManager:
                 replacement_required=replacement_required,
             )
         built_revision = self._git_revision(git, source_dir, "HEAD")
-        if not source_update_skipped:
+        if not checkout_takeover_skipped:
             self._write_github_build_marker(source_dir, built_revision)
         # A forced build starts with no dist tree, so resolving this command proves replacement.
         return self._github_install_attempt(
@@ -3186,9 +3146,6 @@ class ShowRuntimeManager:
 
     def _github_checkout_marker_path(self, source_dir: Path) -> Path:
         return source_dir / ".git" / "avibe-checkout-revision.json"
-
-    def _github_source_update_path(self, source_dir: Path) -> Path:
-        return source_dir / ".git" / "avibe-source-update.json"
 
     def _clone_github_source_checkout(self, git: list[str], source_dir: Path) -> bool:
         try:
@@ -3301,52 +3258,6 @@ class ShowRuntimeManager:
             return False
         return True
 
-    def _read_github_source_update(self, source_dir: Path) -> dict[str, Any] | None:
-        try:
-            payload = json.loads(self._github_source_update_path(source_dir).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(payload, dict) or payload.get("state") != "skipped":
-            return None
-        reason = payload.get("reason")
-        if not isinstance(reason, str) or not reason:
-            return None
-        return {
-            "state": "skipped",
-            "reason": reason,
-            "current_revision": payload.get("current_revision") if isinstance(payload.get("current_revision"), str) else None,
-            "target_revision": payload.get("target_revision") if isinstance(payload.get("target_revision"), str) else None,
-        }
-
-    def _record_github_source_update_skipped(
-        self,
-        source_dir: Path,
-        *,
-        reason: str,
-        current_revision: str | None,
-        target_revision: str | None,
-    ) -> None:
-        payload = {
-            "schema_version": 1,
-            "state": "skipped",
-            "reason": reason,
-            "current_revision": current_revision,
-            "target_revision": target_revision,
-        }
-        try:
-            write_atomic(
-                self._github_source_update_path(source_dir),
-                json.dumps(payload, sort_keys=True) + "\n",
-            )
-        except OSError:
-            logger.warning("Failed to record the skipped GitHub Show Runtime source update", exc_info=True)
-
-    def _clear_github_source_update(self, source_dir: Path) -> None:
-        try:
-            self._github_source_update_path(source_dir).unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Failed to clear the GitHub Show Runtime source update record", exc_info=True)
-
     def _github_source_status(self, source_dir: Path) -> dict[str, Any]:
         git = _resolve_command("git")
         checkout = self._read_github_checkout_record(source_dir)
@@ -3354,7 +3265,6 @@ class ShowRuntimeManager:
             "managed_revision": checkout.revision if checkout else None,
             "current_revision": self._git_revision(git, source_dir, "HEAD") if git and source_dir.exists() else None,
             "built_revision": self._read_github_build_marker(source_dir),
-            "update": self._read_github_source_update(source_dir),
         }
 
     def _git_revision(self, git: list[str], source_dir: Path, ref: str) -> str | None:

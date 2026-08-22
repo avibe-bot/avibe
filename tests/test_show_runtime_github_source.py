@@ -244,7 +244,6 @@ def test_automatic_update_builds_local_commit_without_moving_the_checkout(tmp_pa
     local_revision = git("rev-parse", "HEAD", cwd=source_dir)
     (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
     git("commit", "-am", "upstream update", cwd=upstream)
-    target_revision = git("rev-parse", "HEAD", cwd=upstream)
     automatic = Harness(tmp_path, upstream)
 
     result = automatic.manager.prepare(automatic=True)
@@ -255,50 +254,7 @@ def test_automatic_update_builds_local_commit_without_moving_the_checkout(tmp_pa
     assert automatic.manager._read_github_build_marker(source_dir) is None
     assert [command[1:] for command in automatic.npm_commands] == [["ci"], ["run", "build"]]
     assert result["status"]["reason"] is None
-    assert result["status"]["github_source"]["update"] == {
-        "state": "skipped",
-        "reason": "runtime_github_source_revision_changed",
-        "current_revision": local_revision,
-        "target_revision": target_revision,
-    }
-
-    fresh_status = Harness(tmp_path, upstream).manager.status()
-    assert fresh_status["reason"] is None
-    assert fresh_status["github_source"]["update"] == result["status"]["github_source"]["update"]
-
-    automatic.manager.status()
-    Harness(tmp_path, upstream).manager._clear_github_source_update(source_dir)
-    assert automatic.manager.status()["github_source"]["update"] is None
-
-
-def test_successful_update_retires_stale_record_when_checkout_parent_is_read_only(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    installed = Harness(tmp_path, upstream)
-    assert installed.manager.prepare()["ok"] is True
-    source_dir = installed.manager._github_source_dir()
-    current_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    installed.manager._record_github_source_update_skipped(
-        source_dir,
-        reason="runtime_github_source_update_failed",
-        current_revision=current_revision,
-        target_revision="stale-target",
-    )
-    (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
-    git("commit", "-am", "upstream update", cwd=upstream)
-    updater = Harness(tmp_path, upstream)
-
-    source_parent = source_dir.parent
-    original_mode = source_parent.stat().st_mode
-    source_parent.chmod(0o555)
-    try:
-        result = updater.manager.prepare()
-        fresh_status = updater.manager.status()
-    finally:
-        source_parent.chmod(original_mode)
-
-    assert result["ok"] is True
-    assert result["status"]["github_source"]["update"] is None
-    assert fresh_status["github_source"]["update"] is None
+    assert "update" not in result["status"]["github_source"]
 
 
 @pytest.mark.parametrize(
@@ -310,7 +266,7 @@ def test_successful_update_retires_stale_record_when_checkout_parent_is_read_onl
     ],
 )
 @pytest.mark.parametrize("automatic", [False, True], ids=["forced", "automatic"])
-def test_checkout_refusal_records_current_evidence_before_applying_mode_remedy(
+def test_checkout_refusal_preserves_checkout_and_applies_mode_remedy(
     tmp_path: Path,
     refusal_reason: str,
     automatic: bool,
@@ -331,32 +287,22 @@ def test_checkout_refusal_records_current_evidence_before_applying_mode_remedy(
         installed.manager._github_build_marker_path(source_dir).unlink()
 
     current_revision = git("rev-parse", "HEAD", cwd=source_dir)
-    installed.manager._record_github_source_update_skipped(
-        source_dir,
-        reason="runtime_github_source_update_failed",
-        current_revision=current_revision,
-        target_revision="stale-target",
-    )
     (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
     git("commit", "-am", "upstream update", cwd=upstream)
-    target_revision = git("rev-parse", "HEAD", cwd=upstream)
     attempt = Harness(tmp_path, upstream)
 
     result = attempt.manager.prepare(automatic=True) if automatic else attempt.manager.prepare(force=True)
 
     assert git("rev-parse", "HEAD", cwd=source_dir) == current_revision
-    assert result["status"]["github_source"]["update"] == {
-        "state": "skipped",
-        "reason": refusal_reason,
-        "current_revision": current_revision,
-        "target_revision": target_revision,
-    }
+    assert "update" not in result["status"]["github_source"]
     if automatic:
         assert result["ok"] is True
         assert [command[1:] for command in attempt.npm_commands] == [["ci"], ["run", "build"]]
+        assert attempt.manager._read_github_build_marker(source_dir) is None
     else:
         assert result["ok"] is False
         assert result["reason"] == refusal_reason
+        assert result["status"]["install"]["state"] == "installed"
         assert attempt.npm_commands == []
 
 
@@ -416,7 +362,6 @@ def test_checkout_update_refuses_before_moving_head_when_pending_record_cannot_b
     original_cli = Path(installed["command"][1]).read_text(encoding="utf-8")
     (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
     git("commit", "-am", "upstream update", cwd=upstream)
-    target_revision = git("rev-parse", "HEAD", cwd=upstream)
     original_write = harness.manager._write_github_checkout_record
 
     def fail_pending(source: Path, record: show_runtime._GitHubCheckoutRecord) -> bool:
@@ -434,12 +379,7 @@ def test_checkout_update_refuses_before_moving_head_when_pending_record_cannot_b
     assert result["install"]["state"] == "installed"
     assert result["install"]["reason"] is None
     assert result["status"]["reason"] is None
-    assert result["status"]["github_source"]["update"] == {
-        "state": "skipped",
-        "reason": "runtime_github_source_update_failed",
-        "current_revision": original_revision,
-        "target_revision": target_revision,
-    }
+    assert "update" not in result["status"]["github_source"]
     assert git("rev-parse", "HEAD", cwd=source_dir) == original_revision
     assert checkout_record(harness.manager, source_dir) == show_runtime._GitHubCheckoutRecord(original_revision)
     assert Path(installed["command"][1]).read_text(encoding="utf-8") == original_cli
@@ -459,7 +399,6 @@ def test_missing_head_revision_is_a_structured_update_failure_before_evidence_co
     original_record = checkout_record(installed.manager, source_dir)
     (upstream / "package.json").write_text('{"name": "runtime", "version": "2"}\n', encoding="utf-8")
     git("commit", "-am", "upstream update", cwd=upstream)
-    target_revision = git("rev-parse", "HEAD", cwd=upstream)
     attempt = Harness(tmp_path, upstream)
     real_revision = attempt.manager._git_revision
 
@@ -475,12 +414,7 @@ def test_missing_head_revision_is_a_structured_update_failure_before_evidence_co
     assert result["ok"] is automatic
     if not automatic:
         assert result["reason"] == "runtime_github_source_update_failed"
-    assert result["status"]["github_source"]["update"] == {
-        "state": "skipped",
-        "reason": "runtime_github_source_update_failed",
-        "current_revision": None,
-        "target_revision": target_revision,
-    }
+    assert "update" not in result["status"]["github_source"]
     assert checkout_record(attempt.manager, source_dir) == original_record
     assert attempt.npm_commands == []
 
@@ -530,8 +464,7 @@ def test_force_install_refuses_an_unverified_legacy_checkout_without_touching_th
     assert prepared["ok"] is True
     assert explicit.manager._read_github_checkout_record(source_dir) is None
     assert prepared["status"]["reason"] is None
-    assert prepared["status"]["github_source"]["update"]["state"] == "skipped"
-    assert prepared["status"]["github_source"]["update"]["reason"] == "runtime_github_source_revision_unverified"
+    assert "update" not in prepared["status"]["github_source"]
 
     still_unverified = Harness(tmp_path, upstream).manager.prepare(force=True)
     assert still_unverified["ok"] is False
@@ -544,7 +477,7 @@ def test_force_install_refuses_an_unverified_legacy_checkout_without_touching_th
 
     repaired = Harness(tmp_path, upstream).manager.prepare(force=True)
     assert repaired["ok"] is True
-    assert repaired["status"]["github_source"]["update"] is None
+    assert "update" not in repaired["status"]["github_source"]
 
 
 def test_force_install_fails_before_build_when_old_output_remains(
@@ -587,7 +520,6 @@ def test_forced_update_failure_reports_failed_operation_and_installed_state(tmp_
     assert result["install"]["reason"] is None
     assert result["status"]["install"]["state"] == "installed"
     assert result["status"]["reason"] is None
-    assert result["status"]["github_source"]["update"]["reason"] == "runtime_github_source_update_failed"
     assert result["status"]["command"] == installed["command"]
 
 

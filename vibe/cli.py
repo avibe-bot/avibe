@@ -14449,16 +14449,6 @@ def _git_prepare_satisfies_strict(result: dict) -> bool:
     }
 
 
-def _github_source_update(payload: dict) -> dict:
-    github_source = payload.get("github_source")
-    if not isinstance(github_source, dict):
-        return {}
-    update = github_source.get("update")
-    if not isinstance(update, dict) or update.get("state") != "skipped":
-        return {}
-    return update
-
-
 def _print_runtime_status(payload: dict) -> None:
     print("Show Runtime:")
     print(f"  Provider: {payload.get('provider')}")
@@ -14477,16 +14467,6 @@ def _print_runtime_status(payload: dict) -> None:
     print(f"  Installed: {'yes' if install.get('state') == 'installed' else 'no'}")
     if install.get("install_dir"):
         print(f"  Install dir: {install.get('install_dir')}")
-    source_update = _github_source_update(payload)
-    if source_update:
-        print(
-            "  "
-            + i18n_t(
-                "runtime.status.managedUpdateSkipped",
-                _configured_cli_language(),
-                target_revision=source_update.get("target_revision") or "unknown",
-            )
-        )
     if payload.get("reason"):
         print(f"  Reason: {payload.get('reason')}")
     git = payload.get("git") or {}
@@ -14540,15 +14520,6 @@ def cmd_runtime(args) -> int:
                 status_install = _show_runtime_install(status)
                 if status_install.get("install_dir"):
                     print(f"Install dir: {status_install['install_dir']}")
-                source_update = _github_source_update(status)
-                if source_update:
-                    print(
-                        i18n_t(
-                            "runtime.prepare.managedUpdateSkipped",
-                            language,
-                            target_revision=source_update.get("target_revision") or "unknown",
-                        )
-                    )
             elif policy.get("state") == "skipped":
                 print(
                     i18n_t(

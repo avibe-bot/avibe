@@ -981,6 +981,38 @@ sixth head returns either a rule with no named owner or a payload field whose
 meaning depends on a sibling field, the update record and the status payload
 leave this PR and become their own change.
 
+The sixth head fired that boundary. The persisted update record used
+`state = "skipped"` for both a known target that checkout takeover refused and
+a fetch or revision-inspection failure whose target might not exist. A consumer
+could interpret that field only by pairing it with `reason` and the nullable
+`target_revision`, so the state was another inadequate proxy. The record, its
+`github_source.update` status member, and the prepare/status copy leave this PR
+rather than acquiring a failure-specific consumer branch.
+
+The install dimension stays. Its location is a different member of the status
+payload, its flat mirrors were removed on head five, and no later finding has
+implicated its owner or consumers. The checkout record, build-marker
+provenance, and operation outcome contract stay for the same reason: the sixth
+finding disproves none of them. This is a split by the property that recurred,
+not a rollback of adjacent owners that have held.
+
+The follow-up starts from the reason the update record existed, not from its
+schema. Doctor can already report a failed managed update from the immediate
+operation reason, but an ordinary prepare may still succeed by reusing the old
+runtime and therefore clears that top-level failure. The record persisted that
+degraded side effect so a later status call could repeat it. That past event is
+not current state: `vibe runtime status` performs no network I/O and cannot know
+whether an update is available. The leading design is therefore for the
+operation to report its degraded side effect in band to the caller that just
+performed the fetch, while status makes no update claim it cannot verify. The
+follow-up may depart from that design only with a stated reason.
+
+The next boundary is again a property: if a seventh findings-bearing head
+returns a finding against one of the remaining owners -- checkout evidence,
+the install dimension, build provenance, or the operation outcome contract --
+that owner leaves this PR as its own change. Another site-level patch is not an
+acceptable remedy.
+
 The reason this one predicate absorbed seven probes is worth naming even though it is
 out of scope here: one directory is both Avibe's build input and a place a developer
 may work, so every rule about it has to infer which role it is in. An eighth input

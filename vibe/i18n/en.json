@@ -903,12 +903,8 @@
   "runtime": {
     "prepare": {
       "prepared": "Show Runtime prepared.",
-      "managedUpdateSkipped": "Avibe skipped the managed Show Runtime source update to {target_revision}.",
       "skipped": "Show Runtime preparation skipped: {reason}",
       "failed": "Show Runtime preparation failed: {reason}"
-    },
-    "status": {
-      "managedUpdateSkipped": "GitHub source: Avibe skipped the managed update to {target_revision}."
     },
     "clean": {
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
