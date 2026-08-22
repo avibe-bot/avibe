@@ -568,6 +568,12 @@ class ShowRuntimeManager:
         self._capability_generation = 0
 
     async def ensure(self, *, automatic: bool = True) -> ShowRuntimeAvailability:
+        if self._base_url and await self._healthy(self._base_url):
+            return replace(
+                self._availability,
+                runtime=ShowRuntimeServingState.SERVING,
+                base_url=self._base_url,
+            )
         async with self._lock:
             return await self._admit_runtime_start(automatic=automatic)
 
@@ -697,7 +703,7 @@ class ShowRuntimeManager:
                         availability.reason or "runtime_unavailable",
                     )
         except BaseException as exc:
-            if start_phase in {"admission", "install"}:
+            if start_phase in {"admission", "install", "preconditions"}:
                 pending_exception = exc
             else:
                 reason = _STARTUP_ATTEMPT_FAILED_REASON
@@ -1160,6 +1166,7 @@ class ShowRuntimeManager:
                     command=self._managed_command,
                     policy_reason=admission.policy_reason,
                 )
+            return admission
         else:
             managed = self._managed_bin_path()
             resolved = _resolve_executable_path(managed)
@@ -1453,14 +1460,16 @@ class ShowRuntimeManager:
                 failure_reason = _STARTUP_COMMAND_INVALID_REASON
             else:
                 explicit_fingerprint = _command_fingerprint(explicit_command)
-        configured_node = os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN")
-        try:
-            node_command = _resolve_node_command()
-        except ValueError:
-            node_fingerprint = ("invalid", configured_node)
-            failure_reason = failure_reason or _STARTUP_NODE_COMMAND_INVALID_REASON
-        else:
-            node_fingerprint = _command_fingerprint(node_command)
+        node_fingerprint: tuple[Any, ...] | None = None
+        if not self._command_explicit:
+            configured_node = os.environ.get("VIBE_SHOW_RUNTIME_NODE_BIN")
+            try:
+                node_command = _resolve_node_command()
+            except ValueError:
+                node_fingerprint = ("invalid", configured_node)
+                failure_reason = failure_reason or _STARTUP_NODE_COMMAND_INVALID_REASON
+            else:
+                node_fingerprint = _command_fingerprint(node_command)
         manifest_pin = (
             _path_fingerprint(self.manifest_path)
             if self.manifest_path is not None

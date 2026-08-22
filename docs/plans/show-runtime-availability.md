@@ -1437,6 +1437,27 @@ as a rule because the reduced signal looked adequate each time.
   only from manager-owned disposition, never from a browser counter, and a failed
   poll consumes no confirmation because manager admission never happened.
 
+**Every obligation has two halves.** The sixth findings-bearing head exposed four
+converses that the earlier rules left unstated: a serialized admission must retain
+the lock-free read-only healthy path; a precondition belongs in retry identity only
+when both Avibe does not write it and the selected provider depends on it; a user
+initiated operation must not consume an automatic retry budget; and a cancellation
+before an attempt is owed must propagate without entering the outcome publisher.
+The implementation and tests therefore cover both the owed and not-owed case for
+each rule. A rule with only one half tested is not complete.
+
+The corresponding sixth-head checks are: concurrent healthy asset requests do not
+serialize while a start admission remains locked; an explicit Runtime command is
+unaffected by malformed Node configuration while a managed provider publishes that
+configuration failure; precondition cancellation propagates without a retry record
+while cancellation after an owed attempt still publishes; and one explicit archive
+operation performs exactly one install attempt without consuming automatic retry
+state. The audit also records rules whose converse needs no separate behavior:
+successful request transport clears request evidence (there is no opposite success
+state to preserve), and an unsupported platform offers no local action (the converse
+is the existing repair/configuration action domain). These are checked by the
+existing success and recovery-action parameterized tests.
+
 **A probe proves only the state it was calibrated for.** The first attempt at the
 fix above reused `_healthy()` exactly as the already-running path calls it: one
 request, `connect=0.5s`, `read=2.0s`, no retry. That budget was chosen for a

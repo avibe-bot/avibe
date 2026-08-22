@@ -227,6 +227,10 @@ def _runtime_manager_with_failing_transport(monkeypatch, tmp_path):
 
     manager._base_url = "http://127.0.0.1:49321"
     manager._process = FakeProcess()
+    manager._availability = manager._publish_runtime_availability(
+        ShowRuntimeServingState.SERVING,
+        manager._base_url,
+    )
     monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=True))
     monkeypatch.setattr(
         manager,
@@ -7098,6 +7102,65 @@ def test_healthy_runtime_does_not_fingerprint_preconditions_per_request(monkeypa
     assert asyncio.run(manager.ensure()).available is True
 
 
+def test_healthy_runtime_fast_path_does_not_serialize_health_probes(tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    manager._base_url = "http://127.0.0.1:4173"
+    manager._availability = manager._publish_runtime_availability(
+        ShowRuntimeServingState.SERVING,
+        manager._base_url,
+    )
+    active = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def healthy(_base_url):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if peak == 2:
+            release.set()
+        await release.wait()
+        active -= 1
+        return True
+
+    manager._healthy = healthy
+
+    async def run():
+        results = await asyncio.gather(manager.ensure(), manager.ensure())
+        assert all(result.available for result in results)
+
+    asyncio.run(run())
+    assert peak == 2
+
+
+def test_start_admission_stays_serialized(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    observed = []
+    real_preconditions = manager._retry_preconditions
+
+    def snapshot():
+        observed.append(manager._lock.locked())
+        return real_preconditions()
+
+    monkeypatch.setattr(manager, "_retry_preconditions", snapshot)
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(manager, "stop", lambda: None)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr(manager, "_read_startup_url", lambda *, deadline: asyncio.sleep(0, result=None))
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None))
+
+    asyncio.run(manager.ensure())
+
+    assert observed == [True]
+
+
 def test_install_admission_uses_one_precondition_snapshot_for_gate_and_publication(
     monkeypatch,
     tmp_path,
@@ -7164,6 +7227,86 @@ def test_start_admission_publishes_malformed_configured_commands(
     assert result.runtime_failure_class is ShowRuntimeFailureClass.CONFIGURED
     assert result.runtime_retry_disposition is ShowRuntimeRetryDisposition.MANUAL_ONLY
     assert manager._start_retry is not None
+
+
+def test_explicit_runtime_ignores_unrelated_malformed_node_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_NODE_BIN", "'unterminated")
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(manager, "stop", lambda: None)
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result=None),
+    )
+
+    result = asyncio.run(manager.ensure())
+
+    assert result.runtime_reason == "runtime_start_url_timeout"
+    assert result.runtime_reason != "runtime_start_node_command_invalid"
+
+
+def test_cancelled_start_preconditions_propagate_without_publication(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    started = threading.Event()
+    release = threading.Event()
+    real_preconditions = manager._retry_preconditions
+
+    def blocked_preconditions():
+        started.set()
+        assert release.wait(timeout=5)
+        return real_preconditions()
+
+    monkeypatch.setattr(manager, "_retry_preconditions", blocked_preconditions)
+    monkeypatch.setattr(manager, "stop", lambda: None)
+
+    async def cancel():
+        task = asyncio.create_task(manager.ensure())
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel())
+    assert manager._start_retry is None
+    assert manager._availability.runtime_retry_disposition is None
+
+
+def test_archive_explicit_attempt_does_not_fall_through_to_generic_install(monkeypatch, tmp_path):
+    from core import show_runtime as srt
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+    )
+    attempts = []
+
+    def failed_archive(*, force, offline, automatic):
+        attempts.append((force, offline, automatic))
+        admission = manager._publish_install_availability(install_reason="runtime_archive_download_failed")
+        return admission, srt._ShowRuntimeOperationOutcome(
+            srt._ShowRuntimeOperationState.FAILED,
+            "runtime_archive_download_failed",
+        )
+
+    monkeypatch.setattr(manager, "_attempt_managed_install", failed_archive)
+
+    result = asyncio.run(manager._resolve_managed_availability(automatic=False))
+
+    assert result.install_reason == "runtime_archive_download_failed"
+    assert attempts == [(False, False, False)]
 
 
 @pytest.mark.parametrize("entrypoint", ("request", "request_global"))
