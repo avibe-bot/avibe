@@ -1554,31 +1554,6 @@ def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):
     assert "after 3 attempts" in result["message"]
 
 
-def test_prepare_show_runtime_job_reports_failed_replacement_with_old_install(monkeypatch):
-    import core.show_runtime as show_runtime
-
-    manager = Mock()
-    manager.prepare.return_value = {
-        "ok": False,
-        "reason": "runtime_archive_download_failed",
-        "install": {
-            "state": "installed",
-            "reason": None,
-        },
-        "status": {
-            "installed": True,
-            "command": ["node", "runtime-cli.js"],
-        },
-    }
-    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
-
-    result = api._prepare_show_runtime_job()
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_archive_download_failed"
-    assert "runtime_archive_download_failed" in result["message"]
-
-
 def test_start_dependency_install_job_runs_askill(monkeypatch):
     import time as _t
 

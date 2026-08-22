@@ -42,7 +42,6 @@ def make_upstream(tmp_path: Path) -> Path:
     upstream.mkdir()
     git("init", "-b", "main", cwd=upstream)
     (upstream / "package.json").write_text('{"name": "runtime"}\n', encoding="utf-8")
-    (upstream / ".gitignore").write_text("node_modules\npackages/runtime/dist\n", encoding="utf-8")
     git("add", "-A", cwd=upstream)
     git("commit", "-m", "one", cwd=upstream)
     return upstream
@@ -129,130 +128,11 @@ def test_force_install_rebuilds_even_when_the_commit_matches(tmp_path: Path) -> 
     harness = Harness(tmp_path, upstream)
     assert harness.manager._install_github_runtime()
     harness.npm_commands.clear()
+    harness.manager.force_install = True
 
-    assert harness.manager._install_github_runtime(force=True)
+    assert harness.manager._install_github_runtime()
 
     assert [command[1:] for command in harness.npm_commands] == [["ci"], ["run", "build"]]
-
-
-def test_force_install_refuses_locally_modified_source_without_touching_the_runtime(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-    source_dir = harness.manager._github_source_dir()
-    cli_path = Path(installed["command"][1])
-    original_cli = cli_path.read_text(encoding="utf-8")
-    (source_dir / "package.json").write_text('{"name": "locally-edited"}\n', encoding="utf-8")
-    harness.npm_commands.clear()
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_github_source_dirty"
-    assert result["status"]["installed"] is True
-    assert (source_dir / "package.json").read_text(encoding="utf-8") == '{"name": "locally-edited"}\n'
-    assert cli_path.read_text(encoding="utf-8") == original_cli
-    assert harness.npm_commands == []
-
-
-def test_force_install_fails_before_build_when_old_output_remains(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    assert harness.manager._install_github_runtime()
-    harness.npm_commands.clear()
-    monkeypatch.setattr(show_runtime.shutil, "rmtree", lambda _path: None)
-
-    command = harness.manager._install_github_runtime(force=True)
-
-    assert command is None
-    assert harness.manager._install_reason == "runtime_install_failed"
-    assert harness.npm_commands == []
-
-
-def test_forced_update_failure_reports_failed_operation_and_installed_state(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-
-    def fail_update(_command: list[str], *, cwd: Path | None = None) -> bool:
-        del cwd
-        harness.manager._install_reason = "runtime_install_failed"
-        return False
-
-    harness.manager._run_install_command = fail_update  # type: ignore[method-assign]
-
-    result = harness.manager.prepare(force=True)
-
-    assert result["ok"] is False
-    assert result["reason"] == "runtime_install_failed"
-    assert result["command"] is None
-    assert result["status"]["installed"] is True
-    assert result["status"]["command"] == installed["command"]
-
-
-def test_failed_forced_build_invalidates_the_cached_command_before_retry(tmp_path: Path) -> None:
-    upstream = make_upstream(tmp_path)
-    harness = Harness(tmp_path, upstream)
-    installed = harness.manager.prepare()
-    assert installed["ok"] is True
-    real_run = harness._run
-
-    def fail_the_build(command: list[str], *, cwd: Path | None = None) -> bool:
-        if command[1:] == ["run", "build"]:
-            harness.npm_commands.append(command)
-            harness.manager._install_reason = "runtime_install_failed"
-            return False
-        return real_run(command, cwd=cwd)
-
-    harness.manager._run_install_command = fail_the_build  # type: ignore[method-assign]
-    harness.npm_commands.clear()
-
-    forced = harness.manager.prepare(force=True)
-    retried = harness.manager.prepare()
-
-    assert forced["ok"] is False
-    assert forced["status"]["installed"] is False
-    assert retried["ok"] is False
-    assert retried["reason"] == "runtime_install_failed"
-    assert harness.manager._managed_command is None
-    assert [command[1:] for command in harness.npm_commands] == [
-        ["ci"],
-        ["run", "build"],
-        ["ci"],
-        ["run", "build"],
-    ]
-
-
-@pytest.mark.parametrize(
-    "delegate_outcome",
-    (
-        subprocess.CompletedProcess(args=["git", "fetch"], returncode=1),
-        OSError("git spawn failed"),
-        subprocess.TimeoutExpired(cmd=["git", "fetch"], timeout=300),
-    ),
-)
-def test_github_delegate_failures_are_structured(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    delegate_outcome: subprocess.CompletedProcess | Exception,
-) -> None:
-    manager = show_runtime.ShowRuntimeManager(runtime_dir=tmp_path / "runtime")
-    manager.runtime_dir.mkdir(parents=True)
-
-    def run_delegate(*_args, **_kwargs):
-        if isinstance(delegate_outcome, Exception):
-            raise delegate_outcome
-        return delegate_outcome
-
-    monkeypatch.setattr(show_runtime.subprocess, "run", run_delegate)
-
-    assert manager._run_install_command(["git", "fetch"]) is False
-    assert manager._install_reason == "runtime_install_failed"
 
 
 def test_a_failed_build_leaves_no_marker_licensing_a_skip(tmp_path: Path) -> None:

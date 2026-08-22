@@ -12389,19 +12389,6 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             )
         if startability.state is not _ShowRuntimeStartabilityState.NOT_STARTABLE:
             raise AssertionError(f"Unhandled Show Runtime startability: {startability.state}")
-        if before.get("explicit_command"):
-            reason = startability.reason or "runtime_start_failed"
-            return _doctor_repair_result(
-                target,
-                "failed",
-                i18n_t("runtime.doctor.repairExplicitCommandFailed", language, reason=reason),
-                provider=before.get("provider"),
-                platform=before.get("platform"),
-                install_dir=before.get("install_dir"),
-                installed=True,
-                reason=reason,
-                explicit_command=before.get("explicit_command"),
-            )
 
     archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
     archive_url = str(archive.get("url") or "")
@@ -12425,14 +12412,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "repaired",
-                i18n_t(
-                    (
-                        "runtime.doctor.repairReinstalled"
-                        if before.get("installed")
-                        else "runtime.doctor.repairInstalled"
-                    ),
-                    language,
-                ),
+                i18n_t("runtime.doctor.repairStarted", language),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
                 install_dir=status.get("install_dir"),
@@ -12442,15 +12422,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "failed",
-                i18n_t(
-                    (
-                        "runtime.doctor.repairReinstallStartFailed"
-                        if before.get("installed")
-                        else "runtime.doctor.repairInstallStartFailed"
-                    ),
-                    language,
-                    reason=reason,
-                ),
+                i18n_t("runtime.doctor.repairStartFailed", language, reason=reason),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
                 install_dir=status.get("install_dir"),
@@ -12477,20 +12449,12 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
-    install_dir = status.get("install_dir")
-    message = (
-        i18n_t("runtime.doctor.repairGitHubSourceDirty", language, path=install_dir)
-        if reason == "runtime_github_source_dirty" and install_dir
-        else i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
-    )
     return _doctor_repair_result(
         target,
         "failed",
-        message,
+        i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail),
         provider=result.get("provider"),
         platform=result.get("platform"),
-        install_dir=install_dir,
-        installed=bool(status.get("installed")),
         reason=reason,
         download_error=download_error,
     )
@@ -14483,7 +14447,7 @@ def cmd_runtime(args) -> int:
         payload["git"] = git
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
-        runtime_prepared = bool(payload.get("ok"))
+        runtime_prepared = install.get("state") == "installed"
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -14507,7 +14471,7 @@ def cmd_runtime(args) -> int:
                     i18n_t(
                         "runtime.prepare.failed",
                         language,
-                        reason=payload.get("reason") or install.get("reason") or "unknown",
+                        reason=install.get("reason") or "unknown",
                     ),
                     file=sys.stderr,
                 )
