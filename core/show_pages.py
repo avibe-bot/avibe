@@ -2520,7 +2520,10 @@ def _show_runtime_recovery_script(
     *,
     retry_authorized: bool,
 ) -> str:
-    explicit_script = "" if not retry_authorized else """
+    if not retry_authorized:
+        return ""
+    return """<script>
+      (() => {
       const retryNow = async () => {
         const button = document.getElementById("show-runtime-retry-now");
         if (button) button.disabled = true;
@@ -2539,11 +2542,7 @@ def _show_runtime_recovery_script(
         }
       };
       document.getElementById("show-runtime-retry-now")?.addEventListener("click", retryNow);
-    """
-    if not explicit_script:
-        return ""
-    return f"""<script>
-      {explicit_script}
+      })();
     </script>"""
 
 

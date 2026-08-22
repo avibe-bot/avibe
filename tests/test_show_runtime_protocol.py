@@ -256,6 +256,7 @@ def test_show_runtime_default_read_timeout_is_owner_published_not_request_deadli
     assert raised.value.failure_class.value == "unclassified"
     assert raised.value.retry_disposition.value == "continuous"
     assert raised.value.__cause__ is read_timeout
+    assert manager._base_url is None
     assert manager._start_retry is None
 
 
@@ -299,6 +300,7 @@ def test_show_runtime_explicit_read_timeout_is_converted(monkeypatch, tmp_path):
         )
 
     assert raised.value.__cause__ is read_timeout
+    assert manager._base_url is None
     assert manager._start_retry is None
 
 
@@ -336,6 +338,7 @@ def test_show_runtime_request_enforces_timeout_as_total_deadline(monkeypatch, tm
                 timeout_seconds=0.01,
             )
         )
+    assert manager._base_url is None
     assert manager._start_retry is None
 
 

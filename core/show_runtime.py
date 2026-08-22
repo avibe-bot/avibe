@@ -748,7 +748,8 @@ class ShowRuntimeManager:
         phase_timeout_seconds = SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
         return await self._request_runtime_transport(
             method,
-            f"{base_url}{path}",
+            base_url,
+            path,
             headers=request_headers,
             body=body,
             phase_timeout_seconds=phase_timeout_seconds,
@@ -778,7 +779,8 @@ class ShowRuntimeManager:
         forwarded = {key: value for key, value in (headers or {}).items() if key.lower() not in blocked}
         return await self._request_runtime_transport(
             method,
-            f"{base_url}{path}",
+            base_url,
+            path,
             headers=forwarded,
             body=body,
             phase_timeout_seconds=30.0,
@@ -787,7 +789,8 @@ class ShowRuntimeManager:
     async def _request_runtime_transport(
         self,
         method: str,
-        url: str,
+        base_url: str,
+        path: str,
         *,
         headers: dict[str, str],
         body: bytes | None,
@@ -797,7 +800,7 @@ class ShowRuntimeManager:
         """Own transport failures and publish their recovery evidence."""
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(phase_timeout_seconds, connect=5.0)) as client:
-                request = client.request(method, url, headers=headers, content=body)
+                request = client.request(method, f"{base_url}{path}", headers=headers, content=body)
                 if total_timeout_seconds is None:
                     return await request
                 try:
@@ -806,9 +809,13 @@ class ShowRuntimeManager:
                     raise ShowRuntimeRequestTimeoutError(
                         f"Show Runtime request exceeded {total_timeout_seconds:g} seconds"
                     ) from exc
-        except ShowRuntimeRequestTimeoutError:
-            raise
-        except Exception as exc:
+        except (ShowRuntimeRequestTimeoutError, httpx.RequestError) as exc:
+            async with self._lock:
+                if self._base_url == base_url:
+                    self._base_url = None
+                    self._clear_capability_state()
+            if isinstance(exc, ShowRuntimeRequestTimeoutError):
+                raise
             evidence = ShowRuntimeFailureEvidence(
                 ShowRuntimeFailureDimension.RUNTIME,
                 "runtime_proxy_failed",
@@ -1289,9 +1296,12 @@ class ShowRuntimeManager:
         automatic: bool,
     ) -> tuple[ShowRuntimeAvailability, _ShowRuntimeOperationOutcome]:
         """Publish exactly one install outcome before releasing admission."""
+        if operation.state is _ShowRuntimeOperationState.COMPLETED:
+            self._install_retry = None
+            return admission, operation
         if not automatic:
             retry = self._install_retry
-            if operation.state is _ShowRuntimeOperationState.FAILED and retry and not admission.command:
+            if operation.state is _ShowRuntimeOperationState.FAILED and retry:
                 admission = replace(
                     admission,
                     install_reason=retry.reason,
@@ -1306,9 +1316,7 @@ class ShowRuntimeManager:
                 )
                 self._availability = admission
             return admission, operation
-        if operation.state is _ShowRuntimeOperationState.COMPLETED:
-            self._install_retry = None
-        elif operation.state is _ShowRuntimeOperationState.FAILED and attempt_owed:
+        if operation.state is _ShowRuntimeOperationState.FAILED and attempt_owed:
             retry = self._next_retry_backoff(
                 self._install_retry,
                 reason=operation.reason or "runtime_install_failed",
@@ -1422,11 +1430,11 @@ class ShowRuntimeManager:
         automatic: bool,
     ) -> _ShowRuntimeRetryBackoff | None:
         """Own every write to the Runtime retry record."""
-        if not automatic:
-            return self._start_retry
         if operation.state is _ShowRuntimeOperationState.COMPLETED:
             self._start_retry = None
             return None
+        if not automatic:
+            return self._start_retry
         if operation.state is not _ShowRuntimeOperationState.FAILED:
             return None
         retry = self._next_retry_backoff(

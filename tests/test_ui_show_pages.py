@@ -3083,6 +3083,8 @@ def test_private_show_page_falls_back_to_runtime_recovery(monkeypatch, tmp_path,
     assert b"window.setTimeout" not in response.content
     assert response.content.count(b"fetch(window.location.href") == 1
     assert b"document.write(html)" in response.content
+    assert b"(() => {" in response.content
+    assert b"})();" in response.content
     assert b"window.location.reload" not in response.content
     assert b"X-Avibe-Show-Recovery-Retry" in response.content
     assert b"Math.min(30000, retryDelayMs * 2)" not in response.content
@@ -4096,10 +4098,12 @@ def test_public_show_transport_failure_remains_manually_retryable(
     body = response.content.decode("utf-8")
     first_body = first.content.decode("utf-8")
     assert first.headers["X-Avibe-Show-Recovery-Disposition"] == "continuous"
+    assert first.headers["X-Avibe-Show-Recovery-Reason"] == "runtime_proxy_failed"
     assert "X-Avibe-Show-Recovery-Poll" not in first_body
     assert response.status_code == 200
-    assert response.headers["X-Avibe-Show-Recovery-Class"] == "unclassified"
-    assert response.headers["X-Avibe-Show-Recovery-Disposition"] == "continuous"
+    assert response.headers["X-Avibe-Show-Recovery-Reason"] == "runtime_command_missing"
+    assert response.headers["X-Avibe-Show-Recovery-Class"] == "configured"
+    assert response.headers["X-Avibe-Show-Recovery-Disposition"] == "manual_only"
     assert "X-Avibe-Show-Recovery-Poll" not in body
     assert "show-runtime-retry-now" not in body
     assert "vibe doctor repair show-runtime" not in body
@@ -7182,23 +7186,62 @@ def test_runtime_request_transport_boundary_publishes_recovery_evidence(
             )
         return await manager.request_global("GET", "/_show-runtime/vendor/hash/runtime.js")
 
-    for _attempt in range(2):
-        with pytest.raises(ShowRuntimeUnavailableError) as raised:
-            asyncio.run(request_runtime())
+    with pytest.raises(ShowRuntimeUnavailableError) as raised:
+        asyncio.run(request_runtime())
 
-        assert raised.value.reason == "runtime_proxy_failed"
-        assert raised.value.failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
-        assert raised.value.retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
-        assert raised.value.recovery_action is ShowRuntimeRecoveryAction.REPAIR
-
+    assert raised.value.reason == "runtime_proxy_failed"
+    assert raised.value.failure_class is ShowRuntimeFailureClass.UNCLASSIFIED
+    assert raised.value.retry_disposition is ShowRuntimeRetryDisposition.CONTINUOUS
+    assert raised.value.recovery_action is ShowRuntimeRecoveryAction.REPAIR
+    assert manager._base_url is None
     assert manager._start_retry is None
     assert manager._availability.runtime is ShowRuntimeServingState.SERVING
+
+    admissions = []
+
+    async def admit(*_args, **_kwargs):
+        admissions.append(True)
+        return SimpleNamespace(available=True, base_url="http://127.0.0.1:49322")
 
     async def successful_request(_client, method, url, **_kwargs):
         return httpx.Response(200, request=httpx.Request(method, url))
 
+    monkeypatch.setattr(manager, "ensure", admit)
     monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", successful_request)
     assert asyncio.run(request_runtime()).status_code == 200
+    assert admissions == [True]
+
+
+def test_runtime_transport_response_does_not_invalidate_base_url(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    base_url = manager._base_url
+
+    async def server_error(_client, method, url, **_kwargs):
+        return httpx.Response(503, request=httpx.Request(method, url))
+
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", server_error)
+
+    response = asyncio.run(manager.request_global("GET", "/health"))
+
+    assert response.status_code == 503
+    assert manager._base_url == base_url
+
+
+def test_runtime_transport_programming_error_stays_loud(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    base_url = manager._base_url
+    error = TypeError("request construction defect")
+
+    async def fail_programming(_client, _method, _url, **_kwargs):
+        raise error
+
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", fail_programming)
+
+    with pytest.raises(TypeError) as raised:
+        asyncio.run(manager.request_global("GET", "/health"))
+
+    assert raised.value is error
+    assert manager._base_url == base_url
 
 
 def test_recovery_fact_consumption_census_has_no_default_producer():
@@ -7384,7 +7427,8 @@ def test_user_initiated_prepare_does_not_seed_install_retry_backoff(monkeypatch,
     assert attempts == [100.0, 105.0]
 
 
-def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_path):
+@pytest.mark.parametrize("installed_command", (None, ["/tmp/runtime-cli"]), ids=("absent", "installed"))
+def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_path, installed_command):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
         runtime_dir=tmp_path / "runtime",
@@ -7404,9 +7448,15 @@ def test_failed_user_install_preserves_automatic_retry_record(monkeypatch, tmp_p
         return None
 
     monkeypatch.setattr(manager, "_install_npm_runtime", fail_install)
+    monkeypatch.setattr(
+        manager,
+        "_safe_installed_managed_runtime_command",
+        lambda *, offline: installed_command,
+    )
     payload = manager.prepare(automatic=False)
 
     assert manager._install_retry == before
+    assert payload["install"]["state"] == ("installed" if installed_command else "failed")
     assert payload["install"]["failure_class"] == before.failure_class.value
     assert payload["install"]["retry_disposition"] == before.disposition.value
 
@@ -7491,9 +7541,10 @@ def test_show_runtime_explicit_attempt_retries_after_npm_becomes_available(monke
 
     assert asyncio.run(manager._resolve_managed_command()) is None
     npm[0] = ["/new/npm"]
-    clock[0] = 105.0
+    clock[0] = 100.5
     assert asyncio.run(manager._resolve_managed_command(automatic=False)) == command
-    assert attempts == [100.0, 105.0]
+    assert attempts == [100.0, 100.5]
+    assert manager._install_retry is None
 
 
 def test_show_runtime_manager_backs_off_failed_starts(monkeypatch, tmp_path):
@@ -7758,8 +7809,48 @@ def test_explicit_start_retry_bypasses_live_backoff(monkeypatch, tmp_path):
     assert asyncio.run(manager.ensure()).reason == "runtime_start_url_timeout"
     assert len(starts) == 1
 
-    assert asyncio.run(manager.ensure(automatic=False)).reason == "runtime_start_url_timeout"
+    before = manager._start_retry
+    explicit_failure = asyncio.run(manager.ensure(automatic=False))
+    assert explicit_failure.reason == before.reason
+    assert explicit_failure.runtime_failure_class is before.failure_class
+    assert explicit_failure.runtime_retry_disposition is before.disposition
+    assert manager._start_retry == before
     assert len(starts) == 2
+
+
+def test_successful_explicit_start_clears_automatic_retry_record(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        command="/bin/runtime-cli",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    manager._start_retry = manager._next_retry_backoff(
+        None,
+        reason="runtime_start_url_timeout",
+        dimension=ShowRuntimeFailureDimension.RUNTIME,
+        base_seconds=1.0,
+        max_seconds=30.0,
+    )
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: [command])
+    monkeypatch.setattr("core.show_runtime.subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        manager,
+        "_read_startup_url",
+        lambda *, deadline: asyncio.sleep(0, result="http://127.0.0.1:12345"),
+    )
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=True))
+
+    result = asyncio.run(manager.ensure(automatic=False))
+
+    assert result.available is True
+    assert result.runtime_reason is None
+    assert result.runtime_retry_disposition is None
+    assert manager._start_retry is None
 
 
 def test_show_runtime_manager_passes_runtime_options(monkeypatch, tmp_path):

@@ -512,31 +512,41 @@ precision they protected, so they are removed rather than refined.
 The following rules are normative for PR 2c:
 
 1. **No request-path health pre-probe.** If `_base_url` is set, `request()` uses
-   that snapshot directly. A transport failure is the detector, and no await may
-   occur between reading `_base_url` and selecting it for the request.
+   that snapshot directly. A transport-level failure with no HTTP response is the
+   detector and invalidates that snapshot under the admission lock, so the next
+   request re-enters admission. An HTTP response, including a 5xx response from
+   the sidecar, proves transport succeeded and does not invalidate the runtime.
+   No await may occur between reading `_base_url` and selecting it for the request.
 2. **One admission lock.** Runtime install, start, and stop transitions are
    serialized by the owning admission boundary. Read-only request transport does
-   not add a second probe or transition owner.
+   not add a second probe or transition owner. Waiters observe the first owner's
+   published record; they do not each run a provider.
 3. **One time-only retry record per owner.** Install and start each store attempt
    count, next-attempt monotonic deadline, last failure class, and last reason.
    No retry identity, fingerprint, provider-precondition declaration, or other
-   invalidation key exists.
+   invalidation key exists. Any successful install or start clears its owner's
+   record; because records live only in memory, a process restart starts fresh.
 4. **Two dispositions.** Backoff is bounded exponential time with a documented
    ceiling: five minutes for install admission and 30 seconds for start admission.
    `configured` and `permanent` publish `manual_only`; every other class publishes
    `continuous` with a deadline. The disposition vocabulary is exactly `continuous`
    and `manual_only`.
-5. **Explicit work never mutates automatic retry state.** Explicit attempts are
-   always admitted, never consult a deadline, never advance or clear a record,
-   and project the existing record's class and disposition in their returned
-   admission when one exists.
-6. **Owning operations normalize local I/O.** Every command-resolution and
-   runtime-metadata path converts `OSError` subclasses into typed failure evidence
-   before returning to the UI. No local I/O exception escapes as an unowned 500.
+5. **Explicit work bypasses but does not corrupt automatic retry state.** Explicit
+   attempts are always admitted and never consult a deadline. Explicit failure
+   neither advances nor clears the record and projects its existing class and
+   disposition when one exists; explicit success clears the repaired owner's
+   stale record.
+6. **Owning operations normalize only operational I/O.** Every command-resolution
+   and runtime-metadata path converts `OSError` subclasses into typed failure
+   evidence before returning to the UI, and request transport catches the specific
+   `httpx` network exceptions it owns. Programming defects such as `TypeError`,
+   `ValueError`, and `AttributeError` propagate unchanged rather than acquiring
+   fabricated recovery evidence.
 7. **Retry now renders its one response.** One click performs exactly one fetch
-   and renders that response into the current document. It never follows the
-   fetch with `location.reload()` and therefore never spends a second Runtime
-   attempt.
+   and renders that response into the current document from a private script scope,
+   so repeated recovery-page renders cannot collide on top-level bindings. It never
+   follows the fetch with `location.reload()` and therefore never spends a second
+   Runtime attempt.
 
 Install-lock contention remains `not_applicable`: another process owns progress,
 so this caller did not run a provider and records no failure. Retries remain
@@ -685,7 +695,8 @@ reason, class, non-terminal disposition, and recovery action through
 `ShowRuntimeUnavailableError` before reaching the UI. Reusing the start record is
 forbidden: successful startup is not evidence that a request can be served. When
 `_base_url` already exists, the request uses it without a health pre-probe and
-lets the transport owner publish any failure.
+lets the transport owner publish operational network failures and invalidate the
+stale snapshot; programming exceptions remain loud.
 
 The API's explicit total-deadline error remains a distinct
 `ShowRuntimeRequestTimeoutError` response. A raw default `httpx` transport timeout
