@@ -12425,7 +12425,14 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "repaired",
-                i18n_t("runtime.doctor.repairStarted", language),
+                i18n_t(
+                    (
+                        "runtime.doctor.repairReinstalled"
+                        if before.get("installed")
+                        else "runtime.doctor.repairInstalled"
+                    ),
+                    language,
+                ),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
                 install_dir=status.get("install_dir"),
@@ -12435,7 +12442,15 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             return _doctor_repair_result(
                 target,
                 "failed",
-                i18n_t("runtime.doctor.repairStartFailed", language, reason=reason),
+                i18n_t(
+                    (
+                        "runtime.doctor.repairReinstallStartFailed"
+                        if before.get("installed")
+                        else "runtime.doctor.repairInstallStartFailed"
+                    ),
+                    language,
+                    reason=reason,
+                ),
                 provider=result.get("provider"),
                 platform=result.get("platform"),
                 install_dir=status.get("install_dir"),
@@ -12462,12 +12477,33 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
+    install_dir = status.get("install_dir")
+    github_source = status.get("github_source") if isinstance(status.get("github_source"), dict) else {}
+    github_refusal_messages = {
+        "runtime_github_source_dirty": "runtime.doctor.repairGitHubSourceDirty",
+        "runtime_github_source_revision_changed": "runtime.doctor.repairGitHubSourceRevisionChanged",
+        "runtime_github_source_revision_unverified": "runtime.doctor.repairGitHubSourceRevisionUnverified",
+        "runtime_github_source_update_failed": "runtime.doctor.repairGitHubSourceUpdateFailed",
+    }
+    refusal_message = github_refusal_messages.get(reason)
+    message = (
+        i18n_t(
+            refusal_message,
+            language,
+            path=install_dir,
+            revision=github_source.get("managed_revision") or "unknown",
+        )
+        if refusal_message and install_dir
+        else i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
+    )
     return _doctor_repair_result(
         target,
         "failed",
-        i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail),
+        message,
         provider=result.get("provider"),
         platform=result.get("platform"),
+        install_dir=install_dir,
+        installed=bool(status.get("installed")),
         reason=reason,
         download_error=download_error,
     )
@@ -14401,6 +14437,16 @@ def _git_prepare_satisfies_strict(result: dict) -> bool:
     }
 
 
+def _github_source_update(payload: dict) -> dict:
+    github_source = payload.get("github_source")
+    if not isinstance(github_source, dict):
+        return {}
+    update = github_source.get("update")
+    if not isinstance(update, dict) or update.get("state") != "skipped":
+        return {}
+    return update
+
+
 def _print_runtime_status(payload: dict) -> None:
     print("Show Runtime:")
     print(f"  Provider: {payload.get('provider')}")
@@ -14418,6 +14464,17 @@ def _print_runtime_status(payload: dict) -> None:
     print(f"  Installed: {'yes' if payload.get('installed') else 'no'}")
     if payload.get("install_dir"):
         print(f"  Install dir: {payload.get('install_dir')}")
+    source_update = _github_source_update(payload)
+    if source_update:
+        print(
+            "  "
+            + i18n_t(
+                "runtime.status.managedUpdateSkipped",
+                _configured_cli_language(),
+                current_revision=source_update.get("current_revision") or "unknown",
+                target_revision=source_update.get("target_revision") or "unknown",
+            )
+        )
     if payload.get("reason"):
         print(f"  Reason: {payload.get('reason')}")
     git = payload.get("git") or {}
@@ -14460,7 +14517,7 @@ def cmd_runtime(args) -> int:
         payload["git"] = git
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
-        runtime_prepared = install.get("state") == "installed"
+        runtime_prepared = bool(payload.get("ok"))
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -14470,6 +14527,16 @@ def cmd_runtime(args) -> int:
                 status = payload.get("status") or {}
                 if status.get("install_dir"):
                     print(f"Install dir: {status['install_dir']}")
+                source_update = _github_source_update(status)
+                if source_update:
+                    print(
+                        i18n_t(
+                            "runtime.prepare.managedUpdateSkipped",
+                            language,
+                            current_revision=source_update.get("current_revision") or "unknown",
+                            target_revision=source_update.get("target_revision") or "unknown",
+                        )
+                    )
             elif policy.get("state") == "skipped":
                 print(
                     i18n_t(
@@ -14484,7 +14551,7 @@ def cmd_runtime(args) -> int:
                     i18n_t(
                         "runtime.prepare.failed",
                         language,
-                        reason=install.get("reason") or "unknown",
+                        reason=payload.get("reason") or install.get("reason") or "unknown",
                     ),
                     file=sys.stderr,
                 )

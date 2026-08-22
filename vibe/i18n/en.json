@@ -903,8 +903,12 @@
   "runtime": {
     "prepare": {
       "prepared": "Show Runtime prepared.",
+      "managedUpdateSkipped": "Show Runtime was prepared from local revision {current_revision}; the managed update to {target_revision} was skipped.",
       "skipped": "Show Runtime preparation skipped: {reason}",
       "failed": "Show Runtime preparation failed: {reason}"
+    },
+    "status": {
+      "managedUpdateSkipped": "GitHub source: serving local revision {current_revision}; Avibe skipped the managed update to {target_revision}."
     },
     "clean": {
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
@@ -929,8 +933,14 @@
       "archiveCacheSkippedAction": "Wait for the running install or clean to finish, then rerun Doctor.",
       "archiveCacheSkippedInspectionAction": "Check runtime directory permissions and the Avibe log; retry Doctor once fixed.",
       "repairHealthy": "Show Runtime starts successfully; no repair is needed.",
-      "repairStarted": "Reinstalled and started the manifest-selected Show Runtime.",
-      "repairStartFailed": "Show Runtime was reinstalled but could not start: {reason}",
+      "repairGitHubSourceDirty": "Show Runtime was not rebuilt because the source directory has local changes: {path}. Stash them, including untracked files, or discard them. Committing is not enough: move or back up local commits and restore the Avibe-managed revision before rerunning Doctor.",
+      "repairGitHubSourceRevisionChanged": "Show Runtime was not rebuilt because the source directory is at a different commit from the revision Avibe recorded: {path}. Move or back up local commits, restore the checkout to Avibe's recorded revision `{revision}`, then rerun Doctor.",
+      "repairGitHubSourceRevisionUnverified": "Show Runtime was not rebuilt because Avibe has no verified checkout revision for the source directory: {path}. Back up local work, remove this unverified source directory, then run `vibe runtime prepare` to create a new managed checkout before rerunning Doctor.",
+      "repairGitHubSourceUpdateFailed": "Show Runtime was not rebuilt because Avibe could not complete the managed source update at {path}. The installed runtime was left in place. Check directory permissions and the Avibe log, then rerun Doctor.",
+      "repairInstalled": "Installed and started Show Runtime.",
+      "repairReinstalled": "Reinstalled and started Show Runtime.",
+      "repairInstallStartFailed": "Show Runtime was installed but could not start: {reason}",
+      "repairReinstallStartFailed": "Show Runtime was reinstalled but could not start: {reason}",
       "repairVerificationFailed": "Show Runtime startability could not be verified, so no reinstall was attempted: {detail}",
       "repairPostVerificationFailed": "Show Runtime preparation completed, but startability could not be verified: {detail}",
       "repairExplicitCommandFailed": "The Show Runtime command from VIBE_SHOW_RUNTIME_BIN could not start: {reason}. Fix or remove the override, then rerun Doctor.",

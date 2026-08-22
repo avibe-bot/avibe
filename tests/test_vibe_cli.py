@@ -2285,6 +2285,7 @@ def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
 
     assert result["status"] == "repaired"
     assert result["install_dir"] == str(tmp_path / "runtime")
+    assert result["message"] == "Installed and started Show Runtime."
     assert prepared == [False]
     assert stopped == [True]
 
@@ -2343,7 +2344,6 @@ def test_repair_show_runtime_refuses_explicit_command_before_hypothetical_recove
         SimpleNamespace(available=True, reason=None),
     ]
     explicit_command = str(tmp_path / "explicit-runtime")
-
     manager = SimpleNamespace(
         status=lambda: {
             "provider": "command",
@@ -2425,6 +2425,7 @@ def test_repair_show_runtime_reinstalls_unstartable_runtime_and_verifies_recover
     result = cli._repair_show_runtime()
 
     assert result["status"] == "repaired"
+    assert result["message"] == "Reinstalled and started Show Runtime."
     assert prepared == [True]
 
 
@@ -2471,9 +2472,46 @@ def test_repair_show_runtime_reports_runtime_that_still_cannot_start(monkeypatch
 
     assert result["status"] == "failed"
     assert result["reason"] == "runtime_start_health_timeout"
-    assert "could not start" in result["message"]
+    assert result["message"] == "Show Runtime was reinstalled but could not start: runtime_start_health_timeout"
     assert prepared == [True]
     assert verifier_stops == [True, True]
+
+
+def test_repair_show_runtime_reports_first_install_that_cannot_start(monkeypatch, tmp_path):
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "archive": {"url": str(tmp_path / "runtime.tgz")},
+            "installed": False,
+        },
+        prepare=lambda force=False: {
+            "ok": True,
+            "provider": "manifest-cache",
+            "platform": "linux-x64",
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+            "status": {"install_dir": str(tmp_path / "installed")},
+        },
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_start_health_timeout"
+    assert result["message"] == "Show Runtime was installed but could not start: runtime_start_health_timeout"
 
 
 def test_repair_show_runtime_preserves_undetermined_post_repair_verification(monkeypatch, tmp_path):
@@ -2546,6 +2584,327 @@ def test_repair_show_runtime_preserves_undetermined_post_repair_verification(mon
     assert prepared == [True]
 
 
+def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remains_installed(
+    monkeypatch,
+    tmp_path,
+):
+    prepared = []
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": False,
+            "reason": "runtime_archive_download_failed",
+            "provider": "archive",
+            "platform": "linux-x64",
+            "command": None,
+            "status": {
+                "installed": True,
+                "install_dir": str(tmp_path / "installed"),
+                "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+            },
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "archive",
+            "platform": "linux-x64",
+            "install_dir": str(tmp_path / "installed"),
+            "archive": {"url": str(tmp_path / "runtime.tgz")},
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(tmp_path / "runtime-cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert result["installed"] is True
+    assert result["install_dir"] == str(tmp_path / "installed")
+    assert prepared == [True]
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_cause", "expected_action"),
+    [
+        ("en", "source directory has local changes", "Stash them, including untracked files"),
+        ("zh", "\u6e90\u4ee3\u7801\u76ee\u5f55\u5305\u542b\u672c\u5730\u66f4\u6539", "\u5305\u62ec\u672a\u8ddf\u8e2a\u6587\u4ef6"),
+    ],
+)
+def test_repair_show_runtime_names_dirty_github_source_and_remediation(
+    monkeypatch,
+    tmp_path,
+    language,
+    expected_cause,
+    expected_action,
+):
+    source_dir = tmp_path / "github-source"
+    prepared = []
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": False,
+            "reason": "runtime_github_source_dirty",
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "command": None,
+            "status": {
+                "installed": True,
+                "install_dir": str(source_dir),
+            },
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "install_dir": str(source_dir),
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(source_dir / "cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_github_source_dirty"
+    assert result["installed"] is True
+    assert result["install_dir"] == str(source_dir)
+    assert str(source_dir) in result["message"]
+    assert expected_cause in result["message"]
+    assert expected_action in result["message"]
+    assert prepared == [True]
+
+
+@pytest.mark.parametrize(
+    ("reason", "language", "expected_cause", "expected_action"),
+    [
+        (
+            "runtime_github_source_revision_changed",
+            "en",
+            "different commit from the revision Avibe recorded",
+            "recorded revision `0123456789abcdef`",
+        ),
+        (
+            "runtime_github_source_revision_changed",
+            "zh",
+            "\u5f53\u524d\u7684\u63d0\u4ea4\u4e0e Avibe \u8bb0\u5f55\u7684\u7248\u672c\u4e0d\u540c",
+            "\u8bb0\u5f55\u7684\u7248\u672c `0123456789abcdef`",
+        ),
+        (
+            "runtime_github_source_revision_unverified",
+            "en",
+            "no verified checkout revision",
+            "remove this unverified source directory",
+        ),
+        (
+            "runtime_github_source_revision_unverified",
+            "zh",
+            "\u6ca1\u6709\u6b64\u6e90\u4ee3\u7801\u76ee\u5f55\u7684\u5df2\u9a8c\u8bc1 checkout \u7248\u672c\u8bb0\u5f55",
+            "\u5220\u9664\u8fd9\u4e2a\u672a\u9a8c\u8bc1\u7684\u6e90\u4ee3\u7801\u76ee\u5f55",
+        ),
+        (
+            "runtime_github_source_update_failed",
+            "en",
+            "could not complete the managed source update",
+            "Check directory permissions and the Avibe log",
+        ),
+        (
+            "runtime_github_source_update_failed",
+            "zh",
+            "\u65e0\u6cd5\u5728",
+            "\u68c0\u67e5\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7",
+        ),
+    ],
+)
+def test_repair_show_runtime_names_github_revision_refusal_and_remediation(
+    monkeypatch,
+    tmp_path,
+    reason,
+    language,
+    expected_cause,
+    expected_action,
+):
+    source_dir = tmp_path / "github-source"
+    prepared = []
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": False,
+            "reason": reason,
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "command": None,
+            "status": {
+                "installed": True,
+                "install_dir": str(source_dir),
+                "github_source": {"managed_revision": "0123456789abcdef"},
+            },
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "install_dir": str(source_dir),
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(source_dir / "cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == reason
+    assert result["installed"] is True
+    assert result["install_dir"] == str(source_dir)
+    assert str(source_dir) in result["message"]
+    assert expected_cause in result["message"]
+    assert expected_action in result["message"]
+    assert prepared == [True]
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("en", "serving local revision local123"),
+        ("zh", "\u5f53\u524d\u6b63\u5728\u4f7f\u7528\u672c\u5730\u7248\u672c local123"),
+    ],
+)
+def test_runtime_status_reports_skipped_managed_update_without_failure_reason(
+    monkeypatch,
+    capsys,
+    language,
+    expected,
+):
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+
+    cli._print_runtime_status(
+        {
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "node_available": True,
+            "installed": True,
+            "install_dir": "/test/runtime/source",
+            "reason": None,
+            "github_source": {
+                "update": {
+                    "state": "skipped",
+                    "reason": "runtime_github_source_revision_changed",
+                    "current_revision": "local123",
+                    "target_revision": "upstream456",
+                }
+            },
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert expected in output
+    assert "upstream456" in output
+    assert "Reason:" not in output
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("en", "prepared from local revision local123"),
+        ("zh", "\u5df2\u4ece\u672c\u5730\u7248\u672c local123 \u51c6\u5907\u5b8c\u6210"),
+    ],
+)
+def test_runtime_prepare_reports_success_with_skipped_managed_update(
+    monkeypatch,
+    capsys,
+    language,
+    expected,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "install": {"state": "installed", "reason": None},
+            "status": {
+                "installed": True,
+                "install_dir": "/test/runtime/source",
+                "github_source": {
+                    "update": {
+                        "state": "skipped",
+                        "reason": "runtime_github_source_revision_changed",
+                        "current_revision": "local123",
+                        "target_revision": "upstream456",
+                    }
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=False,
+            json=False,
+            strict=False,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert expected in output
+    assert "upstream456" in output
+
+
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {
@@ -2578,6 +2937,42 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     assert exit_code == 1
     assert "Show Runtime ready" not in captured.out
     assert "VIBE_INSTALL_SKIP_SHOW_RUNTIME" in captured.err
+
+
+def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": False,
+            "reason": "VIBE_SHOW_RUNTIME_BIN",
+            "policy": {
+                "state": "skipped",
+                "reason": "VIBE_SHOW_RUNTIME_BIN",
+            },
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"installed": True},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=True,
+            json=False,
+            strict=True,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Show Runtime ready" not in captured.out
+    assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
 
 
 @pytest.mark.parametrize("failure_phase", ["temporary_directory", "verifier", "cleanup"])
