@@ -100,9 +100,9 @@ provider root.
   recovers.
 - Ambiguous add/flush results may leave a rare duplicate if EverOS
   committed and Avibe could not observe the ack. They are not retried.
-- Session-boundary flush is best-effort. Queue saturation, a crash, or dropping
-  a 257th pending-session tracker may leave old and new conversation content in
-  the same EverOS accumulation boundary.
+- Session-boundary flush is best-effort. Admission saturation can reject a
+  barrier, and a process crash can drop volatile boundary candidates, leaving
+  old and new conversation content in the same EverOS accumulation boundary.
 - Duplicate source-message suppression is process-local. A restart may
   recapture the same IM or remember payload if the caller submits it
   again.
@@ -154,7 +154,10 @@ BestEffortMemoryWriter.offer()
 one ordered worker consumes the ready head slot
         |
         v
-durably open one content-free provider-call gap
+reserve one bounded session-boundary candidate and mark its guard incomplete
+        |
+        v
+durably open one content-free multi-source observation gap
         |
         v
 EverOSPort.add / flush
@@ -200,22 +203,39 @@ appends exactly one message id, and reaching 100 makes that provider session
 immediately due before another add for the same session can be submitted.
 
 The map retains at most 256 provider sessions, so its 100-id per-entry limit
-also bounds total retained ids at 25,600. Every retained session has a bounded,
-content-free durable correlation guard described below. A guard written by the
-current writer instance plus its matching live `PendingFlush` means the bounded
-message-id list is complete. A guard from an older writer generation, or one
-already marked incomplete, makes any recreated tracker incomplete.
+also bounds total retained ids at 25,600. Before an add can cross the provider
+submission edge, reserve or refresh that session's `PendingFlush`, append the
+deterministic message id provisionally, retain the previous tracker snapshot in
+the single in-flight slot, and durably mark its content-free correlation guard
+incomplete. A guard written by the current writer instance plus its matching
+live tracker can become complete only when the same add returns an observed
+`accumulated` acknowledgement and the prior snapshot was complete. A guard from
+an older writer generation, the global guard, or an already incomplete prior
+snapshot keeps the tracker incomplete.
 
-If an `accumulated` result would create a 257th entry, do not evict or mutate an
-existing scope: atomically record the add provenance and set the singleton
-global-incomplete correlation guard, drop the new volatile tracking entry,
-increment a content-free capacity-drop counter, and leave the EverOS buffer
-untouched. A later same-session add may recreate tracking after capacity is
-available, but its `correlation_complete` is false; any later flush is recorded
-as unavailable correlation rather than appearing complete from only the later
-ids. Failure to persist the guard leaves the add's already-open provenance gap
-open and fails the writer generation closed. The pending map does not survive a
-writer generation or process restart, while its durable guards do.
+If a new provider session would create a 257th map entry, skip that add before
+calling EverOS, release its admission slot, increment a content-free capacity
+counter, and do not create provider-call provenance. Never submit a call whose
+possible `unprocessed_buffer` write has no retained raw-session boundary
+candidate. This removes the previous capacity case that could leave an EverOS
+buffer with neither a flush trigger nor a safe correlation state.
+
+An observed `accumulated` result commits the provisional id and its restored
+completeness; `extracted` clears the whole tracker and guard because it proves a
+natural boundary. A rejection or failure proven before provider execution
+restores the prior snapshot (and removes a newly created empty tracker). An
+ambiguous submitted add keeps the provisional id, marks the
+tracker incomplete and immediately due, and is never retried. If the ambiguity
+is a timeout, cancellation, transport loss, or another result without a
+trustworthy response boundary, pause all later provider submissions without
+invalidating the map, stop and reap the owned sidecar, close the observation
+gap at that lifecycle bound, replace the sidecar, and submit this incomplete
+flush before later work. A returned but semantically unknown response with a
+valid request id can enqueue the same due flush immediately without sidecar
+replacement. `/new` and archive still return without waiting. A process crash
+may lose this volatile boundary action, but its durable guard remains
+incomplete. Failure of any required pre-submission guard/gap write skips the add
+without calling EverOS.
 
 When an entry becomes due, the worker snapshots it for one flush attempt. A
 failure proven to occur before the provider coroutine can execute may retain
@@ -290,8 +310,8 @@ own `memory_meta.epoch`. A second identity format would add crash windows
 without removing the outbox.
 
 After migration, `state/memory/memory.sqlite` contains identity plus bounded,
-content-free display-provenance and anomaly tables. They contain no delivery work,
-retry state, flush schedule, captured text, or attachment path:
+content-free observer tables. They contain no delivery work, retry state, flush
+schedule, captured text, or attachment path:
 
 ```text
 memory_meta
@@ -337,6 +357,7 @@ memory_processing_anomaly
   worker_generation
   principal_id
   project_id
+  expires_at_ms        # queue-backed abandonment + 90 days; null for settlement evidence
 
 memory_flush_correlation_guard
   guard_key            # HMAC of provider-session ref, or one global sentinel
@@ -344,12 +365,14 @@ memory_flush_correlation_guard
   incomplete           # boolean; true cannot become complete by later adds
   recorded_at_ms
 
-memory_call_provenance_gap
+memory_observation_gap
   gap_id               # local operation token, never sent to EverOS
   started_at_ms
   ended_at_ms          # null while the outcome is still unknown
   operation_kind       # add | flush | migration
-  reason               # call_unobserved | migration_unknown
+  correlation_incomplete # boolean source-availability flag
+  anomaly_incomplete   # boolean source-availability flag
+  reason               # call_unobserved | migration_unknown | retention_pruned
 ```
 
 `memory_call_provenance` replaces the correlation and authorization facts
@@ -364,13 +387,17 @@ that Processing Record currently reads from `memory_capture_queue` and
   message id and `correlation_complete=true`; a flush row carries the bounded
   message-id list from that session's `PendingFlush` plus its completeness bit
 - retain at most 5,000 provenance rows and at most 14 days, matching Provider
-  Call Log retention, but prune only complete request-id groups: age-prune a
-  group only when its newest `recorded_at_ms` is older than the cutoff, then
-  delete the oldest whole groups until the row count is at most 5,000
+  Call Log retention, but prune only complete request-id groups. Before
+  row-count pruning any group that can still overlap retained Call Log rows,
+  create or widen a closed correlation-only `retention_pruned` observation gap
+  over the deleted groups' full observation-time range in the same transaction.
+  A group wholly older than the Call Log cutoff needs no new coverage; then
+  delete oldest whole groups until the row count is at most 5,000
 - never retain a subset of a request-id group. If one reused group alone exceeds
   the row limit, delete that whole group; missing provenance remains fail-closed
 - enforce both bounds after each provenance write and at boot with the same
-  policy values
+  policy values. If coverage cannot be committed, do not prune; a failed
+  provider-observation transaction leaves its preflight gap open
 - for every user-scoped read, require all rows for the request id to resolve to
   exactly one principal/project; ambiguous or missing provenance never
   broadens visibility
@@ -391,17 +418,20 @@ count, deadline, attempt, or work item:
 - keep at most 256 exact session digests plus one singleton global-incomplete
   sentinel; never evict an exact guard and thereby turn unknown correlation into
   apparently complete correlation
-- create/update an exact guard in the same observer transaction that records the
-  first `accumulated` add for a live tracker. Its opaque writer-instance token
+- create/update an exact guard in the pre-submission transaction for every add
+  that has reserved a live boundary candidate. Its opaque writer-instance token
   proves completeness only while the matching generation and `PendingFlush`
-  still exist
+  still exist; the same observed `accumulated` settlement may restore the prior
+  complete state, but a later unrelated add cannot
 - at generation replacement or process restart, any surviving exact guard has
   an old token and therefore taints later recreated tracking as incomplete
-- when the exact-guard capacity or volatile pending-map capacity is exceeded,
-  set the global sentinel. While it exists every newly created tracker is
-  incomplete, including sessions not represented by an exact row
+- when exact-guard capacity is exceeded by retained old-generation rows, set the
+  global sentinel. While it exists every newly created tracker is incomplete,
+  including sessions not represented by an exact row. Pending-map capacity is
+  handled separately by skipping a new-session add before its provider RPC
 - delete an exact guard only after a natural `extracted` add or acknowledged
-  flush proves that provider buffer crossed a boundary. Rejection, timeout,
+  flush proves that provider buffer crossed a boundary. A rejection or
+  proven-uncommitted failure restores the pre-add guard snapshot; timeout,
   malformed response, cancellation, and ambiguity retain it as incomplete
 - the global sentinel is cleared only by Clear/Factory Reset or a future
   provider-wide operation that positively proves every unprocessed buffer empty;
@@ -424,78 +454,106 @@ not a retry or delivery ledger:
   the user-visible anomaly payload
 - never store provider messages, raw exceptions, payload/message text, session
   ids, source digests, attachment metadata, paths, or lease/fence tokens
-- retain the newest 100,000 rows with no age deletion, matching the current
-  terminal-tombstone count ceiling while preserving old immutable-settlement
-  anomalies that remain among the newest 50; return that newest 50 through the
-  unchanged `failure_log()` / Processing Record projection
+- set `expires_at_ms = occurred_at_ms + 90 days` for queue-backed
+  `delivery_abandoned` rows that the current terminal-tombstone compactor
+  removes, and null for settlement-backed rejected/ambiguous evidence that the
+  current immutable settlement table retains. Migration derives this from the
+  source side of the released `failure_log()` union, not from `kind` alone
+- delete expired rows first, then retain the deterministically newest 100,000
+  unexpired rows. This preserves every source-specific age contract and every
+  immutable-settlement anomaly that can still appear among the newest 50;
+  return that newest 50 through the unchanged `failure_log()` / Processing
+  Record projection
 - order and prune deterministically by `(occurred_at_ms, anomaly_id)`, so
   deleting only oldest overflow cannot change the current newest-50 projection
-- enforce retention after each insert and at boot; an anomaly read/schema
-  failure marks that Processing Record source unavailable rather than returning
-  an empty successful list
+- enforce expiry/count retention after each insert and at boot; an anomaly
+  read/schema failure marks that Processing Record source unavailable rather
+  than returning an empty successful list
 
-The single ordered worker makes correlation loss restart-safe without turning
+The single ordered worker makes every observer loss explicit without turning
 observer state into delivery state:
 
-1. Before every EverOS add or flush attempt, the worker durably inserts one open
-   `memory_call_provenance_gap` row for that operation token. It never closes or
-   replaces another attempt's gap. If this preflight identity transaction fails,
-   the provider is not called: an add is skipped, while a due flush retains its
-   snapshot only for the bounded pre-submission retry policy above.
-2. If the result contains a valid request id, one transaction inserts every
-   provenance row for that call, inserts its sanitized anomaly row when the
-   result is non-success, applies its correlation-guard transition, and deletes
-   only that operation token's gap. An acknowledged add also advances
-   `memory_meta.last_success_at` to the observation time in this transaction.
-   This applies to acknowledged, rejected, and unknown classifications. A
-   separately allowed add retry starts only after that observer transaction
-   commits; a submitted flush is terminal. A provenance/anomaly/guard transaction
-   failure leaves the already-committed gap open and never causes a provider
-   retry.
-3. If an add result has no valid request id and proves no request left Avibe, or
-   a flush attempt fails before its provider coroutine can execute, close only
-   that gap before any permitted retry. On the final bounded failure, insert the
-   sanitized anomaly in the same transaction that closes the gap. If the
-   transaction fails, drop the item and leave the gap open fail-closed. A retry
-   opens a new independent gap.
+1. Before every EverOS add or flush attempt, one preflight transaction marks the
+   exact correlation guard incomplete and inserts one open
+   `memory_observation_gap` for that operation token with both
+   `correlation_incomplete` and `anomaly_incomplete` set. For an add, the
+   volatile provisional boundary reservation above happens first and is rolled
+   back if preflight fails. A gap never closes or replaces another attempt's
+   gap. If preflight fails, the provider is not called: an add is skipped, while
+   a due flush retains its snapshot only for the bounded pre-submission retry
+   policy above.
+2. If a result contains a valid request id, one transaction inserts every
+   provenance row for that call, inserts its source-expiring sanitized anomaly
+   when the result is non-success, applies the guard and provisional-boundary
+   transition, and deletes only that operation token's gap. An acknowledged add
+   also advances `memory_meta.last_success_at` to the observation time in this
+   transaction. This applies to acknowledged, rejected, and semantically unknown
+   classifications. A separately allowed add retry starts only after that
+   observer transaction commits; a submitted flush is terminal. Transaction
+   failure leaves the preflight gap carrying both source flags, keeps any
+   possible add boundary candidate incomplete and due, closes later provider
+   submission, and never retries the provider call.
+3. If an add result proves no request left Avibe, or a flush attempt fails before
+   its provider coroutine can execute, restore the add's prior boundary snapshot
+   and delete only that gap before any permitted retry. On the final bounded
+   failure, insert the queue-backed sanitized anomaly with its 90-day expiry in
+   the same transaction. If that transaction fails, drop the item and leave the
+   gap open with both source flags fail-closed. A retry opens a new independent
+   gap.
 4. A timeout, truncated or malformed response, cancellation, or other submitted
-   result without a trustworthy request id inserts a `result_unknown` anomaly
-   but leaves that operation's gap open because the provider may still execute.
-   Later attempts do not shorten it. If the anomaly transaction fails, the open
-   gap still makes the observation source unavailable; the provider call is not
-   retried.
-5. Close open `call_unobserved` gaps only at a provider-lifecycle upper bound:
-   intake is paused, the writer has no new submission edge, and the sidecar
-   supervisor has successfully stopped and reaped the owned provider process.
-   One transaction sets `ended_at_ms` for gaps that started before that observed
-   termination; only then may a replacement sidecar accept calls. Failed or
-   unprovable termination leaves the gaps open and intake closed. An Avibe boot
-   does not close them merely because the service restarted; it may close them
-   only after the same provider-termination proof. Until then each open gap
-   covers `[started_at_ms, infinity)`.
+   result without a trustworthy request id inserts a settlement-backed
+   `result_unknown` anomaly when possible and atomically clears only that gap's
+   `anomaly_incomplete` flag, but leaves its correlation flag and interval open
+   because the provider may still execute. The add's provisional boundary stays
+   incomplete and due as described above. Later attempts do not shorten the gap
+   and the provider call is never retried. Failure to insert the anomaly leaves
+   both preflight flags set rather than returning a successful empty list.
+5. Set `ended_at_ms` on open `call_unobserved` gaps only at a
+   provider-lifecycle upper bound: intake is paused, the writer has no new
+   submission edge, and the sidecar supervisor has successfully stopped and
+   reaped the owned provider process. Only then may a replacement sidecar accept
+   calls and the retained ambiguous-add boundary flush run before later work.
+   Failed or unprovable termination leaves gaps open and intake closed. An Avibe
+   boot does not close them merely because the service restarted; it may close
+   them only after the same provider-termination proof. Closing a gap bounds its
+   interval; it does not clear either missing-source flag.
 
-A Processing Record call whose observation time overlaps any gap reports the
-correlation source unavailable instead of silently disappearing from a scoped
-result. Thus an older timed-out request remains covered even if a newer request
-quickly returns a valid id and settles its own gap.
+A Processing Record call whose observation time overlaps a
+`correlation_incomplete` gap reports the correlation source unavailable instead
+of silently disappearing from a scoped result. Thus an older timed-out request
+or row-count-pruned provenance group remains covered even if newer observations
+settle successfully.
 
-A gap is global observer state rather than a principal/project authorization
-fact: no scoped reader may bypass an overlapping gap. Gap metadata is also
-bounded to 14 days and 256 ranges. When it exceeds the count bound, coalesce the
-oldest ranges into a wider range rather than dropping coverage. Delete a closed
-range only when it is wholly older than the Provider Call Log retention cutoff;
-an open range is never age-deleted. This may hide a good observation
-conservatively, but cannot authorize the wrong scope. Clear's `reset_for_clear`
-deletes provenance rows, anomalies, correlation guards, and gaps with the
-catalog and watermark reset; Factory Reset deletes them with `state/memory`.
+The anomaly projection is unavailable when an `anomaly_incomplete` gap is open,
+or when fewer than the maximum supported failure-log limit (100) of unexpired
+anomaly rows are strictly newer than a closed gap's `ended_at_ms`. Once 100
+newer known rows exist, no missing event in that older interval can affect any
+supported newest-N result, so the anomaly flag may be retired. Lifecycle close
+alone never turns a missing anomaly into a complete successful projection.
+
+An observation gap is global observer state rather than a principal/project
+authorization fact: no scoped reader may bypass an affected source. Keep at
+most 256 ranges. When the bound would be exceeded, coalesce the oldest closed
+ranges, OR their source flags, and widen their time coverage rather than
+dropping a hole. Never merge away the exact token for an open provider attempt;
+if no closed range can make capacity, fail preflight or retention pruning before
+the provider call or provenance deletion. A closed correlation flag may retire
+only when its range is wholly older than the Provider Call Log cutoff; an open
+flag never age-deletes. Delete the row only after both source flags retire. This
+may hide a good observation conservatively, but cannot authorize or display an
+incomplete source as complete. Clear's `reset_for_clear` deletes provenance
+rows, anomalies, correlation guards, and observation gaps with the catalog and
+watermark reset; Factory Reset deletes them with `state/memory`.
 
 The independently maintained Provider Call Log is not an input to identity
 migration or writer admission. Historical migration copies every valid bounded
 add/flush request id from the released Memory store, including rejected rows and
 every scope row for a reused id, then applies the same whole-group 5,000-row /
-14-day policy using capture/settlement observation times. It does not open or
-filter against the call-log database. Any observer-only correlation that cannot
-be translated safely creates or widens a `migration_unknown` gap over the
+14-day policy using capture/settlement observation times, including
+correlation-only coverage for count-pruned groups that can still overlap the
+Call Log window. It does not open or filter against the call-log database. Any
+observer source that cannot be translated safely creates or widens a
+`migration_unknown` observation gap with the affected source flags over the
 retained observation horizon instead of being silently skipped. An absent,
 corrupt, incompatible, or unreadable call log therefore makes the Processing
 Record calls section unavailable/warned through its existing projection, but
@@ -518,7 +576,8 @@ no attachment or provider await; the identity write is not an outbox.
 
 `last_success_at` also remains durable display/maintenance state. Every
 acknowledged v4 add updates it in the same observer transaction as provenance and
-gap settlement, using the later of its existing value and the observation time.
+observation-gap settlement, using the later of its existing value and the
+observation time.
 Provenance retention never clears it. The reduced
 `has_provider_data_history()` reads this field instead of delivery rows, so
 `MemoryMaintenance.maintenance_payload().data_exists` remains true after
@@ -639,23 +698,27 @@ would accept captures:
    - before dropping delivery tables, copy every valid bounded add/flush request
      id into `memory_call_provenance`, including rejected operations and every
      scope row for a reused id; prune only complete request-id groups to the
-     5,000-row / 14-day window and preserve ambiguity as fail-closed
+     5,000-row / 14-day window, create correlation-only `retention_pruned`
+     coverage before count-pruning groups still inside the Call Log horizon,
+     and preserve ambiguity as fail-closed
    - run the released-shape equivalent of the current `failure_log()` union and
      copy every projected queue/settlement anomaly into
      `memory_processing_anomaly` before its source tables are dropped. Preserve
      the stable id and every sanitized `MemoryFailureLogEntry` field, deduplicate
      rejected adds exactly as the current projection does, map errors through the
-     same closed-code sanitizer, and prune only the oldest overflow beyond the
-     newest 100,000 rows, with no age cutoff
+     same closed-code sanitizer, set 90-day expiry only for queue-backed
+     abandonment rows, keep settlement-backed expiry null, delete rows already
+     expired at migration time, and prune only the oldest overflow beyond the
+     newest 100,000 remaining rows
    - for every old `memory_session_flush_state` row with an unflushed provider
      buffer, create an incomplete exact `memory_flush_correlation_guard` using
      only its bounded session-ref digest. If more than 256 distinct rows exist,
      keep 256 exact guards and set the global-incomplete sentinel; never migrate
      a schedule, count, deadline, fence, attempt, or message id
    - do not open the optional Provider Call Log; if observer-only request-id or
-     timestamp data cannot be translated safely, create or widen one bounded
-     `migration_unknown` gap over the retained horizon and count it without
-     storing source data
+     anomaly data cannot be translated safely, create or widen one bounded
+     `migration_unknown` observation gap with the affected source flags over the
+     retained horizon and count it without storing source data
    - drop delivery tables, indexes, and settlement triggers
    - rebuild `memory_meta` without requiring delivery columns if this
      PR drops them
@@ -680,8 +743,9 @@ would accept captures:
    count, migrated exact-guard count, global-incomplete-guard state, and
    scrubbed confined entry count. Never log text,
    paths, or digests that can recover a message. Also count provenance rows
-   covered by a migration gap and a busy post-commit checkpoint without treating
-   either as a capture-startup failure.
+   covered by retention/migration observation gaps, source-specific expired
+   anomaly rows, and a busy post-commit checkpoint without treating any as a
+   capture-startup failure.
 9. Start `BestEffortMemoryWriter` against the preserved watermark and
    catalog.
 
@@ -797,17 +861,20 @@ labelled as volatile; it must not show a durable missed-capture backlog.
 
 Processing Record and Provider Call Log otherwise retain their current scope
 and correlation behavior through `memory_call_provenance` and
-`memory_call_provenance_gap`, with completeness guarded by
+`memory_observation_gap`, with completeness guarded by
 `memory_flush_correlation_guard`. The reader's capture-source availability probe
 and request-id joins move to those tables; they do not silently omit request-id
 call branches merely because the delivery tables are gone or a volatile
-message-id set was lost.
+message-id set was lost. Count-pruned provenance inside the Call Log horizon is
+covered by a correlation-only gap before deletion.
 
 Processing Record's durable anomaly source moves independently to
 `memory_processing_anomaly`. `MemoryStore.failure_log()` keeps its current
-newest-50 result shape and source-availability behavior; it no longer queries a
-delivery table. Disabling Memory still permits the existing read-only retained
-anomaly projection.
+newest-50 result shape, source-specific expiry, and source-availability
+behavior; it no longer queries a delivery table. Any observation gap that could
+change the requested newest-N result makes that source unavailable instead of
+returning an incomplete list. Disabling Memory still permits the existing
+read-only retained anomaly projection.
 
 ## Control plane that stays
 
@@ -837,7 +904,7 @@ only after the replacement is admitted. This is the replacement for
 Clear's queue primitive becomes: identity `reset_for_clear` (epoch bump,
 catalog wipe, watermark and `last_success_at` reset, and atomic deletion of
 `memory_call_provenance`, `memory_processing_anomaly`,
-`memory_flush_correlation_guard`, and `memory_call_provenance_gap`) with no
+`memory_flush_correlation_guard`, and `memory_observation_gap`) with no
 capture-queue DELETE. The other three surfaces (provider root, call log,
 attachments) stay. Replaying the same `target_epoch` is idempotent and still
 proves every observer table empty before the Clear fence may be released.
@@ -917,14 +984,20 @@ Do not ship those doc edits in this planning PR.
   `failure_log()` projection is field-for-field identical before and after
   migration (including stable ids, deduplication, closed errors, attempts,
   operation, state, generation, and bounded request ids), while the v4 file has
-  no delivery tables. Retention keeps only the deterministically newest 100,000
-  anomaly rows, without an age cutoff and without payload or retry state.
+  no delivery tables. Queue-backed abandoned rows receive their exact 90-day
+  expiry, settlement-backed rows remain unexpired, rows already expired at the
+  migration instant disappear, and count retention keeps only the
+  deterministically newest 100,000 remaining rows without payload or retry
+  state.
 - Provenance age and row-count pruning deletes complete request-id groups only;
   it cannot turn a reused ambiguous id into a uniquely authorized id, including
-  when one group alone exceeds the row bound.
-- A malformed observer correlation creates a bounded retained-horizon migration
-  gap; after restart, overlapping Processing Record observations still report
-  correlation unavailable rather than silently disappearing.
+  when one group alone exceeds the row bound. Count-pruning a group still inside
+  the Call Log horizon atomically creates correlation-only coverage first; an
+  overlapping retained call reports unavailable rather than disappearing.
+- A malformed observer correlation or anomaly creates a bounded retained-horizon
+  migration observation gap with the exact affected source flags; after
+  restart, each overlapping/affected Processing Record source still reports
+  unavailable rather than silently succeeding with omissions.
 - Migration and later-v4-boot tests seed represented bundles, an unrepresented
   valid published bundle, staging leftovers, and safely confined unrecognized
   entries, then prove the empty-reference scrub removes all of them before
@@ -957,16 +1030,27 @@ Do not ship those doc edits in this planning PR.
   or other ambiguity. Only a proven pre-submission failure retains it, and the
   third failed attempt drops it without a provider call.
 - High-cardinality accumulated traffic retains at most 256 pending sessions and
-  25,600 message ids. A 257th new session drops only its new volatile tracking,
-  never evicts or mutates an existing scope, atomically sets the durable
-  global-incomplete guard, and records content-free accounting. A later add for
-  that session may be tracked, but its flush provenance is explicitly incomplete
-  and Processing Record reports correlation unavailable.
+  25,600 message ids. A capture for a 257th distinct session is skipped before
+  any EverOS RPC, never evicts or mutates an existing scope, records only
+  content-free accounting, and cannot create an untracked provider buffer.
 - Exact correlation guards from a previous writer instance/generation taint a
   recreated tracker after restart; a global guard taints every new tracker.
-  Natural extraction or acknowledged flush clears an exact guard, while
-  rejected/ambiguous results and sidecar restart do not. No test can recover
-  complete provenance using only message ids accumulated after a guard.
+  Natural extraction or acknowledged flush clears an exact guard; rejection or
+  proven-uncommitted failure restores the prior snapshot; ambiguous results and
+  sidecar restart do not make it complete. No test can recover complete
+  provenance using only message ids accumulated after an incomplete guard.
+- Before every submitted add, the deterministic message id is provisionally
+  present in a barrier-visible tracker and the durable guard is incomplete. An
+  accumulated ack commits it, extraction clears the boundary, and rejection or
+  proven-uncommitted failure restores the exact prior snapshot.
+- A timed-out/transport-ambiguous submitted add retains that provisional tracker
+  incomplete and due, blocks all later provider submissions, and survives the
+  sidecar stop/reap operation in process. After the lifecycle upper bound, its
+  incomplete flush runs before later work; a `/new` barrier admitted meanwhile
+  returns immediately, and the candidate stays barrier-visible until the
+  recovery flush reaches its submission edge. If that flush cannot prove a
+  boundary, its durable guard remains incomplete. A process crash may drop the
+  volatile flush action but cannot make later correlation complete.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
 - Session barrier does not block `/new` or archive. At its ordered head it
@@ -990,9 +1074,10 @@ Do not ship those doc edits in this planning PR.
   the mandatory empty-root scrub before reopening intake.
 - Watermark persists across writer restart and is monotonic.
 - Every acknowledged add advances durable `last_success_at` atomically with its
-  provenance/gap settlement. After all call-provenance groups age out,
-  `has_provider_data_history()` and maintenance `data_exists` remain true from
-  that timestamp; rejected/ambiguous adds do not advance it and Clear resets it.
+  provenance/observation-gap settlement. After all call-provenance groups age
+  out, `has_provider_data_history()` and maintenance `data_exists` remain true
+  from that timestamp; rejected/ambiguous adds do not advance it and Clear
+  resets it.
 - With the watermark already at `MAX_PROVIDER_TIMESTAMP_MS`, the next otherwise
   valid capture returns `timestamp_invalid` without changing the watermark or
   catalog and without charging a slot, pinning, or creating a task.
@@ -1003,27 +1088,32 @@ Do not ship those doc edits in this planning PR.
   safe text-only degradation, while ambiguous or unclassified attachment
   failures never resubmit the caption.
 - Logs never include captured text, credentials, or absolute paths.
-- Every provider attempt durably opens a gap before the RPC. A failed preflight
-  write skips an add or retains a due flush only within its bounded
-  pre-submission attempts, without calling EverOS; timeout/unknown responses and
-  an injected provenance-commit failure leave a gap that remains fail-closed
-  after restart. A later successful attempt settles only its own gap; the older
-  ambiguous gap stays open until a paused writer plus successful sidecar
-  stop/reap proves its termination boundary.
+- Every provider attempt durably opens a two-source observation gap before the
+  RPC. A failed preflight write skips an add or retains a due flush only within
+  its bounded pre-submission attempts, without calling EverOS;
+  timeout/unknown responses and an injected observer-commit failure leave both
+  correlation and anomaly unavailable after restart. A later successful attempt
+  settles only its own gap; the older ambiguous gap stays open until a paused
+  writer plus successful sidecar stop/reap proves its termination boundary.
 - Valid bounded request ids from acknowledged, rejected, and otherwise
   unclassifiable add/flush responses are recorded with their outcome and scope;
   terminal non-success and exhausted proven-uncommitted operations also persist
-  the current sanitized `MemoryFailureLogEntry` fields in the bounded anomaly
-  table. Provenance/anomaly failure never causes a provider retry; a separately
-  allowed add or pre-submission flush retry settles only its own proven-unentered
-  gap and opens a new one, while a submitted flush remains terminal.
-- An ambiguous request A followed by a successful request B leaves A's gap open
-  after B atomically records provenance and deletes B's gap. A late Provider Call
-  Log row from A therefore overlaps unavailable correlation coverage. Only a
-  successful owned-sidecar stop/reap closes A at the observed termination time;
-  an ordinary later attempt, failed stop, or unproved boot never does.
-- Gap compaction coalesces old ranges without losing covered time, and age
-  deletion removes only closed ranges wholly outside Call Log retention.
+  the current sanitized `MemoryFailureLogEntry` fields and source-specific
+  expiry in the bounded anomaly table. Observer failure never causes a provider
+  retry; its preflight anomaly flag makes `failure_log()` unavailable even after
+  lifecycle close until enough newer known rows exclude the hole from every
+  supported newest-N result. A separately allowed add or pre-submission flush
+  retry settles only its own proven-unentered gap and opens a new one, while a
+  submitted flush remains terminal.
+- An ambiguous request A prevents request B from reaching the provider until a
+  successful owned-sidecar stop/reap closes A's interval. The replacement then
+  flushes A's incomplete candidate before B can submit and delete only B's gap;
+  A's closed correlation flag still covers late Provider Call Log rows until
+  retention. A failed stop or unproved boot admits no B provider submission.
+- Observation-gap compaction coalesces old ranges with the union of their source
+  flags and without losing covered time. Correlation flags retire only outside
+  Call Log retention; anomaly flags retire only after 100 newer unexpired known
+  anomalies make the interval irrelevant to every supported newest-N result.
 
 ### Compatibility with retained surfaces
 
@@ -1038,23 +1128,24 @@ Do not ship those doc edits in this planning PR.
   `orphaned-fence` projection and blocks migration, sidecar, and writer until an
   explicit operator Clear writes new authority.
 - Clear's identity reset atomically removes provenance, anomalies, correlation
-  guards, and gaps and nulls `last_success_at` before releasing its fence. A
-  pre-Clear `failure_log()` row cannot appear under the new epoch, including on
-  idempotent replay after a crash.
+  guards, and observation gaps and nulls `last_success_at` before releasing its
+  fence. A pre-Clear `failure_log()` row cannot appear under the new epoch,
+  including on idempotent replay after a crash.
 - Search, profile, list, remember admission, and agent-owner read paths
   keep their `origin/dev` contracts.
 - Agent-provenance capture writes retain the current user-principal
   `ProviderSessionRef` and provider-session digest; no `-agent` write owner is
   introduced by this cut.
 - Processing Record authorizes and correlates historical migrated calls and
-  new add/flush calls through bounded provenance and gap metadata, including
-  rejected calls, linked memcell membership, unique-scope unlinked list/detail,
-  restart-safe source unavailability, whole-request-id-group retention, and
-  ambiguous-request-id tests.
+  new add/flush calls through bounded provenance and observation-gap metadata,
+  including rejected calls, linked memcell membership, unique-scope unlinked
+  list/detail, restart-safe source unavailability, count-prune coverage,
+  whole-request-id-group retention, and ambiguous-request-id tests.
 - Processing Record reads recent durable failures from bounded
   `memory_processing_anomaly`, preserving its current newest-50 field shape,
-  stable migrated ids, disabled-state visibility, and unavailable-on-read-failure
-  behavior without consulting queue or settlement tables.
+  stable migrated ids, queue-backed 90-day expiry, settlement-backed persistence,
+  disabled-state visibility, and unavailable-on-read-or-gap behavior without
+  consulting queue or settlement tables.
 
 ## Implementation sequence
 
@@ -1079,9 +1170,9 @@ after adding migrator and writer tests. Line count is not acceptance.
 - [ ] Implement v4 identity schema and released-shape migrator.
 - [ ] Implement `BestEffortMemoryWriter` and switch capture to `offer()`.
 - [ ] Replace capture-table Processing Record joins with bounded call
-      provenance, correlation guards, lifecycle-closed durable gaps, and
-      sanitized anomaly rows; migrate retained correlations and the current
-      failure projection before dropping the tables.
+      provenance, correlation guards, source-flagged durable observation gaps,
+      and source-expiring sanitized anomaly rows; migrate retained correlations
+      and the current failure projection before dropping the tables.
 - [ ] Replace session final-flush waits with a best-effort multi-scope session
       barrier over the bounded volatile pending-flush map.
 - [ ] Replace claim quiescence with writer pause/quiesce around Rebuild/Repair.
@@ -1107,12 +1198,12 @@ implementation PR:
 4. Attachment pins have no durable recovery after this cut. Leftover
    bundles are deleted. Original chat attachments are untouched.
 5. Session-boundary flush is a barrier enqueue, not a wait. A crash or
-   a full queue can leave consecutive conversations in one EverOS accumulation
-   boundary. A 257th concurrently tracked provider session also drops its new
-   volatile flush trigger and sets the bounded global-incomplete guard. Later
-   flush correlation stays unavailable rather than silently omitting older
-   message ids; the global guard may conservatively hide unrelated flush
-   correlation until Clear/Factory Reset or a provider-wide empty-buffer proof.
+   a full admission queue can leave consecutive conversations in one EverOS
+   accumulation boundary. A 257th distinct pending session is skipped before
+   EverOS, while an ambiguous submitted add retains a best-effort in-process due
+   boundary candidate; only a process crash may lose that candidate. Its durable
+   guard still keeps later flush correlation unavailable rather than silently
+   omitting older message ids.
 6. No JSON identity file is introduced. Identity stays in the existing
    SQLite file so Clear's `reset_for_clear(target_epoch=...)` and
    Factory Reset keep one authority.
