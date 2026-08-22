@@ -480,6 +480,8 @@
       "codexApiKeyRemoveConfirm": "确定要从 auth.json 移除已保存的 OpenAI API Key 吗？如果有 OAuth 凭据，Codex 会回落到 OAuth；否则会变成未配置状态。",
       "codexApiKeyRemoved": "已移除 OpenAI API Key。",
       "codexApiKeyRemoveFailed": "移除 API Key 失败：{{detail}}",
+      "backendNoticeV2ClearFailed": "API Key 已删除，但保存的设置可能仍未更新：{{detail}}",
+      "backendNoticeDetailUnknown": "设置保存未完成",
       "codexNoticeClearedRelayPointer": "已清除自定义中继指向（{{provider}} → {{url}}）：OAuth 凭据无法被自定义 base_url 验证，Codex 将改为使用 OpenAI 官方端点。如需切回，请重新添加 API Key 或手动编辑 ~/.codex/config.toml。",
       "codexNoticeGeneric": "配置提示：{{code}}",
       "opencodeProviderSignIn": "登录",

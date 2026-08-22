@@ -480,6 +480,8 @@
       "codexApiKeyRemoveConfirm": "Remove the stored OpenAI API key from auth.json? Codex will fall back to OAuth tokens if present, or sit unconfigured if not.",
       "codexApiKeyRemoved": "Stored OpenAI API key removed.",
       "codexApiKeyRemoveFailed": "Could not remove API key: {{detail}}",
+      "backendNoticeV2ClearFailed": "API key removed, but saved settings may still be stale: {{detail}}",
+      "backendNoticeDetailUnknown": "the settings save did not complete",
       "codexNoticeClearedRelayPointer": "Cleared the custom relay pointer ({{provider}} → {{url}}) because OAuth tokens won't validate against a custom base URL. Codex will now use OpenAI's default endpoint. To switch back, re-add an API key or edit ~/.codex/config.toml manually.",
       "codexNoticeGeneric": "Config notice: {{code}}",
       "opencodeProviderSignIn": "Sign in",
