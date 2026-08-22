@@ -6,6 +6,11 @@ import { Check, ChevronUp, Loader2, Pencil } from 'lucide-react';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import {
+  configChanges,
+  updateEnabledPlatforms,
+  type ConfigMutation,
+} from '@/lib/configMutations';
+import {
   getEnabledPlatforms,
   getImPlatforms,
   getPlatformCatalog,
@@ -81,8 +86,9 @@ export const SettingsPlatformsPage: React.FC = () => {
     return togglablePlatforms.filter((p) => shown.has(p.id)).map((p) => p.id);
   }, [togglablePlatforms, enabledPlatforms, revealed]);
 
-  const saveConfig = async (nextData: any) => {
-    const savedConfig = await api.saveConfig(nextData);
+  const saveMutations = async (mutations: readonly ConfigMutation[]) => {
+    if (mutations.length === 0) return config;
+    const savedConfig = await api.mutateConfig(mutations);
     setConfig(savedConfig);
     return savedConfig;
   };
@@ -123,11 +129,21 @@ export const SettingsPlatformsPage: React.FC = () => {
     return true;
   };
 
-  const persistEnabled = async (nextEnabled: string[]) => {
+  // Patch-write shape with list OPERATIONS: sending the whole enabled
+  // list (even as a section patch) replaces it wholesale in the merge —
+  // a stale browser snapshot would drop platforms another process
+  // enabled (e.g. WeChat QR confirmation). The backend verb applies
+  // add/remove against the lock-fresh persisted list instead.
+  const persistEnabledChange = async (
+    op: 'add' | 'remove',
+    platform: string
+  ): Promise<boolean> => {
     setRestartPhase('saving');
     try {
       try {
-        const savedConfig = await saveConfig({ ...config, platforms: { enabled: nextEnabled } });
+        const savedConfig = await saveMutations([
+          updateEnabledPlatforms({ [op]: [platform] }),
+        ]);
         showApplyResult(savedConfig);
       } catch {
         showToast(t('common.saveFailed'), 'error');
@@ -144,7 +160,7 @@ export const SettingsPlatformsPage: React.FC = () => {
   const doDisable = async (id: string) => {
     setBusyPlatform(id);
     try {
-      await persistEnabled(enabledPlatforms.filter((p) => p !== id));
+      await persistEnabledChange('remove', id);
       setRevealed((prev) => prev.filter((p) => p !== id));
       setOpenConfig((prev) => (prev === id ? null : prev));
     } finally {
@@ -170,7 +186,7 @@ export const SettingsPlatformsPage: React.FC = () => {
       // Already configured → checking enables it immediately.
       setBusyPlatform(id);
       try {
-        await persistEnabled([...enabledPlatforms, id]);
+        await persistEnabledChange('add', id);
       } finally {
         setBusyPlatform(null);
       }
@@ -191,7 +207,15 @@ export const SettingsPlatformsPage: React.FC = () => {
     try {
       let savedConfig: any;
       try {
-        savedConfig = await saveConfig({ ...nextData, platforms: { enabled: enabledPlatforms } });
+        // Patch-write shape: ONLY the platform section this card owns.
+        // The enabled list must never ride along as a stale snapshot —
+        // replacing it wholesale would drop platforms another process
+        // enabled (e.g. WeChat QR confirmation). Enablement changes go
+        // through the list-operation verb below, which mutates the
+        // lock-fresh persisted list.
+        savedConfig = await saveMutations(
+          configChanges(config?.[platform], nextData?.[platform], [platform]),
+        );
       } catch {
         showToast(t('common.saveFailed'), 'error');
         return;
@@ -211,9 +235,10 @@ export const SettingsPlatformsPage: React.FC = () => {
         }
         return;
       }
-      const nextEnabled = [...enabledPlatforms, platform];
       try {
-        savedConfig = await saveConfig({ ...savedConfig, platforms: { enabled: nextEnabled } });
+        savedConfig = await saveMutations([
+          updateEnabledPlatforms({ add: [platform] }),
+        ]);
       } catch {
         showToast(t('platform.restartFailed'), 'error');
         return;

@@ -15,113 +15,24 @@ import { useApi } from '../context/ApiContext';
 import clsx from 'clsx';
 import {
   getEnabledPlatforms,
-  platformHasRunnableConfig,
   platformSupportsChannels,
 } from '../lib/platforms';
-import { withoutConfiguredSecretMarker, withSecretDraft, withSecretDrafts } from '../lib/secretFields';
+import {
+  buildWizardStepMutations,
+  collectWizardEnabledPlatformDelta,
+  type WizardEnabledPlatformDelta,
+} from '../lib/wizardConfigMutations';
 import { WizardChrome } from './visual';
-
-const getPersistableWizardPlatforms = (data: any) =>
-  getEnabledPlatforms(data).filter((platform) => platformHasRunnableConfig(data, platform));
-
-const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
-  const enabledPlatforms = enabledPlatformOverride ?? getEnabledPlatforms(data);
-
-  return {
-  // No user-facing primary platform: the backend derives an internal default
-  // from ``platforms.enabled``, so the wizard sends only the enabled set.
-  platforms: {
-    enabled: enabledPlatforms,
-  },
-  mode: data.mode || 'self_host',
-  version: 'v2',
-  slack: {
-    // Preserve all existing slack fields
-    ...withSecretDrafts(data.slack, {
-      bot_token: data.slack?.bot_token,
-      app_token: data.slack?.app_token,
-    }),
-    // Override only the fields that setup modifies
-    require_mention: data.slack?.require_mention || false,
-  },
-  discord: {
-    ...withSecretDraft(data.discord, 'bot_token', data.discord?.bot_token),
-    require_mention: data.discord?.require_mention || false,
-  },
-  telegram: {
-    ...withSecretDraft(data.telegram, 'bot_token', data.telegram?.bot_token),
-    require_mention: data.telegram?.require_mention ?? true,
-    forum_auto_topic: data.telegram?.forum_auto_topic ?? true,
-    use_webhook: data.telegram?.use_webhook ?? false,
-  },
-  lark: (() => {
-    const lark = data.lark || {};
-    const appId = lark.app_id || '';
-    const appIdChanged = Boolean(lark.original_app_id && appId && appId !== lark.original_app_id);
-    const base = appIdChanged ? withoutConfiguredSecretMarker(lark, 'app_secret') : lark;
-    return {
-      ...withSecretDraft(base, 'app_secret', lark.app_secret),
-      app_id: appId,
-      domain: lark.domain || 'feishu',
-      require_mention: lark.require_mention || false,
-    };
-  })(),
-  wechat: {
-    ...withSecretDraft(data.wechat, 'bot_token', data.wechat?.bot_token),
-    base_url: data.wechat?.base_url || 'https://ilinkai.weixin.qq.com',
-    cdn_base_url: data.wechat?.cdn_base_url || 'https://novac2c.cdn.weixin.qq.com/c2c',
-    require_mention: data.wechat?.require_mention || false,
-  },
-  runtime: {
-    // Preserve existing runtime config
-    ...data.runtime,
-    default_cwd: data.default_cwd || data.runtime?.default_cwd || '.',
-  },
-  agents: {
-    opencode: {
-      // Preserve existing opencode config
-      ...data.agents?.opencode,
-      enabled: data.agents?.opencode?.enabled ?? true,
-      cli_path: data.agents?.opencode?.cli_path || 'opencode',
-      default_agent: data.opencode_default_agent ?? data.agents?.opencode?.default_agent ?? null,
-      default_reasoning_effort: data.opencode_default_reasoning_effort ?? data.agents?.opencode?.default_reasoning_effort ?? null,
-    },
-    claude: {
-      // Preserve existing claude config
-      ...data.agents?.claude,
-      enabled: data.agents?.claude?.enabled ?? true,
-      cli_path: data.agents?.claude?.cli_path || 'claude',
-    },
-    codex: {
-      // Preserve existing codex config
-      ...data.agents?.codex,
-      enabled: data.agents?.codex?.enabled ?? false,
-      cli_path: data.agents?.codex?.cli_path || 'codex',
-    },
-  },
-  // Preserve gateway config entirely
-  gateway: data.gateway,
-  ui: {
-    // Preserve existing ui config
-    ...data.ui,
-    setup_host: data.ui?.setup_host || '127.0.0.1',
-    setup_port: data.ui?.setup_port || 5123,
-  },
-  // Preserve existing update config entirely
-  update: data.update,
-  // Preserve ack_mode
-  ack_mode: data.ack_mode,
-  show_duration: data.show_duration ?? false,
-  // Preserve language
-  language: data.language,
-  };
-};
 
 export const Wizard: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const [currentStep, setCurrentStep] = useState(0);
-  const [data, setData] = useState<any>({ show_duration: false });
+  const [data, setData] = useState<any>({
+    show_duration: false,
+    __wizardEnabledAdds: [],
+    __wizardEnabledRemoves: [],
+  });
   const [loaded, setLoaded] = useState(false);
 
   const steps = React.useMemo(() => {
@@ -192,6 +103,17 @@ export const Wizard: React.FC = () => {
             ...configWithCatalog,
             discordGuildAllowlist: discordSettings?.guild_allowlist || [],
             channelConfigsByPlatform,
+            // Baseline for deselection encoding: platforms enabled when
+            // the wizard loaded. A user deselecting one of these must
+            // produce a REMOVE operation on save — an add-only verb
+            // would silently leave the adapter enabled and receiving
+            // messages. Concurrent additions by other processes are NOT
+            // in this baseline and are preserved.
+            __wizardEnabledBaseline: enabledPlatforms,
+            // Finish may reassert only list operations that this wizard has
+            // actually submitted. These are intent records, not config fields.
+            __wizardEnabledAdds: [],
+            __wizardEnabledRemoves: [],
             agents: {
               opencode: config.agents?.opencode,
               claude: config.agents?.claude,
@@ -219,11 +141,39 @@ export const Wizard: React.FC = () => {
     const nextData = {
       ...data,
       ...(platformsChanged ? { channelConfigsByPlatform: {} } : {}),
-      ...(nextPlatforms.includes('wechat') ? { show_duration: false } : {}),
+      // Keep a loaded WeChat value intact until the wizard-owned platform or
+      // Finish mutation persists the required override. Normalizing it on
+      // unrelated steps would erase the baseline and make Finish believe the
+      // persisted value is already false.
+      ...(nextPlatforms.includes('wechat') && !previousPlatforms.includes('wechat')
+        ? { show_duration: false }
+        : {}),
       ...stepData,
     };
+    const submittedDelta = await persistStep(steps[currentStep].id, stepData, data, nextData);
+    const previousAdds = Array.isArray(data.__wizardEnabledAdds)
+      ? data.__wizardEnabledAdds.filter(
+          (platform: unknown): platform is string => typeof platform === 'string',
+        )
+      : [];
+    const previousRemoves = Array.isArray(data.__wizardEnabledRemoves)
+      ? data.__wizardEnabledRemoves.filter(
+          (platform: unknown): platform is string => typeof platform === 'string',
+        )
+      : [];
+    const wizardAdds = new Set(previousAdds);
+    const wizardRemoves = new Set(previousRemoves);
+    for (const platform of submittedDelta.remove) {
+      wizardAdds.delete(platform);
+      wizardRemoves.add(platform);
+    }
+    for (const platform of submittedDelta.add) {
+      wizardRemoves.delete(platform);
+      wizardAdds.add(platform);
+    }
+    nextData.__wizardEnabledAdds = [...wizardAdds];
+    nextData.__wizardEnabledRemoves = [...wizardRemoves];
     setData(nextData);
-    await persistStep(stepData, nextData);
     if (currentStep < steps.length - 1) {
       setCurrentStep(currentStep + 1);
     }
@@ -235,35 +185,15 @@ export const Wizard: React.FC = () => {
     }
   };
 
-  const persistStep = async (stepData: any, mergedData: any) => {
-    if (!mergedData) return;
-    const platformSelectionOnly =
-      Boolean(stepData.platforms || stepData.platform) &&
-      !stepData.agents &&
-      !stepData.slack &&
-      !stepData.discord &&
-      !stepData.telegram &&
-      !stepData.lark &&
-      !stepData.wechat &&
-      !stepData.mode &&
-      !stepData.channelConfigsByPlatform;
-    const shouldPersistConfig =
-      !platformSelectionOnly &&
-      Boolean(
-        mergedData.agents ||
-        mergedData.slack ||
-        mergedData.discord ||
-        mergedData.telegram ||
-        mergedData.lark ||
-        mergedData.wechat ||
-        mergedData.mode ||
-        mergedData.platforms ||
-        mergedData.platform ||
-        mergedData.channelConfigsByPlatform
-    );
-    if (shouldPersistConfig) {
-      await api.saveConfig(buildConfigPayload(mergedData, getPersistableWizardPlatforms(mergedData)));
-    }
+  const persistStep = async (
+    stepId: string,
+    stepData: any,
+    before: any,
+    mergedData: any,
+  ): Promise<WizardEnabledPlatformDelta> => {
+    const mutations = buildWizardStepMutations({ stepId, before, stepData, after: mergedData });
+    if (mutations.length > 0) await api.mutateConfig(mutations);
+
     const discordGuildAllowlist = stepData?.discordGuildAllowlist;
     if (
       Array.isArray(discordGuildAllowlist) &&
@@ -284,6 +214,7 @@ export const Wizard: React.FC = () => {
         }
       }
     }
+    return collectWizardEnabledPlatformDelta(mutations);
   };
 
   const CurrentComponent = steps[currentStep].component;

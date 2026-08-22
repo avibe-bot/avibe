@@ -1527,7 +1527,20 @@ def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Confi
     if previous is None:
         return False
     platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
-    if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
+    # The list-operations verb mutates the enabled list without carrying a
+    # literal ``platforms`` section. Treat it as a platforms edit so
+    # enable/disable toggles still reach the comparison below, but do not
+    # infer a runtime change from the verb alone: Finish may replay an
+    # already-applied operation.
+    from vibe.api import _LIST_OPS_PAYLOAD_KEY
+
+    has_list_ops = _LIST_OPS_PAYLOAD_KEY in payload
+    if (
+        not has_list_ops
+        and "platforms" not in payload
+        and "platform" not in payload
+        and not any(key in payload for key in platform_config_keys)
+    ):
         return False
     return (
         set(previous.platforms.enabled) != set(current.platforms.enabled)
@@ -7520,29 +7533,40 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     if not isinstance(token, str) or not token.strip():
         return
 
+    from config.v2_config import config_file_lock
     from vibe import api as vibe_api
-    from core.services import settings as settings_service
 
-    config = settings_service.load_config(default_factory=settings_service.default_config)
-    current = vibe_api.config_to_payload(config, include_secrets=True)
-    wechat = dict(current.get("wechat") or {})
-    wechat["bot_token"] = token.strip()
+    new_bot_token = token.strip()
+    new_base_url = None
     if isinstance(result.get("base_url"), str) and result["base_url"].strip():
-        wechat["base_url"] = result["base_url"].strip()
-    elif not wechat.get("base_url"):
-        wechat["base_url"] = "https://ilinkai.weixin.qq.com"
-    current["wechat"] = wechat
+        new_base_url = result["base_url"].strip()
 
-    platforms = dict(current.get("platforms") or {})
-    enabled = list(platforms.get("enabled") or [])
-    if "wechat" not in enabled:
-        enabled.append("wechat")
-    platforms["enabled"] = enabled
-    if not platforms.get("primary") or platforms.get("primary") == "avibe":
-        platforms["primary"] = "wechat"
-    current["platforms"] = platforms
+    # Patch-write shape (#1458 stage ③): the whole compute-and-save runs
+    # under the config transaction — the wechat fields and the
+    # enabled-list mutation are derived from the lock-fresh snapshot, so
+    # a concurrent wechat/platform save between an earlier read and this
+    # write can no longer be overwritten by stale section values.
+    with config_file_lock():
+        try:
+            base = vibe_api.load_config()
+        except FileNotFoundError:
+            # Fresh install: seed the same default the settings loader
+            # uses, exactly like the previous default_factory path.
+            from core.services import settings as settings_service
 
-    vibe_api.save_config(current)
+            base = settings_service.default_config()
+        wechat = {"bot_token": new_bot_token}
+        if new_base_url:
+            wechat["base_url"] = new_base_url
+        elif not base.wechat.base_url:
+            wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+
+        vibe_api.save_config(
+            {
+                "wechat": wechat,
+                "__avibe_list_ops": {"platforms.enabled": {"add": ["wechat"]}},
+            }
+        )
 
 
 WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -7583,7 +7607,11 @@ async def wechat_qr_login_poll():
         user_id = result["user_id"]
 
         try:
-            _persist_wechat_qr_credentials(result)
+            # The persistence helper takes the cross-process config
+            # lock and does synchronous file/DB work — keep it off the
+            # ASGI event loop so other UI requests don't stall while it
+            # waits on the lock.
+            await asyncio.to_thread(_persist_wechat_qr_credentials, result)
         except Exception as exc:
             logger.error("Failed to persist WeChat QR credentials: %s", exc)
             return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
@@ -12637,10 +12665,11 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                 # Merge CWD into existing config (load → modify → save)
                 from vibe import api as vibe_api
 
-                current = vibe_api.config_to_payload(vibe_api.load_config())
-                current.setdefault("runtime", {})
-                current["runtime"]["default_cwd"] = modal_values.get("cwd", "/tmp")
-                result = vibe_api.save_config(current)
+                # Patch-write shape (#1458 stage ③): only the field
+                # this modal owns.
+                result = vibe_api.save_config(
+                    {"runtime": {"default_cwd": modal_values.get("cwd", "/tmp")}}
+                )
                 return jsonify({"ok": True, "action": action})
 
             elif action == "routing_submit":

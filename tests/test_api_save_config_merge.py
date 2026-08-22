@@ -1007,14 +1007,38 @@ def test_platform_runnable_config_keeps_wechat_token_optional():
     assert "return Boolean(data?.wechat);" in source
 
 
-def test_wizard_platform_selection_preserves_credential_drafts_on_continue():
+def test_wizard_platform_selection_submits_only_edited_credential_drafts():
     source = Path("ui/src/components/steps/PlatformSelection.tsx").read_text(encoding="utf-8")
 
     assert "const nextData = {" in source
-    assert "...credentialDraft," in source
+    assert "const dirtySections" in source
+    assert "dirtyPayload[key] = credentialDraft[key]" in source
+    assert "...dirtyPayload," in source
     assert "await onSave(nextData);" in source
     assert "onNext(nextData);" in source
     assert "onNext(selectionData);" not in source
+    assert "...credentialDraft," not in source
+
+
+def test_ui_config_writes_have_one_mutation_boundary():
+    """Every browser config write must pass through ApiContext's mutation serializer."""
+
+    ui_root = Path("ui/src")
+    raw_save_callers = []
+    direct_config_posts = []
+    for path in (*ui_root.rglob("*.ts"), *ui_root.rglob("*.tsx")):
+        if ".test." in path.name:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "saveConfig" in text:
+            raw_save_callers.append(str(path))
+        if path.name != "ApiContext.tsx" and re.search(
+            r"\b(?:postJson|apiFetch)\(\s*['\"]\/api\/config", text
+        ):
+            direct_config_posts.append(str(path))
+
+    assert raw_save_callers == []
+    assert direct_config_posts == []
 
 
 # ---------------------------------------------------------------------------
@@ -1730,3 +1754,79 @@ def test_editor_config_write_error_code_keeps_every_failure_localizable():
         ValueError(""),
     ):
         assert api.editor_config_write_error_code(exc) == "editor_config_write_invalid"
+
+
+def test_save_config_list_ops_merge_against_lock_fresh_base(monkeypatch, tmp_path):
+    """The ``__avibe_list_ops`` verb mutates the CURRENT persisted list
+    instead of replacing it with a stale browser snapshot: a toggle that
+    was computed before another process added a platform must not drop
+    that platform (#1458 stage ③ list semantics)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    original = api.save_config(_full_config_payload())
+    # Another process seeds lark credentials and enables lark AFTER the
+    # browser rendered its snapshot.
+    api.save_config(
+        {
+            "lark": {"app_id": "cli_lark_id", "app_secret": "lark-secret"},
+            "platforms": {"enabled": ["discord", "lark"]},
+        }
+    )
+
+    # The browser's stale snapshot only knows slack; the toggle wants to
+    # remove slack — expressed as an operation, not a list replacement.
+    updated = api.save_config(
+        {
+          "__avibe_list_ops": {"platforms.enabled": {"remove": ["discord"]}},
+        }
+    )
+
+    assert "discord" not in updated.platforms.enabled
+    assert "lark" in updated.platforms.enabled
+
+
+def test_list_ops_enable_requires_credentials(monkeypatch, tmp_path):
+    """List-op additions are validated like explicit list saves: enabling
+    a platform without credentials through the verb is rejected (#1458
+    stage ③ list semantics)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    import pytest
+
+    with pytest.raises(ValueError, match="lark"):
+        api.save_config({"__avibe_list_ops": {"platforms.enabled": {"add": ["lark"]}}})
+
+
+def test_list_ops_reject_unwhitelisted_paths(monkeypatch, tmp_path):
+    """Only whitelisted list paths accept operations — arbitrary dotted
+    paths (e.g. model_hub.sources, which must go through ModelHubService)
+    are rejected instead of silently mutating the persisted base."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    import pytest
+
+    with pytest.raises(ValueError, match="not supported"):
+        api.save_config(
+            {"__avibe_list_ops": {"model_hub.sources": {"add": ["rogue"]}}}
+        )
+
+
+@pytest.mark.parametrize(
+    "operations",
+    [
+        {"add": 1},
+        {"remove": 1},
+        {"add": ["discord", 1]},
+        {"remove": [""]},
+        {"add": ["discord"], "replace": ["slack"]},
+    ],
+)
+def test_list_ops_reject_malformed_operands(monkeypatch, tmp_path, operations):
+    """Malformed list operations are client errors, never a server 500."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    with pytest.raises(ValueError, match="Config list operation"):
+        api.save_config({"__avibe_list_ops": {"platforms.enabled": operations}})
