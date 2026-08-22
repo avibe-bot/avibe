@@ -246,7 +246,7 @@ describe('AppShell persistent Workbench chrome', () => {
 
     expect(await screen.findByTestId('workbench')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href')).toBe(
-      '/settings/account',
+      '/settings/replies',
     );
     expect(screen.getByTestId('language-switcher')).toBeTruthy();
     expect(screen.getByTestId('theme-toggle')).toBeTruthy();
@@ -261,11 +261,11 @@ describe('AppShell persistent Workbench chrome', () => {
     const user = userEvent.setup();
 
     render(
-      <MemoryRouter initialEntries={['/settings/account']}>
+      <MemoryRouter initialEntries={['/settings/replies']}>
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<div data-testid="workbench" />} />
-            <Route path="settings/account" element={<div data-testid="settings" />} />
+            <Route path="settings/replies" element={<div data-testid="settings" />} />
           </Route>
         </Routes>
       </MemoryRouter>,

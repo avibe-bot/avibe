@@ -31,7 +31,6 @@ describe('isOwnerOnlyPath', () => {
   });
 
   it('keeps personal preferences, replies, and access readable', () => {
-    expect(isOwnerOnlyPath('/settings/account')).toBe(false);
     expect(isOwnerOnlyPath('/settings/replies')).toBe(false);
     expect(isOwnerOnlyPath('/settings/access')).toBe(false);
   });
@@ -51,19 +50,19 @@ describe('settings landing memory', () => {
     expect(settingsLandingPath(true)).toBe('/settings/backends/claude');
   });
 
-  it('falls back to Account for members when an owner-only section was remembered', () => {
+  it('falls back to Replies for members when an owner-only section was remembered', () => {
     window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, '/settings/service');
-    expect(settingsLandingPath(false)).toBe('/settings/account');
+    expect(settingsLandingPath(false)).toBe('/settings/replies');
   });
 
   it('does not remember transitional platform scope pages as the Settings landing page', () => {
     rememberSettingsPath('/settings/platforms/groups');
-    expect(settingsLandingPath(true)).toBe('/settings/account');
+    expect(settingsLandingPath(true)).toBe('/settings/replies');
   });
 
-  it('retires a remembered Appearance destination', () => {
-    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, '/settings/appearance');
-    expect(settingsLandingPath(true)).toBe('/settings/account');
+  it.each(['/settings/appearance', '/settings/account'])('retires a remembered preference destination: %s', (path) => {
+    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, path);
+    expect(settingsLandingPath(true)).toBe('/settings/replies');
   });
 });
 

@@ -269,13 +269,11 @@
   },
   "settings": {
     "groups": {
-      "preferences": "Preferences",
       "agents": "Agents",
       "connections": "Connections",
       "system": "System"
     },
     "sections": {
-      "account": "Account",
       "backends": "Backends",
       "models": "Models",
       "memory": "Memory",
@@ -290,11 +288,6 @@
     "navigationLabel": "Settings sections",
     "backToSections": "All settings",
     "close": "Close Settings",
-    "accountTitle": "Account",
-    "accountSubtitle": "Review the current browser identity and session.",
-    "identityTitle": "Signed-in identity",
-    "signedInIdentity": "Current session",
-    "localSession": "Local instance session",
     "diagnosticsTab": "Diagnostics",
     "logsTab": "Logs",
     "diagnosticsNavigationLabel": "Diagnostics and logs",

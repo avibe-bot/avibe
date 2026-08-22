@@ -13,7 +13,6 @@ import {
   Settings,
   ShieldCheck,
   Stethoscope,
-  User,
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -40,12 +39,6 @@ type SettingsGroup = {
 };
 
 const SETTINGS_GROUPS: SettingsGroup[] = [
-  {
-    labelKey: 'settings.groups.preferences',
-    items: [
-      { path: '/settings/account', labelKey: 'settings.sections.account', icon: User },
-    ],
-  },
   {
     labelKey: 'settings.groups.agents',
     items: [

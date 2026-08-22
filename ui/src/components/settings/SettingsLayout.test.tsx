@@ -30,7 +30,6 @@ const renderLayout = (path: string) => render(
   <MemoryRouter initialEntries={[path]}>
     <Routes>
       <Route path="/settings" element={<SettingsLayout />}>
-        <Route path="account" element={<div>account-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
       </Route>
     </Routes>
@@ -60,11 +59,10 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
-  it('renders the four-group rail and feature-gated owner sections', async () => {
-    renderLayout('/settings/account');
+  it('renders the three-group rail and feature-gated owner sections', async () => {
+    renderLayout('/settings/replies');
 
-    expect(screen.getByText('account-body')).toBeTruthy();
-    expect(screen.getByText('settings.groups.preferences')).toBeTruthy();
+    expect(screen.getByText('replies-body')).toBeTruthy();
     expect(screen.getByText('settings.groups.agents')).toBeTruthy();
     expect(screen.getByText('settings.groups.connections')).toBeTruthy();
     expect(screen.getByText('settings.groups.system')).toBeTruthy();
@@ -79,7 +77,6 @@ describe('SettingsLayout', () => {
     renderLayout('/settings/replies');
 
     expect(screen.getByText('replies-body')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'settings.sections.account' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.replies' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.access' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.service' })).toBeNull();
@@ -89,17 +86,17 @@ describe('SettingsLayout', () => {
   it('selects the landing section when a mobile root viewport becomes desktop', async () => {
     renderLayout('/settings');
 
-    expect(screen.queryByText('account-body')).toBeNull();
+    expect(screen.queryByText('replies-body')).toBeNull();
     act(() => {
       media.matches = true;
       media.listeners.forEach((listener) => listener({ matches: true } as MediaQueryListEvent));
     });
 
-    await waitFor(() => expect(screen.getByText('account-body')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('replies-body')).toBeTruthy());
   });
 
   it('refreshes Memory visibility after its settings change', async () => {
-    renderLayout('/settings/account');
+    renderLayout('/settings/replies');
     await waitFor(() => {
       expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
     });
@@ -113,7 +110,7 @@ describe('SettingsLayout', () => {
   });
 
   it('keeps the mobile header below the safe-area inset', () => {
-    renderLayout('/settings/account');
+    renderLayout('/settings/replies');
 
     expect(screen.getByRole('banner').className).toContain('pt-[env(safe-area-inset-top)]');
   });

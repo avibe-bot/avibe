@@ -50,6 +50,7 @@ export const isLocalOnlyMessagingField = (field: string): boolean =>
 const isValidSettingsPath = (pathname: string): boolean =>
   pathname.startsWith('/settings/') &&
   pathname !== '/settings/appearance' &&
+  pathname !== '/settings/account' &&
   !pathname.startsWith('/settings/platforms/groups') &&
   !pathname.startsWith('/settings/platforms/users');
 
@@ -71,7 +72,7 @@ export const settingsLandingPath = (canManageInstance: boolean): string => {
       // Ignore unavailable storage.
     }
   }
-  if (!remembered || !isValidSettingsPath(remembered)) return '/settings/account';
-  if (!canManageInstance && isOwnerOnlyPath(remembered)) return '/settings/account';
+  if (!remembered || !isValidSettingsPath(remembered)) return '/settings/replies';
+  if (!canManageInstance && isOwnerOnlyPath(remembered)) return '/settings/replies';
   return remembered;
 };
