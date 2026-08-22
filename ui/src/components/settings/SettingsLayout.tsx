@@ -24,6 +24,7 @@ import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { rememberSettingsPath, settingsLandingPath } from '@/lib/adminNavigation';
+import { useIsDesktop } from '@/lib/useIsDesktop';
 import { modelHubEnabledFromConfig } from './models/featureFlags';
 
 type SettingsItem = {
@@ -83,6 +84,7 @@ export const SettingsLayout: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const location = useLocation();
   const navigate = useNavigate();
+  const isDesktop = useIsDesktop();
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
@@ -90,6 +92,19 @@ export const SettingsLayout: React.FC = () => {
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
     let cancelled = false;
+    let memoryRequest = 0;
+    const refreshMemoryVisibility = () => {
+      const request = ++memoryRequest;
+      void api.getMemorySettings()
+        .then((memory) => {
+          if (!cancelled && request === memoryRequest) {
+            setMemoryVisible(memoryNavShouldBeVisible(memory));
+          }
+        })
+        .catch(() => {
+          if (!cancelled && request === memoryRequest) setMemoryVisible(false);
+        });
+    };
     void api.getConfig()
       .then((config) => {
         if (!cancelled) setModelHubVisible(modelHubEnabledFromConfig(config));
@@ -97,15 +112,11 @@ export const SettingsLayout: React.FC = () => {
       .catch(() => {
         if (!cancelled) setModelHubVisible(false);
       });
-    void api.getMemorySettings()
-      .then((memory) => {
-        if (!cancelled) setMemoryVisible(memoryNavShouldBeVisible(memory));
-      })
-      .catch(() => {
-        if (!cancelled) setMemoryVisible(false);
-      });
+    refreshMemoryVisibility();
+    window.addEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     return () => {
       cancelled = true;
+      window.removeEventListener('avibe:memory-settings-changed', refreshMemoryVisibility);
     };
   }, [api, capabilities.can_manage_instance]);
 
@@ -128,19 +139,13 @@ export const SettingsLayout: React.FC = () => {
   }, [atRoot, location.pathname]);
 
   useEffect(() => {
-    if (!atRoot || typeof window === 'undefined') return;
-    if (
-      typeof window.matchMedia !== 'function' ||
-      !window.matchMedia('(min-width: 768px)').matches
-    ) {
-      return;
-    }
+    if (!atRoot || !isDesktop) return;
     navigate(settingsLandingPath(capabilities.can_manage_instance), { replace: true });
-  }, [atRoot, capabilities.can_manage_instance, navigate]);
+  }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
 
   return (
     <div className="flex min-h-full flex-col bg-background md:min-h-screen">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-surface px-4">
+      <header className="flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between border-b border-border bg-surface px-4 pt-[env(safe-area-inset-top)] md:h-14 md:pt-0">
         <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-foreground">
           <Settings className="size-4 text-mint-ink" />
           <span>{t('nav.settings')}</span>

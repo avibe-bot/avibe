@@ -251,6 +251,31 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.getByTestId('language-switcher')).toBeTruthy();
     expect(screen.getByTestId('theme-toggle')).toBeTruthy();
     expect(screen.getByTestId('account-menu')).toBeTruthy();
+    const preferencesRow = screen.getByTestId('language-switcher').parentElement!;
+    const appsRow = screen.getByTestId('apps-launcher').parentElement!;
+    expect(preferencesRow.compareDocumentPosition(appsRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('uses the Settings button to close an open Settings surface', async () => {
+    viewport.isDesktop = true;
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/settings/appearance']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="settings/appearance" element={<div data-testid="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/');
+    await user.click(settingsToggle);
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
   });
 });
 

@@ -389,16 +389,26 @@ export const AppShell: React.FC = () => {
             {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
           </div>
 
-          {/* Bottom (design.pen NbPMq): Apps + Settings, persistent preferences,
+          {/* Bottom (design.pen NbPMq): persistent preferences, Apps + Settings,
               then run state + version. The whole bottom cluster sits at the
               sidebar's level (z-10) and is covered by a maximized window. The
               outer container no longer owns padding (the brand band is flush to
               the top edge), so this cluster carries its own px-4 + bottom pad. */}
           <div className="relative flex flex-col gap-3 px-4 pb-4">
+            <div className="flex items-center gap-2">
+              <LanguageSwitcher openUpward />
+              <ThemeToggle />
+              <AccountMenu openUpward />
+            </div>
+
             <div className="flex items-stretch gap-2">
               {canUseApps && <AppsLauncher />}
               <Link
-                to={isDesktop ? settingsLandingPath(capabilities.can_manage_instance) : '/settings'}
+                to={isSettings
+                  ? '/'
+                  : isDesktop
+                    ? settingsLandingPath(capabilities.can_manage_instance)
+                    : '/settings'}
                 title={t('appShell.openControlPanel')}
                 aria-label={t('appShell.openControlPanel')}
                 className={clsx(
@@ -410,12 +420,6 @@ export const AppShell: React.FC = () => {
               >
                 <Settings className={clsx('size-[18px]', isSettings ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
               </Link>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <LanguageSwitcher openUpward />
-              <ThemeToggle />
-              <AccountMenu openUpward />
             </div>
 
             {config?.runtime?.hostname && (
