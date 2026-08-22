@@ -67,15 +67,16 @@ provider root.
   reservation through pinning, stale-generation reclamation, queueing, and the
   one in-flight provider call. There is no second reservation chain outside
   that process-wide bound.
-- Principal, project, epoch, `scope_key`, and `provider_root_id` are
-  byte-identical across the upgrade.
+- Principal, project, epoch, `scope_key`, `provider_root_id`, and
+  `last_success_at` are byte-identical across the upgrade.
 - Named-project catalog rows survive.
 - `last_provider_timestamp_ms` survives and remains the lower bound for
   new EverOS add timestamps, so post-upgrade writes cannot reorder against
   already-stored EverOS cells.
-- An in-progress Clear or Factory Reset is completed by the existing
-  destructive path. The capture migrator does not strip or rewrite a store
-  that those markers still own.
+- A readable marker-owned Clear or pending Factory Reset is completed by the
+  existing destructive path. The capture migrator does not strip or rewrite a
+  store that those markers still own. A fence without a readable Clear marker
+  stays blocked until an explicit Clear supplies fresh destructive authority.
 - A Clear marker that exists but cannot be read is still an open destructive
   fence. Migration and all Memory writes stay blocked until the existing
   Clear retry replaces or completes that marker.
@@ -190,31 +191,43 @@ required for this cut.
 `extracted` drops pending flush state for that provider session.
 `accumulated` refreshes one in-memory `PendingFlush(session_ref,
 raw_session_id, first_accumulated_at, last_accumulated_at, message_ids,
-attempts)`. `message_ids` is bounded by the 100-message flush limit and exists
-only to correlate any submitted flush outcome with the retained Provider Call
-Log. `raw_session_id` is the already-validated bounded capture identifier; it
-stays volatile and is never logged. The message-id list length is the volatile
-`unflushed_count`: every `accumulated`
-acknowledgement appends exactly one message id, and reaching 100 makes that
-provider session immediately due before another add for the same session can be
-submitted.
+attempts, correlation_complete)`. `message_ids` is bounded by the 100-message
+flush limit and exists only to correlate any submitted flush outcome with the
+retained Provider Call Log. `raw_session_id` is the already-validated bounded
+capture identifier; it stays volatile and is never logged. The message-id list
+length is the volatile `unflushed_count`: every `accumulated` acknowledgement
+appends exactly one message id, and reaching 100 makes that provider session
+immediately due before another add for the same session can be submitted.
 
 The map retains at most 256 provider sessions, so its 100-id per-entry limit
-also bounds total retained ids at 25,600. If an `accumulated` result would create
-a 257th entry, do not evict or mutate an existing scope: drop the new volatile
-tracking entry, increment a content-free capacity-drop counter, and leave the
-EverOS buffer untouched. A later same-session add may recreate tracking after
-capacity is available, and Repair or provider extraction may process the older
-buffer. The pending map does not survive process restart.
+also bounds total retained ids at 25,600. Every retained session has a bounded,
+content-free durable correlation guard described below. A guard written by the
+current writer instance plus its matching live `PendingFlush` means the bounded
+message-id list is complete. A guard from an older writer generation, or one
+already marked incomplete, makes any recreated tracker incomplete.
+
+If an `accumulated` result would create a 257th entry, do not evict or mutate an
+existing scope: atomically record the add provenance and set the singleton
+global-incomplete correlation guard, drop the new volatile tracking entry,
+increment a content-free capacity-drop counter, and leave the EverOS buffer
+untouched. A later same-session add may recreate tracking after capacity is
+available, but its `correlation_complete` is false; any later flush is recorded
+as unavailable correlation rather than appearing complete from only the later
+ids. Failure to persist the guard leaves the add's already-open provenance gap
+open and fails the writer generation closed. The pending map does not survive a
+writer generation or process restart, while its durable guards do.
 
 When an entry becomes due, the worker snapshots it for one flush attempt. A
 failure proven to occur before the provider coroutine can execute may retain
 that same entry for at most three total attempts. At the exact submission edge
 where the provider coroutine may execute, remove the entry from the map and
-carry its bounded message-id snapshot only in the in-flight slot. Success,
+carry its bounded message-id snapshot and completeness bit only in the in-flight
+slot. Mark its durable guard incomplete before submission. Success,
 rejection, timeout, malformed response, cancellation, and any other ambiguous
 submitted outcome all consume that snapshot permanently; none reinsert or
-reschedule it. Only a later `accumulated` add can create fresh pending state.
+reschedule it. An acknowledged flush or natural `extracted` add deletes that
+session's exact guard; every other result leaves it incomplete for later adds.
+Only a later `accumulated` add can create fresh pending state.
 
 Worker generation increments on disable, shutdown, Reset/Clear, and
 runtime-affecting configuration replacement. The old worker is cancelled, the
@@ -309,6 +322,7 @@ memory_call_provenance
   project_id
   session_id
   message_ids_json     # exact EverOS message ids, at most 100
+  correlation_complete # true for adds; flush snapshot completeness
   recorded_at_ms
 
 memory_processing_anomaly
@@ -323,6 +337,12 @@ memory_processing_anomaly
   worker_generation
   principal_id
   project_id
+
+memory_flush_correlation_guard
+  guard_key            # HMAC of provider-session ref, or one global sentinel
+  writer_instance_id   # opaque generation token; null for global sentinel
+  incomplete           # boolean; true cannot become complete by later adds
+  recorded_at_ms
 
 memory_call_provenance_gap
   gap_id               # local operation token, never sent to EverOS
@@ -341,8 +361,8 @@ that Processing Record currently reads from `memory_capture_queue` and
   `FlushRejected`, another terminal non-success, or an otherwise unclassifiable
   response whose id can still be validated
 - an add row carries its one exact `m_<session>_<provider timestamp>_000`
-  message id; a flush row carries the bounded message-id list from that
-  session's `PendingFlush`
+  message id and `correlation_complete=true`; a flush row carries the bounded
+  message-id list from that session's `PendingFlush` plus its completeness bit
 - retain at most 5,000 provenance rows and at most 14 days, matching Provider
   Call Log retention, but prune only complete request-id groups: age-prune a
   group only when its newest `recorded_at_ms` is older than the cutoff, then
@@ -354,11 +374,38 @@ that Processing Record currently reads from `memory_capture_queue` and
 - for every user-scoped read, require all rows for the request id to resolve to
   exactly one principal/project; ambiguous or missing provenance never
   broadens visibility
+- require every row in a request-id group to have `correlation_complete=true`
+  for correlation and authorization. A false flush row makes that call's
+  correlation source unavailable; its later message ids must not make an
+  incomplete request appear linked or unlinked
 - for a call reached through a linked memcell, additionally require that owned
   memcell to contain one of the recorded message ids
 - for `list_unlinked_calls` and an unlinked request-id detail, unique provenance
   scope is the authorization fact: requiring memcell membership there would
   reject the branch precisely because the call is unlinked
+
+`memory_flush_correlation_guard` is observer completeness metadata, not a flush
+schedule or delivery queue. It contains no message ids, raw session id, payload,
+count, deadline, attempt, or work item:
+
+- keep at most 256 exact session digests plus one singleton global-incomplete
+  sentinel; never evict an exact guard and thereby turn unknown correlation into
+  apparently complete correlation
+- create/update an exact guard in the same observer transaction that records the
+  first `accumulated` add for a live tracker. Its opaque writer-instance token
+  proves completeness only while the matching generation and `PendingFlush`
+  still exist
+- at generation replacement or process restart, any surviving exact guard has
+  an old token and therefore taints later recreated tracking as incomplete
+- when the exact-guard capacity or volatile pending-map capacity is exceeded,
+  set the global sentinel. While it exists every newly created tracker is
+  incomplete, including sessions not represented by an exact row
+- delete an exact guard only after a natural `extracted` add or acknowledged
+  flush proves that provider buffer crossed a boundary. Rejection, timeout,
+  malformed response, cancellation, and ambiguity retain it as incomplete
+- the global sentinel is cleared only by Clear/Factory Reset or a future
+  provider-wide operation that positively proves every unprocessed buffer empty;
+  ordinary add/flush results and sidecar restart cannot prove that
 
 `memory_processing_anomaly` replaces the sanitized failure projection that
 `MemoryStore.failure_log()` currently derives from terminal
@@ -397,11 +444,14 @@ observer state into delivery state:
    snapshot only for the bounded pre-submission retry policy above.
 2. If the result contains a valid request id, one transaction inserts every
    provenance row for that call, inserts its sanitized anomaly row when the
-   result is non-success, and deletes only that operation token's gap. This
-   applies to acknowledged, rejected, and unknown classifications. A separately
-   allowed add retry starts only after that observer transaction commits; a
-   submitted flush is terminal. A provenance/anomaly transaction failure leaves
-   the already-committed gap open and never causes a provider retry.
+   result is non-success, applies its correlation-guard transition, and deletes
+   only that operation token's gap. An acknowledged add also advances
+   `memory_meta.last_success_at` to the observation time in this transaction.
+   This applies to acknowledged, rejected, and unknown classifications. A
+   separately allowed add retry starts only after that observer transaction
+   commits; a submitted flush is terminal. A provenance/anomaly/guard transaction
+   failure leaves the already-committed gap open and never causes a provider
+   retry.
 3. If an add result has no valid request id and proves no request left Avibe, or
    a flush attempt fails before its provider coroutine can execute, close only
    that gap before any permitted retry. On the final bounded failure, insert the
@@ -436,8 +486,8 @@ oldest ranges into a wider range rather than dropping coverage. Delete a closed
 range only when it is wholly older than the Provider Call Log retention cutoff;
 an open range is never age-deleted. This may hide a good observation
 conservatively, but cannot authorize the wrong scope. Clear's `reset_for_clear`
-deletes provenance rows, anomalies, and gaps with the catalog and watermark
-reset; Factory Reset deletes them with `state/memory`.
+deletes provenance rows, anomalies, correlation guards, and gaps with the
+catalog and watermark reset; Factory Reset deletes them with `state/memory`.
 
 The independently maintained Provider Call Log is not an input to identity
 migration or writer admission. Historical migration copies every valid bounded
@@ -465,6 +515,16 @@ charge, attachment pin, or task creation. Otherwise persist the new watermark in
 the same identity transaction as the catalog upsert for named projects, charge
 the ordered slot, and only then release the critical section. That section has
 no attachment or provider await; the identity write is not an outbox.
+
+`last_success_at` also remains durable display/maintenance state. Every
+acknowledged v4 add updates it in the same observer transaction as provenance and
+gap settlement, using the later of its existing value and the observation time.
+Provenance retention never clears it. The reduced
+`has_provider_data_history()` reads this field instead of delivery rows, so
+`MemoryMaintenance.maintenance_payload().data_exists` remains true after
+provenance ages out while EverOS may still contain captured data. Clear resets it
+to null in the same identity reset transaction; migration preserves its exact
+released value.
 
 That identity transaction preserves `MAX_NAMED_MEMORY_PROJECTS`: an existing
 named-project row may be updated at the limit, but inserting a 17th distinct
@@ -524,8 +584,8 @@ default project, both provenances, attachment bundle present or absent,
 flush in_flight / idle, processing-fault columns set or null, WAL+SHM
 sidecars). After upgrade:
 
-- `scope_key`, `epoch`, `provider_root_id`, and
-  `last_provider_timestamp_ms` are unchanged
+- `scope_key`, `epoch`, `provider_root_id`, `last_provider_timestamp_ms`, and
+  `last_success_at` are unchanged
 - `memory_projects` rows are unchanged
 - no capture payload, lease, fence, settlement, or bundle row remains
 - no dropped payload is sent to EverOS
@@ -546,16 +606,21 @@ would accept captures:
    Do not read or rewrite `memory.sqlite` as an identity source; Reset
    deletes `memory` and `state/memory`.
 2. Read `state/memory/clear-intent.json` through `ClearIntentStore.load()`.
-   If it is present and readable, or `memory_meta.clear_in_progress` is set,
-   run the existing Clear reconcile. Clear already deletes queue tables and
-   bumps epoch. After it finishes, the store is empty identity at
-   `target_epoch`. Then open it as v4, creating identity tables if Clear's
-   reset still used the old schema for one boot. If the marker exists but is
-   truncated, malformed, inaccessible, oversized, symlinked, or otherwise
-   raises `ClearIntentUnreadable`, preserve `MemoryMaintenance.is_open()`
-   semantics: do not migrate, do not start the sidecar/writer, and project the
-   existing `memory_clear_marker_unreadable` retry state. Only an explicit
-   Clear re-run may replace that marker.
+   - If it is present and readable, run the existing marker-owned Clear
+     reconcile. After it finishes, the store is empty identity at
+     `target_epoch`. Then open it as v4, creating identity/observer tables if
+     Clear's reset still used the old schema for one boot.
+   - If it is absent but `memory_meta.clear_in_progress` is set, do not call
+     `reconcile_pending()` and do not assume deletion occurred. Preserve the
+     existing `orphaned-fence` / `memory_clear_failed` projection, keep
+     migration plus sidecar/writer admission blocked, and allow only an explicit
+     operator Clear to create a fresh intent and own the destructive sweep.
+   - If it is truncated, malformed, inaccessible, oversized, symlinked, or
+     otherwise raises `ClearIntentUnreadable`, preserve
+     `MemoryMaintenance.is_open()` semantics: do not migrate, do not start the
+     sidecar/writer, and project the existing
+     `memory_clear_marker_unreadable` retry state. Only an explicit Clear re-run
+     may replace that marker.
 3. Otherwise open `state/memory/memory.sqlite` through the existing confined
    path and detect its released shape without writing.
 4. Start one outer `BEGIN IMMEDIATE`. Refactor the v0→v2, v1→v2, and v2→v3
@@ -582,6 +647,11 @@ would accept captures:
      rejected adds exactly as the current projection does, map errors through the
      same closed-code sanitizer, and prune only the oldest overflow beyond the
      newest 100,000 rows, with no age cutoff
+   - for every old `memory_session_flush_state` row with an unflushed provider
+     buffer, create an incomplete exact `memory_flush_correlation_guard` using
+     only its bounded session-ref digest. If more than 256 distinct rows exist,
+     keep 256 exact guards and set the global-incomplete sentinel; never migrate
+     a schedule, count, deadline, fence, attempt, or message id
    - do not open the optional Provider Call Log; if observer-only request-id or
      timestamp data cannot be translated safely, create or widen one bounded
      `migration_unknown` gap over the retained horizon and count it without
@@ -607,7 +677,8 @@ would accept captures:
    same scrub on the next boot; never follow or manually unlink an unsafe entry.
 8. Emit one content-free structured log: discarded nonterminal count,
    discarded terminal count, migrated anomaly count, discarded bundle-row
-   count, and scrubbed confined entry count. Never log text,
+   count, migrated exact-guard count, global-incomplete-guard state, and
+   scrubbed confined entry count. Never log text,
    paths, or digests that can recover a message. Also count provenance rows
    covered by a migration gap and a busy post-commit checkpoint without treating
    either as a capture-startup failure.
@@ -726,9 +797,11 @@ labelled as volatile; it must not show a durable missed-capture backlog.
 
 Processing Record and Provider Call Log otherwise retain their current scope
 and correlation behavior through `memory_call_provenance` and
-`memory_call_provenance_gap`. The reader's capture-source availability probe and
-request-id joins move to those tables; they do not silently omit request-id call
-branches merely because the delivery tables are gone.
+`memory_call_provenance_gap`, with completeness guarded by
+`memory_flush_correlation_guard`. The reader's capture-source availability probe
+and request-id joins move to those tables; they do not silently omit request-id
+call branches merely because the delivery tables are gone or a volatile
+message-id set was lost.
 
 Processing Record's durable anomaly source moves independently to
 `memory_processing_anomaly`. `MemoryStore.failure_log()` keeps its current
@@ -762,9 +835,12 @@ only after the replacement is admitted. This is the replacement for
 `quiesce_claims()`, not an outbox drain.
 
 Clear's queue primitive becomes: identity `reset_for_clear` (epoch bump,
-catalog wipe, watermark zero, call-provenance and gap wipe) with no
+catalog wipe, watermark and `last_success_at` reset, and atomic deletion of
+`memory_call_provenance`, `memory_processing_anomaly`,
+`memory_flush_correlation_guard`, and `memory_call_provenance_gap`) with no
 capture-queue DELETE. The other three surfaces (provider root, call log,
-attachments) stay.
+attachments) stay. Replaying the same `target_epoch` is idempotent and still
+proves every observer table empty before the Clear fence may be released.
 
 Factory Reset still deletes `memory` and `state/memory`. The v4 store is just
 another file under `state/memory`.
@@ -822,13 +898,19 @@ Do not ship those doc edits in this planning PR.
 - Missing, corrupt, incompatible, or unreadable Provider Call Log state does
   not fail identity migration or block writer startup; its observer projection
   reports unavailable/warned independently.
-- `clear_in_progress` / clear-intent / factory-reset pending skip the
-  strip path and follow the existing destructive reconciler.
+- A readable clear-intent or factory-reset pending state skips the strip path
+  and follows its existing destructive reconciler. `clear_in_progress` without
+  a readable intent skips the strip path but stays blocked as an orphaned fence;
+  it never enters the destructive reconciler without fresh operator authority.
 - Every unreadable clear-intent shape keeps migration, sidecar startup, and
   writer startup blocked without modifying the marker or SQLite identity.
 - Retained add/flush request ids migrate to bounded call provenance before
   delivery tables are dropped, including rejected calls and every scope row for
   reused ids; ambiguous cross-scope request ids remain unauthorized.
+- Released unflushed-session rows migrate to incomplete, content-free
+  correlation guards without message ids or schedule state. At 256 distinct
+  exact guards the next distinct row sets the global-incomplete sentinel; a
+  later recreated tracker cannot claim complete flush provenance.
 - Across the released-fixture matrix, seed every failure form each shape can
   represent, together covering `dead`, `manual_required`, boot recovery,
   rejected add/flush, and ambiguous settlement evidence. The newest-50
@@ -876,7 +958,15 @@ Do not ship those doc edits in this planning PR.
   third failed attempt drops it without a provider call.
 - High-cardinality accumulated traffic retains at most 256 pending sessions and
   25,600 message ids. A 257th new session drops only its new volatile tracking,
-  never evicts or mutates an existing scope, and records content-free accounting.
+  never evicts or mutates an existing scope, atomically sets the durable
+  global-incomplete guard, and records content-free accounting. A later add for
+  that session may be tracked, but its flush provenance is explicitly incomplete
+  and Processing Record reports correlation unavailable.
+- Exact correlation guards from a previous writer instance/generation taint a
+  recreated tracker after restart; a global guard taints every new tracker.
+  Natural extraction or acknowledged flush clears an exact guard, while
+  rejected/ambiguous results and sidecar restart do not. No test can recover
+  complete provenance using only message ids accumulated after a guard.
 - Shutdown, disable, config replacement, Clear, and Reset drop the queue
   without drain.
 - Session barrier does not block `/new` or archive. At its ordered head it
@@ -899,6 +989,10 @@ Do not ship those doc edits in this planning PR.
   closed and its permit charged until confined cleanup succeeds; restart runs
   the mandatory empty-root scrub before reopening intake.
 - Watermark persists across writer restart and is monotonic.
+- Every acknowledged add advances durable `last_success_at` atomically with its
+  provenance/gap settlement. After all call-provenance groups age out,
+  `has_provider_data_history()` and maintenance `data_exists` remain true from
+  that timestamp; rejected/ambiguous adds do not advance it and Clear resets it.
 - With the watermark already at `MAX_PROVIDER_TIMESTAMP_MS`, the next otherwise
   valid capture returns `timestamp_invalid` without changing the watermark or
   catalog and without charging a slot, pinning, or creating a task.
@@ -939,6 +1033,14 @@ Do not ship those doc edits in this planning PR.
   operation, and resume only an admitted fresh generation.
 - Clear still resumes from `clear-intent.json` and still recreates an
   empty provider root.
+- A readable Clear intent replays, but an absent intent plus
+  `memory_meta.clear_in_progress=1` remains the existing failed
+  `orphaned-fence` projection and blocks migration, sidecar, and writer until an
+  explicit operator Clear writes new authority.
+- Clear's identity reset atomically removes provenance, anomalies, correlation
+  guards, and gaps and nulls `last_success_at` before releasing its fence. A
+  pre-Clear `failure_log()` row cannot appear under the new epoch, including on
+  idempotent replay after a crash.
 - Search, profile, list, remember admission, and agent-owner read paths
   keep their `origin/dev` contracts.
 - Agent-provenance capture writes retain the current user-principal
@@ -956,7 +1058,7 @@ Do not ship those doc edits in this planning PR.
 
 ## Implementation sequence
 
-1. Identity-and-provenance v4 schema + migrator + fixture property tests. No
+1. Identity-and-observer v4 schema + migrator + fixture property tests. No
    behavior change yet if the writer still reads v4 as empty outbox —
    prefer not to land a half-migrated store. Land migrator and writer
    together.
@@ -977,9 +1079,9 @@ after adding migrator and writer tests. Line count is not acceptance.
 - [ ] Implement v4 identity schema and released-shape migrator.
 - [ ] Implement `BestEffortMemoryWriter` and switch capture to `offer()`.
 - [ ] Replace capture-table Processing Record joins with bounded call
-      provenance, lifecycle-closed durable gaps, and sanitized anomaly rows;
-      migrate retained correlations and the current failure projection before
-      dropping the tables.
+      provenance, correlation guards, lifecycle-closed durable gaps, and
+      sanitized anomaly rows; migrate retained correlations and the current
+      failure projection before dropping the tables.
 - [ ] Replace session final-flush waits with a best-effort multi-scope session
       barrier over the bounded volatile pending-flush map.
 - [ ] Replace claim quiescence with writer pause/quiesce around Rebuild/Repair.
@@ -1007,8 +1109,10 @@ implementation PR:
 5. Session-boundary flush is a barrier enqueue, not a wait. A crash or
    a full queue can leave consecutive conversations in one EverOS accumulation
    boundary. A 257th concurrently tracked provider session also drops its new
-   volatile flush trigger; a later same-session add, Repair, or provider
-   extraction may process that buffer.
+   volatile flush trigger and sets the bounded global-incomplete guard. Later
+   flush correlation stays unavailable rather than silently omitting older
+   message ids; the global guard may conservatively hide unrelated flush
+   correlation until Clear/Factory Reset or a provider-wide empty-buffer proof.
 6. No JSON identity file is introduced. Identity stays in the existing
    SQLite file so Clear's `reset_for_clear(target_epoch=...)` and
    Factory Reset keep one authority.
