@@ -1,13 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
 import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
-import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
-import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
@@ -30,113 +28,31 @@ import { SearchPalette } from './workbench/search/SearchPalette';
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
-import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import {
-  adminLandingPath,
-  isAdvancedSettingsPath,
   isOwnerOnlyPath,
-  isMemorySettingsPath,
-  visibleAdminNavItems,
+  settingsLandingPath,
 } from '../lib/adminNavigation';
 
 type ShellNavItem = {
-  // Optional: a parent that only groups children (no page of its own) omits `to`
-  // and renders as a collapsible toggle instead of a link.
   to?: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   match?: (pathname: string) => boolean;
   badge?: number;
-  children?: ShellNavItem[];
-  // `defaultOpen` makes a group start expanded (used in the mobile 更多 sheet so
-  // 通讯平台 shows its children without a second tap).
-  defaultOpen?: boolean;
-  // Mobile-tab extras: `onClick` makes the tab a button (e.g. 更多 opens the
-  // nav sheet) instead of a link; `variant: 'workbench'` renders the emphasized
-  // green circle for the back-to-workbench tab.
   onClick?: () => void;
-  variant?: 'workbench';
-};
-
-const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
-  item.match
-    ? item.match(pathname)
-    : item.to
-      ? pathname === item.to || pathname.startsWith(`${item.to}/`)
-      : false;
-
-// Mirrors design.pen kSWgv (VR/Sidebar): 240px width, fill --surface,
-// right border, padding [20,16]. Mint-soft active state with mint glow.
-const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
-  const location = useLocation();
-  if (item.children && item.children.length > 0) return <ShellNavGroup item={item} />;
-  const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
-  const Icon = item.icon;
-
-  return (
-    <NavLink
-      to={item.to ?? '#'}
-      className={clsx(
-        'group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
-        active
-          ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
-          : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground'
-      )}
-    >
-      <Icon className={clsx('size-4', active ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
-      <span>{item.label}</span>
-    </NavLink>
-  );
-};
-
-// Collapsible parent for a nested submenu (e.g. 通讯平台 → 平台 / 群组 / 私聊).
-// Auto-expands when one of its children is the active route; the parent has no
-// page of its own, so it's a toggle button rather than a link.
-const ShellNavGroup: React.FC<{ item: ShellNavItem }> = ({ item }) => {
-  const location = useLocation();
-  const Icon = item.icon;
-  const childActive = (item.children ?? []).some((child) => isItemActive(child, location.pathname));
-  const [open, setOpen] = useState(childActive || !!item.defaultOpen);
-  useEffect(() => {
-    if (childActive) setOpen(true);
-  }, [childActive]);
-
-  return (
-    <div className="flex flex-col gap-0.5">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className={clsx(
-          'group flex w-full items-center gap-2.5 rounded-lg border border-transparent px-3 py-2.5 text-[13px] font-medium transition-colors hover:bg-foreground/[0.04]',
-          childActive ? 'text-foreground' : 'text-muted hover:text-foreground'
-        )}
-      >
-        <Icon className={clsx('size-4', childActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
-        <span className="flex-1 text-left">{item.label}</span>
-        <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-180')} />
-      </button>
-      {open && (
-        <div className="ml-3 flex flex-col gap-0.5 border-l border-border pl-2">
-          {item.children!.map((child) => <ShellNavLink key={child.to} item={child} />)}
-        </div>
-      )}
-    </div>
-  );
 };
 
 const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
-  const isWorkbench = item.variant === 'workbench';
 
   const className = clsx(
     'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
-    isWorkbench ? 'text-mint-ink' : active ? 'bg-mint/[0.08] text-mint-ink' : 'text-muted'
+    active ? 'bg-mint/[0.08] text-mint-ink' : 'text-muted'
   );
   const inner = (
     <>
@@ -144,16 +60,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
           centers on one line — the workbench circle no longer protrudes above
           its siblings. */}
       <span className="relative flex h-7 items-center justify-center">
-        {isWorkbench ? (
-          // Emphasized green circle — the back-to-workbench tab, mirroring the
-          // desktop sidebar's distinct mint mode-switch button. Sized to fill the
-          // slot so it sits on the same baseline as the plain icons.
-          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-glow-xs-mint">
-            <Icon className="size-4 text-mint-ink" />
-          </span>
-        ) : (
-          <Icon className="size-4" />
-        )}
+        <Icon className="size-4" />
         {item.badge ? (
           <span className="absolute -right-2 -top-1.5 min-w-[14px] rounded-full bg-mint px-1 text-center font-mono text-[9px] font-bold leading-[14px] text-primary-foreground">
             {item.badge > 99 ? '99+' : item.badge}
@@ -172,14 +79,9 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
 
-// Mobile bottom tab bar shared by both shells. Section tabs flank a raised
-// center FAB. Workbench: center = ＋ (new session). Control Panel: center =
-// Workbench (jump back) — the symmetric counterpart Alex asked for, so each
-// shell can reach the other from the tab bar.
+// Workbench mobile tabs flank a raised new-session action.
 const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> = ({ items, center }) => {
-  // No center FAB → a plain even row of tabs. The Control Panel uses this so
-  // "Workbench" is just the first tab, which reads cleaner than an asymmetric
-  // raised center button.
+  // No center action means a plain even row of tabs.
   if (!center) {
     return (
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
@@ -247,7 +149,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
         </p>
       </div>
       <Link
-        to="/admin/settings/diagnostics"
+        to="/settings/diagnostics"
         className="shrink-0 text-[12px] font-semibold text-gold-ink hover:underline"
       >
         {t('configRecovery.action')}
@@ -275,14 +177,9 @@ export const AppShell: React.FC = () => {
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
   }, [location.pathname]);
-  const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
-  const [memoryNavVisible, setMemoryNavVisible] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
-  // route changes so tapping any item in the sheet dismisses it.
-  const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
   // sheet it closes on any route change — tapping a tile navigates + dismisses.
   const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
@@ -304,20 +201,8 @@ export const AppShell: React.FC = () => {
     if (!capabilities.can_manage_instance) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
-      setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
   }, [api, capabilities.can_manage_instance]);
-
-  useEffect(() => {
-    const refreshMemoryNav = () => {
-      void api.getMemorySettings()
-        .then((memory) => setMemoryNavVisible(memoryNavShouldBeVisible(memory)))
-        .catch(() => setMemoryNavVisible(false));
-    };
-    refreshMemoryNav();
-    window.addEventListener('avibe:memory-settings-changed', refreshMemoryNav);
-    return () => window.removeEventListener('avibe:memory-settings-changed', refreshMemoryNav);
-  }, [api]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
   // everywhere (it's a deliberate command, so it wins even from the composer);
@@ -333,10 +218,8 @@ export const AppShell: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Close the mobile transient surfaces (admin nav sheet + Apps Dock drawer) on
-  // any route change — tapping an item in either navigates, which dismisses it.
+  // Close the mobile Dock drawer on navigation.
   useEffect(() => {
-    setAdminMenuOpen(false);
     setAppsDrawerOpen(false);
   }, [location.pathname]);
 
@@ -387,7 +270,7 @@ export const AppShell: React.FC = () => {
           <CardContent className="space-y-4">
             <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
             <Button asChild>
-              <Link to={adminLandingPath(capabilities.can_use_system)}>
+              <Link to="/settings/service">
                 {t('setup.remoteOwner.action')}
               </Link>
             </Button>
@@ -397,8 +280,6 @@ export const AppShell: React.FC = () => {
     );
   }
 
-  const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
-  const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
   const canUseApps = capabilities.can_chat;
   const canUseShowPageApp =
@@ -421,107 +302,6 @@ export const AppShell: React.FC = () => {
   if (location.pathname === '/setup') {
     return <><ConfigRecoveryNotice config={config} /><Outlet /></>;
   }
-
-  // Two shell modes share the same chrome (brand + bottom status):
-  //   - admin: control-panel pages under /admin/* (legacy dashboard/groups/...
-  //     paths are now Navigate redirects to /admin/*).
-  //   - workbench: the new `/` entry. Commit 01 ships a placeholder with no
-  //     sidebar nav; commit 02 layers in the capability modules + projects.
-  const shellMode: 'workbench' | 'admin' =
-    location.pathname.startsWith('/admin') ? 'admin' : 'workbench';
-
-  const adminItems: ShellNavItem[] = [
-    { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    // Permanent escape hatch to the App Library (a workbench app) for principals
-    // covered by the current Apps policy. It stays reachable even when undocked.
-    ...(canUseApps
-      ? [{ to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p: string) => p.startsWith('/apps/library') }]
-      : []),
-    { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
-    {
-      // 通讯平台: groups everything about connecting messaging platforms — the
-      // platform credentials (was a Settings tab), plus the group + DM scopes.
-      label: t('nav.messagingPlatforms'),
-      icon: LinkIcon,
-      match: (p) =>
-        p.startsWith('/admin/settings/platforms') ||
-        p.startsWith('/admin/groups') ||
-        p.startsWith('/admin/users'),
-      children: [
-        { to: '/admin/settings/platforms', label: t('settings.tabs.platforms'), icon: PlugZap },
-        ...(hasChannelPlatforms ? [{ to: '/admin/groups', label: t('nav.channels'), icon: Hash }] : []),
-        { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
-      ],
-    },
-    // 模型 (Model Hub, L4): the backend release capability is the only authority.
-    ...(modelHubEnabled
-      ? [
-          {
-            to: '/admin/settings/models',
-            label: t('nav.models'),
-            icon: Cpu,
-            match: (p: string) => p.startsWith('/admin/settings/models'),
-          },
-        ]
-      : []),
-    {
-      to: '/admin/settings/backends',
-      label: t('nav.backends'),
-      icon: Bot,
-      match: (p) => p.startsWith('/admin/settings/backends'),
-    },
-    ...(memoryNavVisible
-      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain, match: isMemorySettingsPath }]
-      : []),
-    {
-      to: '/admin/permissions',
-      label: t('nav.permissions'),
-      icon: ShieldCheck,
-      match: (p: string) => p.startsWith('/admin/permissions'),
-    },
-    {
-      // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
-      // backends, models, and Memory have their own sidebar destinations, so
-      // exclude those routes from the active match.
-      to: '/admin/settings/messaging',
-      label: t('nav.advancedSettings'),
-      icon: Settings,
-      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
-    },
-  ];
-
-  // Second half of the runtime-access gate: a page the redirect above withholds
-  // must not still be advertised, or a non-owner taps a nav entry and lands
-  // back on the Workbench.
-  const visibleAdminItems = visibleAdminNavItems(adminItems, capabilities.can_manage_instance);
-
-  const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
-
-  // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
-  // bar with Workbench, Control Panel, More, and Advanced Settings. Permissions
-  // stays in the More sheet with the other overflow destinations.
-  const adminMobileTabsAll: ShellNavItem[] = [
-    { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
-    { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
-    {
-      to: '/admin/settings/messaging',
-      label: t('nav.advancedSettings'),
-      icon: Settings,
-      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
-    },
-  ];
-  const adminMobileTabs = visibleAdminNavItems(adminMobileTabsAll, capabilities.can_manage_instance);
-  // The More sheet shows the overflow: admin sections not already on the bottom
-  // bar. Keep its filtering aligned with the currently visible primary tabs.
-  const adminBottomBarPaths = new Set(
-    adminMobileTabs.map((item) => item.to).filter((to): to is string => !!to && to !== '/'),
-  );
-  const adminSheetItems = visibleAdminItems
-    .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
-    // Groups start expanded in the sheet (the sheet is transient — show the
-    // children up front). The desktop sidebar keeps its collapse-by-default.
-    .map((item) => (item.children ? { ...item, defaultOpen: true } : item));
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
   // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
@@ -550,9 +330,10 @@ export const AppShell: React.FC = () => {
   // brand header AND the bottom tab bar are hidden on them.
   const isChat = location.pathname.startsWith('/chat/');
   const isSearch = location.pathname === '/search';
+  const isSettings = location.pathname === '/settings' || location.pathname.startsWith('/settings/');
   const isShowPageApp = location.pathname.startsWith('/apps/show/');
   const isBuiltinApp = isStandaloneAppRoutePath(location.pathname);
-  const isFullScreenMobile = isChat || isSearch || isShowPageApp || isBuiltinApp;
+  const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
@@ -584,10 +365,6 @@ export const AppShell: React.FC = () => {
           un-maximize to reach it. */}
       {!chromeless && (
       <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
-        {/* Workbench packs more rows (search/inbox/capabilities/projects) into the
-            sidebar, so it runs a tighter vertical rhythm than admin — less outer
-            padding and a smaller gap to the bottom cluster — to give the flex-1
-            Projects list more height. Admin keeps the roomier spacing. */}
         <div className="flex h-full flex-col">
           {/* Brand band — flush to the top edge, sharing the chat header's
               px-4 py-2.5 row height so the logo centerline lines up with the
@@ -608,77 +385,38 @@ export const AppShell: React.FC = () => {
             </div>
           </Link>
 
-          {/* Middle: workspace label + nav list (scrolls). Carries the
-              horizontal + top padding the outer container used to own; workbench
-              runs a tighter rhythm than admin to give the flex-1 Projects list
-              more height. */}
-          <div className={clsx('flex min-h-0 flex-1 flex-col px-4', shellMode === 'workbench' ? 'gap-3 pt-3' : 'gap-6 pt-4')}>
-
-            {shellMode === 'admin' && items.length > 0 && (
-              <div className="flex flex-col gap-2">
-                <div className="px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
-                  {t('appShell.workspaceLabel')}
-                </div>
-                <nav className="flex flex-col gap-0.5">
-                  {items.map((item) => <ShellNavLink key={item.to} item={item} />)}
-                </nav>
-              </div>
-            )}
-            {shellMode === 'workbench' && isDesktop && (
-              <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />
-            )}
+          <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-3">
+            {isDesktop && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
           </div>
 
-          {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
-              buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
-              + hostname between the rows. The whole bottom cluster sits at the
+          {/* Bottom (design.pen NbPMq): Apps + Settings, persistent preferences,
+              then run state + version. The whole bottom cluster sits at the
               sidebar's level (z-10) and is covered by a maximized window. The
               outer container no longer owns padding (the brand band is flush to
               the top edge), so this cluster carries its own px-4 + bottom pad. */}
-          <div className={clsx('relative flex flex-col gap-3 px-4', shellMode === 'workbench' ? 'pb-4' : 'pb-5')}>
-            {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
-                (right). The Dock rises ABOVE the Apps button, clear of the
-                centered Chat composer. Workbench → Settings (control panel);
-                Control Panel → Back to Workbench, the mint counterpart. */}
+          <div className="relative flex flex-col gap-3 px-4 pb-4">
             <div className="flex items-stretch gap-2">
               {canUseApps && <AppsLauncher />}
-              {shellMode === 'workbench' && capabilities.can_manage_instance && (
-                <Link
-                  to={adminLandingPath(capabilities.can_use_system)}
-                  title={t('appShell.openControlPanel')}
-                  aria-label={t('appShell.openControlPanel')}
-                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
-                >
-                  <Settings className="size-[18px] text-muted group-hover:text-foreground" />
-                </Link>
-              )}
+              <Link
+                to={isDesktop ? settingsLandingPath(capabilities.can_manage_instance) : '/settings'}
+                title={t('appShell.openControlPanel')}
+                aria-label={t('appShell.openControlPanel')}
+                className={clsx(
+                  'group flex w-11 shrink-0 items-center justify-center rounded-lg border text-foreground transition-colors',
+                  isSettings
+                    ? 'border-mint/40 bg-mint/[0.08]'
+                    : 'border-border-strong hover:bg-foreground/[0.04]',
+                )}
+              >
+                <Settings className={clsx('size-[18px]', isSettings ? 'text-mint-ink' : 'text-muted group-hover:text-foreground')} />
+              </Link>
             </div>
 
-            {/* Back-to-Workbench (admin only) gets its own full-width row below
-                Apps. As a half-width button beside Apps, the English "Workbench"
-                label + arrow overflowed the 240px sidebar; a full row fits every
-                locale. */}
-            {shellMode === 'admin' && (
-              <Link
-                to="/"
-                className="flex items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[13px] font-semibold text-mint-ink transition hover:bg-mint/[0.12]"
-              >
-                <ArrowLeft className="size-3.5 shrink-0" />
-                <span className="truncate">{t('appShell.backToWorkbench')}</span>
-              </Link>
-            )}
-
-            {/* Language / theme / account quick-toggles only show in the
-                Control Panel, which is the operational surface. The
-                Workbench sidebar stays focused on the agent task itself;
-                the same controls are reachable by switching modes. */}
-            {shellMode === 'admin' && (
-              <div className="flex items-center gap-2">
-                <LanguageSwitcher openUpward />
-                <ThemeToggle />
-                <AccountMenu openUpward />
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              <LanguageSwitcher openUpward />
+              <ThemeToggle />
+              <AccountMenu openUpward />
+            </div>
 
             {config?.runtime?.hostname && (
               <div className="truncate font-mono text-[10px] text-muted">
@@ -744,16 +482,17 @@ export const AppShell: React.FC = () => {
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
           !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
-          !chromeless &&
-            (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
+          !chromeless && (isSettings ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
         <div className={clsx(
           'w-full',
           chromeless
             ? 'h-full'
-            : isFullScreenMobile
-              ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
+            : isSettings
+              ? 'h-full p-0 md:h-auto md:min-h-screen'
+              : isFullScreenMobile
+                ? 'h-full p-0 md:mx-auto md:h-auto md:px-10 md:py-8'
             : 'mx-auto px-4 py-5 md:px-10 md:py-8',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
@@ -766,55 +505,18 @@ export const AppShell: React.FC = () => {
       </main>
 
       {showBottomNav && (
-        shellMode === 'admin' ? (
-          <MobileTabBar items={adminMobileTabs} />
-        ) : (
-          <MobileTabBar
-            items={workbenchTabs}
-            center={capabilities.can_chat
-              ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
-              : undefined}
-          />
-        )
-      )}
-
-      {/* Mobile admin nav sheet — the full nested adminItems (groups expand),
-          opened from the 更多 tab. Mounted only in the admin shell on mobile. */}
-      {shellMode === 'admin' && adminMenuOpen && (
-        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
-          <button
-            type="button"
-            aria-label={t('common.close')}
-            onClick={() => setAdminMenuOpen(false)}
-            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
-          />
-          {/* Floats as a card ABOVE the bottom tab bar (not flush to the screen
-              edge) so the list sits clear of the nav and the thumb-tap zone. */}
-          <div className="absolute inset-x-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-h-[68vh] overflow-y-auto rounded-2xl border border-border bg-surface px-3 pb-3 pt-1 shadow-2xl">
-            <div className="relative flex items-center justify-center py-2">
-              <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
-                {t('appShell.moreSettings')}
-              </span>
-              <button
-                type="button"
-                aria-label={t('common.close')}
-                onClick={() => setAdminMenuOpen(false)}
-                className="absolute right-1 top-1.5 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-            <nav className="flex flex-col gap-0.5 pb-2">
-              {adminSheetItems.map((item) => <ShellNavLink key={item.to ?? item.label} item={item} />)}
-            </nav>
-          </div>
-        </div>
+        <MobileTabBar
+          items={workbenchTabs}
+          center={capabilities.can_chat
+            ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
+            : undefined}
+        />
       )}
 
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && canUseApps && (
+      {canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
@@ -826,9 +528,8 @@ export const AppShell: React.FC = () => {
         />
       )}
 
-      {/* ⌘K message-search palette. Mounted shell-wide so the shortcut works from
-          both Workbench and Control Panel; the sidebar field is the workbench
-          entry point. */}
+      {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
+          Workbench entry point. */}
       <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)

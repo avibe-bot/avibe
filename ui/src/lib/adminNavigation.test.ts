@@ -1,161 +1,81 @@
-import { describe, expect, it } from 'vitest';
+/* @vitest-environment jsdom */
+
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
-  adminLandingPath,
-  filterOwnerOnlyNavItems,
-  isAdvancedSettingsPath,
   isLocalOnlyMessagingField,
-  isOwnerOnlyPath,
   isMemorySettingsPath,
-  visibleAdminNavItems,
+  isOwnerOnlyPath,
+  rememberSettingsPath,
+  SETTINGS_LAST_PATH_KEY,
+  settingsLandingPath,
 } from './adminNavigation';
 
-describe('isAdvancedSettingsPath', () => {
-  it('defers to the standalone Memory item when that item is visible', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/memory', true)).toBe(false);
-    expect(isAdvancedSettingsPath('/admin/settings/memory/', true)).toBe(false);
-  });
-
-  it('keeps Memory setup under Advanced Settings when the standalone item is hidden', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/memory', false)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/memory/', false)).toBe(true);
-  });
-
-  it('keeps the remaining settings pages grouped under Advanced Settings', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/messaging', true)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/service', true)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/dependencies', true)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/diagnostics', true)).toBe(true);
-  });
-
-  it('leaves other standalone settings destinations inactive', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/platforms', true)).toBe(false);
-    expect(isAdvancedSettingsPath('/admin/settings/backends', true)).toBe(false);
-    expect(isAdvancedSettingsPath('/admin/settings/models', true)).toBe(false);
-  });
+beforeEach(() => {
+  window.localStorage.clear();
 });
 
 describe('isOwnerOnlyPath', () => {
-  it('covers every destination with an Owner management gate', () => {
+  it('covers canonical machine-management destinations and their details', () => {
+    const ownerOnly = [
+      '/settings/service',
+      '/settings/platforms/slack',
+      '/settings/remote-access',
+      '/settings/backends/claude',
+      '/settings/models',
+      '/settings/dependencies',
+      '/settings/memory',
+      '/settings/diagnostics/logs',
+    ];
+    expect(ownerOnly.every(isOwnerOnlyPath)).toBe(true);
+  });
+
+  it('keeps personal preferences, replies, and access readable', () => {
+    expect(isOwnerOnlyPath('/settings/appearance')).toBe(false);
+    expect(isOwnerOnlyPath('/settings/account')).toBe(false);
+    expect(isOwnerOnlyPath('/settings/replies')).toBe(false);
+    expect(isOwnerOnlyPath('/settings/access')).toBe(false);
+  });
+
+  it('keeps retired owner routes gated before their redirect runs', () => {
     expect(isOwnerOnlyPath('/admin/dashboard')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/remote-access')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/groups')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/users')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/logs')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/service')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/platforms')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/backends')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/models')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/dependencies')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/diagnostics')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/settings/logs')).toBe(true);
-    expect(isOwnerOnlyPath('/harness')).toBe(false);
-  });
-
-  it('matches nested paths under a gated destination', () => {
-    expect(isOwnerOnlyPath('/admin/settings/platforms/slack')).toBe(true);
-    expect(isOwnerOnlyPath('/admin/groups/engineering')).toBe(true);
-    expect(isOwnerOnlyPath('/harness/')).toBe(false);
-  });
-
-  it('leaves remotely usable destinations open', () => {
+    expect(isOwnerOnlyPath('/admin/settings/backends/codex')).toBe(true);
     expect(isOwnerOnlyPath('/admin/settings/messaging')).toBe(false);
     expect(isOwnerOnlyPath('/admin/permissions')).toBe(false);
-    expect(isOwnerOnlyPath('/apps/files')).toBe(false);
-    expect(isOwnerOnlyPath('/apps/editor')).toBe(false);
-    expect(isOwnerOnlyPath('/apps/terminal')).toBe(false);
-    expect(isOwnerOnlyPath('/apps/library')).toBe(false);
-    expect(isOwnerOnlyPath('/apps/show/session-1')).toBe(false);
-    expect(isOwnerOnlyPath('/')).toBe(false);
-  });
-
-  it('does not match a route that only shares a gated prefix', () => {
-    expect(isOwnerOnlyPath('/admin/dashboards')).toBe(false);
-    expect(isOwnerOnlyPath('/harness-status')).toBe(false);
-    expect(isOwnerOnlyPath('/apps/library-picker')).toBe(false);
   });
 });
 
-describe('filterOwnerOnlyNavItems', () => {
-  it('removes Owner-only destinations from nested admin navigation trees', () => {
-    const visible = filterOwnerOnlyNavItems([
-      {
-        children: [
-          { to: '/admin/settings/platforms' },
-          { to: '/admin/groups' },
-          { to: '/admin/settings/messaging' },
-        ],
-      },
-      { onClick: () => undefined },
-      { to: '/admin/settings/messaging' },
-    ]);
-
-    expect(visible).toEqual([
-      {
-        children: [{ to: '/admin/settings/messaging' }],
-      },
-      { onClick: expect.any(Function) },
-      { to: '/admin/settings/messaging' },
-    ]);
-  });
-});
-
-describe('visibleAdminNavItems', () => {
-  const adminItems = [
-    { to: '/admin/dashboard' },
-    { to: '/admin/remote-access' },
-    { to: '/admin/settings/messaging' },
-  ];
-
-  it('keeps Owner destinations when the caller can manage the instance', () => {
-    expect(visibleAdminNavItems(adminItems, true)).toEqual(adminItems);
+describe('settings landing memory', () => {
+  it('remembers the most recent canonical section or detail', () => {
+    rememberSettingsPath('/settings/backends/claude');
+    expect(window.localStorage.getItem(SETTINGS_LAST_PATH_KEY)).toBe('/settings/backends/claude');
+    expect(settingsLandingPath(true)).toBe('/settings/backends/claude');
   });
 
-  it('hides Owner destinations only when the caller cannot manage the instance', () => {
-    expect(visibleAdminNavItems(adminItems, false)).toEqual([
-      { to: '/admin/settings/messaging' },
-    ]);
-  });
-});
-
-describe('adminLandingPath', () => {
-  it('opens the Dashboard for an owner', () => {
-    expect(adminLandingPath(true)).toBe('/admin/dashboard');
+  it('falls back to Appearance for members when an owner-only section was remembered', () => {
+    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, '/settings/service');
+    expect(settingsLandingPath(false)).toBe('/settings/appearance');
   });
 
-  it('sends a remote owner to an admin page they can actually use', () => {
-    const destination = adminLandingPath(false);
-    expect(destination).toBe('/admin/settings/messaging');
-    expect(isOwnerOnlyPath(destination)).toBe(false);
-  });
-
-  it('keeps non-owners on messaging settings', () => {
-    expect(adminLandingPath(false)).toBe('/admin/settings/messaging');
+  it('does not remember transitional platform scope pages as the Settings landing page', () => {
+    rememberSettingsPath('/settings/platforms/groups');
+    expect(settingsLandingPath(true)).toBe('/settings/appearance');
   });
 });
 
 describe('isLocalOnlyMessagingField', () => {
-  it('marks messaging controls governed by the Owner capability', () => {
+  it('keeps machine-global controls owner-only without gating Replies', () => {
     expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
     expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
     expect(isLocalOnlyMessagingField('show_pages_prompt')).toBe(true);
-  });
-
-  it('leaves remote-safe messaging preferences available remotely', () => {
-    expect(isLocalOnlyMessagingField('ack_mode')).toBe(false);
-    expect(isLocalOnlyMessagingField('show_duration')).toBe(false);
     expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
   });
 });
 
 describe('isMemorySettingsPath', () => {
-  it('matches the Memory route and nested path boundaries', () => {
-    expect(isMemorySettingsPath('/admin/settings/memory')).toBe(true);
-    expect(isMemorySettingsPath('/admin/settings/memory/')).toBe(true);
-    expect(isMemorySettingsPath('/admin/settings/memory/details')).toBe(true);
-  });
-
-  it('does not match a route that only shares the Memory prefix', () => {
-    expect(isMemorySettingsPath('/admin/settings/memory-tools')).toBe(false);
+  it('matches the canonical Memory route at a path boundary', () => {
+    expect(isMemorySettingsPath('/settings/memory')).toBe(true);
+    expect(isMemorySettingsPath('/settings/memory/details')).toBe(true);
+    expect(isMemorySettingsPath('/settings/memory-tools')).toBe(false);
   });
 });

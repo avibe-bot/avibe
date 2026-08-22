@@ -2,7 +2,9 @@ const matchesRoute = (pathname: string, route: string): boolean =>
   pathname === route || pathname.startsWith(`${route}/`);
 
 export const isMemorySettingsPath = (pathname: string): boolean =>
-  matchesRoute(pathname, '/admin/settings/memory');
+  matchesRoute(pathname, '/settings/memory');
+
+export const SETTINGS_LAST_PATH_KEY = 'avibe.settings.last-path';
 
 /**
  * Destinations that require Instance Owner management capability.
@@ -11,6 +13,14 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
  * `isLocalOnlyMessagingField` below.
  */
 export const OWNER_ONLY_ROUTES = [
+  '/settings/service',
+  '/settings/platforms',
+  '/settings/remote-access',
+  '/settings/backends',
+  '/settings/models',
+  '/settings/dependencies',
+  '/settings/memory',
+  '/settings/diagnostics',
   '/admin/dashboard',
   '/admin/remote-access',
   '/admin/groups',
@@ -34,40 +44,33 @@ const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
 export const isOwnerOnlyPath = (pathname: string): boolean =>
   OWNER_ONLY_ROUTES.some((route) => matchesRoute(pathname, route));
 
-export type LocalSystemNavItem = {
-  to?: string;
-  onClick?: () => void;
-  children?: LocalSystemNavItem[];
-};
-
-export const filterOwnerOnlyNavItems = <T extends LocalSystemNavItem>(navItems: T[]): T[] =>
-  navItems
-    .filter((item) => !item.to || !isOwnerOnlyPath(item.to))
-    .map((item) =>
-      item.children ? ({ ...item, children: filterOwnerOnlyNavItems(item.children) } as T) : item,
-    )
-    .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
-
-export const visibleAdminNavItems = <T extends LocalSystemNavItem>(
-  navItems: T[],
-  canManageInstance: boolean,
-): T[] => (canManageInstance ? navItems : filterOwnerOnlyNavItems(navItems));
-
 export const isLocalOnlyMessagingField = (field: string): boolean =>
   LOCAL_ONLY_MESSAGING_FIELDS.has(field);
 
-/**
- * Where the "Control Panel" entry points for the current instance role.
- */
-export const adminLandingPath = (canUseSystem: boolean): string =>
-  canUseSystem ? '/admin/dashboard' : '/admin/settings/messaging';
+const isValidSettingsPath = (pathname: string): boolean =>
+  pathname.startsWith('/settings/') &&
+  !pathname.startsWith('/settings/platforms/groups') &&
+  !pathname.startsWith('/settings/platforms/users');
 
-export const isAdvancedSettingsPath = (
-  pathname: string,
-  memoryNavVisible: boolean,
-): boolean =>
-  pathname.startsWith('/admin/settings') &&
-  !pathname.startsWith('/admin/settings/platforms') &&
-  !pathname.startsWith('/admin/settings/backends') &&
-  !pathname.startsWith('/admin/settings/models') &&
-  (!memoryNavVisible || !isMemorySettingsPath(pathname));
+export const rememberSettingsPath = (pathname: string): void => {
+  if (typeof window === 'undefined' || !isValidSettingsPath(pathname)) return;
+  try {
+    window.localStorage.setItem(SETTINGS_LAST_PATH_KEY, pathname);
+  } catch {
+    // Storage is an optional convenience; routing keeps a deterministic fallback.
+  }
+};
+
+export const settingsLandingPath = (canManageInstance: boolean): string => {
+  let remembered: string | null = null;
+  if (typeof window !== 'undefined') {
+    try {
+      remembered = window.localStorage.getItem(SETTINGS_LAST_PATH_KEY);
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }
+  if (!remembered || !isValidSettingsPath(remembered)) return '/settings/appearance';
+  if (!canManageInstance && isOwnerOnlyPath(remembered)) return '/settings/appearance';
+  return remembered;
+};

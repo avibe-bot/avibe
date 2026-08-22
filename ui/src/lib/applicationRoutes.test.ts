@@ -9,6 +9,7 @@ import {
   inAppChatPath,
   isApplicationRouteHref,
 } from './applicationRoutes';
+import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
 
 function routePath(element: ts.JsxOpeningLikeElement): string | null {
   if (element.tagName.getText() !== 'Route') return null;
@@ -57,9 +58,12 @@ function declaredRoutePaths(sourceText: string): string[] {
 }
 
 describe('AppShell route policy', () => {
-  it('matches every path declared by App.tsx', () => {
+  it('matches every page and generated legacy redirect declared by App.tsx', () => {
     const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
-    const declared = declaredRoutePaths(appSource);
+    const declared = [
+      ...declaredRoutePaths(appSource),
+      ...LEGACY_SETTINGS_REDIRECTS.map((redirect) => redirect.from),
+    ];
     const catalog = [...APPLICATION_ROUTE_PATHS, ...APPLICATION_DYNAMIC_ROUTE_PATHS];
 
     expect([...declared].sort()).toEqual([...catalog].sort());
