@@ -137,9 +137,9 @@ Admission performs no EverOS I/O and no unbounded wait:
 1. Run existing authorization, size, scope, and request overflow checks.
 2. Under one process-local lock, reserve a permit and claim the source digest as a
    non-evictable pending entry; existing digests return `CaptureDuplicate`.
-3. Pin optional attachments under that permit. On any pin failure, attempt cleanup
-   once and admit a non-empty caption as text-only under the same reservation;
-   attachment-only input drops.
+3. Pin optional attachments under that permit. Pin failure must prove confined
+   cleanup or latch attachment intake off before releasing the permit; admit a
+   non-empty caption as text-only, while attachment-only input drops.
 4. In one short admission critical section and bounded SQLite transaction, compute
    candidate catalog and timestamp state. Reject a 17th project or a value above
    `MAX_PROVIDER_TIMESTAMP_MS` before mutating either durable field.
@@ -232,9 +232,9 @@ Recognize every released v0-v3 shape accepted by the current migrator. Migration
 1. Reconcile readable Factory Reset/Clear intent. An unreadable marker or orphaned
    Clear fence stays blocked until an explicit Clear supplies fresh authority.
 2. Recognize the confined SQLite shape without writing.
-3. In one transaction, derive stable v4 fields directly from each released shape,
-   including v0-v2 catalog rows from queue data; no legacy helper may commit
-   independently. Then discard all delivery-shaped state and install v4.
+3. In one transaction, preserve identity, catalog, and the exact timestamp watermark
+   from every released shape, deriving v0-v2 catalog rows from queue data; no legacy
+   helper may commit independently. Then discard delivery state and install v4.
 4. Commit, then checkpoint, close owned connections, and reopen through SQLite's
    normal WAL lifecycle. Never unlink WAL, SHM, or journal files directly.
 5. Best-effort scrub the confined attachment root, then enable text capture.
@@ -313,7 +313,7 @@ the same time merely to split the diff.
 | Scenario | Contract |
 |---|---|
 | `MEMORY-INDEP-001`, `-002`, `-010`, `-012` | retain non-blocking lifecycle, accepted loss, and content-free logs |
-| `MEMORY-INDEP-003`, `-008` | rewrite shutdown to drop without settlement waits |
+| `MEMORY-INDEP-003`, `-007`, `-008` | rewrite shutdown to drop; archive offers one barrier then releases authorization without settlement waits |
 | `MEMORY-SEARCH-005`, `-006`, `-012`, `-013`, `-014` | rewrite v4 migration/diagnostics; remove reopen recovery; bound flush |
 | `MEMORY-CLEAR-201` | remove `manual_required`; Clear still discards volatile work |
 | `MEMORY-REBUILD-202`, `MEMORY-REPAIR-006` | rewrite claim/sidecar assertions around the transition barrier |
@@ -324,8 +324,8 @@ Remove scenarios that require replay, complete Processing Record retention, or d
 
 ### Validation
 
-- Every released fixture, including v0-v2 named projects derived from queue rows,
-  preserves identity/catalog data and removes delivery rows without provider I/O.
+- Every released fixture preserves identity/catalog data and the exact watermark,
+  including v0-v2 catalog derived from queue rows; delivery rows vanish without provider I/O.
 - Pre-commit failures leave the old store unchanged with no helper commit;
   post-commit checkpoint/reopen failures retain v4 for normal recovery.
 - Unknown schemas, unsafe paths, and ambiguous Clear authority fail closed without
