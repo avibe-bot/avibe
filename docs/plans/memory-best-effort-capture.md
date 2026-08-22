@@ -123,7 +123,7 @@ Fixed implementation defaults:
 |---|---:|
 | writer permits across preparation, queue, and in-flight work | 256 |
 | duplicate source-message LRU | 256 |
-| total add attempts | 3 |
+| provider attempts per queue item | 3 |
 | pending provider sessions | 256 |
 | retained message ids per pending session | 100 |
 | flush thresholds | 5 min idle / 30 min age / 100 acknowledgements |
@@ -155,17 +155,16 @@ occurs without a reservation, and an identity failure creates no recovery item.
 Reusing a project is allowed at the 16-project limit; creating a 17th is not.
 
 Every queue entry, including a session barrier, owns one permit until its local
-operation is actually terminal. Then one bundle-release attempt returns the permit;
-cleanup failure may leak a confined file but never writer capacity.
+operation is terminal; attachment cleanup follows the bounded rule below.
 
 ### Ordered worker and retries
 
 One worker performs provider operations serially and preserves queue order.
 
-An add may use at most three total attempts, and only when the previous failure is
-proven to precede provider execution. A possibly submitted timeout, cancellation,
-malformed response, transport failure, or unclassified rejection is terminal.
-Restart drops the queue and all retry knowledge.
+Each add or flush may use at most three total attempts, and only when the previous
+failure is proven to precede provider execution. A possibly submitted timeout,
+cancellation, malformed response, transport failure, or unclassified rejection is
+terminal. Restart drops the queue and all retry knowledge.
 
 The sole post-call modality fallback is an attachment rejection for which existing
 `attachment_add_rejection_proves_no_write()` positively proves no write. Under the
@@ -187,20 +186,20 @@ return. At queue head, the barrier flushes currently tracked scopes for that raw
 session. It may miss an untracked scope, a capture still preparing attachments, or
 state lost during a transition.
 
-A flush retries only a failure proven to precede provider execution. Once
-submitted, it is consumed regardless of result and never restored to the tracker.
+A flush uses the same three-attempt cap. Once submitted, it is consumed regardless
+of result and never restored to the tracker.
 
 ### Runtime transitions
 
-Disable, shutdown, and runtime-affecting configuration replacement stop intake,
-cancel the generation, and discard queued and tracked work without draining it.
-In-flight calls are not replayed; cancellation is not proof that no write occurred.
+Shutdown stops intake, cancels the generation, and drops queued/tracked work without
+draining; process teardown reaps owned work.
 
-Clear and Factory Reset also discard volatile work, but before changing identity or
-the provider root they must prove that no old-generation provider RPC can still
-execute. Stop and reap the sidecar, or use an equivalent existing bounded
-quiescence proof. Cancellation alone is insufficient. If exclusion cannot be
-proved, fail the destructive operation closed and leave identity/root untouched.
+Disable or any transition that changes provider authority or its root -- runtime
+configuration replacement, Restart Engine, Rebuild, Repair, Clear, or Factory Reset
+-- also drops volatile work, then uses one bounded barrier to stop/reap old provider
+RPCs and join all attachment-pin jobs before publishing the change, contacting a
+replacement, launching maintenance, or deleting state. Cancellation alone is
+insufficient; failed exclusion keeps the old authority/root and fails closed.
 
 ## Persistent state and migration
 
@@ -230,9 +229,9 @@ Recognize every released v0-v3 shape accepted by the current migrator. Migration
 1. Reconcile readable Factory Reset/Clear intent. An unreadable marker or orphaned
    Clear fence stays blocked until an explicit Clear supplies fresh authority.
 2. Recognize the confined SQLite shape without writing.
-3. In one transaction, preserve stable identity, project rows, watermark, and
-   `last_success_at`; discard delivery, retry, settlement, provenance, failure,
-   flush, and attachment-bundle state; install identity-only v4.
+3. In one transaction, derive stable v4 fields directly from each released shape,
+   including v0-v2 catalog rows from queue data; no legacy helper may commit
+   independently. Then discard all delivery-shaped state and install v4.
 4. Commit, then checkpoint, close owned connections, and reopen through SQLite's
    normal WAL lifecycle. Never unlink WAL, SHM, or journal files directly.
 5. Best-effort scrub the confined attachment root, then enable text capture.
@@ -251,11 +250,9 @@ Keep artifact installation, sidecar ownership, root confinement,
 `MemoryOperationLease`, Restart Engine, Rebuild (`cascade rebuild --yes`), Repair
 (`cascade sync`), Clear authority, Factory Reset, and root recreation.
 
-Before Rebuild or Repair launches a maintenance child, close writer intake and
-cancel its generation. Wait only for the existing bounded provider-RPC quiescence
-proof; never drain queued capture. Fail closed if a second provider owner cannot be
-excluded. Clear resets identity, catalog, watermark, and summaries only after the
-stronger destructive quiescence rule above succeeds.
+All listed authority-changing operations use the single transition barrier above;
+none drains queued capture or introduces per-operation delivery state. Clear resets
+identity, catalog, watermark, and summaries only after that barrier succeeds.
 
 ### Diagnostics
 
@@ -272,9 +269,10 @@ complete empty result.
 
 ### Attachments
 
-Use the shared writer permit before pinning. On admission failure or terminal
-provider outcome, attempt confined bundle release once, then release the permit
-even if file cleanup fails. Log without paths; boot cleanup may reclaim the orphan.
+Use the shared permit before pinning and attempt confined bundle release once at a
+terminal outcome. If release fails, atomically latch attachment intake off for that
+runtime before returning the permit; only already-reserved work may add a bounded
+number of orphans. Log without paths.
 
 Run existing confined cleanup before enabling attachment capture. If confinement
 or cleanup safety cannot be proved, disable attachment capture for that runtime and
@@ -319,17 +317,18 @@ the same time merely to split the diff.
 | `MEMORY-INDEP-012` | retain content-free service logging and no IM alert |
 | `MEMORY-SEARCH-006` | rewrite final flush as a best-effort bounded barrier |
 | `MEMORY-SEARCH-013` | rewrite terminal flush to allow missed captured scopes |
-| `MEMORY-IM-ATTACH-009`, `-011` | retain one proven-safe text fallback |
+| `MEMORY-FACTORY-003`, `-004`, `-201` | retain exclusion; include pin jobs in the barrier |
+| `MEMORY-IM-ATTACH-004`, `-009`, `-011` | retain normal cleanup/fallback; bound cleanup failure |
 
 Remove or rewrite scenarios that require replay, `manual_required`, exact
 Processing Record history, or shutdown drain.
 
 ### Validation
 
-- Every released fixture preserves stable identity/catalog data and removes all
-  delivery-shaped rows without provider I/O.
-- Injected pre-commit migration failures leave the old logical store unchanged;
-  post-commit checkpoint/reopen failures retain committed v4 for normal recovery.
+- Every released fixture, including v0-v2 named projects derived from queue rows,
+  preserves identity/catalog data and removes delivery rows without provider I/O.
+- Pre-commit failures leave the old store unchanged with no helper commit;
+  post-commit checkpoint/reopen failures retain v4 for normal recovery.
 - Unknown schemas, unsafe paths, and ambiguous Clear authority fail closed without
   writes.
 - The 256 permits bound attachment preparation plus queued and in-flight work; no
@@ -338,12 +337,12 @@ Processing Record history, or shutdown drain.
   trackers stay within bounds.
 - Offers, barriers, replacement, and shutdown never wait for delivery; transitions
   intentionally discard volatile state.
-- Only proven-unsubmitted failures retry. The sole attachment caption fallback is
-  single-shot, proven unwritten, and included in the three-attempt maximum.
+- Adds and flushes stop after three attempts; the sole attachment caption fallback
+  is single-shot, proven unwritten, and included in that maximum.
 - Diagnostics failure cannot reject capture, missing evidence never widens access,
   and unavailable sources are reported truthfully.
-- Rebuild, Repair, Clear, and Factory Reset retain bounded provider exclusion
-  without draining capture.
+- Authority replacement, maintenance, Clear, and Factory Reset quiesce old RPC and
+  pin work without draining capture; cleanup failure disables further pinning.
 - Logs, summaries, and receipts remain content-free.
 
 Tests must prove the healthy path, bounds, non-blocking behavior, security, and
