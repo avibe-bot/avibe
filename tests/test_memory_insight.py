@@ -11,7 +11,7 @@ import pytest
 from config import paths as config_paths
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.everos_insight import reader as reader_module
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, derive_assistant_memory_owner_id
 from core.memory.types import ProviderSessionRef
 
 
@@ -19,6 +19,7 @@ ALICE = "u-" + "a" * 32
 BOB = "u-" + "b" * 32
 PROJECT = "default"
 OTHER_PROJECT = "billing"
+ALICE_ASSISTANT = derive_assistant_memory_owner_id(ALICE)
 
 
 def _json(value: object) -> str:
@@ -178,6 +179,8 @@ def _insert_queue(
     add_request_id: str | None = None,
     flush_settlement_request_id: str | None = None,
     generation: int = 1,
+    caller: str | None = None,
+    provenance: str = "user_input",
 ) -> None:
     provider_session_ref = ProviderSessionRef(
         principal_id=owner,
@@ -193,7 +196,7 @@ def _insert_queue(
                 generation, principal_id, project_ref, provenance, occurred_at_ms,
                 provider_timestamp_ms, state, attempts, add_request_id, add_status,
                 created_at, completed_at
-            ) VALUES (?, 1, ?, ?, ?, ?, ?, 'user_input', ?, ?, 'delivered', 1,
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'delivered', 1,
                       ?, 'accumulated', ?, ?)
             """,
             (
@@ -201,8 +204,9 @@ def _insert_queue(
                 session,
                 provider_session_ref,
                 generation,
-                owner,
+                caller or owner,
                 project,
+                provenance,
                 timestamp_ms,
                 timestamp_ms,
                 add_request_id,
@@ -415,6 +419,80 @@ def test_rejected_pre_memcell_call_is_scope_authorized_and_linked_calls_are_excl
     ]
     assert alice["truncated"] is False
     assert alice["sections"]["calls"]["status"] == "available"
+
+
+def test_assistant_owned_capture_is_visible_in_scoped_and_admin_diagnostics(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    """Scenario: MEMORY-SEARCH-014."""
+
+    session = "assistant-owned"
+    timestamp_ms = 7_000
+    request_id = "request-assistant-owned"
+    memcell_id = "mc_assistant_owned"
+    _insert_queue(
+        insight_paths,
+        "assistant-owned",
+        ALICE_ASSISTANT,
+        caller=ALICE,
+        provenance="agent",
+        session=session,
+        timestamp_ms=timestamp_ms,
+        add_request_id=request_id,
+    )
+    _insert_memcell(
+        insight_paths,
+        memcell_id,
+        ALICE_ASSISTANT,
+        timestamp_ms=timestamp_ms + 1,
+        message_ids=[f"m_{session}_{timestamp_ms}_000"],
+    )
+    event = {
+        "memcell_id": memcell_id,
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "owner_id": ALICE_ASSISTANT,
+    }
+    _insert_run(insight_paths, "run-assistant-owned", "extract_atomic_facts", event)
+    _insert_call(
+        insight_paths,
+        "call-assistant-boundary",
+        request_id=request_id,
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "call-assistant-run",
+        run_id="run-assistant-owned",
+        owner_id=ALICE_ASSISTANT,
+        project_id=PROJECT,
+    )
+
+    reader = MemoryInsightReader(insight_paths)
+    scoped = reader.list_entries((ALICE, PROJECT), None, 10)
+    admin = reader.list_admin_entries(None, 10)
+    detail = reader.entry_detail((ALICE, PROJECT), memcell_id)
+    admin_detail = reader.admin_entry_detail(memcell_id)
+
+    assert [entry["memcell_id"] for entry in scoped["entries"]] == [memcell_id]
+    assert [entry["memcell_id"] for entry in admin["entries"]] == [memcell_id]
+    assert scoped["entries"][0]["principal_id"] == ALICE_ASSISTANT
+    assert scoped["entries"][0]["authorized_call_count"] == 2
+    assert detail["status"] == "ok"
+    assert detail["capture"] == {
+        "status": "available",
+        "delivery_states": ["delivered"],
+        "matched_message_count": 1,
+    }
+    assert [step.get("run_id") for step in detail["steps"][1:]] == [
+        "run-assistant-owned"
+    ]
+    assert {call["id"] for call in detail["calls"]} == {
+        "call-assistant-boundary",
+        "call-assistant-run",
+    }
+    assert admin_detail["capture"] == detail["capture"]
+    assert reader.entry_detail((BOB, PROJECT), memcell_id) == {"status": "not_found"}
 
 
 def test_unlinked_call_join_is_bounded_before_scanning_retained_history(

@@ -20,6 +20,11 @@ from core.memory.processing_record import (
     ProcessingSourceObservations,
     SourceObservation,
 )
+from core.memory.store import (
+    derive_assistant_memory_owner_id,
+    is_memory_owner_id,
+    is_principal_id,
+)
 
 from .recorder import _scrub_json, _scrub_text
 
@@ -53,6 +58,7 @@ _ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}")
 _PRINCIPAL_RE = re.compile(r"u-[0-9a-f]{32}")
 _PROJECT_RE = re.compile(r"p-[0-9a-f]{32}")
 _PRINCIPAL_GLOB = "u-" + "[0-9a-f]" * 32
+_ASSISTANT_OWNER_GLOB = _PRINCIPAL_GLOB + "-agent"
 _PROJECT_GLOB = "p-" + "[0-9a-f]" * 32
 _ATTACHMENT_TYPES = frozenset(
     {
@@ -277,7 +283,10 @@ class MemoryInsightReader:
                 continue
             if (
                 isinstance(query_filter, _ScopedMemcellFilter)
-                and row_scope != (query_filter.principal_id, query_filter.project_id)
+                and (
+                    row_scope[0] not in _memory_owner_ids(query_filter.principal_id)
+                    or row_scope[1] != query_filter.project_id
+                )
             ):
                 continue
             principal_id, project_id = row_scope
@@ -398,7 +407,10 @@ class MemoryInsightReader:
                                    json_type(memcell.sender_ids_json) = 'array'
                                    AND json_array_length(memcell.sender_ids_json) = 1
                                    AND json_type(memcell.sender_ids_json, '$[0]') = 'text'
-                                   AND json_extract(memcell.sender_ids_json, '$[0]') = origin.principal_id
+                                   AND json_extract(memcell.sender_ids_json, '$[0]') IN (
+                                       origin.principal_id,
+                                       origin.principal_id || '-agent'
+                                   )
                                  ELSE 0 END
                              AND CASE WHEN json_valid(memcell.message_ids_json) THEN
                                    EXISTS (
@@ -589,9 +601,17 @@ class MemoryInsightReader:
             ),
             memcell_id=memcell_id,
         )
+        memory_owner_id = _memcell_owner_for_caller(
+            row,
+            caller_principal_id=principal_id,
+            project_id=project_id,
+        )
+        if memory_owner_id is None:
+            row = None
         return self._entry_detail_result(
             row,
-            principal_id=principal_id,
+            caller_principal_id=principal_id,
+            memory_owner_id=memory_owner_id or "",
             project_id=project_id,
             everos_section=everos_section,
         )
@@ -606,12 +626,14 @@ class MemoryInsightReader:
         scope = _memcell_scope(row) if row is not None else None
         if scope is None:
             row = None
-            principal_id, project_id = "", ""
+            caller_principal_id, memory_owner_id, project_id = "", "", ""
         else:
-            principal_id, project_id = scope
+            memory_owner_id, project_id = scope
+            caller_principal_id = _caller_principal_for_owner(memory_owner_id) or ""
         return self._entry_detail_result(
             row,
-            principal_id=principal_id,
+            caller_principal_id=caller_principal_id,
+            memory_owner_id=memory_owner_id,
             project_id=project_id,
             everos_section=everos_section,
         )
@@ -620,7 +642,8 @@ class MemoryInsightReader:
         self,
         row: sqlite3.Row | None,
         *,
-        principal_id: str,
+        caller_principal_id: str,
+        memory_owner_id: str,
         project_id: str,
         everos_section: dict[str, str],
     ) -> dict[str, Any]:
@@ -640,17 +663,18 @@ class MemoryInsightReader:
             }
         queues, capture_section = self._read_detail_capture_rows(
             row,
-            principal_id=principal_id,
+            principal_id=caller_principal_id,
             project_id=project_id,
         )
         runs, owned_run_count, runs_section = self._read_detail_runs(
             memcell_id=str(row["memcell_id"]),
-            principal_id=principal_id,
+            principal_id=memory_owner_id,
             project_id=project_id,
         )
         calls, owned_call_count, call_section = self._read_detail_calls(
             row,
-            principal_id=principal_id,
+            caller_principal_id=caller_principal_id,
+            memory_owner_id=memory_owner_id,
             project_id=project_id,
             capture_available=capture_section["status"] == "available",
             runs_available=runs_section["status"] == "available",
@@ -661,7 +685,7 @@ class MemoryInsightReader:
             row,
             queues,
             capture_section,
-            principal_id=principal_id,
+            principal_id=caller_principal_id,
             project_id=project_id,
             base_urls=self._provider_base_urls,
             exact_values=self._exact_redaction_values,
@@ -672,7 +696,7 @@ class MemoryInsightReader:
             base_urls=self._provider_base_urls,
             exact_values=self._exact_redaction_values,
         )
-        current_state = self._current_state(principal_id, project_id, everos_section)
+        current_state = self._current_state(memory_owner_id, project_id, everos_section)
         result: dict[str, Any] = {
             "status": "ok",
             "entry": _entry_projection(
@@ -973,6 +997,7 @@ class MemoryInsightReader:
                             "message_ids": sorted(_message_ids(memcell)),
                             "project_id": scope[1],
                             "owner_id": scope[0],
+                            "caller_id": _caller_principal_for_owner(scope[0]),
                         }
                         for memcell in memcells
                         if (scope := _memcell_scope(memcell)) is not None
@@ -985,7 +1010,8 @@ class MemoryInsightReader:
                         SELECT json_extract(page_item.value, '$.memcell_id') AS memcell_id,
                                json_extract(page_item.value, '$.message_ids') AS message_ids_json,
                                json_extract(page_item.value, '$.project_id') AS project_id,
-                               json_extract(page_item.value, '$.owner_id') AS owner_id
+                               json_extract(page_item.value, '$.owner_id') AS owner_id,
+                               json_extract(page_item.value, '$.caller_id') AS caller_id
                         FROM json_each(:page_json) AS page_item
                     )
                     """
@@ -1010,11 +1036,11 @@ class MemoryInsightReader:
                     ctes.append(
                         """
                         capture_candidates AS MATERIALIZED (
-                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                        SELECT page.memcell_id, page.owner_id, page.caller_id, page.project_id,
                                owned_queue.add_request_id AS request_id
                         FROM page
                         JOIN capture.memory_capture_queue AS owned_queue
-                          ON owned_queue.principal_id = page.owner_id
+                          ON owned_queue.principal_id = page.caller_id
                          AND owned_queue.project_ref = page.project_id
                         WHERE typeof(owned_queue.add_request_id) = 'text'
                           AND owned_queue.add_request_id != ''
@@ -1028,11 +1054,11 @@ class MemoryInsightReader:
 
                         UNION
 
-                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                        SELECT page.memcell_id, page.owner_id, page.caller_id, page.project_id,
                                owned_settlement.request_id AS request_id
                         FROM page
                         JOIN capture.memory_capture_queue AS owned_queue
-                          ON owned_queue.principal_id = page.owner_id
+                          ON owned_queue.principal_id = page.caller_id
                          AND owned_queue.project_ref = page.project_id
                         JOIN capture.memory_flush_settlements AS owned_settlement
                           ON owned_settlement.provider_session_ref =
@@ -1057,7 +1083,7 @@ class MemoryInsightReader:
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
                               WHERE any_queue.add_request_id = candidate.request_id
                                 AND (
-                                  any_queue.principal_id IS NOT candidate.owner_id
+                                  any_queue.principal_id IS NOT candidate.caller_id
                                   OR any_queue.project_ref IS NOT candidate.project_id
                               )
                           )
@@ -1072,7 +1098,7 @@ class MemoryInsightReader:
                               WHERE any_settlement.operation_kind = 'flush'
                                 AND any_settlement.request_id = candidate.request_id
                                 AND (
-                                    any_queue.principal_id IS NOT candidate.owner_id
+                                    any_queue.principal_id IS NOT candidate.caller_id
                                     OR any_queue.project_ref IS NOT candidate.project_id
                                 )
                           )
@@ -1172,7 +1198,8 @@ class MemoryInsightReader:
         self,
         memcell: sqlite3.Row,
         *,
-        principal_id: str,
+        caller_principal_id: str,
+        memory_owner_id: str,
         project_id: str,
         capture_available: bool,
         runs_available: bool,
@@ -1210,7 +1237,7 @@ class MemoryInsightReader:
                         capture_candidates AS MATERIALIZED (
                         SELECT owned_queue.add_request_id AS request_id
                         FROM page JOIN capture.memory_capture_queue AS owned_queue
-                          ON owned_queue.principal_id = :owner_id
+                          ON owned_queue.principal_id = :caller_id
                          AND owned_queue.project_ref = :project_id
                         WHERE typeof(owned_queue.add_request_id) = 'text'
                           AND owned_queue.add_request_id != ''
@@ -1225,7 +1252,7 @@ class MemoryInsightReader:
 
                         SELECT owned_settlement.request_id AS request_id
                         FROM page JOIN capture.memory_capture_queue AS owned_queue
-                          ON owned_queue.principal_id = :owner_id
+                          ON owned_queue.principal_id = :caller_id
                          AND owned_queue.project_ref = :project_id
                         JOIN capture.memory_flush_settlements AS owned_settlement
                           ON owned_settlement.provider_session_ref =
@@ -1248,7 +1275,7 @@ class MemoryInsightReader:
                         WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
                               WHERE any_queue.add_request_id = candidate.request_id
-                                AND (any_queue.principal_id IS NOT :owner_id
+                                AND (any_queue.principal_id IS NOT :caller_id
                                      OR any_queue.project_ref IS NOT :project_id)
                           )
                           AND NOT EXISTS (
@@ -1261,7 +1288,7 @@ class MemoryInsightReader:
                                AND any_queue.generation = any_settlement.generation
                               WHERE any_settlement.operation_kind = 'flush'
                                 AND any_settlement.request_id = candidate.request_id
-                                AND (any_queue.principal_id IS NOT :owner_id
+                                AND (any_queue.principal_id IS NOT :caller_id
                                      OR any_queue.project_ref IS NOT :project_id)
                           )
                         )
@@ -1350,7 +1377,8 @@ class MemoryInsightReader:
                     """,
                     {"memcell_id": str(memcell["memcell_id"]),
                      "message_ids_json": str(memcell["message_ids_json"]), "app_id": _APP_ID,
-                     "project_id": project_id, "owner_id": principal_id, "limit": _MAX_DETAIL_CALLS},
+                     "project_id": project_id, "owner_id": memory_owner_id,
+                     "caller_id": caller_principal_id, "limit": _MAX_DETAIL_CALLS},
                 ))
                 return rows, int(rows[0]["total_count"]) if rows else 0, {"status": "available"}
         except _Unavailable as unavailable:
@@ -1610,14 +1638,31 @@ def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:
     return principal_id, project_id
 
 
+def _memory_owner_ids(principal_id: str) -> tuple[str, str]:
+    return principal_id, derive_assistant_memory_owner_id(principal_id)
+
+
+def _caller_principal_for_owner(memory_owner_id: str) -> str | None:
+    if is_principal_id(memory_owner_id):
+        return memory_owner_id
+    if not is_memory_owner_id(memory_owner_id):
+        return None
+    caller_principal_id = memory_owner_id[: -len("-agent")]
+    return (
+        caller_principal_id
+        if derive_assistant_memory_owner_id(caller_principal_id) == memory_owner_id
+        else None
+    )
+
+
 def _memcell_scope_sql(
     query_filter: _MemcellFilter,
-) -> tuple[str, str, tuple[str, str]]:
+) -> tuple[str, str, tuple[str, ...]]:
     if isinstance(query_filter, _ScopedMemcellFilter):
         return (
             "project_id = ?",
-            "json_extract(sender_ids_json, '$[0]') = ?",
-            (query_filter.project_id, query_filter.principal_id),
+            "json_extract(sender_ids_json, '$[0]') IN (?, ?)",
+            (query_filter.project_id, *_memory_owner_ids(query_filter.principal_id)),
         )
     if isinstance(query_filter, _AdminMemcellFilter):
         return (
@@ -1627,8 +1672,9 @@ def _memcell_scope_sql(
             "AND project_id NOT GLOB '*[^a-z0-9_-]*' "
             "AND project_id NOT IN ('all', 'personal') "
             "AND substr(project_id, 1, 2) NOT IN ('p-', 'u-')))",
-            "json_extract(sender_ids_json, '$[0]') GLOB ?",
-            (_PROJECT_GLOB, _PRINCIPAL_GLOB),
+            "(json_extract(sender_ids_json, '$[0]') GLOB ? "
+            "OR json_extract(sender_ids_json, '$[0]') GLOB ?)",
+            (_PROJECT_GLOB, _PRINCIPAL_GLOB, _ASSISTANT_OWNER_GLOB),
         )
     raise TypeError("unsupported memcell query filter")
 
@@ -1643,7 +1689,30 @@ def _decode_json(value: object) -> Any:
 
 
 def _memcell_owned_by(row: sqlite3.Row, *, principal_id: str, project_id: str) -> bool:
-    return _memcell_scope(row) == (principal_id, project_id)
+    scope = _memcell_scope(row)
+    return bool(
+        scope is not None
+        and scope[0] in _memory_owner_ids(principal_id)
+        and scope[1] == project_id
+    )
+
+
+def _memcell_owner_for_caller(
+    row: sqlite3.Row | None,
+    *,
+    caller_principal_id: str,
+    project_id: str,
+) -> str | None:
+    if row is None:
+        return None
+    scope = _memcell_scope(row)
+    if (
+        scope is None
+        or scope[0] not in _memory_owner_ids(caller_principal_id)
+        or scope[1] != project_id
+    ):
+        return None
+    return scope[0]
 
 
 def _memcell_scope(row: sqlite3.Row) -> MemoryReadScope | None:
@@ -1657,7 +1726,7 @@ def _memcell_scope(row: sqlite3.Row) -> MemoryReadScope | None:
         not isinstance(senders, list)
         or len(senders) != 1
         or not isinstance(senders[0], str)
-        or _PRINCIPAL_RE.fullmatch(senders[0]) is None
+        or not is_memory_owner_id(senders[0])
     ):
         return None
     return senders[0], project_id

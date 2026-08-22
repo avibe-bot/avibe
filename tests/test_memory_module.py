@@ -114,6 +114,7 @@ def _request(
     attachments: tuple[CaptureAttachment, ...] = (),
     principal_id: str = PRINCIPAL,
     project_id: str = PROJECT,
+    provenance: str = "user_input",
 ):
     from core.memory.types import CaptureRequest
 
@@ -122,7 +123,7 @@ def _request(
         session_id=session,
         principal_id=principal_id,
         project_id=project_id,
-        provenance="user_input",
+        provenance=provenance,
         text=text,
         occurred_at_ms=occurred_at_ms,
         attachments=attachments,
@@ -1606,6 +1607,121 @@ async def test_agentic_recall_interleaves_per_leg_rank_with_only_one_agentic_leg
         "agentic",
         "hybrid",
     ]
+
+
+async def test_terminal_flush_closes_user_and_agent_sessions_under_one_deadline(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-SEARCH-013."""
+
+    user_flush_entered = asyncio.Event()
+    assistant_flush_entered = asyncio.Event()
+    release_user_flush = asyncio.Event()
+
+    async def observe_flush(session_ref) -> None:
+        if session_ref.principal_id == PRINCIPAL:
+            user_flush_entered.set()
+            await release_user_flush.wait()
+        elif session_ref.principal_id == ASSISTANT_OWNER:
+            assistant_flush_entered.set()
+
+    provider = FakeMemoryProvider(flush_hook=observe_flush)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(
+        _request(source="terminal-user", text="user capture")
+    ) == CaptureAccepted()
+    assert await module.capture(
+        _request(
+            source="terminal-agent",
+            text="agent capture immediately before session end",
+            occurred_at_ms=1_001,
+            provenance="agent",
+        )
+    ) == CaptureAccepted()
+
+    terminal = asyncio.create_task(
+        module.final_flush(
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            raw_session_id="conversation-1",
+            deadline_seconds=2,
+        )
+    )
+    try:
+        await asyncio.wait_for(user_flush_entered.wait(), timeout=1)
+        await asyncio.wait_for(assistant_flush_entered.wait(), timeout=1)
+        assert not terminal.done()
+        assert {capture.session_ref.principal_id for capture in provider.captures} == {
+            PRINCIPAL,
+            ASSISTANT_OWNER,
+        }
+        release_user_flush.set()
+        assert await terminal
+        assert {session.principal_id for session in provider.flushes} == {
+            PRINCIPAL,
+            ASSISTANT_OWNER,
+        }
+    finally:
+        release_user_flush.set()
+        await asyncio.gather(terminal, return_exceptions=True)
+
+
+async def test_agent_remember_round_trips_through_dual_owner_search(
+    tmp_path: Path,
+) -> None:
+    """Scenario: MEMORY-SEARCH-016."""
+
+    class CapturedSearchProvider(FakeMemoryProvider):
+        async def search(
+            self,
+            principal_id,
+            project_id,
+            query,
+            limit,
+            **_options,
+        ):
+            hits = [
+                ProviderSearchItem(
+                    item=MemoryItem(kind="episode", text=capture.text),
+                    score=1.0,
+                    episode_id=f"captured-{index}",
+                    timestamp=None,
+                    provider_rank=index,
+                    queried_owner=principal_id,
+                )
+                for index, capture in enumerate(self.captures)
+                if capture.session_ref.principal_id == principal_id
+                and capture.session_ref.project_ref == project_id
+                and query.casefold() in capture.text.casefold()
+            ]
+            return tuple(hits[:limit])
+
+    provider = CapturedSearchProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    remembered = "The user plans the release on the 23rd"
+
+    assert await module.capture(
+        _request(
+            source="agent-remember-round-trip",
+            text=remembered,
+            provenance="agent",
+        )
+    ) == CaptureAccepted()
+    assert await module.drain() == 1
+    result = await module.search(
+        "23rd",
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert [capture.session_ref.principal_id for capture in provider.captures] == [
+        ASSISTANT_OWNER
+    ]
+    assert result == MemoryItems(
+        items=(MemoryItem(kind="episode", text=remembered, origin="agent"),)
+    )
+
+
 async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Path) -> None:
     class CountingStore(MemoryStore):
         def __init__(self, path: Path) -> None:

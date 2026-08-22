@@ -532,8 +532,8 @@ class MemoryModule:
         if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
             return False
         try:
-            session_ref = await self._store_call(
-                self._store.provider_session_ref,
+            session_refs = await self._store_call(
+                self._store.provider_session_refs_with_capture_state,
                 principal_id=principal_id,
                 project_ref=project_id,
                 session_id=raw_session_id,
@@ -541,10 +541,17 @@ class MemoryModule:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return False
-            return await self._worker.coordinator.final_flush(
-                session_ref,
-                deadline_seconds=remaining,
+            results = await asyncio.gather(
+                *(
+                    self._worker.coordinator.final_flush(
+                        session_ref,
+                        deadline_seconds=remaining,
+                    )
+                    for session_ref in session_refs
+                ),
+                return_exceptions=True,
             )
+            return all(result is True for result in results)
         except asyncio.TimeoutError:
             return False
         except (TypeError, ValueError):
