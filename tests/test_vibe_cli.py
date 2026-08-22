@@ -2622,6 +2622,74 @@ def test_repair_show_runtime_reports_failed_replacement_while_old_runtime_remain
     assert prepared == [True]
 
 
+@pytest.mark.parametrize(
+    ("language", "expected_cause", "expected_action"),
+    [
+        ("en", "source directory has local changes", "Commit, stash, or remove"),
+        ("zh", "\u6e90\u4ee3\u7801\u76ee\u5f55\u5305\u542b\u672c\u5730\u66f4\u6539", "\u63d0\u4ea4\u3001\u4fdd\u5b58\u5230 stash \u6216\u79fb\u9664"),
+    ],
+)
+def test_repair_show_runtime_names_dirty_github_source_and_remediation(
+    monkeypatch,
+    tmp_path,
+    language,
+    expected_cause,
+    expected_action,
+):
+    source_dir = tmp_path / "github-source"
+    prepared = []
+
+    def prepare(force=False):
+        prepared.append(force)
+        return {
+            "ok": False,
+            "reason": "runtime_github_source_dirty",
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "command": None,
+            "status": {
+                "installed": True,
+                "install_dir": str(source_dir),
+            },
+        }
+
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "github-source",
+            "platform": "linux-x64",
+            "install_dir": str(source_dir),
+            "installed": True,
+            "command": [str(tmp_path / "node"), str(source_dir / "cli.js")],
+        },
+        prepare=prepare,
+    )
+
+    def manager_factory(**kwargs):
+        if not kwargs:
+            return manager
+        return SimpleNamespace(
+            ensure=lambda: asyncio.sleep(
+                0,
+                result=SimpleNamespace(available=False, reason="runtime_start_health_timeout"),
+            ),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", manager_factory)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "runtime_github_source_dirty"
+    assert result["installed"] is True
+    assert result["install_dir"] == str(source_dir)
+    assert str(source_dir) in result["message"]
+    assert expected_cause in result["message"]
+    assert expected_action in result["message"]
+    assert prepared == [True]
+
+
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {

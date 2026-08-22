@@ -12477,13 +12477,19 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
             detail = f"{detail}: {download_error['url']}"
     else:
         detail = reason
+    install_dir = status.get("install_dir")
+    message = (
+        i18n_t("runtime.doctor.repairGitHubSourceDirty", language, path=install_dir)
+        if reason == "runtime_github_source_dirty" and install_dir
+        else i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail)
+    )
     return _doctor_repair_result(
         target,
         "failed",
-        i18n_t("runtime.doctor.repairPrepareFailed", language, detail=detail),
+        message,
         provider=result.get("provider"),
         platform=result.get("platform"),
-        install_dir=status.get("install_dir"),
+        install_dir=install_dir,
         installed=bool(status.get("installed")),
         reason=reason,
         download_error=download_error,
