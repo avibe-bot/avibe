@@ -1566,9 +1566,11 @@ claiming an unobserved internal engine phase or introducing a retry loop. If
 readiness is not established, Avibe terminates the child and preserves the
 existing runtime failure contract.
 During that window Avibe continuously drains combined child output to prevent a
-full pipe from blocking startup, retains only a bounded tail in memory, and emits
-only a compact, bounded, redacted diagnostic to the service log. Raw child output
-is never persisted by the supervisor.
+full pipe from blocking startup. It exact-redacts known runtime and upstream
+secrets before bounded tail retention, discards any partial leading line created
+at the remaining pattern-redaction boundary, and emits only a compact, bounded,
+redacted diagnostic to the service log. Raw child output is never persisted by
+the supervisor.
 
 **v3 routing requires no new engine policy.** Failover is ours, not the engine's: the engine
 runs as a single global instance with its own cooling and request-retry disabled

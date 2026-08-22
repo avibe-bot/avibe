@@ -1687,6 +1687,7 @@ def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
     """MH-RUNTIME-006: readiness timeout is terminal, bounded, and safely diagnosable."""
 
     caplog.set_level(logging.WARNING, logger="vibe.model_hub_runtime.supervisor")
+    boundary_secret = "boundary-secret-" + "z" * 9_000
     visible_secret = "visible-upstream-test-secret"
     json_secret = "unprefixed-json-secret"
     supervisor, store = _fixture_supervisor(
@@ -1694,14 +1695,22 @@ def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
         startup_timeout=2.0,
         startup_delay=60.0,
         startup_output=(
-            "discarded-prefix "
+            f"raw-value={boundary_secret}\n"
+            + "discarded-prefix "
             + "x" * 12_000
-            + f" Authorization: Bearer {visible_secret} api-key={visible_secret}"
+            + "\n"
+            + f"Authorization: Bearer {visible_secret} api-key={visible_secret}"
             + f' raw-value={visible_secret} {{"token":"{json_secret}"}} tail-marker'
         ),
         echo_runtime_secrets=True,
     )
     credential_ref = store.store_api_key(
+        boundary_secret,
+        vendor="custom",
+        protocol="openai_chat",
+        base_url="https://timeout.example.test/v1",
+    )
+    visible_credential_ref = store.store_api_key(
         visible_secret,
         vendor="custom",
         protocol="openai_chat",
@@ -1718,7 +1727,17 @@ def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
                 allowed_origins=("codex",),
                 model_ids=("model-a",),
                 prefix="timeout",
-            )
+            ),
+            SourceRecord(
+                source_id="src_timeout02",
+                vendor="custom",
+                protocol="openai_chat",
+                base_url="https://timeout.example.test/v1",
+                credential_ref=visible_credential_ref,
+                allowed_origins=("codex",),
+                model_ids=("model-a",),
+                prefix="timeout2",
+            ),
         ]
     )
 
@@ -1738,6 +1757,7 @@ def test_mh_runtime_006_timeout_stops_engine_with_bounded_redacted_diagnostics(
     assert "startup_output_truncated=true" in warning
     assert "tail-marker" in warning
     assert "[REDACTED]" in warning
+    assert "z" * 64 not in warning
     assert visible_secret not in warning
     assert json_secret not in warning
     assert runtime_secrets.management_key not in warning

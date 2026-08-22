@@ -42,16 +42,72 @@ _STARTUP_QUERY_SECRET_RE = re.compile(
 _STARTUP_PREFIXED_KEY_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}"
 )
+_REDACTED_BYTES = _REDACTED.encode("ascii")
+
+
+def _redact_exact_prefix(
+    data: bytes,
+    safe_length: int,
+    exact_values: tuple[bytes, ...],
+) -> tuple[bytes, bytes]:
+    if not exact_values:
+        return data[:safe_length], data[safe_length:]
+    spans: list[tuple[int, int]] = []
+    for value in exact_values:
+        search_from = 0
+        while True:
+            position = data.find(value, search_from)
+            if position < 0 or position >= safe_length:
+                break
+            spans.append((position, position + len(value)))
+            search_from = position + 1
+    if not spans:
+        return data[:safe_length], data[safe_length:]
+    spans.sort()
+    merged_spans: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged_spans and start <= merged_spans[-1][1]:
+            previous_start, previous_end = merged_spans[-1]
+            merged_spans[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged_spans.append((start, end))
+    redacted = bytearray()
+    cursor = 0
+    for start, end in merged_spans:
+        redacted.extend(data[cursor:start])
+        redacted.extend(_REDACTED_BYTES)
+        cursor = end
+    if cursor < safe_length:
+        redacted.extend(data[cursor:safe_length])
+        cursor = safe_length
+    return bytes(redacted), data[cursor:]
 
 
 class _BoundedStartupOutput:
-    """Drain a child pipe continuously while retaining only its startup tail."""
+    """Drain a child pipe while retaining an exact-redacted startup tail."""
 
-    def __init__(self, stream: Any, *, limit: int = _STARTUP_OUTPUT_TAIL_BYTES) -> None:
+    def __init__(
+        self,
+        stream: Any,
+        *,
+        exact_values: tuple[str, ...],
+        limit: int = _STARTUP_OUTPUT_TAIL_BYTES,
+    ) -> None:
         self._stream = stream
         self._limit = limit
+        self._exact_values = tuple(
+            sorted(
+                {value.encode("utf-8") for value in exact_values if value},
+                key=len,
+                reverse=True,
+            )
+        )
+        self._overlap = max((len(value) for value in self._exact_values), default=1) - 1
+        self._pending = bytearray()
         self._tail = bytearray()
-        self._truncated = False
+        self._observed_bytes = 0
+        self._source_exceeded_limit = False
+        self._tail_truncated = False
         self._retaining = True
         self._lock = threading.Lock()
         self._thread = threading.Thread(
@@ -73,18 +129,42 @@ class _BoundedStartupOutput:
                 with self._lock:
                     if not self._retaining:
                         continue
-                    overflow = len(self._tail) + len(chunk) - self._limit
-                    if overflow > 0:
-                        del self._tail[:overflow]
-                        self._truncated = True
-                    self._tail.extend(chunk)
+                    self._observed_bytes += len(chunk)
+                    self._source_exceeded_limit = self._observed_bytes > self._limit
+                    self._pending.extend(chunk)
+                    self._flush_pending_locked(final=False)
         except Exception:
             logger.debug("Model Hub startup output drain stopped")
 
-    def snapshot(self) -> tuple[bytes, bool]:
+    def _flush_pending_locked(self, *, final: bool) -> None:
+        safe_length = (
+            len(self._pending)
+            if final
+            else max(0, len(self._pending) - self._overlap)
+        )
+        if safe_length == 0:
+            return
+        redacted, pending = _redact_exact_prefix(
+            bytes(self._pending),
+            safe_length,
+            self._exact_values,
+        )
+        self._pending = bytearray(pending)
+        overflow = len(self._tail) + len(redacted) - self._limit
+        if overflow > 0:
+            del self._tail[:overflow]
+            self._tail_truncated = True
+        self._tail.extend(redacted)
+
+    def snapshot(self) -> tuple[bytes, bool, bool]:
         with self._lock:
+            self._flush_pending_locked(final=True)
             self._retaining = False
-            return bytes(self._tail), self._truncated
+            return (
+                bytes(self._tail),
+                self._source_exceeded_limit or self._tail_truncated,
+                self._tail_truncated,
+            )
 
     def join(self, timeout: float = 1.0) -> None:
         self._thread.join(timeout=timeout)
@@ -95,7 +175,12 @@ def _sanitize_startup_output(
     *,
     exact_values: tuple[str, ...],
     truncated: bool,
+    partial_line: bool,
 ) -> tuple[str, bool]:
+    if partial_line:
+        _partial_line, separator, raw = raw.partition(b"\n")
+        if not separator:
+            raw = b""
     text = raw.decode("utf-8", "replace")
     text = "".join(character if character.isprintable() or character.isspace() else " " for character in text)
     for value in sorted((item for item in exact_values if item), key=len, reverse=True):
@@ -304,7 +389,10 @@ class EngineSupervisor:
         if process.stdout is None:
             self._stop_locked()
             raise EngineUnavailableError("models.engine.start_failed")
-        output = _BoundedStartupOutput(process.stdout)
+        output = _BoundedStartupOutput(
+            process.stdout,
+            exact_values=startup_redaction_values,
+        )
         self._startup_output = output
         started_at = time.monotonic()
         deadline = started_at + self.startup_timeout
@@ -324,11 +412,12 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
-                raw_output, output_truncated = output.snapshot()
+                raw_output, output_truncated, partial_line = output.snapshot()
                 diagnostic, output_truncated = _sanitize_startup_output(
                     raw_output,
                     exact_values=startup_redaction_values,
                     truncated=output_truncated,
+                    partial_line=partial_line,
                 )
                 logger.info(
                     "Model Hub engine startup outcome=ready managed_version=%s "
@@ -341,11 +430,12 @@ class EngineSupervisor:
                 return connection
             time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         self._stop_locked()
-        raw_output, output_truncated = output.snapshot()
+        raw_output, output_truncated, partial_line = output.snapshot()
         diagnostic, output_truncated = _sanitize_startup_output(
             raw_output,
             exact_values=startup_redaction_values,
             truncated=output_truncated,
+            partial_line=partial_line,
         )
         logger.warning(
             "Model Hub engine startup outcome=%s managed_version=%s exit_code=%s "
