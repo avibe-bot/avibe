@@ -8436,14 +8436,18 @@ def dependencies_status(*, offline: bool = False) -> dict:
     except Exception as exc:  # noqa: BLE001
         srt = {"installed": False, "node_available": None, "node_version": None, "reason": str(exc)}
     manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
+    install = srt.get("install") if isinstance(srt.get("install"), dict) else {}
     srt_installed = bool(srt.get("installed"))
+    installed_matches_manifest = install.get("matches_manifest")
     deps.append(
         {
             "id": "show-runtime",
             "kind": "runtime",
             "required": True,
             "installed": srt_installed,
-            "version": manifest.get("runtime_version"),
+            "version": install.get("runtime_version"),
+            "latest_version": manifest.get("runtime_version"),
+            "has_update": bool(srt_installed and installed_matches_manifest is False),
             "status": "ready" if srt_installed else "missing",
             "reason": srt.get("reason"),
             "download_error": srt.get("download_error"),

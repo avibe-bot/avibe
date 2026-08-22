@@ -221,6 +221,8 @@ class ShowRuntimeAvailability:
     policy_reason: str | None = None
     install_reason: str | None = None
     install_failure_class: ShowRuntimeFailureClass | None = None
+    install_runtime_version: str | None = None
+    install_matches_manifest: bool | None = None
     runtime_reason: str | None = None
 
     @property
@@ -243,6 +245,8 @@ class ShowRuntimeAvailability:
         install: ShowRuntimeInstallState | None = None,
         policy_reason: str | None = None,
         install_reason: str | None = None,
+        install_runtime_version: str | None = None,
+        install_matches_manifest: bool | None = None,
     ) -> "ShowRuntimeAvailability":
         if install is None:
             if command:
@@ -260,6 +264,8 @@ class ShowRuntimeAvailability:
             install_failure_class=(
                 classify_show_runtime_failure(install_reason) if install is ShowRuntimeInstallState.FAILED else None
             ),
+            install_runtime_version=install_runtime_version,
+            install_matches_manifest=install_matches_manifest,
         )
 
     def as_payload(self) -> dict[str, Any]:
@@ -271,6 +277,8 @@ class ShowRuntimeAvailability:
                 "reason": self.install_reason,
                 "failure_class": self.install_failure_class.value if self.install_failure_class else None,
                 "command": command,
+                "runtime_version": self.install_runtime_version,
+                "matches_manifest": self.install_matches_manifest,
             },
             "runtime": {
                 "state": self.runtime.value,
@@ -982,7 +990,8 @@ class ShowRuntimeManager:
         installed_dir: Path | None = None
         archive: ShowRuntimeArchive | None = None
         archive_status: dict[str, Any] | None = None
-        installed_matches = False
+        installed_runtime_version: str | None = None
+        installed_matches: bool | None = None
         installed = configured_command is not None
         manifest_status = _manifest_status_payload(manifest)
         if not configured_command and self.runtime_source == _RUNTIME_SOURCE_MANIFEST:
@@ -990,6 +999,7 @@ class ShowRuntimeManager:
                 installed = True
                 installed_dir = disk_install.install_dir
                 installed_command = disk_install.command
+                installed_runtime_version = _persisted_manifest_runtime_version(disk_install.metadata)
                 if manifest_status is None:
                     manifest_status = _persisted_manifest_status_payload(disk_install.metadata)
                     archive_status = _persisted_archive_status_payload(disk_install.metadata)
@@ -1001,6 +1011,7 @@ class ShowRuntimeManager:
                         continue
                     installed = True
                     installed_dir = candidate
+                    installed_runtime_version = manifest.runtime_version
                     installed_matches = True
                     if node and node_supported is not False:
                         installed_command = self._manifest_runtime_command(candidate, node)
@@ -1026,9 +1037,13 @@ class ShowRuntimeManager:
             managed = _resolve_executable_path(self._managed_bin_path())
             installed_command = [managed] if managed else None
             installed = installed_command is not None
+        if installed and manifest is not None and archive is not None and installed_matches is not True:
+            installed_matches = False
         install_payload = ShowRuntimeAvailability.from_install(
             command=installed_command,
             install=(ShowRuntimeInstallState.INSTALLED if installed else ShowRuntimeInstallState.ABSENT),
+            install_runtime_version=installed_runtime_version,
+            install_matches_manifest=installed_matches,
         ).as_payload()["install"]
         return {
             "provider": self.runtime_source,
@@ -1046,7 +1061,7 @@ class ShowRuntimeManager:
                 "base_url": None,
             },
             "installed": installed,
-            "installed_matches_manifest": installed_matches,
+            "installed_matches_manifest": install_payload["matches_manifest"],
             "install_dir": str(installed_dir) if installed_dir else None,
             "command": installed_command,
             "reason": self._install_reason,
@@ -3116,6 +3131,11 @@ def _persisted_manifest_status_payload(metadata: Mapping[str, Any]) -> dict[str,
         "source": metadata.get("manifest_source"),
         "platforms": [metadata.get("platform")],
     }
+
+
+def _persisted_manifest_runtime_version(metadata: Mapping[str, Any]) -> str | None:
+    runtime_version = metadata.get("runtime_version")
+    return runtime_version if isinstance(runtime_version, str) and runtime_version else None
 
 
 def _persisted_archive_status_payload(metadata: Mapping[str, Any]) -> dict[str, Any]:

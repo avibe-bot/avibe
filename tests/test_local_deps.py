@@ -1172,7 +1172,13 @@ def test_dependencies_status_shape(monkeypatch):
 
     class _Mgr:
         def status(self):
-            return {"installed": True, "manifest": {"runtime_version": "1.4.0"}, "node_available": True, "node_version": "20.11"}
+            return {
+                "installed": True,
+                "install": {"runtime_version": "1.4.0", "matches_manifest": True},
+                "manifest": {"runtime_version": "1.4.0"},
+                "node_available": True,
+                "node_version": "20.11",
+            }
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
     import core.memory.artifact as memory_artifact
@@ -1197,6 +1203,8 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
     assert by["avault"]["latest_version"] is None and by["avault"]["has_update"] is False
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
+    assert by["show-runtime"]["latest_version"] == "1.4.0"
+    assert by["show-runtime"]["has_update"] is False
     assert by["memory-runtime"] == {
         "id": "memory-runtime",
         "kind": "runtime",
@@ -1209,6 +1217,73 @@ def test_dependencies_status_shape(monkeypatch):
         "download_error": None,
     }
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected"),
+    (
+        pytest.param(
+            {
+                "provider": "manifest-cache",
+                "installed": True,
+                "install": {"runtime_version": "runtime-installed", "matches_manifest": False},
+                "manifest": {"runtime_version": "runtime-selected"},
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            },
+            {"version": "runtime-installed", "latest_version": "runtime-selected", "has_update": True},
+            id="stale-manifest-install",
+        ),
+        pytest.param(
+            {
+                "provider": "github-source",
+                "installed": True,
+                "install": {"runtime_version": None, "matches_manifest": None},
+                "manifest": None,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            },
+            {"version": None, "latest_version": None, "has_update": False},
+            id="github-source-not-comparable",
+        ),
+    ),
+)
+def test_dependencies_status_projects_show_runtime_identity_without_pairing(monkeypatch, runtime_status, expected):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.14", "latest_version": None, "has_update": False, "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"installed": True, "version": "0.0.1", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=False))),
+    )
+
+    import core.memory.artifact as memory_artifact
+    import core.show_runtime as show_runtime
+    import core.tmux_runtime as tmux_runtime
+
+    manager = Mock()
+    manager.status.return_value = runtime_status
+    memory_manager = Mock()
+    memory_manager.status.return_value = {"installed": False, "status": "missing", "manifest": None}
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: memory_manager)
+    monkeypatch.setattr(tmux_runtime, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
+
+    entry = next(item for item in api.dependencies_status()["deps"] if item["id"] == "show-runtime")
+
+    assert entry["installed"] is True
+    assert entry["status"] == "ready"
+    assert {key: entry[key] for key in expected} == expected
 
 
 @pytest.mark.parametrize(

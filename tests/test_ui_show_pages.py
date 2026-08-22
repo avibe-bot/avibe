@@ -350,6 +350,7 @@ def _write_runtime_manifest(
     sha256: str | None = None,
     size: int | None = None,
     url: str | None = None,
+    runtime_version: str = "runtime-test-ref",
 ) -> Path:
     manifest_path = tmp_path / "show_runtime_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -357,7 +358,7 @@ def _write_runtime_manifest(
         json.dumps(
             {
                 "schema_version": 1,
-                "runtime_version": "runtime-test-ref",
+                "runtime_version": runtime_version,
                 "minimum_node": "^20.19.0 || >=22.12.0",
                 "archives": {
                     _runtime_platform_tag(): {
@@ -7451,10 +7452,50 @@ def test_show_runtime_remote_manifest_install_remains_installed_when_source_is_u
     assert status["installed"] is True
     assert status["install"]["state"] == "installed"
     assert status["runtime"]["state"] == "unchecked"
-    assert status["installed_matches_manifest"] is False
+    assert status["install"]["runtime_version"] == "runtime-test-ref"
+    assert status["install"]["matches_manifest"] is None
+    assert status["installed_matches_manifest"] is None
     assert status["command"] == command
     assert status["manifest"]["source"] == manifest_url
     assert status["reason"] == "runtime_manifest_download_failed"
+
+
+def test_show_runtime_status_keeps_installed_identity_separate_from_selected_manifest(monkeypatch, tmp_path):
+    runtime_dir, manifest_url, install_dir, command = _install_remote_manifest_runtime(monkeypatch, tmp_path)
+    selected_archive = _write_runtime_archive(tmp_path, text="#!/usr/bin/env node\n// selected runtime\n")
+    selected_manifest = _write_runtime_manifest(
+        tmp_path,
+        selected_archive,
+        url="https://example.test/selected-runtime.tgz",
+        runtime_version="runtime-selected-ref",
+    )
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        manifest_url=manifest_url,
+        auto_install=False,
+    )
+    monkeypatch.setattr(
+        "core.show_runtime.fetch_bytes",
+        lambda url, **_kwargs: selected_manifest.read_bytes()
+        if url == manifest_url
+        else pytest.fail(f"unexpected fetch: {url}"),
+    )
+
+    status = manager.status()
+
+    assert status["installed"] is True
+    assert status["install"] == {
+        "state": "installed",
+        "reason": None,
+        "failure_class": None,
+        "command": command,
+        "runtime_version": "runtime-test-ref",
+        "matches_manifest": False,
+    }
+    assert status["installed_matches_manifest"] is False
+    assert status["manifest"]["runtime_version"] == "runtime-selected-ref"
+    assert status["install_dir"] == str(install_dir)
 
 
 def test_show_runtime_disk_install_fact_does_not_require_node(monkeypatch, tmp_path):
@@ -7572,6 +7613,8 @@ def test_show_runtime_availability_classifies_install_failure(
         "reason": reason,
         "failure_class": expected_class,
         "command": None,
+        "runtime_version": None,
+        "matches_manifest": None,
     }
     assert result["runtime"]["state"] == "unchecked"
 
